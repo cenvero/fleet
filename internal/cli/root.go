@@ -56,6 +56,8 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newServerCommand(&configDir))
 	root.AddCommand(newServiceCommand(&configDir))
 	root.AddCommand(newLogsCommand(&configDir))
+	root.AddCommand(newExecCommand(&configDir))
+	root.AddCommand(newSSHCommand(&configDir))
 	root.AddCommand(newPortCommand(&configDir))
 	root.AddCommand(newFirewallCommand(&configDir))
 	root.AddCommand(newAlertsCommand(&configDir))
@@ -1212,4 +1214,110 @@ func followServiceLogs(ctx context.Context, cmd *cobra.Command, app *core.App, s
 		_, err = f.WriteString(formatted)
 		return err
 	})
+}
+
+func newExecCommand(configDir *string) *cobra.Command {
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "exec <server> <command>",
+		Short: "Run a shell command on one server or all servers",
+		Long: `Run a shell command on a managed server via the fleet agent.
+
+Examples:
+  fleet exec web-01 uptime
+  fleet exec web-01 "df -h /"
+  fleet exec --all uptime`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+
+			if all {
+				command := strings.Join(args, " ")
+				results := app.ExecCommandAll(command)
+				for _, r := range results {
+					if r.Error != nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "=== %s [error] ===\n%s\n", r.Server, r.Error)
+						continue
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "=== %s [exit %d] ===\n", r.Server, r.Result.ExitCode)
+					if r.Result.Stdout != "" {
+						fmt.Fprint(cmd.OutOrStdout(), r.Result.Stdout)
+					}
+					if r.Result.Stderr != "" {
+						fmt.Fprint(cmd.ErrOrStderr(), r.Result.Stderr)
+					}
+				}
+				return nil
+			}
+
+			if len(args) < 2 {
+				return fmt.Errorf("usage: fleet exec <server> <command>")
+			}
+			serverName := args[0]
+			command := strings.Join(args[1:], " ")
+			result, err := app.ExecCommand(serverName, command)
+			if err != nil {
+				return err
+			}
+			if result.Stdout != "" {
+				fmt.Fprint(cmd.OutOrStdout(), result.Stdout)
+			}
+			if result.Stderr != "" {
+				fmt.Fprint(cmd.ErrOrStderr(), result.Stderr)
+			}
+			if result.ExitCode != 0 {
+				return fmt.Errorf("exit status %d", result.ExitCode)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "run on all servers concurrently")
+	return cmd
+}
+
+func newSSHCommand(configDir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "ssh <server>",
+		Short: "Open an interactive root shell on a server",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+
+			server, err := app.GetServer(args[0])
+			if err != nil {
+				return err
+			}
+
+			keyPath := filepath.Join(app.ConfigDir, "keys", app.Config.Crypto.PrimaryKey)
+			knownHostsPath := app.Config.Crypto.KnownHostsPath
+			addr := server.Address
+			port := strconv.Itoa(server.Port)
+			user := server.User
+			if user == "" {
+				user = "root"
+			}
+
+			sshArgs := []string{
+				"-i", keyPath,
+				"-p", port,
+				"-o", "UserKnownHostsFile=" + knownHostsPath,
+				"-o", "StrictHostKeyChecking=accept-new",
+				user + "@" + addr,
+			}
+
+			sshCmd := exec.Command("ssh", sshArgs...) //nolint:gosec
+			sshCmd.Stdin = os.Stdin
+			sshCmd.Stdout = os.Stdout
+			sshCmd.Stderr = os.Stderr
+			return sshCmd.Run()
+		},
+	}
 }

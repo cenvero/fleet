@@ -26,6 +26,33 @@ Reverse-mode servers should be registered before the agent dials in:
 fleet server add edge-01 unknown --mode reverse
 ```
 
+## Shell Access
+
+Open an interactive root shell on any managed server:
+
+```bash
+fleet ssh web-01
+```
+
+This connects through the fleet agent on port 2222 using the fleet key — no need to manage separate SSH credentials.
+
+Run a one-off command on a single server:
+
+```bash
+fleet exec web-01 uptime
+fleet exec web-01 "df -h /"
+fleet exec web-01 "cat /etc/os-release"
+```
+
+Run a command across all servers at once:
+
+```bash
+fleet exec --all uptime
+fleet exec --all "free -m"
+```
+
+Results are shown per-server with the exit code. Non-zero exits are reported as errors.
+
 ## Services
 
 Track services you care about:

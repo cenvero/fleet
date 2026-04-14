@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -651,6 +652,49 @@ func (a *App) AddFirewallRule(serverName, rule string) error {
 		Operator: a.operator(),
 		Details:  rule,
 	})
+}
+
+type ExecServerResult struct {
+	Server   string
+	Result   proto.ExecResult
+	Error    error
+}
+
+func (a *App) ExecCommand(serverName, command string) (proto.ExecResult, error) {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	response, err := a.callRPC(server, proto.Envelope{
+		Action:  "shell.exec",
+		Payload: proto.ExecPayload{Command: command},
+	})
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	if response.Error != nil {
+		return proto.ExecResult{}, fmt.Errorf("%s: %s", response.Error.Code, response.Error.Message)
+	}
+	return proto.DecodePayload[proto.ExecResult](response.Payload)
+}
+
+func (a *App) ExecCommandAll(command string) []ExecServerResult {
+	servers, err := a.ListServers()
+	if err != nil {
+		return []ExecServerResult{{Error: err}}
+	}
+	results := make([]ExecServerResult, len(servers))
+	var wg sync.WaitGroup
+	for i, server := range servers {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			result, err := a.ExecCommand(name, command)
+			results[i] = ExecServerResult{Server: name, Result: result, Error: err}
+		}(i, server.Name)
+	}
+	wg.Wait()
+	return results
 }
 
 func (a *App) ListAlerts(server, severity string) ([]alerts.Alert, error) {

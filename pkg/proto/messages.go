@@ -164,6 +164,16 @@ type ControllerKnownHostsResult struct {
 	Fingerprints []string `json:"fingerprints,omitempty"`
 }
 
+type ExecPayload struct {
+	Command string `json:"command"`
+}
+
+type ExecResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
+}
+
 func DecodeHelloPayload(payload any) (HelloPayload, error) {
 	return DecodePayload[HelloPayload](payload)
 }

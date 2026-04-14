@@ -440,6 +440,33 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			if op.Finalize != nil {
 				_ = op.Finalize()
 			}
+		case "shell.exec":
+			payload, err := proto.DecodePayload[proto.ExecPayload](request.Payload)
+			if err != nil {
+				_ = proto.Encode(channel, proto.Envelope{
+					Type:            proto.EnvelopeTypeResponse,
+					ProtocolVersion: proto.CurrentProtocolVersion,
+					RequestID:       request.RequestID,
+					Action:          request.Action,
+					Error: &proto.Error{
+						Code:    "bad_payload",
+						Message: err.Error(),
+					},
+				})
+				continue
+			}
+			result, err := runShellExec(context.Background(), payload)
+			if err != nil {
+				_ = proto.Encode(channel, errorEnvelope(request, err))
+				continue
+			}
+			_ = proto.Encode(channel, proto.Envelope{
+				Type:            proto.EnvelopeTypeResponse,
+				ProtocolVersion: proto.CurrentProtocolVersion,
+				RequestID:       request.RequestID,
+				Action:          request.Action,
+				Payload:         result,
+			})
 		default:
 			_ = proto.Encode(channel, proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,

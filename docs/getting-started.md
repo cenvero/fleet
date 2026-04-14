@@ -162,6 +162,21 @@ Current dashboard tabs include:
 
 Keyboard and mouse navigation are both supported.
 
+## Shell Access
+
+Open an interactive shell on any server through the fleet agent:
+
+```bash
+./fleet ssh demo
+```
+
+Run a one-off command or run it across all servers:
+
+```bash
+./fleet exec demo uptime
+./fleet exec --all uptime
+```
+
 ## Next Recommended Commands
 
 Once the basic path works, the next useful commands are:
