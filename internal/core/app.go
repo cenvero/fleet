@@ -217,6 +217,15 @@ func (a *App) SaveServer(server ServerRecord) error {
 }
 
 func (a *App) RemoveServer(name string) error {
+	server, err := a.GetServer(name)
+	if err != nil {
+		return err
+	}
+	if server.Agent.Managed {
+		if teardownErr := a.TeardownAgent(server); teardownErr != nil {
+			return fmt.Errorf("teardown agent on %s: %w", name, teardownErr)
+		}
+	}
 	path := filepath.Join(a.ConfigDir, "servers", name+".toml")
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove server %s: %w", name, err)

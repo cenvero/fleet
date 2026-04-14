@@ -125,6 +125,10 @@ type AgentInstall struct {
 	Managed     bool      `toml:"managed" json:"managed"`
 	BinaryPath  string    `toml:"binary_path,omitempty" json:"binary_path,omitempty"`
 	ServiceName string    `toml:"service_name,omitempty" json:"service_name,omitempty"`
+	LoginUser   string    `toml:"login_user,omitempty" json:"login_user,omitempty"`
+	LoginPort   int       `toml:"login_port,omitempty" json:"login_port,omitempty"`
+	LoginKey    string    `toml:"login_key,omitempty" json:"login_key,omitempty"`
+	UseSudo     bool      `toml:"use_sudo,omitempty" json:"use_sudo,omitempty"`
 	UpdatedAt   time.Time `toml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 

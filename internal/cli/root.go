@@ -200,6 +200,10 @@ func newServerCommand(configDir *string) *cobra.Command {
 	var port int
 	var keyPath string
 	var user string
+	var loginUser string
+	var loginPort int
+	var loginKey string
+	var useSudo bool
 
 	add := &cobra.Command{
 		Use:   "add <name> <ip>",
@@ -215,20 +219,43 @@ func newServerCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return app.AddServer(core.ServerRecord{
+			if err := app.AddServer(core.ServerRecord{
 				Name:    args[0],
 				Address: args[1],
 				Mode:    parsedMode,
 				Port:    port,
 				User:    user,
 				KeyPath: keyPath,
-			})
+			}); err != nil {
+				return err
+			}
+
+			if loginUser != "" && parsedMode == transport.ModeDirect {
+				fmt.Fprintf(cmd.OutOrStdout(), "Installing agent on %s...\n", args[0])
+				lp := loginPort
+				if lp == 0 {
+					lp = 22
+				}
+				if err := app.AutoInstallAgent(args[0], loginUser, loginKey, lp, useSudo); err != nil {
+					return fmt.Errorf("agent install failed (server was added): %w\n"+
+						"Run 'fleet server bootstrap %s --login-user %s' to retry manually", err, args[0], loginUser)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Agent installed and running. Connect with: fleet server reconnect %s\n", args[0])
+			} else if parsedMode == transport.ModeDirect && loginUser == "" {
+				record, _ := app.GetServer(args[0])
+				fmt.Fprintln(cmd.OutOrStdout(), core.AgentInstallInstructions(record, parsedMode))
+			}
+			return nil
 		},
 	}
 	add.Flags().StringVar(&mode, "mode", "direct", "server transport mode")
-	add.Flags().IntVar(&port, "port", 22, "SSH port")
-	add.Flags().StringVar(&user, "user", "cenvero-agent", "SSH username")
+	add.Flags().IntVar(&port, "port", 2222, "agent SSH port (after install)")
+	add.Flags().StringVar(&user, "user", "cenvero-agent", "agent SSH username")
 	add.Flags().StringVar(&keyPath, "key", "", "SSH key path override")
+	add.Flags().StringVar(&loginUser, "login-user", "", "initial SSH login user for agent install (e.g. root, ubuntu)")
+	add.Flags().IntVar(&loginPort, "login-port", 22, "SSH port for initial login")
+	add.Flags().StringVar(&loginKey, "login-key", "", "SSH key for initial login (defaults to fleet key)")
+	add.Flags().BoolVar(&useSudo, "sudo", false, "use sudo for agent install commands")
 
 	serverCmd.AddCommand(add)
 	var listFormat string

@@ -43,7 +43,7 @@ func TestReadServiceLogs(t *testing.T) {
 		Mode:               transport.ModeDirect,
 		HostKeyPath:        filepath.Join(t.TempDir(), "agent_host_key"),
 		AuthorizedKeysPath: filepath.Join(configDir, "keys", "id_ed25519.pub"),
-		LogReader: fakeLogReader{
+		LogReader: &fakeLogReader{
 			Results: map[string]proto.LogReadResult{
 				"/var/log/nginx/access.log": {
 					Path: "/var/log/nginx/access.log",
@@ -100,7 +100,7 @@ type fakeLogReader struct {
 	Sequence map[string][]proto.LogReadResult
 }
 
-func (f fakeLogReader) Read(_ context.Context, payload proto.LogReadPayload) (proto.LogReadResult, error) {
+func (f *fakeLogReader) Read(_ context.Context, payload proto.LogReadPayload) (proto.LogReadResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if sequence := f.Sequence[payload.Path]; len(sequence) > 0 {
@@ -165,7 +165,7 @@ func TestFollowServiceLogsEmitsOnlyNewLines(t *testing.T) {
 		Mode:               transport.ModeDirect,
 		HostKeyPath:        filepath.Join(t.TempDir(), "agent_host_key"),
 		AuthorizedKeysPath: filepath.Join(configDir, "keys", "id_ed25519.pub"),
-		LogReader:          reader,
+		LogReader:          &reader,
 	}
 	errCh := make(chan error, 1)
 
@@ -271,7 +271,7 @@ func TestReadCachedServiceLogsUsesAggregatedCopy(t *testing.T) {
 		Mode:               transport.ModeDirect,
 		HostKeyPath:        filepath.Join(t.TempDir(), "agent_host_key"),
 		AuthorizedKeysPath: filepath.Join(configDir, "keys", "id_ed25519.pub"),
-		LogReader:          reader,
+		LogReader:          &reader,
 	}
 	errCh := make(chan error, 1)
 
