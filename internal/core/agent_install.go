@@ -103,7 +103,7 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath string, login
 		return fmt.Errorf("agent install: %w", err)
 	}
 
-	server.User = defaultAgentUser
+	server.User = "root"
 	server.Port = agentPort
 	server.Agent = AgentInstall{
 		Managed:     true,
@@ -205,7 +205,6 @@ func buildRemoteDownloadInstallScript(server ServerRecord, sudo, serviceName, ve
 	lines := []string{
 		"#!/bin/sh",
 		"set -eu",
-		"AGENT_USER=" + shellQuote(defaultAgentUser),
 		"SERVICE_NAME=" + shellQuote(serviceName),
 		"STATE_DIR=" + shellQuote(defaultStateDir),
 		"CONFIG_DIR=" + shellQuote(defaultConfigDir),
@@ -250,7 +249,6 @@ func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName string
 	lines := []string{
 		"#!/bin/sh",
 		"set -eu",
-		"AGENT_USER=" + shellQuote(defaultAgentUser),
 		"SERVICE_NAME=" + shellQuote(serviceName),
 		"STATE_DIR=" + shellQuote(defaultStateDir),
 		"CONFIG_DIR=" + shellQuote(defaultConfigDir),
@@ -266,19 +264,10 @@ func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName string
 
 func buildAgentSetupLines(sudo, serviceName, binarySource string) []string {
 	return []string{
-		"if ! id -u \"$AGENT_USER\" >/dev/null 2>&1; then",
-		"  if command -v useradd >/dev/null 2>&1; then",
-		"    " + sudo + "useradd --system --create-home --home-dir \"$STATE_DIR\" --shell /usr/sbin/nologin \"$AGENT_USER\"",
-		"  else",
-		"    " + sudo + "adduser --system --home \"$STATE_DIR\" --shell /usr/sbin/nologin \"$AGENT_USER\"",
-		"  fi",
-		"fi",
-		"",
 		sudo + "mkdir -p \"$STATE_DIR\" \"$CONFIG_DIR\"",
 		sudo + "install -m 0755 " + binarySource + " \"$BIN_PATH\"",
 		sudo + "install -m 0644 /tmp/cenvero-fleet-agent.service /etc/systemd/system/" + shellQuote(serviceName) + ".service",
-		sudo + "install -m 0644 /tmp/cenvero-fleet-authorized_keys \"$STATE_DIR/authorized_keys\"",
-		sudo + "chown -R \"$AGENT_USER\":\"$AGENT_USER\" \"$STATE_DIR\"",
+		sudo + "install -m 0600 /tmp/cenvero-fleet-authorized_keys \"$STATE_DIR/authorized_keys\"",
 		sudo + "systemctl daemon-reload",
 		sudo + "systemctl enable --now " + shellQuote(serviceName) + ".service",
 	}

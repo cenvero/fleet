@@ -250,7 +250,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 	}
 	add.Flags().StringVar(&mode, "mode", "direct", "server transport mode")
 	add.Flags().IntVar(&port, "port", 2222, "agent SSH port (after install)")
-	add.Flags().StringVar(&user, "user", "cenvero-agent", "agent SSH username")
+	add.Flags().StringVar(&user, "user", "root", "agent SSH username")
 	add.Flags().StringVar(&keyPath, "key", "", "SSH key path override")
 	add.Flags().StringVar(&loginUser, "login-user", "", "initial SSH login user for agent install (e.g. root, ubuntu)")
 	add.Flags().IntVar(&loginPort, "login-port", 22, "SSH port for initial login")

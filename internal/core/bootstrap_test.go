@@ -83,8 +83,8 @@ func TestBootstrapServerDirectUploadsAgentAndUpdatesServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetServer() error = %v", err)
 	}
-	if server.User != defaultAgentUser {
-		t.Fatalf("expected server user %q, got %q", defaultAgentUser, server.User)
+	if server.User != "root" {
+		t.Fatalf("expected server user %q, got %q", "root", server.User)
 	}
 	if server.Port != 2222 {
 		t.Fatalf("expected direct-mode agent port 2222, got %d", server.Port)

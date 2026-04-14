@@ -141,7 +141,7 @@ func (a *App) AddServer(record ServerRecord) error {
 		record.Port = 22
 	}
 	if record.User == "" {
-		record.User = "cenvero-agent"
+		record.User = "root"
 	}
 	if record.Mode == "" {
 		record.Mode = a.Config.DefaultMode

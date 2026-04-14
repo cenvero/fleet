@@ -139,7 +139,7 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 		return BootstrapResult{}, err
 	}
 
-	server.User = defaultAgentUser
+	server.User = "root"
 	if server.Mode == transport.ModeDirect {
 		server.Port = resolved.agentPort
 	}
@@ -331,9 +331,7 @@ func buildAgentServiceUnit(server ServerRecord, cfg resolvedBootstrapConfig) (st
 		"",
 		"[Service]",
 		"Type=simple",
-		"User=" + defaultAgentUser,
-		"Group=" + defaultAgentUser,
-		"ExecStart=/bin/sh -lc " + shellQuote(execStart),
+		"ExecStart=" + execStart,
 		"Restart=always",
 		"RestartSec=5",
 		"",
@@ -353,7 +351,6 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 	lines := []string{
 		"#!/bin/sh",
 		"set -eu",
-		"AGENT_USER=" + shellQuote(defaultAgentUser),
 		"SERVICE_NAME=" + shellQuote(cfg.serviceName),
 		"STATE_DIR=" + shellQuote(defaultStateDir),
 		"CONFIG_DIR=" + shellQuote(defaultConfigDir),
@@ -362,23 +359,14 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 		"TEMP_UNIT=" + shellQuote(cfg.tempUnitPath),
 		"TEMP_SCRIPT=" + shellQuote(cfg.tempScriptPath),
 		"",
-		"if ! id -u \"$AGENT_USER\" >/dev/null 2>&1; then",
-		"  if command -v useradd >/dev/null 2>&1; then",
-		"    " + sudo + "useradd --system --create-home --home-dir \"$STATE_DIR\" --shell /usr/sbin/nologin \"$AGENT_USER\"",
-		"  else",
-		"    " + sudo + "adduser --system --home \"$STATE_DIR\" --shell /usr/sbin/nologin \"$AGENT_USER\"",
-		"  fi",
-		"fi",
-		"",
 		sudo + "mkdir -p \"$STATE_DIR\" \"$CONFIG_DIR\"",
 		sudo + "install -m 0755 \"$TEMP_BIN\" \"$BIN_PATH\"",
 		sudo + "install -m 0644 \"$TEMP_UNIT\" /etc/systemd/system/\"$SERVICE_NAME\".service",
 	}
 	if includeAuthorizedKeys {
-		lines = append(lines, sudo+"install -m 0644 "+shellQuote(cfg.tempAuthorizedKeysPath)+" "+shellQuote(defaultDirectAuthorizedKeysPath()))
+		lines = append(lines, sudo+"install -m 0600 "+shellQuote(cfg.tempAuthorizedKeysPath)+" "+shellQuote(defaultDirectAuthorizedKeysPath()))
 	}
 	lines = append(lines,
-		sudo+"chown -R \"$AGENT_USER\":\"$AGENT_USER\" \"$STATE_DIR\"",
 		sudo+"systemctl daemon-reload",
 		sudo+"systemctl enable --now \"$SERVICE_NAME\".service",
 		"rm -f \"$TEMP_BIN\" \"$TEMP_UNIT\" \"$TEMP_SCRIPT\"",
