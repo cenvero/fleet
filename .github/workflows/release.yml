@@ -42,6 +42,10 @@ jobs:
         env:
           FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
         run: ./scripts/validate-signing-assets.sh
+      - name: Install minisign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y minisign
       - name: Install Goreleaser
         uses: goreleaser/goreleaser-action@v6
         with:
