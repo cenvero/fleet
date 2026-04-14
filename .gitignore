@@ -1,0 +1,11 @@
+.DS_Store
+.cache/
+.claude/
+bin/
+build/
+coverage.out
+dist/
+tmp/
+_private/
+fleet
+fleet-agent

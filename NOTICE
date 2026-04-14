@@ -1,0 +1,10 @@
+Cenvero Fleet
+Copyright (C) 2026 Cenvero / Shubhdeep Singh
+
+This repository contains original work for the Cenvero Fleet controller, agent,
+static distribution assets, and release automation scaffolding.
+
+This project is licensed under the GNU Affero General Public License,
+version 3 or any later version. See `LICENSE` and `COPYING`.
+
+Third-party dependencies are declared in `go.mod` and `go.sum`.

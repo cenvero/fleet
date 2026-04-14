@@ -1,0 +1,96 @@
+version: 2
+
+project_name: fleet
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: fleet
+    main: ./cmd/fleet
+    binary: fleet
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    goarm:
+      - "7"
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: darwin
+        goarm: "7"
+      - goos: windows
+        goarm: "7"
+    ldflags:
+      - -s -w -X github.com/cenvero/fleet/internal/version.Version={{.Version}}
+    flags:
+      - -trimpath
+
+  - id: fleet-agent
+    main: ./cmd/fleet-agent
+    binary: fleet-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    goarm:
+      - "7"
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: darwin
+        goarm: "7"
+      - goos: windows
+        goarm: "7"
+    ldflags:
+      - -s -w -X github.com/cenvero/fleet/internal/version.Version={{.Version}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: unix
+    ids:
+      - fleet
+      - fleet-agent
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"arm\" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+signs:
+  - artifacts: archive
+    cmd: minisign
+    signature: "${artifact}.minisig"
+    stdin: "{{ .Env.MINISIGN_PASSWORD }}"
+    args:
+      - -Sm
+      - "${artifact}"
+      - -s
+      - "{{ .Env.MINISIGN_KEY_FILE }}"
+      - -x
+      - "${signature}"
+
+release:
+  draft: false
+  prerelease: auto
+
+snapshot:
+  version_template: "{{ .Version }}-next"

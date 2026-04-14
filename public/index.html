@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cenvero Fleet</title>
+  <meta name="description" content="Cenvero Fleet is a self-hosted, decentralized fleet management platform.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --bg-soft: #121926;
+      --card: rgba(18, 25, 38, 0.82);
+      --text: #f4f7fb;
+      --muted: #98a6bc;
+      --accent: #00d4aa;
+      --accent-soft: rgba(0, 212, 170, 0.16);
+      --border: rgba(255, 255, 255, 0.08);
+      --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, monospace;
+      --sans: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: var(--sans);
+      background:
+        radial-gradient(circle at top, rgba(0, 212, 170, 0.18), transparent 38%),
+        linear-gradient(180deg, #081018 0%, #0a0e14 45%, #09131e 100%);
+      min-height: 100vh;
+    }
+    a { color: inherit; text-decoration: none; }
+    .shell {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 0 24px 72px;
+    }
+    .nav {
+      position: sticky;
+      top: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px 0;
+      backdrop-filter: blur(14px);
+      background: linear-gradient(180deg, rgba(10, 14, 20, 0.86), rgba(10, 14, 20, 0.28));
+      z-index: 10;
+    }
+    .brand {
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      letter-spacing: 0.08em;
+      text-transform: lowercase;
+    }
+    .brand span { color: var(--accent); }
+    .links {
+      display: flex;
+      gap: 20px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    .hero {
+      padding: 72px 0 56px;
+      display: grid;
+      grid-template-columns: 1.3fr 1fr;
+      gap: 34px;
+      align-items: end;
+    }
+    .eyebrow, .terminal, .card h3, code, pre {
+      font-family: var(--mono);
+    }
+    .eyebrow {
+      display: inline-flex;
+      gap: 12px;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(12, 18, 30, 0.72);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.74rem;
+    }
+    h1 {
+      margin: 22px 0 14px;
+      font-size: clamp(3rem, 8vw, 6rem);
+      line-height: 0.92;
+      letter-spacing: -0.05em;
+      max-width: 10ch;
+    }
+    .lead {
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 1.1rem;
+      line-height: 1.75;
+      max-width: 54ch;
+    }
+    .terminal {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(8, 15, 23, 0.96), rgba(13, 19, 31, 0.9));
+      border: 1px solid rgba(0, 212, 170, 0.22);
+      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.25);
+      overflow: auto;
+    }
+    .terminal span:first-child { color: var(--accent); }
+    .terminal span:last-child { color: #d9fef4; white-space: nowrap; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 24px;
+    }
+    .button {
+      padding: 14px 18px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+    }
+    .button:hover { transform: translateY(-1px); }
+    .button.primary {
+      background: var(--accent);
+      color: #03251d;
+      border-color: transparent;
+      font-weight: 700;
+    }
+    .button.secondary { color: var(--text); background: rgba(255, 255, 255, 0.02); }
+    .hero-card, .card {
+      border: 1px solid var(--border);
+      background: var(--card);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+    }
+    .hero-card h2, .section h2 {
+      margin: 0 0 10px;
+      font-size: 1.45rem;
+    }
+    .hero-card p, .section p, .card p {
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .section {
+      margin-top: 72px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 22px;
+    }
+    .two-up {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 22px;
+    }
+    .card h3 {
+      margin: 0 0 14px;
+      font-size: 0.95rem;
+      color: var(--accent);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      color: #daf7ef;
+      line-height: 1.7;
+    }
+    footer {
+      margin-top: 80px;
+      padding-top: 28px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    @media (max-width: 900px) {
+      .hero, .grid, .two-up { grid-template-columns: 1fr; }
+      .links { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="nav">
+      <a class="brand" href="/">cenvero / <span>fleet</span></a>
+      <div class="links">
+        <a href="#features">Features</a>
+        <a href="#install">Install</a>
+        <a href="#modes">Modes</a>
+        <a href="https://github.com/cenvero/fleet">GitHub</a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow">
+          <span>v1.0</span>
+          <span>open source</span>
+          <span>AGPL-3.0</span>
+        </div>
+        <h1>Command your fleet.</h1>
+        <p class="lead">Cenvero Fleet runs where you do, speaks over SSH, and keeps every byte in an operator-owned directory. One controller. Two transport modes. Zero cloud dependency.</p>
+        <div class="terminal"><span>$</span><span>curl -fsSL https://fleet.cenvero.org/install | sh</span></div>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/cenvero/fleet">View on GitHub</a>
+          <a class="button secondary" href="/docs/">Read the docs</a>
+        </div>
+      </div>
+      <aside class="hero-card">
+        <h2>Operator owned by design</h2>
+        <p>Cenvero Fleet’s controller can live on a laptop, workstation, or server. Reverse mode handles NAT’d nodes when you have a stable listener. Direct mode works when the controller roams and the remote host exposes SSH. Mix both in one deployment.</p>
+      </aside>
+    </section>
+
+    <section id="features" class="section">
+      <h2>Why Cenvero Fleet</h2>
+      <p>Every core decision is built around a Unix-feeling binary, explicit ownership, and distribution that doesn’t collapse under its own packaging.</p>
+      <div class="grid">
+        <article class="card">
+          <h3>One static binary</h3>
+          <p>Go-first packaging keeps the controller and agent easy to cross-compile, audit, and install.</p>
+        </article>
+        <article class="card">
+          <h3>Two transport modes</h3>
+          <p>Run direct controller-to-agent sessions or persistent reverse connections from NAT’d nodes.</p>
+        </article>
+        <article class="card">
+          <h3>Operator-owned data</h3>
+          <p>Config, keys, logs, backups, and state stay in the directory the operator chose during `fleet init`.</p>
+        </article>
+        <article class="card">
+          <h3>Modern crypto</h3>
+          <p>Ed25519 by default, AEAD-only SSH ciphers, host key pinning, audit logs, and signed release plumbing.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="modes" class="section">
+      <h2>Two modes, one controller</h2>
+      <div class="two-up">
+        <article class="card">
+          <h3>Reverse mode</h3>
+          <p>Use this when the controller has a stable address and the remote node does not. The agent dials out and keeps the channel alive.</p>
+        </article>
+        <article class="card">
+          <h3>Direct mode</h3>
+          <p>Use this when the controller is behind NAT or moves between networks. Cenvero Fleet reaches out to each server on demand.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="install" class="section">
+      <h2>Quick start</h2>
+      <div class="card">
+<pre>$ curl -fsSL https://fleet.cenvero.org/install | sh
+$ fleet init
+$ fleet server add web-01 192.168.1.10 --mode direct</pre>
+      </div>
+    </section>
+
+    <footer>
+      <div>© 2026 Cenvero. Cenvero Fleet is licensed under AGPL-3.0-or-later.</div>
+      <div>
+        <a href="https://github.com/cenvero/fleet">GitHub</a> ·
+        <a href="/docs/">Docs</a> ·
+        <a href="mailto:security@cenvero.org">security@cenvero.org</a>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

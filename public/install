@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+BASE_URL="https://fleet.cenvero.org"
+CHANNEL="${FLEET_CHANNEL:-stable}"
+OS="$(uname -s 2>/dev/null || echo unknown)"
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing dependency: $1" >&2
+    exit 1
+  }
+}
+
+run_unix_installer() {
+  need curl
+  curl -fsSL "${BASE_URL}/install.sh" | FLEET_CHANNEL="${CHANNEL}" sh
+}
+
+run_windows_installer() {
+  need curl
+
+  tmp="$(mktemp "${TMPDIR:-/tmp}/fleet-install.XXXXXX.ps1")"
+  trap 'rm -f "$tmp"' EXIT INT TERM
+  curl -fsSL "${BASE_URL}/install.ps1" -o "${tmp}"
+
+  if command -v pwsh >/dev/null 2>&1; then
+    FLEET_CHANNEL="${CHANNEL}" pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${tmp}"
+    return
+  fi
+
+  if command -v powershell.exe >/dev/null 2>&1; then
+    FLEET_CHANNEL="${CHANNEL}" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${tmp}"
+    return
+  fi
+
+  if command -v powershell >/dev/null 2>&1; then
+    FLEET_CHANNEL="${CHANNEL}" powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${tmp}"
+    return
+  fi
+
+  echo "missing dependency: PowerShell (pwsh, powershell.exe, or powershell)" >&2
+  exit 1
+}
+
+case "${OS}" in
+  Linux|Darwin|FreeBSD|OpenBSD|NetBSD)
+    run_unix_installer
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    run_windows_installer
+    ;;
+  *)
+    echo "unsupported operating system: ${OS}" >&2
+    exit 1
+    ;;
+esac

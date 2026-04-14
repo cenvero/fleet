@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cenvero Fleet release manifest",
+  "type": "object",
+  "required": ["channels", "binaries", "agent_binaries"],
+  "properties": {
+    "generated_at": {
+      "type": "string"
+    },
+    "channels": {
+      "type": "object",
+      "required": ["stable", "beta", "alpha"]
+    },
+    "binaries": {
+      "type": "object"
+    },
+    "agent_binaries": {
+      "type": "object"
+    }
+  }
+}

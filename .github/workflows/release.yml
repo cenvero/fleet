@@ -1,0 +1,157 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  goreleaser:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate release secrets
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+        run: ./scripts/validate-release-env.sh
+      - name: Write minisign key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          mkdir -p .release
+          printf '%s' "${MINISIGN_SECRET_KEY}" | base64 -d > .release/minisign.key
+      - name: Sync release signing public key
+        env:
+          FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+        run: ./scripts/sync-signing-key.sh
+      - name: Validate synced signing assets
+        env:
+          FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+        run: ./scripts/validate-signing-assets.sh
+      - name: Install Goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          MINISIGN_KEY_FILE: .release/minisign.key
+      - name: Upload release dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+  update-manifest:
+    name: Update manifest
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+      - name: Select channel
+        id: channel
+        run: |
+          if printf '%s' "${GITHUB_REF_NAME}" | grep -Eq -- '-alpha\.'; then
+            echo "value=alpha" >> "${GITHUB_OUTPUT}"
+          elif printf '%s' "${GITHUB_REF_NAME}" | grep -Eq -- '-(beta|rc)\.'; then
+            echo "value=beta" >> "${GITHUB_OUTPUT}"
+          else
+            echo "value=stable" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Sync signing key files
+        env:
+          FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+        run: ./scripts/sync-signing-key.sh
+      - name: Update manifest metadata
+        env:
+          FLEET_VERSION: ${{ github.ref_name }}
+          FLEET_CHANNEL: ${{ steps.channel.outputs.value }}
+          FLEET_RELEASE_NOTES_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          FLEET_REPOSITORY: ${{ github.repository }}
+        run: |
+          export FLEET_RELEASE_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ./scripts/update-manifest.sh
+      - name: Validate generated manifest
+        env:
+          FLEET_VERSION: ${{ github.ref_name }}
+          FLEET_REPOSITORY: ${{ github.repository }}
+        run: ./scripts/validate-release-manifest.sh
+      - name: Commit manifest
+        run: |
+          git config user.name "cenvero-release-bot"
+          git config user.email "releases@cenvero.org"
+          git add public/manifest.json public/signing.pub public/install.sh public/install.ps1 internal/update/signing.pub
+          git commit -m "chore(release): update manifest for ${GITHUB_REF_NAME}" || exit 0
+          git push origin HEAD:main
+
+  smoke-test:
+    name: Smoke test release
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    steps:
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+      - name: Download archive
+        run: |
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${GITHUB_REF_NAME}_linux_amd64.tar.gz" -o fleet.tar.gz
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${GITHUB_REF_NAME}_linux_amd64.tar.gz.minisig" -o fleet.tar.gz.minisig
+      - name: Verify signature
+        env:
+          MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
+        run: |
+          key_payload="$(printf '%s\n' "${MINISIGN_PUBLIC_KEY}" | awk 'NF { line = $0 } END { print line }')"
+          [ -n "${key_payload}" ] || {
+            echo "minisign public key payload missing" >&2
+            exit 1
+          }
+          [ "${key_payload}" != "REPLACE_WITH_MINISIGN_PUBLIC_KEY" ] || {
+            echo "minisign public key placeholder is not allowed" >&2
+            exit 1
+          }
+          minisign -Vm fleet.tar.gz -P "${key_payload}" -x fleet.tar.gz.minisig
+      - name: Verify binary runs
+        run: |
+          tar -xzf fleet.tar.gz
+          ./fleet --version
+
+  deploy-pages:
+    name: Deploy Pages
+    runs-on: ubuntu-latest
+    needs: [update-manifest]
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4
