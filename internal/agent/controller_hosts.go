@@ -52,7 +52,7 @@ func (m fileControllerKnownHostsManager) Update(_ context.Context, payload proto
 			Message: "controller address is required",
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		return proto.ControllerKnownHostsResult{}, &RPCError{
 			Code:    "known_hosts_directory_failed",
 			Message: err.Error(),

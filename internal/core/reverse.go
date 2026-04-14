@@ -337,7 +337,7 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 	}
 
 	path := filepath.Join(h.app.ConfigDir, "keys", "agents", serverName+".pub")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create reverse agent key directory: %w", err)
 	}
 

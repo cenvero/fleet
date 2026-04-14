@@ -45,10 +45,10 @@ func (q *fileMetricsQueue) Enqueue(snapshot proto.MetricsSnapshot) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if err := os.MkdirAll(filepath.Dir(q.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(q.path), 0o750); err != nil {
 		return fmt.Errorf("create metrics queue directory: %w", err)
 	}
-	file, err := os.OpenFile(q.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(q.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open metrics queue: %w", err)
 	}

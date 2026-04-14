@@ -60,7 +60,7 @@ func (s *Store) Save(alert Alert) error {
 	if alert.ID == "" {
 		return fmt.Errorf("alert id is required")
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return fmt.Errorf("create alerts directory: %w", err)
 	}
 	existing, err := s.Get(alert.ID)
@@ -99,7 +99,7 @@ func (s *Store) Save(alert Alert) error {
 	if err != nil {
 		return fmt.Errorf("marshal alert: %w", err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write alert: %w", err)
 	}
 	return nil

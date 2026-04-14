@@ -75,7 +75,7 @@ func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyS
 }
 
 func ensureKnownHostsFile(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create known_hosts directory: %w", err)
 	}
 	if _, err := os.Stat(path); err == nil {

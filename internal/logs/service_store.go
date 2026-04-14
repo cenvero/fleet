@@ -57,7 +57,7 @@ func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogL
 		return nil
 	}
 	basePath := s.basePath(serverName, serviceName)
-	if err := os.MkdirAll(filepath.Dir(basePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(basePath), 0o750); err != nil {
 		return fmt.Errorf("create aggregated log directory: %w", err)
 	}
 	if err := s.expireCache(basePath, s.cursorPath(serverName, serviceName)); err != nil {
@@ -82,7 +82,7 @@ func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogL
 		return nil
 	}
 
-	file, err := os.OpenFile(basePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(basePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open aggregated log: %w", err)
 	}
@@ -187,7 +187,7 @@ func (s *ServiceStore) writeCursor(serverName, serviceName string, cursor logCur
 	if err != nil {
 		return fmt.Errorf("marshal log cursor: %w", err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write log cursor: %w", err)
 	}
 	return nil

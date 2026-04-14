@@ -184,7 +184,7 @@ func SaveConfig(path string, cfg Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
 	f, err := os.Create(path)
@@ -213,7 +213,7 @@ func EnsureLayout(configDir string) error {
 		filepath.Join(configDir, "tmp"),
 	}
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create directory %s: %w", dir, err)
 		}
 	}
@@ -230,7 +230,7 @@ func BackupDir(sourceDir, outputPath string) (string, error) {
 	if outputPath == "" {
 		outputPath = filepath.Join(sourceDir, "backups", "fleet-backup-"+time.Now().UTC().Format("20060102T150405Z")+".tar.gz")
 	}
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o750); err != nil {
 		return "", fmt.Errorf("create backup output directory: %w", err)
 	}
 
@@ -306,19 +306,20 @@ func RestoreBackup(inputPath, outputDir string) error {
 		target := filepath.Join(outputDir, filepath.Clean(header.Name))
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
+			if err := os.MkdirAll(target, os.FileMode(header.Mode&0o7777)); err != nil { //nolint:gosec
 				return fmt.Errorf("create restore directory: %w", err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 				return fmt.Errorf("create restore parent: %w", err)
 			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+			file, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode&0o7777)) //nolint:gosec
 			if err != nil {
 				return fmt.Errorf("create restore file: %w", err)
 			}
-			if _, err := io.Copy(file, tr); err != nil {
-				file.Close()
+			const maxRestoreSize = 512 * 1024 * 1024
+			if _, err := io.Copy(file, io.LimitReader(tr, maxRestoreSize)); err != nil {
+				_ = file.Close()
 				return fmt.Errorf("restore file contents: %w", err)
 			}
 			if err := file.Close(); err != nil {

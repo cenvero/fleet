@@ -236,7 +236,7 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 	switch cfg.Backend {
 	case BackendSQLite:
 		path := cfg.PathFor(workload)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, nil, fmt.Errorf("create database directory: %w", err)
 		}
 		dialector = sqlite.Open(path)

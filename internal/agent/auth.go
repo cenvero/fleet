@@ -35,7 +35,7 @@ func (m fileAuthorizedKeysManager) Update(_ context.Context, payload proto.Autho
 			Message: "authorized keys path is required",
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o750); err != nil {
 		return proto.AuthorizedKeysResult{}, &RPCError{
 			Code:    "authorized_keys_directory_failed",
 			Message: err.Error(),

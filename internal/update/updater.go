@@ -143,7 +143,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	}
 
 	updateDir := filepath.Join(opts.ConfigDir, "backups", "updates")
-	if err := os.MkdirAll(updateDir, 0o755); err != nil {
+	if err := os.MkdirAll(updateDir, 0o750); err != nil {
 		return ApplyResult{}, err
 	}
 
@@ -229,14 +229,14 @@ func rollbackStatePath(configDir string) string {
 }
 
 func writeRollbackState(path string, state rollbackState) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func readRollbackState(path string) (rollbackState, error) {
