@@ -5,6 +5,7 @@ bin/
 build/
 coverage.out
 dist/
+.release/
 tmp/
 _private/
 fleet
