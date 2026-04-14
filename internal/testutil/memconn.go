@@ -29,6 +29,7 @@ type memConn struct {
 	out    chan []byte
 	local  net.Addr
 	remote net.Addr
+	mu     sync.Mutex
 	buf    bytes.Buffer
 }
 
@@ -55,20 +56,32 @@ func NewBufferedConnPair(localA, localB string) (net.Conn, net.Conn) {
 }
 
 func (c *memConn) Read(p []byte) (int, error) {
-	for {
-		if c.buf.Len() > 0 {
-			return c.buf.Read(p)
-		}
+	c.mu.Lock()
+	if c.buf.Len() > 0 {
+		n, err := c.buf.Read(p)
+		c.mu.Unlock()
+		return n, err
+	}
+	c.mu.Unlock()
+
+	select {
+	case payload := <-c.in:
+		c.mu.Lock()
+		_, _ = c.buf.Write(payload)
+		n, err := c.buf.Read(p)
+		c.mu.Unlock()
+		return n, err
+	case <-c.pipe.done:
+		// Drain any buffered data before returning EOF.
 		select {
-		case payload, ok := <-c.in:
-			if !ok {
-				return 0, io.EOF
-			}
+		case payload := <-c.in:
+			c.mu.Lock()
 			_, _ = c.buf.Write(payload)
-		case <-c.pipe.done:
-			if c.buf.Len() == 0 {
-				return 0, io.EOF
-			}
+			n, err := c.buf.Read(p)
+			c.mu.Unlock()
+			return n, err
+		default:
+			return 0, io.EOF
 		}
 	}
 }
@@ -76,15 +89,6 @@ func (c *memConn) Read(p []byte) (int, error) {
 func (c *memConn) Write(p []byte) (n int, err error) {
 	payload := make([]byte, len(p))
 	copy(payload, p)
-
-	defer func() {
-		if recover() != nil {
-			// Sending on a channel that was just closed should behave like a closed socket,
-			// not crash the test process.
-			n = 0
-			err = io.ErrClosedPipe
-		}
-	}()
 
 	select {
 	case <-c.pipe.done:
@@ -94,11 +98,12 @@ func (c *memConn) Write(p []byte) (n int, err error) {
 	}
 }
 
+// Close signals shutdown via the done channel only. Data channels are never
+// closed because closing a channel while another goroutine is mid-send on it
+// is a data race; the done signal is sufficient to unblock all waiters.
 func (c *memConn) Close() error {
 	c.pipe.once.Do(func() {
 		close(c.pipe.done)
-		close(c.pipe.a2b)
-		close(c.pipe.b2a)
 	})
 	return nil
 }
