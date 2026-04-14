@@ -121,8 +121,9 @@ jobs:
           sudo apt-get install -y minisign
       - name: Download archive
         run: |
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${GITHUB_REF_NAME}_linux_amd64.tar.gz" -o fleet.tar.gz
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${GITHUB_REF_NAME}_linux_amd64.tar.gz.minisig" -o fleet.tar.gz.minisig
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz" -o fleet.tar.gz
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz.minisig" -o fleet.tar.gz.minisig
       - name: Verify signature
         env:
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
