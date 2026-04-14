@@ -53,7 +53,7 @@ jobs:
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           MINISIGN_KEY_FILE: .release/minisign.key
       - name: Upload release dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-dist
           path: dist
