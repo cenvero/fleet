@@ -116,7 +116,7 @@ func generateEd25519(dir string, passphrase []byte) error {
 	if err != nil {
 		return fmt.Errorf("create ed25519 public key: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, "id_ed25519.pub"), ssh.MarshalAuthorizedKey(pub), 0o644)
+	return os.WriteFile(filepath.Join(dir, "id_ed25519.pub"), ssh.MarshalAuthorizedKey(pub), 0o644) // #nosec G306 -- public key is intentionally world-readable
 }
 
 func generateRSA4096(dir string, passphrase []byte) error {
@@ -131,7 +131,7 @@ func generateRSA4096(dir string, passphrase []byte) error {
 	if err != nil {
 		return fmt.Errorf("create rsa public key: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, "id_rsa4096.pub"), ssh.MarshalAuthorizedKey(pub), 0o644)
+	return os.WriteFile(filepath.Join(dir, "id_rsa4096.pub"), ssh.MarshalAuthorizedKey(pub), 0o644) // #nosec G306 -- public key is intentionally world-readable
 }
 
 func writePEM(path, blockType string, data, passphrase []byte) error {

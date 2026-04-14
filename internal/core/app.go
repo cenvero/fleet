@@ -655,9 +655,9 @@ func (a *App) AddFirewallRule(serverName, rule string) error {
 }
 
 type ExecServerResult struct {
-	Server   string
-	Result   proto.ExecResult
-	Error    error
+	Server string
+	Result proto.ExecResult
+	Error  error
 }
 
 func (a *App) ExecCommand(serverName, command string) (proto.ExecResult, error) {

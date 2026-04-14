@@ -24,7 +24,7 @@ func Encode(w io.Writer, env Envelope) error {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
 
-	if err := binary.Write(w, binary.BigEndian, uint32(len(body))); err != nil { //nolint:gosec
+	if err := binary.Write(w, binary.BigEndian, uint32(len(body))); err != nil { // #nosec G115 -- envelope size fits uint32
 		return fmt.Errorf("write envelope length: %w", err)
 	}
 

@@ -350,7 +350,7 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 			return nil, fmt.Errorf("reverse agent key mismatch for %s", serverName)
 		}
 	} else if os.IsNotExist(err) {
-		if err := os.WriteFile(path, ssh.MarshalAuthorizedKey(key), 0o644); err != nil {
+		if err := os.WriteFile(path, ssh.MarshalAuthorizedKey(key), 0o644); err != nil { // #nosec G306 -- public key is intentionally world-readable
 			return nil, fmt.Errorf("pin reverse agent key for %s: %w", serverName, err)
 		}
 	} else {

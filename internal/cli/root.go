@@ -607,7 +607,7 @@ func newLogsCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return os.WriteFile(exportPath, append(data, '\n'), 0o644)
+			return os.WriteFile(exportPath, append(data, '\n'), 0o600)
 		},
 	}
 	cmd.Flags().StringVar(&server, "server", "", "filter by server name")
@@ -1191,12 +1191,12 @@ func writeLogOutput(cmd *cobra.Command, result proto.LogReadResult, exportPath s
 		_, err := fmt.Fprint(cmd.OutOrStdout(), output)
 		return err
 	}
-	return os.WriteFile(exportPath, []byte(output), 0o644)
+	return os.WriteFile(exportPath, []byte(output), 0o600)
 }
 
 func followServiceLogs(ctx context.Context, cmd *cobra.Command, app *core.App, serverName, serviceName, search string, tailLines int, exportPath string) error {
 	if exportPath != "" {
-		if err := os.WriteFile(exportPath, nil, 0o644); err != nil {
+		if err := os.WriteFile(exportPath, nil, 0o600); err != nil {
 			return err
 		}
 	}
@@ -1206,7 +1206,7 @@ func followServiceLogs(ctx context.Context, cmd *cobra.Command, app *core.App, s
 			_, err := fmt.Fprint(cmd.OutOrStdout(), formatted)
 			return err
 		}
-		f, err := os.OpenFile(exportPath, os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(exportPath, os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}

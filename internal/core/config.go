@@ -338,7 +338,7 @@ func WriteExport(path string, export ConfigExport) error {
 		_, err = os.Stdout.Write(append(data, '\n'))
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func ReadExport(path string) (ConfigExport, error) {
