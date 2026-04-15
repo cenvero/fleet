@@ -1219,24 +1219,67 @@ func newSelfUninstallCommand(configDir *string) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "self-uninstall",
-		Short: "Remove the local config directory",
+		Short: "Remove fleet binary and config directory",
+		Long: `Removes the fleet binary from its install location and deletes
+the local config directory (servers, keys, logs, etc.).
+
+All managed agents on remote servers are left untouched.
+Run 'fleet server remove <name>' first if you want to tear those down.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !yes {
-				return errors.New("refusing to uninstall without --yes")
+				fmt.Fprintln(cmd.OutOrStdout(), "This will remove:")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet binary from its install location")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet config directory (servers, keys, logs, etc.)")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "Remote agents on managed servers are NOT affected.")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "Re-run with --yes to confirm.")
+				return nil
 			}
+
 			if *configDir == "" {
 				*configDir = core.DefaultConfigDir("")
 			}
-			return os.RemoveAll(*configDir)
-		},
-		Args: cobra.NoArgs,
-		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			yesFlag, _ := cmd.Flags().GetBool("yes")
-			yes = yesFlag
+
+			// Remove config directory
+			if err := os.RemoveAll(*configDir); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove config dir %s: %v\n", *configDir, err)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Removed config directory: %s\n", *configDir)
+			}
+
+			// Find and remove the fleet binary
+			binaryPath, err := exec.LookPath("fleet")
+			if err != nil {
+				// Try the path of the running executable as fallback
+				binaryPath, err = os.Executable()
+				if err != nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "warning: could not locate fleet binary; remove it manually")
+					return nil
+				}
+				binaryPath, _ = filepath.EvalSymlinks(binaryPath)
+			}
+
+			if err := os.Remove(binaryPath); err != nil {
+				if os.IsPermission(err) {
+					// Try with sudo on unix
+					sudoErr := exec.Command("sudo", "rm", "-f", binaryPath).Run()
+					if sudoErr != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove %s (permission denied). Run: sudo rm -f %s\n", binaryPath, binaryPath)
+						return nil
+					}
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove %s: %v\n", binaryPath, err)
+					return nil
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed binary: %s\n", binaryPath)
+			fmt.Fprintln(cmd.OutOrStdout(), "Fleet uninstalled.")
 			return nil
 		},
+		Args: cobra.NoArgs,
 	}
-	cmd.Flags().BoolVar(&yes, "yes", false, "confirm removal of the config directory")
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm uninstall")
 	return cmd
 }
 
