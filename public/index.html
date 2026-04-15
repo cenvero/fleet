@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <style>
     :root {
       --bg: #080c12;
@@ -184,11 +185,13 @@
       transform: translateY(-2px);
     }
     .feature-icon {
-      width: 36px; height: 36px;
+      width: 38px; height: 38px;
       background: var(--accent-soft); border-radius: 10px;
       display: flex; align-items: center; justify-content: center;
-      font-size: 1.1rem; margin-bottom: 14px;
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 14px;
     }
+    .feature-icon svg { width: 18px; height: 18px; stroke: var(--accent); stroke-width: 1.8; }
     .feature-card h3 {
       font-size: 0.95rem; font-weight: 600; color: var(--text);
       margin-bottom: 8px;
@@ -250,7 +253,8 @@
       background: var(--card); color: var(--text);
       box-shadow: 0 1px 6px rgba(0,0,0,0.3);
     }
-    .os-tab .tab-icon { font-size: 1rem; line-height: 1; }
+    .os-tab .tab-icon { display: flex; align-items: center; }
+    .os-tab .tab-icon svg { width: 15px; height: 15px; }
 
     .os-panel { display: none; }
     .os-panel.active { display: block; }
@@ -385,47 +389,47 @@
   <p class="section-sub">No agents to pre-install, no cloud accounts, no dashboards to subscribe to. Just a binary and SSH.</p>
   <div class="features-grid">
     <div class="feature-card">
-      <div class="feature-icon">⚡</div>
+      <div class="feature-icon"><i data-lucide="zap"></i></div>
       <h3>Agent Auto-install</h3>
       <p>Add a server and fleet SSHes in, downloads the right agent binary, and sets up a systemd service automatically.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🔄</div>
+      <div class="feature-icon"><i data-lucide="arrow-left-right"></i></div>
       <h3>Two transport modes</h3>
       <p>Direct mode for reachable servers, reverse mode for servers behind NAT or firewalls. Mix both in one fleet.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🖥</div>
+      <div class="feature-icon"><i data-lucide="terminal"></i></div>
       <h3>Shell &amp; exec</h3>
       <p>Open a root shell with <code>fleet ssh</code> or run commands across all servers concurrently with <code>fleet exec --all</code>.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">📋</div>
+      <div class="feature-icon"><i data-lucide="settings-2"></i></div>
       <h3>Service control</h3>
       <p>Track, start, stop, and restart systemd services. Stream and cache logs for any tracked service.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🔥</div>
+      <div class="feature-icon"><i data-lucide="shield"></i></div>
       <h3>Firewall management</h3>
       <p>Manage UFW rules and open or close ports on any server directly from the controller.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">📊</div>
+      <div class="feature-icon"><i data-lucide="layout-dashboard"></i></div>
       <h3>Terminal dashboard</h3>
       <p>A full TUI with server health, metrics, services, logs, and alerts — all in one terminal window.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🔔</div>
+      <div class="feature-icon"><i data-lucide="bell"></i></div>
       <h3>Alerts</h3>
       <p>Metric threshold alerts with acknowledge and suppress actions. No external alerting system needed.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🔒</div>
+      <div class="feature-icon"><i data-lucide="shield-check"></i></div>
       <h3>Signed releases</h3>
       <p>Every release is signed with minisign. The installer verifies the signature before touching your binary.</p>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">♻️</div>
+      <div class="feature-icon"><i data-lucide="refresh-cw"></i></div>
       <h3>Self-updating</h3>
       <p>One command updates the controller and rolls out the same version to every managed agent automatically.</p>
     </div>
@@ -484,9 +488,18 @@ fleet dashboard</pre>
   <h2 class="section-title">Every platform, one command</h2>
 
   <div class="os-tabs" id="osTabs">
-    <button class="os-tab" data-os="mac" onclick="switchOS('mac')"><span class="tab-icon">🍎</span> macOS</button>
-    <button class="os-tab" data-os="linux" onclick="switchOS('linux')"><span class="tab-icon">🐧</span> Linux</button>
-    <button class="os-tab" data-os="windows" onclick="switchOS('windows')"><span class="tab-icon">⊞</span> Windows</button>
+    <button class="os-tab" data-os="mac" onclick="switchOS('mac')">
+      <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg></span>
+      macOS
+    </button>
+    <button class="os-tab" data-os="linux" onclick="switchOS('linux')">
+      <span class="tab-icon"><i data-lucide="terminal"></i></span>
+      Linux
+    </button>
+    <button class="os-tab" data-os="windows" onclick="switchOS('windows')">
+      <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M3 12V6.75l6-1.32v6.57H3zm17 0V5l-9 1.26V12h9zM3 13h6v6.08l-6-1.29V13zm17 0h-9v6.74L20 18.5V13z"/></svg></span>
+      Windows
+    </button>
   </div>
 
   <!-- macOS -->
@@ -570,6 +583,7 @@ fleet dashboard</pre>
     });
   }
   switchOS(detectOS());
+  lucide.createIcons();
 
   function toggleMenu(btn) {
     const m = document.getElementById('nav-mobile');
