@@ -40,6 +40,22 @@ func NewRootCommand() *cobra.Command {
 			if configDir == "" {
 				configDir = core.DefaultConfigDir("")
 			}
+			// Commands that are always allowed before init
+			switch cmd.Name() {
+			case "init", "help", "self-uninstall", "completion", "fleet":
+				return nil
+			}
+			if cmd.HasParent() {
+				switch cmd.Parent().Name() {
+				case "help", "completion":
+					return nil
+				}
+			}
+			if !core.IsInitialized(configDir) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Fleet is not initialized yet.\n")
+				fmt.Fprintf(cmd.ErrOrStderr(), "Run 'fleet init' first to set up the controller.\n")
+				os.Exit(1)
+			}
 			return nil
 		},
 	}

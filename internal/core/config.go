@@ -199,6 +199,12 @@ func ConfigPath(configDir string) string {
 	return filepath.Join(configDir, "config.toml")
 }
 
+// IsInitialized reports whether the config directory has been set up by `fleet init`.
+func IsInitialized(configDir string) bool {
+	_, err := os.Stat(ConfigPath(configDir))
+	return err == nil
+}
+
 func EnsureLayout(configDir string) error {
 	dirs := []string{
 		filepath.Join(configDir, "keys"),
