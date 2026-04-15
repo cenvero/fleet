@@ -60,16 +60,25 @@ builds:
       - -trimpath
 
 archives:
-  - id: unix
+  - id: fleet-archive
     ids:
       - fleet
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "fleet_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"arm\" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}"
+
+  - id: fleet-agent-archive
+    ids:
       - fleet-agent
     formats:
       - tar.gz
     format_overrides:
       - goos: windows
         format: zip
-    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"arm\" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}"
+    name_template: "fleet-agent_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"arm\" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}"
 
 checksum:
   name_template: "checksums.txt"

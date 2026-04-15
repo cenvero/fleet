@@ -73,6 +73,10 @@ jobs:
         with:
           name: release-dist
           path: dist
+      - name: Debug artifacts
+        run: |
+          echo "=== Archive entries in artifacts.json ==="
+          jq '[.[] | select(.type == "Archive") | {name, goos, goarch, binary: (.extra.Binary // .extra.Binaries[0])}]' dist/artifacts.json
       - name: Select channel
         id: channel
         run: |
