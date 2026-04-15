@@ -104,7 +104,7 @@ brews:
     homepage: "https://fleet.cenvero.org"
     description: "Self-hosted decentralized fleet management platform"
     license: "AGPL-3.0-or-later"
-    folder: Formula
+    directory: Formula
     skip_upload: auto
     install: |
       bin.install "fleet"
