@@ -180,58 +180,73 @@
     strong { color: var(--text); font-weight: 600; }
     .lead { font-size: 1.05rem; color: #b0c2d8; margin-bottom: 28px; line-height: 1.6; }
 
-    /* ── INSTALL METHODS ────────────────────────────── */
-    .install-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
-      gap: 14px; margin: 24px 0;
+    /* ── INSTALL TAB SWITCHER ────────────────────────── */
+    .os-tabs {
+      display: inline-flex; gap: 4px;
+      background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+      border-radius: 12px; padding: 4px; margin-bottom: 20px;
     }
-    .install-card {
-      border: 1px solid var(--border); border-radius: var(--radius);
-      background: var(--bg-card); overflow: hidden;
-      transition: border-color 200ms, transform 200ms, box-shadow 200ms;
+    .os-tab {
+      display: flex; align-items: center; gap: 7px;
+      padding: 7px 16px; border-radius: 9px; border: none;
+      background: none; color: var(--muted); font-family: var(--sans);
+      font-size: 0.855rem; font-weight: 500; cursor: pointer;
+      transition: all 160ms; white-space: nowrap;
     }
-    .install-card:hover {
-      border-color: var(--border-acc); transform: translateY(-2px);
-      box-shadow: 0 8px 28px rgba(0,0,0,0.35);
+    .os-tab:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+    .os-tab.active { background: var(--bg-soft); color: var(--text); box-shadow: 0 1px 6px rgba(0,0,0,0.3); }
+    .os-tab .tab-icon { font-size: 1rem; line-height: 1; }
+
+    .os-panel { display: none; }
+    .os-panel.active { display: block; }
+
+    .install-box {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden; max-width: 620px;
     }
-    .install-card.featured { border-color: var(--border-acc); }
-    .install-card.featured:hover { box-shadow: 0 8px 32px rgba(0,212,170,0.14); }
-    .ic-head {
-      padding: 14px 18px; display: flex; align-items: center; gap: 10px;
-      border-bottom: 1px solid var(--border);
+    .install-box-primary { padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .install-box-label {
+      font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent);
+      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
     }
-    .ic-os-icon { font-size: 1.25rem; line-height: 1; }
-    .ic-title { font-weight: 600; font-size: 0.9rem; }
-    .ic-body { padding: 14px 18px; }
-    .ic-method { margin-bottom: 14px; }
-    .ic-method:last-child { margin-bottom: 0; }
-    .ic-method-label {
-      font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.1em;
-      text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
-      display: flex; align-items: center; gap: 6px;
-    }
-    .ic-method-label .rec-dot {
-      width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
-    }
-    .ic-cmd {
-      font-family: var(--mono); font-size: 0.78rem;
-      background: var(--code-bg); border: 1px solid var(--border);
-      border-radius: 9px; padding: 10px 14px; color: #b8ddd6;
-      overflow-x: auto; white-space: pre; line-height: 1.65;
-    }
-    .ic-cmd .c { color: #3a5550; }
-    .ic-your-badge {
-      margin-left: auto; font-family: var(--mono); font-size: 0.63rem;
-      padding: 2px 9px; border-radius: 999px;
+    .install-box-label .rec-pill {
       background: var(--accent-soft); border: 1px solid var(--border-acc);
-      color: var(--accent); white-space: nowrap;
+      color: var(--accent); padding: 1px 8px; border-radius: 999px;
+      font-size: 0.6rem; letter-spacing: 0.06em;
     }
-    .install-card.your-os {
-      border-color: rgba(0,212,170,0.35);
-      box-shadow: 0 0 0 1px rgba(0,212,170,0.1), 0 8px 32px rgba(0,0,0,0.3);
-      order: -1;
+    .install-cmd-row {
+      display: flex; align-items: center;
+      background: var(--code-bg); border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 10px; padding: 11px 16px; gap: 12px;
     }
+    .install-cmd-row code {
+      flex: 1; font-family: var(--mono); font-size: 0.83rem;
+      color: var(--accent); background: none; padding: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .install-cmd-row button {
+      flex-shrink: 0; background: var(--accent-soft);
+      border: 1px solid var(--border-acc); color: var(--accent);
+      font-family: var(--mono); font-size: 0.68rem; padding: 4px 12px;
+      border-radius: 7px; cursor: pointer; transition: background 150ms;
+    }
+    .install-cmd-row button:hover { background: rgba(0,212,170,0.22); }
+    .install-box-alt {
+      padding: 12px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .install-box-alt span { font-size: 0.8rem; color: var(--muted2); }
+    .install-box-alt code { font-family: var(--mono); font-size: 0.77rem; color: #7ec8be; background: none; padding: 0; }
+    .install-box-alt button {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      font-family: var(--mono); font-size: 0.67rem; padding: 2px 9px;
+      border-radius: 6px; cursor: pointer; transition: border-color 150ms, color 150ms;
+    }
+    .install-box-alt button:hover { border-color: var(--accent); color: var(--accent); }
+    .install-note {
+      font-size: 0.82rem; color: var(--muted2); margin-top: 12px; padding: 0 2px;
+    }
+    .install-note code { font-size: 0.8rem; }
 
     /* ── CODE BLOCKS ────────────────────────────────── */
     code {
@@ -473,67 +488,61 @@
       <h2>Install</h2>
       <p>Pick your preferred method. The controller is a single static binary — no runtime dependencies.</p>
 
-      <div class="install-grid">
-
-        <!-- macOS -->
-        <div class="install-card featured" data-os="mac">
-          <div class="ic-head">
-            <div class="ic-os-icon">🍎</div>
-            <div class="ic-title">macOS</div>
-          </div>
-          <div class="ic-body">
-            <div class="ic-method">
-              <div class="ic-method-label"><span class="rec-dot"></span>Homebrew — recommended</div>
-              <div class="ic-cmd"><span class="c"># add the tap once — gives you brew install &amp; upgrade</span>
-brew tap cenvero/fleet
-brew install cenvero-fleet
-
-<span class="c"># upgrade later</span>
-brew upgrade cenvero-fleet</div>
-            </div>
-            <div class="ic-method">
-              <div class="ic-method-label">One-liner (also supported)</div>
-              <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Linux -->
-        <div class="install-card" data-os="linux">
-          <div class="ic-head">
-            <div class="ic-os-icon">🐧</div>
-            <div class="ic-title">Linux</div>
-          </div>
-          <div class="ic-body">
-            <div class="ic-method">
-              <div class="ic-method-label"><span class="rec-dot"></span>One-liner — recommended</div>
-              <div class="ic-cmd"><span class="c"># detects arch, verifies minisign signature</span>
-curl -fsSL https://fleet.cenvero.org/install | sh</div>
-            </div>
-            <p style="font-size:0.8rem;color:var(--muted2);margin-top:12px;margin-bottom:0">Also available via Homebrew — <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code></p>
-          </div>
-        </div>
-
-        <!-- Windows -->
-        <div class="install-card" data-os="windows">
-          <div class="ic-head">
-            <div class="ic-os-icon">⊞</div>
-            <div class="ic-title">Windows</div>
-          </div>
-          <div class="ic-body">
-            <div class="ic-method">
-              <div class="ic-method-label"><span class="rec-dot"></span>PowerShell</div>
-              <div class="ic-cmd"><span class="c"># run from an elevated PowerShell prompt</span>
-irm https://fleet.cenvero.org/install.ps1 | iex</div>
-            </div>
-          </div>
-        </div>
-
+      <div class="os-tabs" id="osTabs">
+        <button class="os-tab" data-os="mac" onclick="switchOS('mac')"><span class="tab-icon">🍎</span> macOS</button>
+        <button class="os-tab" data-os="linux" onclick="switchOS('linux')"><span class="tab-icon">🐧</span> Linux</button>
+        <button class="os-tab" data-os="windows" onclick="switchOS('windows')"><span class="tab-icon">⊞</span> Windows</button>
       </div>
 
-      <p style="font-size:0.86rem; color:var(--muted2); margin-top:4px;">
-        All release archives are signed with minisign and verified before install.
-        To build from source: <code>git clone https://github.com/cenvero/fleet &amp;&amp; make build</code> (Go 1.24+).
+      <!-- macOS -->
+      <div class="os-panel" data-os="mac">
+        <div class="install-box">
+          <div class="install-box-primary">
+            <div class="install-box-label">Homebrew <span class="rec-pill">recommended</span></div>
+            <div class="install-cmd-row">
+              <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code>
+              <button onclick="copyCmd(this,'brew tap cenvero/fleet\nbrew install cenvero-fleet')">copy</button>
+            </div>
+          </div>
+          <div class="install-box-alt">
+            <span>or one-liner:</span>
+            <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
+            <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
+          </div>
+        </div>
+        <p class="install-note">Upgrade anytime with <code>brew upgrade cenvero-fleet</code>. All archives are minisign-verified before install.</p>
+      </div>
+
+      <!-- Linux -->
+      <div class="os-panel" data-os="linux">
+        <div class="install-box">
+          <div class="install-box-primary">
+            <div class="install-box-label">One-liner</div>
+            <div class="install-cmd-row">
+              <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
+              <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
+            </div>
+          </div>
+        </div>
+        <p class="install-note">Detects your CPU arch, verifies the minisign signature, installs to <code>/usr/bin/fleet</code>. Also available via Homebrew — <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code></p>
+      </div>
+
+      <!-- Windows -->
+      <div class="os-panel" data-os="windows">
+        <div class="install-box">
+          <div class="install-box-primary">
+            <div class="install-box-label">PowerShell</div>
+            <div class="install-cmd-row">
+              <code>irm https://fleet.cenvero.org/install.ps1 | iex</code>
+              <button onclick="copyCmd(this,'irm https://fleet.cenvero.org/install.ps1 | iex')">copy</button>
+            </div>
+          </div>
+        </div>
+        <p class="install-note">Run from an elevated PowerShell prompt. Installs to <code>%ProgramFiles%\fleet</code> and adds it to PATH.</p>
+      </div>
+
+      <p style="font-size:0.82rem;color:var(--muted2);margin-top:20px">
+        To build from source: <code>git clone https://github.com/cenvero/fleet &amp;&amp; make build</code> (Go 1.24+)
       </p>
 
       <div class="callout">
@@ -985,26 +994,23 @@ fleet database shift \
 </footer>
 
 <script>
-  // OS detection — highlight & move matching install card to front
-  (function() {
+  function detectOS() {
     const ua = navigator.userAgent;
-    let os = 'linux';
-    if (/Windows/i.test(ua))                                              os = 'windows';
-    else if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua))   os = 'mac';
-
-    const card = document.querySelector('.install-card[data-os="' + os + '"]');
-    if (!card) return;
-    card.classList.add('your-os');
-    const head = card.querySelector('.ic-head');
-    if (head) {
-      const badge = document.createElement('span');
-      badge.className = 'ic-your-badge';
-      badge.textContent = 'your platform';
-      head.appendChild(badge);
-    }
-    const grid = card.parentElement;
-    if (grid) grid.prepend(card);
-  })();
+    if (/Windows/i.test(ua)) return 'windows';
+    if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua)) return 'mac';
+    return 'linux';
+  }
+  function switchOS(os) {
+    document.querySelectorAll('.os-tab').forEach(t => t.classList.toggle('active', t.dataset.os === os));
+    document.querySelectorAll('.os-panel').forEach(p => p.classList.toggle('active', p.dataset.os === os));
+  }
+  function copyCmd(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'copied!';
+      setTimeout(() => btn.textContent = 'copy', 1800);
+    });
+  }
+  switchOS(detectOS());
 
   function copy(btn) {
     const pre = btn.nextElementSibling;

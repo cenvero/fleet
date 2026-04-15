@@ -232,57 +232,88 @@
     /* ── DIVIDER ── */
     .divider { border: none; border-top: 1px solid var(--border); margin: 0; }
 
-    /* ── INSTALL METHODS ── */
-    .install-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-    .install-card {
+    /* ── INSTALL TAB SWITCHER ── */
+    .os-tabs {
+      display: inline-flex; gap: 4px;
+      background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+      border-radius: 12px; padding: 4px; margin-bottom: 20px;
+    }
+    .os-tab {
+      display: flex; align-items: center; gap: 7px;
+      padding: 8px 18px; border-radius: 9px; border: none;
+      background: none; color: var(--muted); font-family: var(--sans);
+      font-size: 0.875rem; font-weight: 500; cursor: pointer;
+      transition: all 160ms; white-space: nowrap;
+    }
+    .os-tab:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+    .os-tab.active {
+      background: var(--card); color: var(--text);
+      box-shadow: 0 1px 6px rgba(0,0,0,0.3);
+    }
+    .os-tab .tab-icon { font-size: 1rem; line-height: 1; }
+
+    .os-panel { display: none; }
+    .os-panel.active { display: block; }
+
+    .install-box {
       background: var(--card); border: 1px solid var(--border);
       border-radius: var(--radius); overflow: hidden;
-      transition: border-color 200ms, transform 200ms, box-shadow 200ms;
+      max-width: 640px;
     }
-    .install-card:hover { border-color: rgba(0,212,170,0.28); transform: translateY(-2px); box-shadow: 0 8px 28px rgba(0,0,0,0.3); }
-    .install-card.featured { border-color: rgba(0,212,170,0.22); }
-    .ic-head {
-      display: flex; align-items: center; gap: 10px;
-      padding: 14px 18px; border-bottom: 1px solid var(--border);
+    .install-box-primary {
+      padding: 20px 22px;
+      border-bottom: 1px solid var(--border);
     }
-    .ic-os-icon { font-size: 1.3rem; line-height: 1; }
-    .ic-title { font-weight: 600; font-size: 0.9rem; }
-    .ic-rec {
-      margin-left: auto; font-family: var(--mono); font-size: 0.65rem;
-      padding: 2px 9px; border-radius: 999px;
-      border: 1px solid rgba(0,212,170,0.3); color: var(--accent);
-      white-space: nowrap;
+    .install-box-label {
+      font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent);
+      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
     }
-    .ic-body { padding: 14px 18px; }
-    .ic-body p { font-size: 0.84rem; color: var(--muted); margin-bottom: 12px; }
-    .ic-method { margin-bottom: 12px; }
-    .ic-method:last-child { margin-bottom: 0; }
-    .ic-method-label {
-      font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.1em;
-      text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
-      display: flex; align-items: center; gap: 6px;
+    .install-box-label .rec-pill {
+      background: var(--accent-soft); border: 1px solid rgba(0,212,170,0.3);
+      color: var(--accent); padding: 1px 8px; border-radius: 999px;
+      font-size: 0.62rem; letter-spacing: 0.08em;
     }
-    .ic-method-label .rec-dot {
-      width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    .install-cmd-row {
+      display: flex; align-items: center;
+      background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 10px; padding: 12px 16px; gap: 12px;
     }
-    .ic-cmd {
-      font-family: var(--mono); font-size: 0.78rem;
-      background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 9px; padding: 10px 14px; color: #b8ddd6;
-      overflow-x: auto; white-space: pre; line-height: 1.65;
+    .install-cmd-row code {
+      flex: 1; font-family: var(--mono); font-size: 0.85rem;
+      color: var(--accent); background: none; padding: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .ic-cmd .c { color: #3a5248; }
-    .ic-your-badge {
-      margin-left: auto; font-family: var(--mono); font-size: 0.63rem;
-      padding: 2px 9px; border-radius: 999px;
-      background: var(--accent-soft); border: 1px solid rgba(0,212,170,0.35);
-      color: var(--accent); white-space: nowrap;
+    .install-cmd-row button {
+      flex-shrink: 0; background: var(--accent-soft);
+      border: 1px solid rgba(0,212,170,0.25); color: var(--accent);
+      font-family: var(--mono); font-size: 0.7rem; padding: 4px 12px;
+      border-radius: 7px; cursor: pointer; transition: background 150ms;
     }
-    .install-card.your-os {
-      border-color: rgba(0,212,170,0.35);
-      box-shadow: 0 0 0 1px rgba(0,212,170,0.1), 0 8px 32px rgba(0,0,0,0.3);
-      order: -1;
+    .install-cmd-row button:hover { background: rgba(0,212,170,0.22); }
+
+    .install-box-alt {
+      padding: 14px 22px;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     }
+    .install-box-alt span { font-size: 0.8rem; color: var(--muted); }
+    .install-box-alt code {
+      font-family: var(--mono); font-size: 0.78rem; color: #7ec8be;
+      background: none; padding: 0;
+    }
+    .install-box-alt button {
+      background: none; border: 1px solid var(--border);
+      color: var(--muted); font-family: var(--mono); font-size: 0.68rem;
+      padding: 2px 9px; border-radius: 6px; cursor: pointer;
+      transition: border-color 150ms, color 150ms;
+    }
+    .install-box-alt button:hover { border-color: var(--accent); color: var(--accent); }
+
+    .install-note {
+      font-size: 0.82rem; color: var(--muted); margin-top: 12px;
+      padding: 0 2px;
+    }
+    .install-note code { font-size: 0.8rem; }
 
     /* ── FOOTER ── */
     footer {
@@ -411,7 +442,7 @@
     <div>
       <div class="code-wrap">
         <button class="copy-btn" onclick="copyCode(this)">copy</button>
-        <pre><span class="c"># macOS — Homebrew (recommended)</span>
+        <pre><span class="c"># 1. Install (macOS — recommended)</span>
 brew tap cenvero/fleet
 brew install cenvero-fleet
 
@@ -451,58 +482,62 @@ fleet dashboard</pre>
 <div class="section">
   <div class="section-label">Installation</div>
   <h2 class="section-title">Every platform, one command</h2>
-  <div class="install-grid">
 
-    <!-- macOS -->
-    <div class="install-card featured" data-os="mac">
-      <div class="ic-head">
-        <div class="ic-os-icon">🍎</div>
-        <div class="ic-title">macOS</div>
-      </div>
-      <div class="ic-body">
-        <div class="ic-method">
-          <div class="ic-method-label"><span class="rec-dot"></span>Homebrew — recommended</div>
-          <div class="ic-cmd"><span class="c"># add tap once, then install &amp; upgrade normally</span>
-brew tap cenvero/fleet
-brew install cenvero-fleet</div>
-        </div>
-        <div class="ic-method">
-          <div class="ic-method-label">One-liner</div>
-          <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Linux -->
-    <div class="install-card" data-os="linux">
-      <div class="ic-head">
-        <div class="ic-os-icon">🐧</div>
-        <div class="ic-title">Linux</div>
-      </div>
-      <div class="ic-body">
-        <div class="ic-method">
-          <div class="ic-method-label"><span class="rec-dot"></span>One-liner — recommended</div>
-          <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
-        </div>
-        <p style="font-size:0.78rem;color:var(--muted);margin-top:10px;margin-bottom:0">Also available via Homebrew — <code style="font-size:0.78rem">brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code></p>
-      </div>
-    </div>
-
-    <!-- Windows -->
-    <div class="install-card" data-os="windows">
-      <div class="ic-head">
-        <div class="ic-os-icon">⊞</div>
-        <div class="ic-title">Windows</div>
-      </div>
-      <div class="ic-body">
-        <div class="ic-method">
-          <div class="ic-method-label"><span class="rec-dot"></span>PowerShell</div>
-          <div class="ic-cmd">irm https://fleet.cenvero.org/install.ps1 | iex</div>
-        </div>
-      </div>
-    </div>
-
+  <div class="os-tabs" id="osTabs">
+    <button class="os-tab" data-os="mac" onclick="switchOS('mac')"><span class="tab-icon">🍎</span> macOS</button>
+    <button class="os-tab" data-os="linux" onclick="switchOS('linux')"><span class="tab-icon">🐧</span> Linux</button>
+    <button class="os-tab" data-os="windows" onclick="switchOS('windows')"><span class="tab-icon">⊞</span> Windows</button>
   </div>
+
+  <!-- macOS -->
+  <div class="os-panel" data-os="mac">
+    <div class="install-box">
+      <div class="install-box-primary">
+        <div class="install-box-label">
+          Homebrew <span class="rec-pill">recommended</span>
+        </div>
+        <div class="install-cmd-row">
+          <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code>
+          <button onclick="copyCmd(this,'brew tap cenvero/fleet\nbrew install cenvero-fleet')">copy</button>
+        </div>
+      </div>
+      <div class="install-box-alt">
+        <span>or one-liner:</span>
+        <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
+        <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
+      </div>
+    </div>
+    <p class="install-note">After install, upgrade anytime with <code>brew upgrade cenvero-fleet</code></p>
+  </div>
+
+  <!-- Linux -->
+  <div class="os-panel" data-os="linux">
+    <div class="install-box">
+      <div class="install-box-primary">
+        <div class="install-box-label">One-liner</div>
+        <div class="install-cmd-row">
+          <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
+          <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
+        </div>
+      </div>
+    </div>
+    <p class="install-note">Also available via Homebrew — <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code></p>
+  </div>
+
+  <!-- Windows -->
+  <div class="os-panel" data-os="windows">
+    <div class="install-box">
+      <div class="install-box-primary">
+        <div class="install-box-label">PowerShell</div>
+        <div class="install-cmd-row">
+          <code>irm https://fleet.cenvero.org/install.ps1 | iex</code>
+          <button onclick="copyCmd(this,'irm https://fleet.cenvero.org/install.ps1 | iex')">copy</button>
+        </div>
+      </div>
+    </div>
+    <p class="install-note">Run from an elevated PowerShell prompt. Installs to <code>%ProgramFiles%\fleet</code> and adds it to PATH.</p>
+  </div>
+
 </div>
 
 <hr class="divider">
@@ -518,29 +553,23 @@ brew install cenvero-fleet</div>
 </footer>
 
 <script>
-  // OS detection — highlight & move matching install card to front
-  (function() {
+  function detectOS() {
     const ua = navigator.userAgent;
-    let os = 'linux';
-    if (/Windows/i.test(ua))                          os = 'windows';
-    else if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua)) os = 'mac';
-    else if (/Android/i.test(ua))                     os = 'linux';
-
-    const card = document.querySelector('.install-card[data-os="' + os + '"]');
-    if (!card) return;
-    card.classList.add('your-os');
-    // insert "your platform" badge in header
-    const head = card.querySelector('.ic-head');
-    if (head) {
-      const badge = document.createElement('span');
-      badge.className = 'ic-your-badge';
-      badge.textContent = 'your platform';
-      head.appendChild(badge);
-    }
-    // move to front of grid
-    const grid = card.parentElement;
-    if (grid) grid.prepend(card);
-  })();
+    if (/Windows/i.test(ua)) return 'windows';
+    if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua)) return 'mac';
+    return 'linux';
+  }
+  function switchOS(os) {
+    document.querySelectorAll('.os-tab').forEach(t => t.classList.toggle('active', t.dataset.os === os));
+    document.querySelectorAll('.os-panel').forEach(p => p.classList.toggle('active', p.dataset.os === os));
+  }
+  function copyCmd(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'copied!';
+      setTimeout(() => btn.textContent = 'copy', 1800);
+    });
+  }
+  switchOS(detectOS());
 
   function toggleMenu(btn) {
     const m = document.getElementById('nav-mobile');
