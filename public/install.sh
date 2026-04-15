@@ -24,12 +24,7 @@ ask()   { printf "${BOLD}%s${RESET} [y/N]: " "$1"; }
 printf "\n${BOLD}  Cenvero Fleet installer${RESET}${DIM}  fleet.cenvero.org${RESET}\n"
 printf "${DIM}  ─────────────────────────────────────────────────${RESET}\n\n"
 
-# ── required deps ──────────────────────────────────────────────────────────
-for dep in curl tar jq; do
-  command -v "$dep" >/dev/null 2>&1 || die "missing required dependency: $dep — install it and re-run"
-done
-
-# ── detect platform ────────────────────────────────────────────────────────
+# ── detect platform (needed for pkg manager logic below) ───────────────────
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -40,82 +35,96 @@ case "$ARCH" in
 esac
 TARGET="${OS}-${ARCH}"
 
-# ── minisign check ─────────────────────────────────────────────────────────
+# ── hard requirements: curl and tar ────────────────────────────────────────
+for dep in curl tar; do
+  command -v "$dep" >/dev/null 2>&1 || die "missing required tool: $dep — install it and re-run"
+done
+
+# ── pkg_install helper — used for both jq and minisign ─────────────────────
+# Usage: pkg_install <package>
+pkg_install() {
+  _pkg="$1"
+  if [ "$OS" = "darwin" ]; then
+    if ! command -v brew >/dev/null 2>&1; then
+      warn "Homebrew is not installed. Visit https://brew.sh"
+      return 1
+    fi
+    brew install "${_pkg}"
+  elif [ "$OS" = "linux" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get install -y "${_pkg}"
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y "${_pkg}"
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y "${_pkg}"
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --noconfirm "${_pkg}"
+    elif command -v apk >/dev/null 2>&1; then
+      sudo apk add "${_pkg}"
+    else
+      warn "Could not detect a package manager. Install ${_pkg} manually and re-run."
+      return 1
+    fi
+  fi
+}
+
+# ── software check ─────────────────────────────────────────────────────────
+# Tell the user upfront what may be installed, then handle each dep.
+
+NEED_JQ=0
+NEED_MINISIGN=0
+command -v jq        >/dev/null 2>&1 || NEED_JQ=1
+command -v minisign  >/dev/null 2>&1 || NEED_MINISIGN=1
+
+if [ "${NEED_JQ}" = "1" ] || [ "${NEED_MINISIGN}" = "1" ]; then
+  printf "${BOLD}  The installer needs the following software:${RESET}\n\n"
+  [ "${NEED_JQ}"       = "1" ] && printf "    • jq        ${RED}(required)${RESET}  — parse the release manifest\n"
+  [ "${NEED_MINISIGN}" = "1" ] && printf "    • minisign  ${YELLOW}(recommended)${RESET} — verify release signatures\n"
+  printf "\n"
+  printf "  ${DIM}It will use %s to install missing packages.${RESET}\n" \
+    "$([ "$OS" = "darwin" ] && echo "Homebrew" || echo "your package manager (with sudo)")"
+  printf "\n"
+fi
+
+# jq — required, cannot skip
+if [ "${NEED_JQ}" = "1" ]; then
+  ask "Install jq now? (required — cannot continue without it)"
+  read -r REPLY </dev/tty || REPLY="n"
+  case "$REPLY" in
+    [Yy]|[Yy][Ee][Ss])
+      step "Installing jq"
+      pkg_install jq || die "Failed to install jq. Install it manually and re-run."
+      ok "jq installed"
+      ;;
+    *)
+      die "jq is required. Install it and re-run the installer."
+      ;;
+  esac
+  printf "\n"
+fi
+
+# minisign — optional, but strongly recommended
 HAS_MINISIGN=1
 command -v minisign >/dev/null 2>&1 || HAS_MINISIGN=0
 
-if [ "${HAS_MINISIGN}" = "0" ]; then
-  printf "\n"
-  warn "minisign is not installed — it is used to verify release signatures."
-  warn "We ${BOLD}strongly recommend${RESET} installing it before continuing."
-  printf "\n"
-
-  if [ "$OS" = "darwin" ]; then
-    # macOS — install via Homebrew, no sudo needed
-    if ! command -v brew >/dev/null 2>&1; then
-      warn "Homebrew is not installed either. Visit https://brew.sh to install it first."
-      ask "Continue without signature verification?"
-      read -r REPLY </dev/tty || REPLY="n"
-      case "$REPLY" in
-        [Yy]|[Yy][Ee][Ss]) warn "Continuing — checksum will still be verified." ;;
-        *) die "Aborted." ;;
-      esac
-    else
-      ask "Install minisign via Homebrew now and continue?"
-      read -r REPLY </dev/tty || REPLY="n"
-      case "$REPLY" in
-        [Yy]|[Yy][Ee][Ss])
-          step "Installing minisign via Homebrew"
-          brew install minisign
-          HAS_MINISIGN=1
-          ok "minisign installed"
-          ;;
-        *)
-          warn "Continuing without signature verification."
-          ;;
-      esac
-    fi
-
-  elif [ "$OS" = "linux" ]; then
-    # Linux — detect package manager and install with sudo
-    if command -v apt-get >/dev/null 2>&1; then
-      PKG_CMD="sudo apt-get install -y minisign"
-    elif command -v dnf >/dev/null 2>&1; then
-      PKG_CMD="sudo dnf install -y minisign"
-    elif command -v yum >/dev/null 2>&1; then
-      PKG_CMD="sudo yum install -y minisign"
-    elif command -v pacman >/dev/null 2>&1; then
-      PKG_CMD="sudo pacman -S --noconfirm minisign"
-    elif command -v apk >/dev/null 2>&1; then
-      PKG_CMD="sudo apk add minisign"
-    else
-      PKG_CMD=""
-    fi
-
-    if [ -n "${PKG_CMD}" ]; then
-      ask "Install minisign now (${PKG_CMD}) and continue?"
-      read -r REPLY </dev/tty || REPLY="n"
-      case "$REPLY" in
-        [Yy]|[Yy][Ee][Ss])
-          step "Installing minisign"
-          eval "${PKG_CMD}"
-          HAS_MINISIGN=1
-          ok "minisign installed"
-          ;;
-        *)
-          warn "Continuing without signature verification."
-          ;;
-      esac
-    else
-      warn "Could not detect a package manager to install minisign."
-      ask "Continue without signature verification?"
-      read -r REPLY </dev/tty || REPLY="n"
-      case "$REPLY" in
-        [Yy]|[Yy][Ee][Ss]) warn "Continuing — checksum will still be verified." ;;
-        *) die "Aborted. Install minisign manually and re-run." ;;
-      esac
-    fi
-  fi
+if [ "${NEED_MINISIGN}" = "1" ]; then
+  ask "Install minisign now? (recommended for signature verification)"
+  read -r REPLY </dev/tty || REPLY="n"
+  case "$REPLY" in
+    [Yy]|[Yy][Ee][Ss])
+      step "Installing minisign"
+      if pkg_install minisign; then
+        HAS_MINISIGN=1
+        ok "minisign installed"
+      else
+        warn "Could not install minisign — continuing without signature verification."
+      fi
+      ;;
+    *)
+      warn "Skipping minisign — release signature will not be verified."
+      warn "Checksum (sha256) will still be verified."
+      ;;
+  esac
   printf "\n"
 fi
 
