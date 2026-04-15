@@ -46,6 +46,7 @@ type ApplyResult struct {
 	BackupPath        string `json:"backup_path"`
 	RollbackState     string `json:"rollback_state"`
 	ReleaseNotesURL   string `json:"release_notes_url,omitempty"`
+	Note              string `json:"note,omitempty"`
 	Applied           bool   `json:"applied"`
 	SHA256Verified    bool   `json:"sha256_verified"`
 	SignatureVerified bool   `json:"signature_verified"`

@@ -1190,6 +1190,11 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
+			if core.IsHomebrewInstall(app.ExecutablePath) {
+				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — skipping controller self-update.")
+				fmt.Fprintln(cmd.OutOrStdout(), "To update the controller run:  brew upgrade cenvero-fleet")
+				fmt.Fprintln(cmd.OutOrStdout())
+			}
 			result, err := app.ApplyFleetUpdate(cmd.Context(), targetServers)
 			if err != nil {
 				return err

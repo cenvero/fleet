@@ -36,6 +36,16 @@ type FleetUpdateAgentResult struct {
 	Error             string `json:"error,omitempty"`
 }
 
+// IsHomebrewInstall reports whether the controller binary is managed by Homebrew.
+// When true, the controller must be updated via `brew upgrade cenvero-fleet`
+// rather than the built-in self-updater.
+func IsHomebrewInstall(executablePath string) bool {
+	p := strings.ToLower(executablePath)
+	return strings.Contains(p, "/homebrew/") ||
+		strings.Contains(p, "/cellar/") ||
+		strings.Contains(p, "/linuxbrew/")
+}
+
 func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 	apply := a.ControllerUpdater
 	if apply == nil {
@@ -65,9 +75,22 @@ func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 }
 
 func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string) (FleetUpdateResult, error) {
-	controllerResult, err := a.ApplyUpdate(ctx)
-	if err != nil {
-		return FleetUpdateResult{}, err
+	var controllerResult update.ApplyResult
+
+	if IsHomebrewInstall(a.ExecutablePath) {
+		// Controller is managed by Homebrew — skip self-update entirely.
+		// Agents are still updated below.
+		controllerResult = update.ApplyResult{
+			Applied: false,
+			Version: version.Version,
+			Note:    "managed by Homebrew — run `brew upgrade cenvero-fleet` to update the controller",
+		}
+	} else {
+		var err error
+		controllerResult, err = a.ApplyUpdate(ctx)
+		if err != nil {
+			return FleetUpdateResult{}, err
+		}
 	}
 
 	targets, err := a.updateTargets(serverNames)

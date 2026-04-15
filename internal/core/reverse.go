@@ -16,6 +16,7 @@ import (
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/logs"
 	"github.com/cenvero/fleet/internal/transport"
+	"github.com/cenvero/fleet/internal/version"
 	"github.com/cenvero/fleet/pkg/proto"
 	"golang.org/x/crypto/ssh"
 )
@@ -396,6 +397,21 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 		Operator: h.app.operator(),
 		Details:  fmt.Sprintf("fingerprint=%s capabilities=%d", info.HostKeyFingerprint, len(info.Hello.Capabilities)),
 	})
+
+	// Auto-sync agent version on connect if it differs from the controller.
+	if h.app.Config.Updates.Policy == "auto" &&
+		info.Hello.AgentVersion != "" &&
+		info.Hello.AgentVersion != version.Version {
+		go func() {
+			_ = h.app.AuditLog.Append(logs.AuditEntry{
+				Action:   "agent.auto-update",
+				Target:   serverName,
+				Operator: "system",
+				Details:  fmt.Sprintf("agent=%s controller=%s", info.Hello.AgentVersion, version.Version),
+			})
+			h.app.applyAgentUpdate(context.Background(), server)
+		}()
+	}
 }
 
 func (h *ReverseHub) clearSession(serverName, lastError string) {
