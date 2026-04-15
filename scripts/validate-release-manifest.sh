@@ -102,7 +102,7 @@ while IFS= read -r artifact; do
 done < <(
   jq -c --arg version "${FLEET_VERSION}" '
     .[]
-    | select(.type == "Archive")
+    | select(.type == "Archive" or .type == "Zip")
     | select((.extra.Binary // (.extra.Binaries[0] // "")) == "fleet" or (.extra.Binary // (.extra.Binaries[0] // "")) == "fleet-agent")
     | select(.name | contains(($version | ltrimstr("v")) + "_"))
     | {

@@ -76,7 +76,7 @@ jobs:
       - name: Debug artifacts
         run: |
           echo "=== Archive entries in artifacts.json ==="
-          jq '[.[] | select(.type == "Archive") | {name, goos, goarch, binary: (.extra.Binary // .extra.Binaries[0])}]' dist/artifacts.json
+          jq '[.[] | select(.type == "Archive" or .type == "Zip") | {type, name, goos, goarch, binary: (.extra.Binary // .extra.Binaries[0])}]' dist/artifacts.json
       - name: Select channel
         id: channel
         run: |
