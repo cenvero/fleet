@@ -100,24 +100,6 @@ brews:
     repository:
       owner: cenvero
       name: homebrew-fleet
-      token: "{{ .Env.HOMEBREW_TOKEN }}"
-    homepage: "https://fleet.cenvero.org"
-    description: "Self-hosted decentralized fleet management platform"
-    license: "AGPL-3.0-or-later"
-    folder: Formula
-    skip_upload: auto
-    install: |
-      bin.install "fleet"
-    test: |
-      assert_match version.to_s, shell_output("#{bin}/fleet --version")
-
-brews:
-  - name: cenvero-fleet
-    ids:
-      - fleet-archive
-    repository:
-      owner: cenvero
-      name: homebrew-fleet
       token: "{{ .Env.GITHUB_TOKEN }}"
     homepage: "https://fleet.cenvero.org"
     description: "Self-hosted decentralized fleet management platform"
