@@ -12,23 +12,25 @@
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <style>
     :root {
-      --bg: #080c12;
-      --bg2: #0d1420;
-      --card: rgba(15,22,35,0.9);
-      --card-hover: rgba(20,30,48,0.95);
-      --text: #eef2f8;
-      --muted: #8a9ab8;
-      --subtle: #4a5a72;
-      --accent: #00d4aa;
-      --accent2: #0099ff;
-      --accent-soft: rgba(0,212,170,0.12);
-      --accent-border: rgba(0,212,170,0.25);
-      --border: rgba(255,255,255,0.07);
+      /* Deep, next-gen dark mode palette */
+      --bg: #030508;
+      --bg2: #080b11;
+      --card: rgba(10, 14, 22, 0.6);
+      --card-hover: rgba(15, 20, 30, 0.8);
+      --text: #f0f4f8;
+      --muted: #94a3b8;
+      --subtle: #475569;
+      --accent: #00ebb8;
+      --accent-hover: #00ffd0;
+      --accent-soft: rgba(0, 235, 184, 0.1);
+      --accent-border: rgba(0, 235, 184, 0.25);
+      --border: rgba(255, 255, 255, 0.08);
       --mono: 'JetBrains Mono', ui-monospace, monospace;
       --sans: 'Inter', system-ui, sans-serif;
-      --radius: 14px;
-      --nav-h: 58px;
+      --radius: 16px;
+      --nav-h: 64px;
     }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
     body {
@@ -36,10 +38,25 @@
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
-      line-height: 1.7;
+      line-height: 1.6;
       font-size: 15px;
       overflow-x: hidden;
     }
+    
+    /* Background Glow Effect */
+    body::before {
+      content: '';
+      position: absolute;
+      top: -10%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 80vw;
+      height: 80vh;
+      background: radial-gradient(circle, rgba(0, 235, 184, 0.05) 0%, rgba(3, 5, 8, 0) 70%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
@@ -48,299 +65,310 @@
       position: sticky; top: 0; z-index: 200;
       height: var(--nav-h);
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0 clamp(16px, 5vw, 48px);
-      background: rgba(8,12,18,0.85);
-      backdrop-filter: blur(20px);
+      padding: 0 clamp(20px, 5vw, 60px);
+      background: rgba(3, 5, 8, 0.7);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
       border-bottom: 1px solid var(--border);
     }
     .nav-brand {
-      font-family: var(--mono); font-size: 0.9rem; font-weight: 500;
-      letter-spacing: 0.06em; color: var(--text);
+      font-family: var(--mono); font-size: 1rem; font-weight: 600;
+      letter-spacing: 0.04em; color: var(--text);
     }
     .nav-brand span { color: var(--accent); }
-    .nav-links { display: flex; align-items: center; gap: 6px; }
+    .nav-links { display: flex; align-items: center; gap: 8px; }
     .nav-links a {
-      padding: 6px 12px; border-radius: 8px;
-      color: var(--muted); font-size: 0.88rem; font-weight: 500;
-      transition: color 150ms, background 150ms;
+      padding: 8px 16px; border-radius: 8px;
+      color: var(--muted); font-size: 0.9rem; font-weight: 500;
+      transition: all 200ms ease;
     }
-    .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.06); text-decoration: none; }
+    .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
     .nav-links .nav-cta {
-      color: var(--accent); border: 1px solid var(--accent-border);
-      background: var(--accent-soft);
+      color: var(--bg); background: var(--accent);
+      font-weight: 600; border: none;
     }
-    .nav-links .nav-cta:hover { background: rgba(0,212,170,0.2); }
+    .nav-links .nav-cta:hover { background: var(--accent-hover); box-shadow: 0 0 20px rgba(0, 235, 184, 0.3); }
+    
     .nav-burger {
       display: none; flex-direction: column; gap: 5px;
       background: none; border: none; cursor: pointer; padding: 4px;
     }
     .nav-burger span {
-      display: block; width: 22px; height: 2px;
-      background: var(--muted); border-radius: 2px;
-      transition: transform 200ms, opacity 200ms;
+      display: block; width: 24px; height: 2px;
+      background: var(--text); border-radius: 2px;
     }
     .nav-mobile {
       display: none; position: fixed; top: var(--nav-h); left: 0; right: 0;
-      background: rgba(8,12,18,0.97); backdrop-filter: blur(20px);
+      background: rgba(3, 5, 8, 0.95); backdrop-filter: blur(20px);
       border-bottom: 1px solid var(--border);
-      flex-direction: column; padding: 12px 16px 20px; gap: 4px; z-index: 199;
+      flex-direction: column; padding: 16px; gap: 8px; z-index: 199;
     }
     .nav-mobile.open { display: flex; }
     .nav-mobile a {
-      padding: 10px 14px; border-radius: 10px;
-      color: var(--muted); font-size: 0.95rem; font-weight: 500;
+      padding: 12px 16px; border-radius: 10px;
+      color: var(--muted); font-size: 1rem; font-weight: 500;
     }
-    .nav-mobile a:hover { color: var(--text); background: rgba(255,255,255,0.06); text-decoration: none; }
+    .nav-mobile a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
 
-    /* ── HERO ── */
+    /* ── HERO (Redesigned Split Layout) ── */
     .hero {
-      padding: clamp(60px, 10vh, 120px) clamp(16px, 5vw, 48px) clamp(50px, 8vh, 100px);
-      max-width: 900px; margin: 0 auto; text-align: center;
+      padding: clamp(60px, 12vh, 140px) clamp(20px, 5vw, 60px) clamp(40px, 8vh, 80px);
+      max-width: 1300px; margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 60px;
+      align-items: center;
     }
+    
+    .hero-content {
+      max-width: 600px;
+    }
+
     .hero-badge {
       display: inline-flex; align-items: center; gap: 8px;
       font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
       color: var(--accent); background: var(--accent-soft);
       border: 1px solid var(--accent-border);
-      padding: 5px 14px; border-radius: 999px; margin-bottom: 28px;
+      padding: 6px 16px; border-radius: 999px; margin-bottom: 32px;
+      text-transform: uppercase;
+      box-shadow: 0 0 20px rgba(0, 235, 184, 0.1);
     }
-    .hero-badge::before { content: '●'; font-size: 0.5em; }
+    .hero-badge::before { content: '●'; font-size: 0.6em; animation: pulse 2s infinite; }
+    
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.4; }
+      100% { opacity: 1; }
+    }
+
     .hero h1 {
-      font-size: clamp(2.2rem, 6vw, 4rem); font-weight: 700;
-      letter-spacing: -0.04em; line-height: 1.1;
-      margin-bottom: 20px;
-      background: linear-gradient(135deg, #eef2f8 0%, #a0b4d0 100%);
+      font-size: clamp(2.5rem, 5vw, 4.2rem); font-weight: 700;
+      letter-spacing: -0.04em; line-height: 1.05;
+      margin-bottom: 24px;
+      background: linear-gradient(180deg, #ffffff 0%, #94a3b8 100%);
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
       background-clip: text;
     }
     .hero p {
-      font-size: clamp(1rem, 2.5vw, 1.2rem); color: var(--muted);
-      max-width: 600px; margin: 0 auto 36px; line-height: 1.75;
+      font-size: clamp(1.05rem, 2vw, 1.25rem); color: var(--muted);
+      margin-bottom: 40px; line-height: 1.7;
     }
-    .hero-install {
-      display: inline-flex; align-items: center; gap: 12px;
-      background: var(--bg2); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 12px 18px 12px 20px;
-      margin-bottom: 32px; max-width: 100%;
-    }
-    .hero-install code {
-      font-family: var(--mono); font-size: 0.88rem; color: var(--accent);
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .hero-install button {
-      flex-shrink: 0;
-      background: var(--accent-soft); border: 1px solid var(--accent-border);
-      color: var(--accent); font-family: var(--mono); font-size: 0.72rem;
-      padding: 5px 12px; border-radius: 8px; cursor: pointer;
-      transition: background 150ms;
-    }
-    .hero-install button:hover { background: rgba(0,212,170,0.22); }
-    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    
+    .hero-actions { display: flex; gap: 16px; flex-wrap: wrap; }
     .btn {
       display: inline-flex; align-items: center; gap: 8px;
-      padding: 11px 22px; border-radius: 10px;
-      font-size: 0.9rem; font-weight: 600;
-      transition: transform 150ms, box-shadow 150ms, background 150ms;
+      padding: 14px 28px; border-radius: 12px;
+      font-size: 0.95rem; font-weight: 600;
+      transition: all 200ms ease;
       cursor: pointer; border: none;
     }
-    .btn:hover { transform: translateY(-1px); text-decoration: none; }
+    .btn:hover { transform: translateY(-2px); text-decoration: none; }
     .btn-primary {
-      background: var(--accent); color: #051510;
-      box-shadow: 0 0 24px rgba(0,212,170,0.25);
+      background: var(--accent); color: #020806;
+      box-shadow: 0 8px 24px rgba(0, 235, 184, 0.2);
     }
-    .btn-primary:hover { background: #00ebb8; box-shadow: 0 0 32px rgba(0,212,170,0.4); }
+    .btn-primary:hover { background: var(--accent-hover); box-shadow: 0 12px 32px rgba(0, 235, 184, 0.35); }
     .btn-ghost {
-      background: transparent; color: var(--text);
+      background: rgba(255,255,255,0.03); color: var(--text);
       border: 1px solid var(--border);
+      backdrop-filter: blur(10px);
     }
-    .btn-ghost:hover { background: rgba(255,255,255,0.06); }
+    .btn-ghost:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.2); }
+
+    /* ── TERMINAL WINDOW (Moved from Installation) ── */
+    .hero-terminal {
+      background: #06090e;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05) inset;
+      overflow: hidden;
+      position: relative;
+    }
+    
+    .hero-terminal::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent-border), transparent);
+    }
+
+    .terminal-header {
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+
+    .os-tabs { display: flex; gap: 8px; }
+    .os-tab {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px; border-radius: 8px; border: 1px solid transparent;
+      background: none; color: var(--subtle); font-family: var(--sans);
+      font-size: 0.85rem; font-weight: 500; cursor: pointer;
+      transition: all 200ms ease;
+    }
+    .os-tab:hover { color: var(--muted); background: rgba(255,255,255,0.03); }
+    .os-tab.active {
+      background: rgba(255,255,255,0.05); color: var(--text);
+      border-color: var(--border);
+    }
+    .os-tab .tab-icon svg { width: 14px; height: 14px; }
+
+    .os-panel { display: none; padding: 24px; }
+    .os-panel.active { display: block; animation: fadeIn 0.3s ease; }
+    
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+    .install-box-label {
+      font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--accent);
+      display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
+    }
+    .install-box-label .rec-pill {
+      background: var(--accent-soft); border: 1px solid var(--accent-border);
+      color: var(--accent); padding: 2px 8px; border-radius: 999px;
+      font-size: 0.65rem; letter-spacing: 0.05em;
+    }
+    .install-cmd-row {
+      display: flex; align-items: center;
+      background: rgba(0,0,0,0.5); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px; gap: 12px;
+      margin-bottom: 16px;
+    }
+    .install-cmd-row code {
+      flex: 1; font-family: var(--mono); font-size: 0.9rem;
+      color: var(--accent); background: none; padding: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .install-cmd-row button {
+      flex-shrink: 0; background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border); color: var(--text);
+      font-family: var(--mono); font-size: 0.75rem; padding: 6px 14px;
+      border-radius: 8px; cursor: pointer; transition: all 200ms ease;
+    }
+    .install-cmd-row button:hover { background: var(--text); color: var(--bg); }
+
+    .install-box-alt {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      background: rgba(255,255,255,0.02); padding: 12px 16px; border-radius: 10px;
+    }
+    .install-box-alt span { font-size: 0.85rem; color: var(--muted); }
+    .install-box-alt code { font-family: var(--mono); font-size: 0.85rem; color: #a5b4fc; }
+    .install-box-alt button {
+      background: none; border: 1px solid var(--border);
+      color: var(--muted); font-family: var(--mono); font-size: 0.75rem;
+      padding: 4px 10px; border-radius: 6px; cursor: pointer;
+      transition: all 200ms ease;
+    }
+    .install-box-alt button:hover { border-color: var(--accent); color: var(--accent); }
+
+    .install-note { font-size: 0.85rem; color: var(--subtle); margin-top: 16px; font-family: var(--mono); }
+    .install-note code { font-size: 0.85rem; color: var(--muted); }
+
+    /* ── DIVIDER ── */
+    .divider { border: none; border-top: 1px solid var(--border); margin: 0; }
 
     /* ── FEATURES ── */
-    .section { padding: clamp(40px, 6vw, 80px) clamp(16px, 5vw, 48px); max-width: 1100px; margin: 0 auto; }
+    .section { padding: clamp(60px, 10vw, 120px) clamp(20px, 5vw, 60px); max-width: 1300px; margin: 0 auto; }
     .section-label {
-      font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
-      text-transform: uppercase; color: var(--accent); margin-bottom: 12px;
+      font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.15em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 16px;
     }
     .section-title {
-      font-size: clamp(1.6rem, 4vw, 2.4rem); font-weight: 700;
-      letter-spacing: -0.03em; margin-bottom: 14px; line-height: 1.2;
+      font-size: clamp(2rem, 4vw, 2.8rem); font-weight: 700;
+      letter-spacing: -0.03em; margin-bottom: 16px; line-height: 1.1;
+      color: var(--text);
     }
-    .section-sub { color: var(--muted); font-size: 1rem; max-width: 560px; margin-bottom: 40px; }
+    .section-sub { color: var(--muted); font-size: 1.1rem; max-width: 600px; margin-bottom: 60px; line-height: 1.6; }
 
     .features-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-      gap: 16px;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 24px;
     }
     .feature-card {
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 24px;
-      transition: border-color 200ms, background 200ms, transform 200ms;
+      padding: 32px;
+      transition: all 300ms ease;
+      backdrop-filter: blur(10px);
     }
     .feature-card:hover {
       border-color: var(--accent-border);
       background: var(--card-hover);
-      transform: translateY(-2px);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4);
     }
     .feature-icon {
-      width: 38px; height: 38px;
-      background: var(--accent-soft); border-radius: 10px;
+      width: 48px; height: 48px;
+      background: linear-gradient(135deg, rgba(0,235,184,0.1) 0%, rgba(0,235,184,0.02) 100%);
+      border: 1px solid var(--accent-border);
+      border-radius: 12px;
       display: flex; align-items: center; justify-content: center;
-      display: flex; align-items: center; justify-content: center;
-      margin-bottom: 14px;
+      margin-bottom: 24px;
     }
-    .feature-icon svg { width: 18px; height: 18px; stroke: var(--accent); stroke-width: 1.8; }
+    .feature-icon svg { width: 22px; height: 22px; stroke: var(--accent); stroke-width: 1.8; }
     .feature-card h3 {
-      font-size: 0.95rem; font-weight: 600; color: var(--text);
-      margin-bottom: 8px;
+      font-size: 1.1rem; font-weight: 600; color: var(--text);
+      margin-bottom: 10px;
     }
-    .feature-card p { font-size: 0.875rem; color: var(--muted); line-height: 1.65; }
+    .feature-card p { font-size: 0.95rem; color: var(--muted); line-height: 1.6; }
 
     /* ── QUICKSTART ── */
-    .qs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-    .qs-step { display: flex; gap: 16px; }
-    .qs-num {
-      flex-shrink: 0; width: 28px; height: 28px;
-      background: var(--accent-soft); border: 1px solid var(--accent-border);
-      border-radius: 50%; display: flex; align-items: center; justify-content: center;
-      font-family: var(--mono); font-size: 0.75rem; color: var(--accent); font-weight: 600;
-      margin-top: 2px;
-    }
-    .qs-step h4 { font-size: 0.9rem; font-weight: 600; color: var(--text); margin-bottom: 4px; }
-    .qs-step p { font-size: 0.85rem; color: var(--muted); }
-
-    /* ── CODE ── */
-    .code-wrap { position: relative; margin: 20px 0; }
+    .qs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+    
+    /* ── CODE BLOCKS ── */
+    .code-wrap { position: relative; margin: 24px 0; }
     pre {
-      font-family: var(--mono); font-size: 0.84rem; line-height: 1.65;
-      background: var(--bg2);
+      font-family: var(--mono); font-size: 0.9rem; line-height: 1.7;
+      background: #06090e;
       border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 20px 22px;
-      overflow-x: auto; color: #c8dce8;
+      border-radius: 12px; padding: 24px;
+      overflow-x: auto; color: #e2e8f0;
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
     }
-    pre .c { color: #3d5468; }
+    pre .c { color: #64748b; }
     pre .kw { color: var(--accent); }
-    pre .flag { color: #7dd3c0; }
+    pre .flag { color: #a5b4fc; }
     .copy-btn {
-      position: absolute; top: 10px; right: 10px;
-      background: var(--accent-soft); border: 1px solid var(--accent-border);
-      color: var(--accent); font-family: var(--mono); font-size: 0.7rem;
-      padding: 4px 10px; border-radius: 6px; cursor: pointer;
-      transition: background 150ms;
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+      color: var(--text); font-family: var(--mono); font-size: 0.75rem;
+      padding: 6px 12px; border-radius: 8px; cursor: pointer;
+      transition: all 200ms ease;
     }
-    .copy-btn:hover { background: rgba(0,212,170,0.22); }
-
-    /* ── DIVIDER ── */
-    .divider { border: none; border-top: 1px solid var(--border); margin: 0; }
-
-    /* ── INSTALL TAB SWITCHER ── */
-    .os-tabs {
-      display: inline-flex; gap: 4px;
-      background: rgba(255,255,255,0.04); border: 1px solid var(--border);
-      border-radius: 12px; padding: 4px; margin-bottom: 20px;
-    }
-    .os-tab {
-      display: flex; align-items: center; gap: 7px;
-      padding: 8px 18px; border-radius: 9px; border: none;
-      background: none; color: var(--muted); font-family: var(--sans);
-      font-size: 0.875rem; font-weight: 500; cursor: pointer;
-      transition: all 160ms; white-space: nowrap;
-    }
-    .os-tab:hover { color: var(--text); background: rgba(255,255,255,0.06); }
-    .os-tab.active {
-      background: var(--card); color: var(--text);
-      box-shadow: 0 1px 6px rgba(0,0,0,0.3);
-    }
-    .os-tab .tab-icon { display: flex; align-items: center; }
-    .os-tab .tab-icon svg { width: 15px; height: 15px; }
-
-    .os-panel { display: none; }
-    .os-panel.active { display: block; }
-
-    .install-box {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); overflow: hidden;
-      max-width: 640px;
-    }
-    .install-box-primary {
-      padding: 20px 22px;
-      border-bottom: 1px solid var(--border);
-    }
-    .install-box-label {
-      font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.12em;
-      text-transform: uppercase; color: var(--accent);
-      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
-    }
-    .install-box-label .rec-pill {
-      background: var(--accent-soft); border: 1px solid rgba(0,212,170,0.3);
-      color: var(--accent); padding: 1px 8px; border-radius: 999px;
-      font-size: 0.62rem; letter-spacing: 0.08em;
-    }
-    .install-cmd-row {
-      display: flex; align-items: center;
-      background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 10px; padding: 12px 16px; gap: 12px;
-    }
-    .install-cmd-row code {
-      flex: 1; font-family: var(--mono); font-size: 0.85rem;
-      color: var(--accent); background: none; padding: 0;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .install-cmd-row button {
-      flex-shrink: 0; background: var(--accent-soft);
-      border: 1px solid rgba(0,212,170,0.25); color: var(--accent);
-      font-family: var(--mono); font-size: 0.7rem; padding: 4px 12px;
-      border-radius: 7px; cursor: pointer; transition: background 150ms;
-    }
-    .install-cmd-row button:hover { background: rgba(0,212,170,0.22); }
-
-    .install-box-alt {
-      padding: 14px 22px;
-      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    }
-    .install-box-alt span { font-size: 0.8rem; color: var(--muted); }
-    .install-box-alt code {
-      font-family: var(--mono); font-size: 0.78rem; color: #7ec8be;
-      background: none; padding: 0;
-    }
-    .install-box-alt button {
-      background: none; border: 1px solid var(--border);
-      color: var(--muted); font-family: var(--mono); font-size: 0.68rem;
-      padding: 2px 9px; border-radius: 6px; cursor: pointer;
-      transition: border-color 150ms, color 150ms;
-    }
-    .install-box-alt button:hover { border-color: var(--accent); color: var(--accent); }
-
-    .install-note {
-      font-size: 0.82rem; color: var(--muted); margin-top: 12px;
-      padding: 0 2px;
-    }
-    .install-note code { font-size: 0.8rem; }
+    .copy-btn:hover { background: var(--text); color: var(--bg); }
 
     /* ── FOOTER ── */
     footer {
       border-top: 1px solid var(--border);
-      padding: clamp(20px, 4vw, 32px) clamp(16px, 5vw, 48px);
+      padding: clamp(30px, 4vw, 40px) clamp(20px, 5vw, 60px);
       display: flex; justify-content: space-between; align-items: center;
-      flex-wrap: wrap; gap: 12px;
-      color: var(--subtle); font-size: 0.85rem;
+      flex-wrap: wrap; gap: 16px;
+      color: var(--subtle); font-size: 0.9rem;
+      background: var(--bg2);
     }
-    footer a { color: var(--muted); }
+    footer a { color: var(--muted); transition: color 200ms; }
     footer a:hover { color: var(--text); }
-    .footer-links { display: flex; gap: 20px; flex-wrap: wrap; }
+    .footer-links { display: flex; gap: 24px; flex-wrap: wrap; }
 
     /* ── RESPONSIVE ── */
-    @media (max-width: 700px) {
+    @media (max-width: 1024px) {
+      .hero { grid-template-columns: 1fr; text-align: center; gap: 40px; }
+      .hero-content { max-width: 100%; margin: 0 auto; }
+      .hero-actions { justify-content: center; }
+      .hero-terminal { text-align: left; }
+    }
+    @media (max-width: 768px) {
       .nav-links { display: none; }
       .nav-burger { display: flex; }
       .qs-grid { grid-template-columns: 1fr; }
-      .hero h1 { font-size: 2rem; }
+      .hero h1 { font-size: 2.5rem; }
     }
     @media (max-width: 500px) {
-      .hero-install code { font-size: 0.78rem; }
-      .hero-install { padding: 10px 14px; }
+      .install-cmd-row { flex-direction: column; align-items: stretch; }
+      .install-cmd-row button { align-self: stretch; }
     }
   </style>
 </head>
@@ -365,24 +393,73 @@
   <a href="/docs/#install">Get Started</a>
 </div>
 
-<!-- HERO -->
 <section class="hero">
-  <div class="hero-badge">Self-hosted fleet management</div>
-  <h1>Manage every server.<br>No cloud required.</h1>
-  <p>Cenvero Fleet connects to your Linux servers over SSH, auto-installs agents, and gives you shell access, service control, logs, and live metrics — all from one binary.</p>
-  <div class="hero-install">
-    <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
-    <button onclick="copyInstall(this)">copy</button>
+  <div class="hero-content">
+    <div class="hero-badge">Self-hosted fleet management</div>
+    <h1>Manage every server.<br>No cloud required.</h1>
+    <p>Cenvero Fleet connects to your Linux servers over SSH, auto-installs agents, and gives you shell access, service control, logs, and live metrics — all from one binary.</p>
+    <div class="hero-actions">
+      <a href="/docs/" class="btn btn-primary">Read the docs</a>
+      <a href="https://github.com/cenvero/fleet/releases" class="btn btn-ghost">Download releases</a>
+    </div>
   </div>
-  <div class="hero-actions">
-    <a href="/docs/" class="btn btn-primary">Read the docs</a>
-    <a href="https://github.com/cenvero/fleet/releases" class="btn btn-ghost">Download releases</a>
+
+  <div class="hero-terminal">
+    <div class="terminal-header">
+      <div class="os-tabs" id="osTabs">
+        <button class="os-tab" data-os="mac" onclick="switchOS('mac')">
+          <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg></span>
+          macOS
+        </button>
+        <button class="os-tab" data-os="linux" onclick="switchOS('linux')">
+          <span class="tab-icon"><i data-lucide="terminal"></i></span>
+          Linux
+        </button>
+        <button class="os-tab" data-os="windows" onclick="switchOS('windows')">
+          <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M3 12V6.75l6-1.32v6.57H3zm17 0V5l-9 1.26V12h9zM3 13h6v6.08l-6-1.29V13zm17 0h-9v6.74L20 18.5V13z"/></svg></span>
+          Windows
+        </button>
+      </div>
+    </div>
+
+    <div class="os-panel" data-os="mac">
+      <div class="install-box-label">
+        Homebrew <span class="rec-pill">recommended</span>
+      </div>
+      <div class="install-cmd-row">
+        <code>brew tap cenvero/fleet && brew install cenvero-fleet</code>
+        <button onclick="copyCmd(this,'brew tap cenvero/fleet\nbrew install cenvero-fleet')">copy</button>
+      </div>
+      <div class="install-box-alt">
+        <span>or one-liner:</span>
+        <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
+        <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
+      </div>
+      <p class="install-note"># After install, upgrade anytime with brew upgrade cenvero-fleet</p>
+    </div>
+
+    <div class="os-panel" data-os="linux">
+      <div class="install-box-label">One-liner</div>
+      <div class="install-cmd-row">
+        <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
+        <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
+      </div>
+      <p class="install-note"># Also available via Homebrew — brew tap cenvero/fleet && brew install cenvero-fleet</p>
+    </div>
+
+    <div class="os-panel" data-os="windows">
+      <div class="install-box-label">PowerShell</div>
+      <div class="install-cmd-row">
+        <code>irm https://fleet.cenvero.org/install.ps1 | iex</code>
+        <button onclick="copyCmd(this,'irm https://fleet.cenvero.org/install.ps1 | iex')">copy</button>
+      </div>
+      <p class="install-note"># Run from an elevated PowerShell prompt. Installs to %ProgramFiles%\fleet and adds it to PATH.</p>
+    </div>
   </div>
 </section>
 
 <hr class="divider">
 
-<!-- FEATURES -->
 <div class="section">
   <div class="section-label">What it does</div>
   <h2 class="section-title">Everything you need to run a fleet</h2>
@@ -438,7 +515,6 @@
 
 <hr class="divider">
 
-<!-- QUICK START -->
 <div class="section">
   <div class="section-label">Quick start</div>
   <h2 class="section-title">Up and running in minutes</h2>
@@ -482,79 +558,6 @@ fleet dashboard</pre>
 
 <hr class="divider">
 
-<!-- INSTALL METHODS -->
-<div class="section">
-  <div class="section-label">Installation</div>
-  <h2 class="section-title">Every platform, one command</h2>
-
-  <div class="os-tabs" id="osTabs">
-    <button class="os-tab" data-os="mac" onclick="switchOS('mac')">
-      <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg></span>
-      macOS
-    </button>
-    <button class="os-tab" data-os="linux" onclick="switchOS('linux')">
-      <span class="tab-icon"><i data-lucide="terminal"></i></span>
-      Linux
-    </button>
-    <button class="os-tab" data-os="windows" onclick="switchOS('windows')">
-      <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M3 12V6.75l6-1.32v6.57H3zm17 0V5l-9 1.26V12h9zM3 13h6v6.08l-6-1.29V13zm17 0h-9v6.74L20 18.5V13z"/></svg></span>
-      Windows
-    </button>
-  </div>
-
-  <!-- macOS -->
-  <div class="os-panel" data-os="mac">
-    <div class="install-box">
-      <div class="install-box-primary">
-        <div class="install-box-label">
-          Homebrew <span class="rec-pill">recommended</span>
-        </div>
-        <div class="install-cmd-row">
-          <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code>
-          <button onclick="copyCmd(this,'brew tap cenvero/fleet\nbrew install cenvero-fleet')">copy</button>
-        </div>
-      </div>
-      <div class="install-box-alt">
-        <span>or one-liner:</span>
-        <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
-        <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
-      </div>
-    </div>
-    <p class="install-note">After install, upgrade anytime with <code>brew upgrade cenvero-fleet</code></p>
-  </div>
-
-  <!-- Linux -->
-  <div class="os-panel" data-os="linux">
-    <div class="install-box">
-      <div class="install-box-primary">
-        <div class="install-box-label">One-liner</div>
-        <div class="install-cmd-row">
-          <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
-          <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
-        </div>
-      </div>
-    </div>
-    <p class="install-note">Also available via Homebrew — <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code></p>
-  </div>
-
-  <!-- Windows -->
-  <div class="os-panel" data-os="windows">
-    <div class="install-box">
-      <div class="install-box-primary">
-        <div class="install-box-label">PowerShell</div>
-        <div class="install-cmd-row">
-          <code>irm https://fleet.cenvero.org/install.ps1 | iex</code>
-          <button onclick="copyCmd(this,'irm https://fleet.cenvero.org/install.ps1 | iex')">copy</button>
-        </div>
-      </div>
-    </div>
-    <p class="install-note">Run from an elevated PowerShell prompt. Installs to <code>%ProgramFiles%\fleet</code> and adds it to PATH.</p>
-  </div>
-
-</div>
-
-<hr class="divider">
-
 <footer>
   <div>© 2026 Cenvero · AGPL-3.0-or-later</div>
   <div class="footer-links">
@@ -578,8 +581,9 @@ fleet dashboard</pre>
   }
   function copyCmd(btn, text) {
     navigator.clipboard.writeText(text).then(() => {
+      const original = btn.textContent;
       btn.textContent = 'copied!';
-      setTimeout(() => btn.textContent = 'copy', 1800);
+      setTimeout(() => btn.textContent = original, 1800);
     });
   }
   switchOS(detectOS());
@@ -588,12 +592,6 @@ fleet dashboard</pre>
   function toggleMenu(btn) {
     const m = document.getElementById('nav-mobile');
     m.classList.toggle('open');
-  }
-  function copyInstall(btn) {
-    navigator.clipboard.writeText('curl -fsSL https://fleet.cenvero.org/install | sh').then(() => {
-      btn.textContent = 'copied!';
-      setTimeout(() => btn.textContent = 'copy', 1800);
-    });
   }
   function copyCode(btn) {
     const pre = btn.nextElementSibling;

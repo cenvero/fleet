@@ -12,23 +12,25 @@
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <style>
     :root {
-      --bg:          #070c13;
-      --bg-soft:     #0d1520;
-      --bg-card:     rgba(13,21,32,0.9);
-      --text:        #eef2fa;
-      --muted:       #7e92b0;
-      --muted2:      #5a6e8a;
-      --accent:      #00d4aa;
-      --accent-dim:  #00b894;
-      --accent-soft: rgba(0,212,170,0.11);
-      --accent-glow: rgba(0,212,170,0.18);
-      --border:      rgba(255,255,255,0.07);
-      --border-acc:  rgba(0,212,170,0.18);
-      --code-bg:     rgba(4,10,20,0.98);
+      /* Deep, next-gen dark mode palette */
+      --bg:          #030508;
+      --bg-soft:     #080b11;
+      --bg-card:     rgba(10, 14, 22, 0.6);
+      --card-hover:  rgba(15, 20, 30, 0.8);
+      --text:        #f0f4f8;
+      --muted:       #94a3b8;
+      --muted2:      #475569;
+      --accent:      #00ebb8;
+      --accent-hover:#00ffd0;
+      --accent-soft: rgba(0, 235, 184, 0.1);
+      --accent-glow: rgba(0, 235, 184, 0.2);
+      --border:      rgba(255, 255, 255, 0.08);
+      --border-acc:  rgba(0, 235, 184, 0.25);
+      --code-bg:     #06090e;
       --mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, monospace;
       --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
-      --sidebar-w: 252px;
-      --nav-h:     56px;
+      --sidebar-w: 260px;
+      --nav-h:     64px;
       --radius:    14px;
     }
 
@@ -43,62 +45,78 @@
       font-size: 15px;
       line-height: 1.75;
       -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+      position: relative;
+    }
+    
+    /* Background Glow Effect */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100vw;
+      height: 100vh;
+      background: radial-gradient(circle at 50% 0%, rgba(0, 235, 184, 0.03) 0%, rgba(3, 5, 8, 0) 60%);
+      z-index: -1;
+      pointer-events: none;
     }
 
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+    a { color: var(--accent); text-decoration: none; transition: all 150ms ease; }
+    a:hover { text-decoration: underline; color: var(--accent-hover); }
 
     /* ── TOP NAV ────────────────────────────────────── */
     .topnav {
       position: sticky; top: 0; z-index: 300;
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0 clamp(16px, 5vw, 40px);
+      padding: 0 clamp(20px, 5vw, 60px);
       height: var(--nav-h);
-      background: rgba(7,12,19,0.94);
-      backdrop-filter: blur(20px) saturate(1.4);
-      -webkit-backdrop-filter: blur(20px) saturate(1.4);
+      background: rgba(3, 5, 8, 0.7);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
       border-bottom: 1px solid var(--border);
     }
     .brand {
-      font-family: var(--mono); font-size: 0.875rem;
-      letter-spacing: 0.05em; color: var(--text); white-space: nowrap;
+      font-family: var(--mono); font-size: 0.95rem; font-weight: 600;
+      letter-spacing: 0.04em; color: var(--text); white-space: nowrap;
       display: flex; align-items: center; gap: 6px;
     }
-    .brand-dot { color: var(--muted2); }
-    .brand span { color: var(--accent); }
+    .brand-dot { color: var(--muted2); font-weight: 400; }
+    .brand span:not(.brand-dot) { color: var(--accent); }
+    .brand:hover { text-decoration: none; }
 
-    .topnav-links { display: flex; gap: 6px; }
+    .topnav-links { display: flex; gap: 8px; }
     .topnav-links a {
-      color: var(--muted); font-size: 0.875rem; font-weight: 500;
-      padding: 5px 11px; border-radius: 8px;
-      transition: color 150ms, background 150ms;
+      color: var(--muted); font-size: 0.9rem; font-weight: 500;
+      padding: 8px 14px; border-radius: 8px;
     }
-    .topnav-links a:hover { color: var(--text); background: rgba(255,255,255,0.06); text-decoration: none; }
-    .topnav-links a.active { color: var(--text); background: var(--accent-soft); }
+    .topnav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
+    .topnav-links a.active { color: var(--bg); background: var(--accent); font-weight: 600; box-shadow: 0 0 15px rgba(0,235,184,0.2); }
 
     /* hamburger */
     .menu-btn {
       display: none; align-items: center; justify-content: center;
       background: none; border: 1px solid var(--border);
-      border-radius: 9px; padding: 7px 9px; cursor: pointer;
-      color: var(--muted); gap: 4px; flex-direction: column;
-      transition: border-color 160ms, color 160ms;
+      border-radius: 9px; padding: 8px 10px; cursor: pointer;
+      color: var(--muted); gap: 5px; flex-direction: column;
+      transition: all 200ms ease;
     }
-    .menu-btn:hover { border-color: var(--border-acc); color: var(--text); }
+    .menu-btn:hover { border-color: var(--border-acc); color: var(--text); background: rgba(255,255,255,0.03); }
     .menu-btn span {
-      display: block; width: 18px; height: 1.5px;
+      display: block; width: 20px; height: 2px;
       background: currentColor; border-radius: 2px; transition: all 220ms ease;
     }
-    .menu-btn.open span:nth-child(1) { transform: translateY(5.5px) rotate(45deg); }
+    .menu-btn.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
     .menu-btn.open span:nth-child(2) { opacity: 0; transform: scaleX(0); }
-    .menu-btn.open span:nth-child(3) { transform: translateY(-5.5px) rotate(-45deg); }
+    .menu-btn.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
     /* ── PAGE LAYOUT ────────────────────────────────── */
     .layout {
       display: flex;
-      max-width: 1300px;
+      max-width: 1400px;
       margin: 0 auto;
-      padding: 0 clamp(16px, 4vw, 32px);
+      padding: 0 clamp(20px, 4vw, 60px);
     }
 
     /* ── SIDEBAR ────────────────────────────────────── */
@@ -109,265 +127,284 @@
       top: var(--nav-h);
       height: calc(100vh - var(--nav-h));
       overflow-y: auto;
-      padding: 28px 8px 64px 0;
+      padding: 32px 16px 64px 0;
       border-right: 1px solid var(--border);
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.08) transparent;
     }
-    .sidebar::-webkit-scrollbar { width: 3px; }
-    .sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.09); border-radius: 3px; }
+    .sidebar::-webkit-scrollbar { width: 4px; }
+    .sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
 
-    .sb-group { margin-bottom: 26px; }
+    .sb-group { margin-bottom: 32px; }
     .sb-label {
-      font-family: var(--mono); font-size: 0.65rem;
-      letter-spacing: 0.16em; text-transform: uppercase;
-      color: var(--accent); padding: 0 14px; margin-bottom: 4px;
-      display: block;
+      font-family: var(--mono); font-size: 0.7rem; font-weight: 600;
+      letter-spacing: 0.15em; text-transform: uppercase;
+      color: var(--accent); padding: 0 16px; margin-bottom: 8px;
+      display: block; opacity: 0.9;
     }
     .sidebar a {
       display: flex; align-items: center; gap: 8px;
-      padding: 6px 14px; border-radius: 9px;
-      color: var(--muted); font-size: 0.865rem; font-weight: 500;
-      transition: color 140ms, background 140ms;
+      padding: 8px 16px; border-radius: 10px;
+      color: var(--muted); font-size: 0.9rem; font-weight: 500;
+      border: 1px solid transparent;
+      transition: all 150ms ease;
     }
-    .sidebar a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
+    .sidebar a:hover { color: var(--text); background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.05); text-decoration: none; }
     .sidebar a.active {
       color: var(--text); background: var(--accent-soft);
-      border-right: 2px solid var(--accent);
+      border-color: var(--border-acc);
+      box-shadow: inset 2px 0 0 var(--accent);
     }
 
     /* mobile overlay */
     .sb-overlay {
       display: none; position: fixed; inset: 0; z-index: 250;
-      background: rgba(0,0,0,0.6);
-      backdrop-filter: blur(3px);
-      -webkit-backdrop-filter: blur(3px);
-      transition: opacity 220ms;
+      background: rgba(3,5,8,0.8);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      transition: opacity 300ms ease;
     }
-    .sb-overlay.open { display: block; }
+    .sb-overlay.open { display: block; animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
     /* ── CONTENT AREA ───────────────────────────────── */
     .content {
       flex: 1; min-width: 0;
-      padding: 48px 0 100px 52px;
+      padding: 48px 0 100px clamp(32px, 5vw, 64px);
     }
     .content > section {
-      margin-bottom: 80px;
-      scroll-margin-top: calc(var(--nav-h) + 20px);
+      margin-bottom: 90px;
+      scroll-margin-top: calc(var(--nav-h) + 32px);
     }
 
     /* typography */
     h1 {
-      font-size: clamp(1.9rem, 4vw, 2.7rem);
+      font-size: clamp(2.2rem, 5vw, 3.2rem);
       font-weight: 700; letter-spacing: -0.04em; line-height: 1.1;
-      margin-bottom: 14px;
+      margin-bottom: 16px;
+      background: linear-gradient(180deg, #ffffff 0%, #94a3b8 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
-    h1 em { font-style: normal; color: var(--accent); }
+    h1 em { font-style: normal; color: var(--accent); -webkit-text-fill-color: var(--accent); }
     h2 {
-      font-size: clamp(1.2rem, 3vw, 1.65rem);
+      font-size: clamp(1.4rem, 3vw, 1.8rem);
       font-weight: 600; letter-spacing: -0.03em;
-      margin-bottom: 20px; padding-bottom: 14px;
+      margin-bottom: 24px; padding-bottom: 16px;
       border-bottom: 1px solid var(--border);
+      color: var(--text);
     }
     h3 {
-      font-family: var(--mono); font-size: 0.7rem;
-      letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--accent); margin: 36px 0 14px;
+      font-family: var(--mono); font-size: 0.8rem;
+      letter-spacing: 0.15em; text-transform: uppercase;
+      color: var(--accent); margin: 40px 0 16px;
     }
-    h4 { font-size: 0.93rem; font-weight: 600; color: var(--text); margin: 18px 0 8px; }
-    p  { color: var(--muted); margin-bottom: 14px; }
-    ul, ol { color: var(--muted); padding-left: 22px; margin-bottom: 14px; }
-    li { margin-bottom: 5px; }
+    h4 { font-size: 1rem; font-weight: 600; color: var(--text); margin: 20px 0 10px; }
+    p  { color: var(--muted); margin-bottom: 16px; line-height: 1.7; }
+    ul, ol { color: var(--muted); padding-left: 24px; margin-bottom: 16px; }
+    li { margin-bottom: 8px; }
     strong { color: var(--text); font-weight: 600; }
-    .lead { font-size: 1.05rem; color: #b0c2d8; margin-bottom: 28px; line-height: 1.6; }
+    .lead { font-size: 1.1rem; color: #cbd5e1; margin-bottom: 32px; line-height: 1.6; max-width: 700px; }
 
     /* ── INSTALL TAB SWITCHER ────────────────────────── */
     .os-tabs {
-      display: inline-flex; gap: 4px;
-      background: rgba(255,255,255,0.04); border: 1px solid var(--border);
-      border-radius: 12px; padding: 4px; margin-bottom: 20px;
+      display: inline-flex; gap: 6px;
+      background: rgba(255,255,255,0.02); border: 1px solid var(--border);
+      border-radius: 12px; padding: 6px; margin-bottom: 24px;
     }
     .os-tab {
-      display: flex; align-items: center; gap: 7px;
-      padding: 7px 16px; border-radius: 9px; border: none;
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 18px; border-radius: 8px; border: 1px solid transparent;
       background: none; color: var(--muted); font-family: var(--sans);
-      font-size: 0.855rem; font-weight: 500; cursor: pointer;
-      transition: all 160ms; white-space: nowrap;
+      font-size: 0.9rem; font-weight: 500; cursor: pointer;
+      transition: all 200ms ease; white-space: nowrap;
     }
-    .os-tab:hover { color: var(--text); background: rgba(255,255,255,0.06); }
-    .os-tab.active { background: var(--bg-soft); color: var(--text); box-shadow: 0 1px 6px rgba(0,0,0,0.3); }
+    .os-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .os-tab.active { background: rgba(255,255,255,0.06); color: var(--text); border-color: var(--border); box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
     .os-tab .tab-icon { display: flex; align-items: center; }
-    .os-tab .tab-icon svg { width: 14px; height: 14px; }
+    .os-tab .tab-icon svg { width: 16px; height: 16px; }
 
     .os-panel { display: none; }
-    .os-panel.active { display: block; }
+    .os-panel.active { display: block; animation: slideUp 0.3s ease; }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 
     .install-box {
-      background: var(--bg-card); border: 1px solid var(--border);
-      border-radius: var(--radius); overflow: hidden; max-width: 620px;
+      background: var(--code-bg); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden; max-width: 680px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05);
+      position: relative;
     }
-    .install-box-primary { padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .install-box::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent-border), transparent);
+    }
+    .install-box-primary { padding: 24px; border-bottom: 1px solid var(--border); }
     .install-box-label {
-      font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.12em;
+      font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
       text-transform: uppercase; color: var(--accent);
-      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+      display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
     }
     .install-box-label .rec-pill {
       background: var(--accent-soft); border: 1px solid var(--border-acc);
-      color: var(--accent); padding: 1px 8px; border-radius: 999px;
-      font-size: 0.6rem; letter-spacing: 0.06em;
+      color: var(--accent); padding: 2px 10px; border-radius: 999px;
+      font-size: 0.65rem; letter-spacing: 0.05em; font-weight: 600;
     }
     .install-cmd-row {
       display: flex; align-items: center;
-      background: var(--code-bg); border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 10px; padding: 11px 16px; gap: 12px;
+      background: rgba(0,0,0,0.6); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 18px; gap: 16px;
     }
     .install-cmd-row code {
-      flex: 1; font-family: var(--mono); font-size: 0.83rem;
+      flex: 1; font-family: var(--mono); font-size: 0.9rem;
       color: var(--accent); background: none; padding: 0;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .install-cmd-row button {
-      flex-shrink: 0; background: var(--accent-soft);
-      border: 1px solid var(--border-acc); color: var(--accent);
-      font-family: var(--mono); font-size: 0.68rem; padding: 4px 12px;
-      border-radius: 7px; cursor: pointer; transition: background 150ms;
+      flex-shrink: 0; background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border); color: var(--text);
+      font-family: var(--mono); font-size: 0.75rem; padding: 6px 14px;
+      border-radius: 8px; cursor: pointer; transition: all 200ms ease;
     }
-    .install-cmd-row button:hover { background: rgba(0,212,170,0.22); }
+    .install-cmd-row button:hover { background: var(--text); color: var(--bg); }
     .install-box-alt {
-      padding: 12px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 16px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      background: rgba(255,255,255,0.01);
     }
-    .install-box-alt span { font-size: 0.8rem; color: var(--muted2); }
-    .install-box-alt code { font-family: var(--mono); font-size: 0.77rem; color: #7ec8be; background: none; padding: 0; }
+    .install-box-alt span { font-size: 0.85rem; color: var(--muted); }
+    .install-box-alt code { font-family: var(--mono); font-size: 0.85rem; color: #a5b4fc; background: none; padding: 0; }
     .install-box-alt button {
       background: none; border: 1px solid var(--border); color: var(--muted);
-      font-family: var(--mono); font-size: 0.67rem; padding: 2px 9px;
-      border-radius: 6px; cursor: pointer; transition: border-color 150ms, color 150ms;
+      font-family: var(--mono); font-size: 0.75rem; padding: 4px 10px;
+      border-radius: 6px; cursor: pointer; transition: all 200ms ease;
     }
     .install-box-alt button:hover { border-color: var(--accent); color: var(--accent); }
     .install-note {
-      font-size: 0.82rem; color: var(--muted2); margin-top: 12px; padding: 0 2px;
+      font-size: 0.85rem; color: var(--muted2); margin-top: 16px; padding: 0 4px; font-family: var(--mono);
     }
-    .install-note code { font-size: 0.8rem; }
+    .install-note code { font-size: 0.85rem; color: var(--muted); }
 
     /* ── CODE BLOCKS ────────────────────────────────── */
     code {
-      font-family: var(--mono); font-size: 0.83em;
-      background: rgba(0,212,170,0.1); color: var(--accent);
-      padding: 2px 7px; border-radius: 5px;
+      font-family: var(--mono); font-size: 0.85em;
+      background: rgba(255,255,255,0.05); color: #e2e8f0;
+      padding: 2px 6px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);
     }
-    .cb { position: relative; margin: 18px 0; }
+    .cb { position: relative; margin: 24px 0; }
     pre {
-      font-family: var(--mono); font-size: 0.82rem; line-height: 1.72;
+      font-family: var(--mono); font-size: 0.9rem; line-height: 1.7;
       background: var(--code-bg);
-      border: 1px solid rgba(0,212,170,0.13);
-      border-radius: var(--radius); padding: 20px 22px;
-      overflow-x: auto; color: #c4e0da; white-space: pre;
+      border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 24px;
+      overflow-x: auto; color: #e2e8f0; white-space: pre;
+      box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
     }
-    pre .c    { color: #344e47; }
-    pre .kw   { color: #00d4aa; }
-    pre .str  { color: #9fe7c8; }
-    pre .flag { color: #7dd3c0; }
+    pre .c    { color: #64748b; }
+    pre .kw   { color: var(--accent); }
+    pre .str  { color: #a5b4fc; }
+    pre .flag { color: #a5b4fc; }
     .copy-btn {
-      position: absolute; top: 11px; right: 12px;
-      background: rgba(0,212,170,0.08); border: 1px solid rgba(0,212,170,0.18);
-      color: var(--accent); font-family: var(--mono); font-size: 0.68rem;
-      padding: 4px 12px; border-radius: 6px; cursor: pointer;
-      transition: background 150ms, transform 100ms;
-      letter-spacing: 0.03em;
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+      color: var(--text); font-family: var(--mono); font-size: 0.75rem;
+      padding: 6px 12px; border-radius: 8px; cursor: pointer;
+      transition: all 200ms ease; letter-spacing: 0.02em;
     }
-    .copy-btn:hover { background: rgba(0,212,170,0.2); }
+    .copy-btn:hover { background: var(--text); color: var(--bg); }
     .copy-btn:active { transform: scale(0.95); }
 
     /* ── CALLOUT ────────────────────────────────────── */
     .callout {
-      border-left: 3px solid var(--accent);
-      background: linear-gradient(100deg, rgba(0,212,170,0.08), rgba(0,212,170,0.03));
-      border-radius: 0 12px 12px 0; padding: 14px 20px; margin: 22px 0;
-      color: #9ec4bb; font-size: 0.9rem;
+      border-left: 4px solid var(--accent);
+      background: linear-gradient(90deg, rgba(0,235,184,0.05) 0%, rgba(0,235,184,0.01) 100%);
+      border-radius: 0 12px 12px 0; padding: 20px 24px; margin: 32px 0;
+      color: #cbd5e1; font-size: 0.95rem; border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
     }
     .callout strong { color: var(--accent); }
-    .callout.tip { border-color: #3b82f6; background: linear-gradient(100deg, rgba(59,130,246,0.08), rgba(59,130,246,0.03)); color: #93aed4; }
+    .callout.tip { border-left-color: #3b82f6; background: linear-gradient(90deg, rgba(59,130,246,0.05) 0%, rgba(59,130,246,0.01) 100%); }
     .callout.tip strong { color: #60a5fa; }
 
     /* ── TABLES ─────────────────────────────────────── */
-    .tw { overflow-x: auto; margin: 18px 0; border-radius: var(--radius); border: 1px solid var(--border); }
-    table { border-collapse: collapse; width: 100%; font-size: 0.875rem; min-width: 400px; }
+    .tw { overflow-x: auto; margin: 24px 0; border-radius: var(--radius); border: 1px solid var(--border); background: rgba(255,255,255,0.01); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; min-width: 500px; text-align: left;}
     th {
-      text-align: left; font-family: var(--mono); font-size: 0.68rem;
-      letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent);
-      padding: 10px 16px; border-bottom: 1px solid var(--border);
-      background: rgba(0,212,170,0.04); white-space: nowrap;
+      font-family: var(--mono); font-size: 0.75rem; font-weight: 600;
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,0.4); white-space: nowrap;
     }
     td {
-      padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.04);
-      color: var(--muted); vertical-align: top;
+      padding: 14px 20px; border-bottom: 1px solid rgba(255,255,255,0.03);
+      color: var(--text); vertical-align: middle;
     }
-    td code { font-size: 0.82em; white-space: nowrap; }
+    td:first-child { color: var(--accent); font-family: var(--mono); font-size: 0.85rem;}
+    td code { font-size: 0.9em; white-space: nowrap; background: none; border:none; padding:0;}
     tr:last-child td { border-bottom: none; }
-    tbody tr:hover td { background: rgba(255,255,255,0.02); }
+    tbody tr:hover td { background: rgba(255,255,255,0.03); }
 
     /* ── CARDS ──────────────────────────────────────── */
     .card-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-      gap: 14px; margin: 22px 0;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px; margin: 32px 0;
     }
     .card {
       border: 1px solid var(--border); border-radius: var(--radius);
-      padding: 20px 22px; background: var(--bg-card);
-      transition: border-color 200ms, transform 200ms, box-shadow 200ms;
+      padding: 24px; background: var(--bg-card);
+      backdrop-filter: blur(10px);
+      transition: all 300ms ease;
     }
     .card:hover {
       border-color: var(--border-acc);
-      transform: translateY(-2px);
-      box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+      transform: translateY(-4px);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+      background: var(--card-hover);
     }
     .card h4 {
-      font-family: var(--mono); font-size: 0.74rem;
+      font-family: var(--mono); font-size: 0.85rem; font-weight: 600;
       text-transform: uppercase; letter-spacing: 0.1em;
-      color: var(--accent); margin: 0 0 10px;
+      color: var(--accent); margin: 0 0 12px;
     }
-    .card p { font-size: 0.875rem; margin: 0; }
+    .card p { font-size: 0.95rem; margin: 0; color: var(--muted); line-height: 1.6; }
 
     /* ── BADGE ──────────────────────────────────────── */
     .badge {
-      display: inline-block; font-family: var(--mono); font-size: 0.68rem;
-      padding: 2px 9px; border-radius: 999px; border: 1px solid;
-      vertical-align: middle; margin-left: 8px; white-space: nowrap;
+      display: inline-block; font-family: var(--mono); font-size: 0.7rem; font-weight: 600;
+      padding: 4px 10px; border-radius: 999px; border: 1px solid;
+      vertical-align: middle; margin-left: 10px; white-space: nowrap;
     }
-    .badge-linux { color: #7dd3c0; border-color: rgba(125,211,192,0.3); }
-    .badge-all   { color: #94a3b8; border-color: rgba(148,163,184,0.3); }
+    .badge-linux { color: #818cf8; border-color: rgba(129, 140, 248, 0.3); background: rgba(129, 140, 248, 0.1); }
+    .badge-all   { color: #94a3b8; border-color: rgba(148,163,184,0.3); background: rgba(148,163,184,0.1); }
 
     /* ── STEPS ──────────────────────────────────────── */
-    .steps { list-style: none; padding: 0; margin: 16px 0 20px; counter-reset: step; }
+    .steps { list-style: none; padding: 0; margin: 24px 0 32px; counter-reset: step; }
     .steps li {
-      counter-increment: step; margin-bottom: 10px;
-      display: flex; gap: 14px; align-items: flex-start;
-      color: var(--muted);
+      counter-increment: step; margin-bottom: 16px;
+      display: flex; gap: 16px; align-items: flex-start;
+      color: var(--text); font-size: 0.95rem;
     }
     .steps li::before {
       content: counter(step);
       display: flex; align-items: center; justify-content: center;
-      min-width: 24px; height: 24px; border-radius: 50%;
+      min-width: 28px; height: 28px; border-radius: 50%;
       background: var(--accent-soft); border: 1px solid var(--border-acc);
-      color: var(--accent); font-family: var(--mono); font-size: 0.72rem;
-      font-weight: 500; margin-top: 1px; flex-shrink: 0;
+      color: var(--accent); font-family: var(--mono); font-size: 0.8rem;
+      font-weight: 600; margin-top: 0px; flex-shrink: 0;
     }
 
     /* ── FOOTER ─────────────────────────────────────── */
     footer {
       border-top: 1px solid var(--border);
-      padding: 28px clamp(16px, 5vw, 40px);
-      color: var(--muted2); font-size: 0.855rem;
+      padding: 32px clamp(20px, 5vw, 60px);
+      background: var(--bg-soft);
+      color: var(--muted2); font-size: 0.9rem;
       display: flex; justify-content: space-between;
-      align-items: center; gap: 14px; flex-wrap: wrap;
+      align-items: center; gap: 20px; flex-wrap: wrap;
     }
-    footer a { color: var(--muted); }
-    footer a:hover { color: var(--text); }
+    footer a { color: var(--muted); transition: color 200ms; }
+    footer a:hover { color: var(--text); text-decoration: none;}
 
     /* ── RESPONSIVE ─────────────────────────────────── */
-    @media (max-width: 920px) {
+    @media (max-width: 1024px) {
       .menu-btn { display: flex; }
       .topnav-links { display: none; }
 
@@ -375,32 +412,37 @@
         position: fixed;
         inset: 0 auto 0 0;
         z-index: 260;
-        width: min(var(--sidebar-w), 78vw);
+        width: min(var(--sidebar-w), 85vw);
         height: 100dvh;
-        padding-top: calc(var(--nav-h) + 20px);
-        background: var(--bg-soft);
-        border-right: 1px solid rgba(0,212,170,0.14);
+        padding-top: calc(var(--nav-h) + 24px);
+        background: rgba(8, 11, 17, 0.98);
+        backdrop-filter: blur(20px);
+        border-right: 1px solid var(--border);
         transform: translateX(-110%);
-        transition: transform 260ms cubic-bezier(0.32, 0, 0.2, 1);
-        box-shadow: 4px 0 40px rgba(0,0,0,0.4);
+        transition: transform 300ms cubic-bezier(0.32, 0, 0.2, 1);
+        box-shadow: 10px 0 50px rgba(0,0,0,0.6);
       }
       .sidebar.open { transform: translateX(0); }
 
-      .content { padding: 32px 0 80px; }
-      .card-grid { grid-template-columns: 1fr 1fr; }
+      .content { padding: 40px 0 80px 0; }
+    }
+
+    @media (max-width: 768px) {
+      .card-grid { grid-template-columns: 1fr; }
+      .install-cmd-row { flex-direction: column; align-items: stretch; gap: 10px; }
+      .install-cmd-row button { align-self: stretch; padding: 10px; }
     }
 
     @media (max-width: 600px) {
-      .card-grid { grid-template-columns: 1fr; }
-      .install-grid { grid-template-columns: 1fr; }
-      pre { font-size: 0.76rem; padding: 14px 16px; }
-      .content { padding: 24px 0 64px; }
-      h1 { font-size: 1.72rem; }
-      h2 { font-size: 1.2rem; }
+      pre { font-size: 0.8rem; padding: 16px; }
+      .content { padding: 32px 0 64px 0; }
+      h1 { font-size: 2rem; }
+      h2 { font-size: 1.4rem; }
     }
 
     @media (max-width: 380px) {
-      pre { font-size: 0.7rem; }
+      pre { font-size: 0.75rem; }
+      .os-tab { padding: 8px 12px; font-size: 0.8rem; }
     }
   </style>
 </head>
@@ -461,7 +503,6 @@
 
   <main class="content">
 
-    <!-- OVERVIEW -->
     <section id="overview">
       <h1>Cenvero Fleet <em>Docs</em></h1>
       <p class="lead">One controller. Two transport modes. Full control — no cloud required.</p>
@@ -485,7 +526,6 @@
       </div>
     </section>
 
-    <!-- INSTALL -->
     <section id="install">
       <h2>Install</h2>
       <p>Pick your preferred method. The controller is a single static binary — no runtime dependencies.</p>
@@ -505,7 +545,6 @@
         </button>
       </div>
 
-      <!-- macOS -->
       <div class="os-panel" data-os="mac">
         <div class="install-box">
           <div class="install-box-primary">
@@ -521,10 +560,9 @@
             <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
           </div>
         </div>
-        <p class="install-note">Upgrade anytime with <code>brew upgrade cenvero-fleet</code>. All archives are minisign-verified before install.</p>
+        <p class="install-note"># Upgrade anytime with brew upgrade cenvero-fleet. All archives are minisign-verified before install.</p>
       </div>
 
-      <!-- Linux -->
       <div class="os-panel" data-os="linux">
         <div class="install-box">
           <div class="install-box-primary">
@@ -535,10 +573,9 @@
             </div>
           </div>
         </div>
-        <p class="install-note">Detects your CPU arch, verifies the minisign signature, installs to <code>/usr/bin/fleet</code>. Also available via Homebrew — <code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code></p>
+        <p class="install-note"># Detects your CPU arch, verifies the minisign signature, installs to /usr/bin/fleet. Also available via Homebrew — brew tap cenvero/fleet && brew install cenvero-fleet</p>
       </div>
 
-      <!-- Windows -->
       <div class="os-panel" data-os="windows">
         <div class="install-box">
           <div class="install-box-primary">
@@ -549,10 +586,10 @@
             </div>
           </div>
         </div>
-        <p class="install-note">Run from an elevated PowerShell prompt. Installs to <code>%ProgramFiles%\fleet</code> and adds it to PATH.</p>
+        <p class="install-note"># Run from an elevated PowerShell prompt. Installs to %ProgramFiles%\fleet and adds it to PATH.</p>
       </div>
 
-      <p style="font-size:0.82rem;color:var(--muted2);margin-top:20px">
+      <p style="font-size:0.85rem;color:var(--muted2);margin-top:24px; font-family: var(--mono);">
         To build from source: <code>git clone https://github.com/cenvero/fleet &amp;&amp; make build</code> (Go 1.24+)
       </p>
 
@@ -561,7 +598,6 @@
       </div>
     </section>
 
-    <!-- INIT -->
     <section id="init">
       <h2>Initialize</h2>
       <p>Run once on the machine that will act as the controller:</p>
@@ -581,7 +617,6 @@ fleet config show</pre>
       </div>
     </section>
 
-    <!-- SERVER ADD -->
     <section id="server-add">
       <h2>Add a Server</h2>
       <p>Run <code>fleet server add</code> with no arguments to be guided through a step-by-step prompt, or pass the name and address directly:</p>
@@ -628,7 +663,6 @@ fleet server remove web-01</pre>
       </div>
     </section>
 
-    <!-- AUTO-INSTALL -->
     <section id="auto-install">
       <h2>Auto-install Agent</h2>
       <p>For direct-mode servers the agent is <strong>automatically installed</strong> by default. The CLI shows an install preview and asks for confirmation before SSHing in.</p>
@@ -676,7 +710,6 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
       <p>Stops and disables <code>fleet-agent.service</code>, removes the binary, and deletes the server record.</p>
     </section>
 
-    <!-- TRANSPORT -->
     <section id="transport">
       <h2>Transport Modes</h2>
       <div class="card-grid">
@@ -703,7 +736,6 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
       </div>
     </section>
 
-    <!-- SSH -->
     <section id="ssh">
       <h2>Shell Access</h2>
       <p>Open an interactive root shell on any managed server:</p>
@@ -717,7 +749,6 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
       </div>
     </section>
 
-    <!-- EXEC -->
     <section id="exec">
       <h2>Run Commands</h2>
       <p>Run a one-off command on a single server:</p>
@@ -737,7 +768,6 @@ fleet exec <span class="flag">--all</span> "apt list --upgradable 2>/dev/null | 
       <p>Output is prefixed with the server name. Commands run via <code>/bin/sh -c</code> on the agent.</p>
     </section>
 
-    <!-- SERVICES -->
     <section id="services">
       <h2>Services</h2>
       <p class="lead">Track and control systemd services on Linux agents. <span class="badge badge-linux">linux</span></p>
@@ -762,7 +792,6 @@ fleet service restart web-01 nginx.service</pre>
       </div>
     </section>
 
-    <!-- LOGS -->
     <section id="logs">
       <h2>Logs</h2>
       <p>Read tracked service logs live or from the controller-side cache.</p>
@@ -783,7 +812,6 @@ fleet service logs web-01 nginx.service <span class="flag">--follow</span></pre>
       <p>Retention is configurable by size, count, and age in <code>config.toml</code>.</p>
     </section>
 
-    <!-- FIREWALL -->
     <section id="firewall">
       <h2>Firewall &amp; Ports</h2>
       <p class="lead">Manage UFW rules and open/close ports on Linux agents. <span class="badge badge-linux">linux</span></p>
@@ -807,7 +835,6 @@ fleet port close web-01 443</pre>
       </div>
     </section>
 
-    <!-- ALERTS -->
     <section id="alerts">
       <h2>Alerts</h2>
       <p>Fleet evaluates metric thresholds and fires alerts when servers breach them.</p>
@@ -827,7 +854,6 @@ fleet alerts suppress &lt;id&gt; <span class="flag">--for</span> 6h</pre>
       </div>
     </section>
 
-    <!-- DASHBOARD -->
     <section id="dashboard">
       <h2>Dashboard</h2>
       <p>Full-terminal TUI with multiple panels:</p>
@@ -851,7 +877,6 @@ fleet alerts suppress &lt;id&gt; <span class="flag">--for</span> 6h</pre>
       <p>Arrow keys + <code>Tab</code> to navigate. Mouse supported. <code>q</code> or <code>Ctrl+C</code> to exit.</p>
     </section>
 
-    <!-- KEYS -->
     <section id="keys">
       <h2>Keys</h2>
       <p>The controller uses Ed25519 keys for SSH authentication.</p>
@@ -866,7 +891,6 @@ fleet key rotate</pre>
       <p>Key rotation pushes the new public key to all connected servers' <code>authorized_keys</code> before replacing the local private key. Safe for both direct and reverse fleets.</p>
     </section>
 
-    <!-- UPDATES -->
     <section id="updates">
       <h2>Updates</h2>
       <p>Fleet manages its own updates. Agents are <strong>automatically kept in sync</strong> with the controller version whenever they connect — no policy configuration required.</p>
@@ -891,7 +915,6 @@ fleet update channel beta</pre>
       </div>
     </section>
 
-    <!-- CONFIG -->
     <section id="config">
       <h2>Configuration</h2>
       <div class="cb">
@@ -920,7 +943,6 @@ fleet database shift \
       </div>
     </section>
 
-    <!-- COMMANDS -->
     <section id="commands">
       <h2>All Commands</h2>
       <div class="tw">
@@ -964,7 +986,6 @@ fleet database shift \
       </div>
     </section>
 
-    <!-- LAYOUT -->
     <section id="layout">
       <h2>Directory Layout</h2>
       <p>Default location: <code>~/.cenvero-fleet/</code></p>
@@ -1017,8 +1038,9 @@ fleet database shift \
   }
   function copyCmd(btn, text) {
     navigator.clipboard.writeText(text).then(() => {
+      const original = btn.textContent;
       btn.textContent = 'copied!';
-      setTimeout(() => btn.textContent = 'copy', 1800);
+      setTimeout(() => btn.textContent = original, 1800);
     });
   }
   switchOS(detectOS());
@@ -1027,8 +1049,9 @@ fleet database shift \
   function copy(btn) {
     const pre = btn.nextElementSibling;
     navigator.clipboard.writeText(pre.innerText).then(() => {
+      const original = btn.textContent;
       btn.textContent = 'copied!';
-      setTimeout(() => btn.textContent = 'copy', 1800);
+      setTimeout(() => btn.textContent = original, 1800);
     });
   }
 

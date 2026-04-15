@@ -4,81 +4,222 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>404 · Cenvero Fleet</title>
+  <link rel="icon" href="https://cdn.cenvero.com/favicon.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0a0e14;
-      --card: rgba(18, 25, 38, 0.86);
-      --text: #f4f7fb;
-      --muted: #98a6bc;
-      --accent: #00d4aa;
+      /* Matching Next-Gen Palette */
+      --bg: #030508;
+      --card: rgba(10, 14, 22, 0.6);
+      --text: #f0f4f8;
+      --muted: #94a3b8;
+      --accent: #00ebb8;
+      --accent-hover: #00ffd0;
       --border: rgba(255, 255, 255, 0.08);
-      --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, monospace;
-      --sans: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, monospace;
+      --sans: 'Inter', system-ui, sans-serif;
+      --nav-h: 64px;
     }
-    * { box-sizing: border-box; }
+    
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    
     body {
       margin: 0;
       min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background:
-        radial-gradient(circle at top, rgba(0, 212, 170, 0.14), transparent 40%),
-        linear-gradient(180deg, #081018, #0a0e14);
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
       color: var(--text);
       font-family: var(--sans);
+      overflow-x: hidden;
+    }
+
+    /* Background Glow Effect */
+    body::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100vw;
+      height: 100vh;
+      background: radial-gradient(circle at 50% 30%, rgba(0, 235, 184, 0.05) 0%, rgba(3, 5, 8, 0) 60%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    /* ── NAV ── */
+    .nav {
+      position: sticky; top: 0; z-index: 200;
+      height: var(--nav-h);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 clamp(20px, 5vw, 60px);
+      background: rgba(3, 5, 8, 0.7);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-brand {
+      font-family: var(--mono); font-size: 1rem; font-weight: 600;
+      letter-spacing: 0.04em; color: var(--text);
+      text-decoration: none;
+    }
+    .nav-brand span { color: var(--accent); }
+    
+    .nav-links { display: flex; align-items: center; gap: 8px; }
+    .nav-links a {
+      padding: 8px 16px; border-radius: 8px;
+      color: var(--muted); font-size: 0.9rem; font-weight: 500;
+      text-decoration: none;
+      transition: all 200ms ease;
+    }
+    .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .nav-links .nav-cta {
+      color: var(--bg); background: var(--accent);
+      font-weight: 600; border: none;
+    }
+    .nav-links .nav-cta:hover { background: var(--accent-hover); box-shadow: 0 0 20px rgba(0, 235, 184, 0.3); }
+    
+    .nav-burger {
+      display: none; flex-direction: column; gap: 5px;
+      background: none; border: none; cursor: pointer; padding: 4px;
+    }
+    .nav-burger span {
+      display: block; width: 24px; height: 2px;
+      background: var(--text); border-radius: 2px;
+    }
+    
+    .nav-mobile {
+      display: none; position: fixed; top: var(--nav-h); left: 0; right: 0;
+      background: rgba(3, 5, 8, 0.95); backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+      flex-direction: column; padding: 16px; gap: 8px; z-index: 199;
+    }
+    .nav-mobile.open { display: flex; }
+    .nav-mobile a {
+      padding: 12px 16px; border-radius: 10px; text-decoration: none;
+      color: var(--muted); font-size: 1rem; font-weight: 500;
+    }
+    .nav-mobile a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+
+    /* ── 404 CONTENT ── */
+    .content-wrapper {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
       padding: 24px;
     }
+
     .panel {
       width: min(720px, 100%);
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 24px;
-      padding: 32px;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+      padding: clamp(32px, 5vw, 48px);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255,255,255,0.05);
+      backdrop-filter: blur(16px);
+      text-align: left;
     }
+    
     .code, h1 {
       font-family: var(--mono);
     }
+    
     h1 {
       margin: 0;
-      font-size: clamp(3rem, 10vw, 5.5rem);
+      font-size: clamp(3rem, 8vw, 5rem);
+      font-weight: 700;
       color: var(--accent);
+      line-height: 1;
+      letter-spacing: -0.02em;
     }
+    
     p {
       color: var(--muted);
+      font-size: 1.1rem;
       line-height: 1.7;
-      margin: 14px 0 24px;
+      margin: 16px 0 32px;
     }
+    
     pre {
-      margin: 0 0 24px;
-      padding: 18px 20px;
-      border-radius: 18px;
-      background: #09131e;
-      border: 1px solid rgba(0, 212, 170, 0.18);
-      overflow: auto;
-      color: #defaf2;
+      margin: 0 0 32px;
+      padding: 20px 24px;
+      border-radius: 16px;
+      background: #06090e;
+      border: 1px solid rgba(0, 235, 184, 0.15);
+      box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
+      overflow-x: auto;
+      color: #e2e8f0;
       line-height: 1.7;
+      font-size: 0.9rem;
     }
-    a {
-      display: inline-block;
-      padding: 14px 18px;
-      border-radius: 14px;
+    
+    .btn-return {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 14px 28px;
+      border-radius: 12px;
       background: var(--accent);
-      color: #03251d;
+      color: #020806;
       text-decoration: none;
-      font-weight: 700;
+      font-size: 0.95rem;
+      font-weight: 600;
+      transition: all 200ms ease;
+      box-shadow: 0 8px 24px rgba(0, 235, 184, 0.2);
+    }
+    .btn-return:hover { 
+      background: var(--accent-hover); 
+      box-shadow: 0 12px 32px rgba(0, 235, 184, 0.35); 
+      transform: translateY(-2px);
+    }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .nav-burger { display: flex; }
     }
   </style>
 </head>
 <body>
-  <main class="panel">
-    <h1>404</h1>
-    <p>This route isn’t in the fleet.</p>
+
+  <nav class="nav">
+    <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
+    <div class="nav-links">
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/cenvero/fleet">GitHub</a>
+      <a href="https://github.com/cenvero/fleet/releases">Releases</a>
+      <a href="/docs/#install" class="nav-cta">Get Started</a>
+    </div>
+    <button class="nav-burger" onclick="toggleMenu()" aria-label="Menu">
+      <span></span><span></span><span></span>
+    </button>
+  </nav>
+  
+  <div class="nav-mobile" id="nav-mobile">
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/cenvero/fleet">GitHub</a>
+    <a href="https://github.com/cenvero/fleet/releases">Releases</a>
+    <a href="/docs/#install">Get Started</a>
+  </div>
+
+  <div class="content-wrapper">
+    <main class="panel">
+      <h1>404</h1>
+      <p>This route isn’t in the fleet.</p>
 <pre class="code">$ fleet server show the-page-you-asked-for
 NAME:   the-page-you-asked-for
 STATUS: NOT FOUND
 MODE:   unknown</pre>
-    <a href="/">Return to base</a>
-  </main>
+      <a href="/" class="btn-return">Return to base</a>
+    </main>
+  </div>
+
+  <script>
+    function toggleMenu() {
+      const m = document.getElementById('nav-mobile');
+      m.classList.toggle('open');
+    }
+  </script>
 </body>
 </html>
