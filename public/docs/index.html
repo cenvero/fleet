@@ -183,7 +183,7 @@
     /* ── INSTALL METHODS ────────────────────────────── */
     .install-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
       gap: 14px; margin: 24px 0;
     }
     .install-card {
@@ -192,38 +192,33 @@
       transition: border-color 200ms, transform 200ms, box-shadow 200ms;
     }
     .install-card:hover {
-      border-color: var(--border-acc);
-      transform: translateY(-2px);
+      border-color: var(--border-acc); transform: translateY(-2px);
       box-shadow: 0 8px 28px rgba(0,0,0,0.35);
     }
     .install-card.featured { border-color: var(--border-acc); }
     .install-card.featured:hover { box-shadow: 0 8px 32px rgba(0,212,170,0.14); }
     .ic-head {
-      padding: 16px 18px 12px;
-      display: flex; align-items: center; gap: 10px;
+      padding: 14px 18px; display: flex; align-items: center; gap: 10px;
       border-bottom: 1px solid var(--border);
     }
-    .ic-icon {
-      width: 32px; height: 32px; border-radius: 8px;
-      background: var(--accent-soft); border: 1px solid var(--border-acc);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 1rem; flex-shrink: 0;
-    }
+    .ic-os-icon { font-size: 1.25rem; line-height: 1; }
     .ic-title { font-weight: 600; font-size: 0.9rem; }
-    .ic-badge {
-      margin-left: auto; font-family: var(--mono); font-size: 0.65rem;
-      padding: 2px 8px; border-radius: 999px;
-      border: 1px solid var(--border-acc); color: var(--accent);
-      white-space: nowrap;
-    }
     .ic-body { padding: 14px 18px; }
-    .ic-body p { font-size: 0.84rem; margin-bottom: 12px; }
+    .ic-method { margin-bottom: 14px; }
+    .ic-method:last-child { margin-bottom: 0; }
+    .ic-method-label {
+      font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .ic-method-label .rec-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
+    }
     .ic-cmd {
       font-family: var(--mono); font-size: 0.78rem;
       background: var(--code-bg); border: 1px solid var(--border);
       border-radius: 9px; padding: 10px 14px; color: #b8ddd6;
       overflow-x: auto; white-space: pre; line-height: 1.65;
-      position: relative;
     }
     .ic-cmd .c { color: #3a5550; }
 
@@ -469,64 +464,70 @@
 
       <div class="install-grid">
 
+        <!-- macOS -->
         <div class="install-card featured">
           <div class="ic-head">
-            <div class="ic-icon">🍺</div>
-            <div class="ic-title">Homebrew</div>
-            <div class="ic-badge">recommended</div>
+            <div class="ic-os-icon">🍎</div>
+            <div class="ic-title">macOS</div>
           </div>
           <div class="ic-body">
-            <p>Tap the Cenvero tap once, then install and upgrade with standard Homebrew commands. Works on macOS and Linux.</p>
-            <div class="ic-cmd"><span class="c"># add the tap (one time only)</span>
+            <div class="ic-method">
+              <div class="ic-method-label"><span class="rec-dot"></span>Homebrew — recommended</div>
+              <div class="ic-cmd"><span class="c"># add the tap once — gives you brew install &amp; upgrade</span>
 brew tap cenvero/fleet
-
-<span class="c"># install</span>
 brew install cenvero-fleet
 
 <span class="c"># upgrade later</span>
 brew upgrade cenvero-fleet</div>
+            </div>
+            <div class="ic-method">
+              <div class="ic-method-label">One-liner (also supported)</div>
+              <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
+            </div>
           </div>
         </div>
 
+        <!-- Linux -->
         <div class="install-card">
           <div class="ic-head">
-            <div class="ic-icon">⚡</div>
-            <div class="ic-title">One-liner</div>
-            <div class="ic-badge">linux &amp; mac</div>
+            <div class="ic-os-icon">🐧</div>
+            <div class="ic-title">Linux</div>
           </div>
           <div class="ic-body">
-            <p>Shell script that detects your OS and arch, verifies the minisign signature, and installs the binary.</p>
-            <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
+            <div class="ic-method">
+              <div class="ic-method-label"><span class="rec-dot"></span>One-liner — recommended</div>
+              <div class="ic-cmd"><span class="c"># detects arch, verifies minisign signature</span>
+curl -fsSL https://fleet.cenvero.org/install | sh</div>
+            </div>
+            <div class="ic-method">
+              <div class="ic-method-label">Homebrew on Linux (also supported)</div>
+              <div class="ic-cmd">brew tap cenvero/fleet
+brew install cenvero-fleet</div>
+            </div>
           </div>
         </div>
 
+        <!-- Windows -->
         <div class="install-card">
           <div class="ic-head">
-            <div class="ic-icon">⊞</div>
+            <div class="ic-os-icon">⊞</div>
             <div class="ic-title">Windows</div>
-            <div class="ic-badge">powershell</div>
           </div>
           <div class="ic-body">
-            <p>Run from an elevated PowerShell prompt. Installs to <code>%ProgramFiles%\fleet</code> and adds it to PATH.</p>
-            <div class="ic-cmd">irm https://fleet.cenvero.org/install.ps1 | iex</div>
-          </div>
-        </div>
-
-        <div class="install-card">
-          <div class="ic-head">
-            <div class="ic-icon">⚙</div>
-            <div class="ic-title">Build from source</div>
-            <div class="ic-badge">go 1.24+</div>
-          </div>
-          <div class="ic-body">
-            <p>Produces both <code>fleet</code> and <code>fleet-agent</code> in the repo root.</p>
-            <div class="ic-cmd">git clone https://github.com/cenvero/fleet
-cd fleet
-make build</div>
+            <div class="ic-method">
+              <div class="ic-method-label"><span class="rec-dot"></span>PowerShell</div>
+              <div class="ic-cmd"><span class="c"># run from an elevated PowerShell prompt</span>
+irm https://fleet.cenvero.org/install.ps1 | iex</div>
+            </div>
           </div>
         </div>
 
       </div>
+
+      <p style="font-size:0.86rem; color:var(--muted2); margin-top:4px;">
+        All release archives are signed with minisign and verified before install.
+        To build from source: <code>git clone https://github.com/cenvero/fleet &amp;&amp; make build</code> (Go 1.24+).
+      </p>
 
       <div class="callout">
         <strong>Release verification</strong> — all release archives are signed with minisign. The installer verifies the signature against the embedded public key before swapping the binary. You can also verify manually with <code>minisign -Vm fleet.tar.gz -p minisign.pub</code>.

@@ -233,16 +233,45 @@
     .divider { border: none; border-top: 1px solid var(--border); margin: 0; }
 
     /* ── INSTALL METHODS ── */
-    .install-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+    .install-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
     .install-card {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 20px 22px;
+      border-radius: var(--radius); overflow: hidden;
+      transition: border-color 200ms, transform 200ms, box-shadow 200ms;
     }
-    .install-card h4 {
-      font-family: var(--mono); font-size: 0.8rem; color: var(--accent);
-      text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
+    .install-card:hover { border-color: rgba(0,212,170,0.28); transform: translateY(-2px); box-shadow: 0 8px 28px rgba(0,0,0,0.3); }
+    .install-card.featured { border-color: rgba(0,212,170,0.22); }
+    .ic-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 18px; border-bottom: 1px solid var(--border);
     }
-    .install-card pre { margin: 0; padding: 12px 14px; font-size: 0.82rem; }
+    .ic-os-icon { font-size: 1.3rem; line-height: 1; }
+    .ic-title { font-weight: 600; font-size: 0.9rem; }
+    .ic-rec {
+      margin-left: auto; font-family: var(--mono); font-size: 0.65rem;
+      padding: 2px 9px; border-radius: 999px;
+      border: 1px solid rgba(0,212,170,0.3); color: var(--accent);
+      white-space: nowrap;
+    }
+    .ic-body { padding: 14px 18px; }
+    .ic-body p { font-size: 0.84rem; color: var(--muted); margin-bottom: 12px; }
+    .ic-method { margin-bottom: 12px; }
+    .ic-method:last-child { margin-bottom: 0; }
+    .ic-method-label {
+      font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 6px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .ic-method-label .rec-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    }
+    .ic-cmd {
+      font-family: var(--mono); font-size: 0.78rem;
+      background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 9px; padding: 10px 14px; color: #b8ddd6;
+      overflow-x: auto; white-space: pre; line-height: 1.65;
+    }
+    .ic-cmd .c { color: #3a5248; }
 
     /* ── FOOTER ── */
     footer {
@@ -371,11 +400,12 @@
     <div>
       <div class="code-wrap">
         <button class="copy-btn" onclick="copyCode(this)">copy</button>
-        <pre><span class="c"># 1. Install</span>
-curl -fsSL https://fleet.cenvero.org/install | sh
+        <pre><span class="c"># macOS — Homebrew (recommended)</span>
+brew tap cenvero/fleet
+brew install cenvero-fleet
 
-<span class="c"># Homebrew</span>
-brew install cenvero/fleet/cenvero-fleet</pre>
+<span class="c"># Linux / macOS — one-liner</span>
+curl -fsSL https://fleet.cenvero.org/install | sh</pre>
       </div>
       <div class="code-wrap">
         <button class="copy-btn" onclick="copyCode(this)">copy</button>
@@ -411,18 +441,60 @@ fleet dashboard</pre>
   <div class="section-label">Installation</div>
   <h2 class="section-title">Every platform, one command</h2>
   <div class="install-grid">
-    <div class="install-card">
-      <h4>Linux &amp; macOS</h4>
-      <pre>curl -fsSL https://fleet.cenvero.org/install | sh</pre>
+
+    <!-- macOS -->
+    <div class="install-card featured">
+      <div class="ic-head">
+        <div class="ic-os-icon">🍎</div>
+        <div class="ic-title">macOS</div>
+      </div>
+      <div class="ic-body">
+        <div class="ic-method">
+          <div class="ic-method-label"><span class="rec-dot"></span>Homebrew — recommended</div>
+          <div class="ic-cmd"><span class="c"># add tap once, then install &amp; upgrade normally</span>
+brew tap cenvero/fleet
+brew install cenvero-fleet</div>
+        </div>
+        <div class="ic-method">
+          <div class="ic-method-label">One-liner</div>
+          <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
+        </div>
+      </div>
     </div>
+
+    <!-- Linux -->
     <div class="install-card">
-      <h4>Homebrew</h4>
-      <pre>brew install cenvero/fleet/cenvero-fleet</pre>
+      <div class="ic-head">
+        <div class="ic-os-icon">🐧</div>
+        <div class="ic-title">Linux</div>
+      </div>
+      <div class="ic-body">
+        <div class="ic-method">
+          <div class="ic-method-label"><span class="rec-dot"></span>One-liner — recommended</div>
+          <div class="ic-cmd">curl -fsSL https://fleet.cenvero.org/install | sh</div>
+        </div>
+        <div class="ic-method">
+          <div class="ic-method-label">Homebrew on Linux</div>
+          <div class="ic-cmd">brew tap cenvero/fleet
+brew install cenvero-fleet</div>
+        </div>
+      </div>
     </div>
+
+    <!-- Windows -->
     <div class="install-card">
-      <h4>Windows (PowerShell)</h4>
-      <pre>irm https://fleet.cenvero.org/install.ps1 | iex</pre>
+      <div class="ic-head">
+        <div class="ic-os-icon">⊞</div>
+        <div class="ic-title">Windows</div>
+      </div>
+      <div class="ic-body">
+        <div class="ic-method">
+          <div class="ic-method-label"><span class="rec-dot"></span>PowerShell</div>
+          <div class="ic-cmd">irm https://fleet.cenvero.org/install.ps1 | iex</div>
+        </div>
+      </div>
     </div>
+
   </div>
 </div>
 
