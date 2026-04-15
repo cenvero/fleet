@@ -295,15 +295,20 @@ fleet config show</pre>
 
     <section id="server-add">
       <h2>Add a Server</h2>
-      <p>Register a server and connect to it:</p>
+      <p>Run <code>fleet server add</code> with no arguments to be guided through a step-by-step prompt, or pass the name and address directly:</p>
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this)">copy</button>
-        <pre><span class="c"># direct mode — controller reaches the server</span>
-fleet server add web-01 192.0.2.10 <span class="flag">--mode</span> direct
+        <pre><span class="c"># Interactive mode — prompts for all details</span>
+fleet server add
 
-<span class="c"># reverse mode — server dials out to the controller</span>
+<span class="c"># Non-interactive — name and address provided</span>
+fleet server add web-01 192.0.2.10
+
+<span class="c"># Reverse mode (agent dials out to the controller)</span>
 fleet server add edge-01 unknown <span class="flag">--mode</span> reverse</pre>
       </div>
+
+      <p>In interactive mode the CLI asks for name, address, transport mode, login credentials (key or password), SSH port, and sudo preference — pressing Enter accepts each default.</p>
 
       <h3>Server add flags</h3>
       <div class="table-wrap">
@@ -313,10 +318,12 @@ fleet server add edge-01 unknown <span class="flag">--mode</span> reverse</pre>
             <tr><td><code>--mode</code></td><td>direct</td><td>Transport mode: <code>direct</code> or <code>reverse</code></td></tr>
             <tr><td><code>--port</code></td><td>2222</td><td>Fleet agent port on the remote server</td></tr>
             <tr><td><code>--user</code></td><td>root</td><td>SSH user the agent runs as</td></tr>
-            <tr><td><code>--login-user</code></td><td>—</td><td>Login user for auto-installing the agent (triggers auto-install)</td></tr>
-            <tr><td><code>--login-port</code></td><td>22</td><td>Standard SSH port for the auto-install login</td></tr>
-            <tr><td><code>--login-key</code></td><td>—</td><td>Path to SSH private key for auto-install login</td></tr>
-            <tr><td><code>--sudo</code></td><td>false</td><td>Use sudo during auto-install if login user is not root</td></tr>
+            <tr><td><code>--login-user</code></td><td>—</td><td>Login user for agent auto-install (prompted if omitted in direct mode)</td></tr>
+            <tr><td><code>--login-port</code></td><td>22</td><td>SSH port for the initial login</td></tr>
+            <tr><td><code>--login-key</code></td><td>—</td><td>SSH private key for login (defaults to fleet key)</td></tr>
+            <tr><td><code>--login-password</code></td><td>—</td><td>SSH password for login (use key auth when possible)</td></tr>
+            <tr><td><code>--sudo</code></td><td>false</td><td>Use sudo for agent install commands if login user is not root</td></tr>
+            <tr><td><code>--no-agent</code></td><td>false</td><td>Skip agent auto-install (register server only)</td></tr>
           </tbody>
         </table>
       </div>
@@ -334,26 +341,31 @@ fleet server remove web-01</pre>
 
     <section id="auto-install">
       <h2>Auto-install Agent</h2>
-      <p>On Linux servers, pass <code>--login-user</code> to have the controller SSH in, download the agent from the GitHub release, install it as a systemd service, and configure everything automatically:</p>
+      <p>For direct-mode servers the agent is <strong>automatically installed</strong> by default — no extra flags needed. When you run <code>fleet server add</code> (interactive or not), the CLI will prompt for login credentials and SSH in to install the agent as a systemd service.</p>
+
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this)">copy</button>
-        <pre><span class="c"># Auto-install using root login (most common)</span>
+        <pre><span class="c"># Fully interactive — prompts for everything including login creds</span>
+fleet server add
+
+<span class="c"># Non-interactive with key auth</span>
 fleet server add web-01 192.0.2.10 \
-  <span class="flag">--mode</span> direct \
   <span class="flag">--login-user</span> root \
-  <span class="flag">--login-port</span> 22 \
   <span class="flag">--login-key</span> ~/.ssh/id_ed25519
 
-<span class="c"># Auto-install using a sudo-capable user</span>
+<span class="c"># Non-interactive with password auth</span>
 fleet server add web-01 192.0.2.10 \
-  <span class="flag">--mode</span> direct \
   <span class="flag">--login-user</span> ubuntu \
-  <span class="flag">--sudo</span></pre>
+  <span class="flag">--login-password</span> mypassword \
+  <span class="flag">--sudo</span>
+
+<span class="c"># Skip auto-install (register only)</span>
+fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
       </div>
 
       <p>The auto-install flow:</p>
       <ol>
-        <li>SSHes to the server using the provided login credentials</li>
+        <li>SSHes to the server using the provided login credentials (key or password)</li>
         <li>Detects the CPU architecture (<code>uname -m</code>)</li>
         <li>Downloads the correct <code>fleet-agent</code> release binary from GitHub</li>
         <li>Installs it to <code>/usr/local/bin/fleet-agent</code></li>
@@ -362,7 +374,7 @@ fleet server add web-01 192.0.2.10 \
       </ol>
 
       <div class="callout">
-        <strong>Linux only</strong> — auto-install requires systemd and is only supported on Linux. For macOS or Windows agents, see the manual setup instructions printed by <code>fleet server add</code> when <code>--login-user</code> is omitted.
+        <strong>Linux only</strong> — auto-install requires systemd. For macOS or Windows agents, pass <code>--no-agent</code> and follow the manual setup instructions printed by <code>fleet server add</code>.
       </div>
 
       <h3>Teardown</h3>
@@ -626,7 +638,7 @@ fleet database shift \
             <tr><td><code>fleet status</code></td><td>Show controller status and server summary</td></tr>
             <tr><td><code>fleet dashboard</code></td><td>Open the terminal dashboard TUI</td></tr>
             <tr><td><code>fleet daemon</code></td><td>Start the controller daemon (required for reverse mode)</td></tr>
-            <tr><td><code>fleet server add &lt;name&gt; &lt;ip&gt;</code></td><td>Register a server; auto-installs agent if <code>--login-user</code> given</td></tr>
+            <tr><td><code>fleet server add [name] [ip]</code></td><td>Register a server and auto-install agent (interactive when args omitted; <code>--no-agent</code> to skip)</td></tr>
             <tr><td><code>fleet server list</code></td><td>List all registered servers</td></tr>
             <tr><td><code>fleet server show &lt;name&gt;</code></td><td>Show server details and last observed state</td></tr>
             <tr><td><code>fleet server reconnect &lt;name&gt;</code></td><td>Force reconnect and refresh server info</td></tr>
