@@ -103,8 +103,8 @@ jobs:
         run: ./scripts/validate-release-manifest.sh
       - name: Commit manifest
         run: |
-          git config user.name "cenvero-release-bot"
-          git config user.email "releases@cenvero.org"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add public/manifest.json public/signing.pub public/install.sh public/install.ps1 internal/update/signing.pub
           git commit -m "chore(release): update manifest for ${GITHUB_REF_NAME}" || exit 0
           git push origin HEAD:main
@@ -118,15 +118,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y minisign
+      - name: List release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Assets for ${GITHUB_REF_NAME}:"
+          gh release view "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --json assets \
+            --jq '.assets[].name'
       - name: Download archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           gh release download "${GITHUB_REF_NAME}" \
             --repo "${{ github.repository }}" \
-            --pattern "fleet_${VERSION}_linux_amd64.tar.gz" \
-            --pattern "fleet_${VERSION}_linux_amd64.tar.gz.minisig" \
+            --pattern "fleet_*_linux_amd64.tar.gz" \
+            --pattern "fleet_*_linux_amd64.tar.gz.minisig" \
             --dir .
       - name: Verify signature
         env:
@@ -141,21 +149,18 @@ jobs:
             echo "minisign public key placeholder is not allowed" >&2
             exit 1
           }
-          VERSION="${GITHUB_REF_NAME#v}"
-          minisign -Vm "fleet_${VERSION}_linux_amd64.tar.gz" -P "${key_payload}" -x "fleet_${VERSION}_linux_amd64.tar.gz.minisig"
+          archive="$(ls fleet_*_linux_amd64.tar.gz)"
+          minisign -Vm "${archive}" -P "${key_payload}" -x "${archive}.minisig"
       - name: Verify binary runs
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          tar -xzf "fleet_${VERSION}_linux_amd64.tar.gz"
+          archive="$(ls fleet_*_linux_amd64.tar.gz)"
+          tar -xzf "${archive}"
           ./fleet --version
 
   deploy-pages:
     name: Deploy Pages
     runs-on: ubuntu-latest
     needs: [update-manifest]
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
