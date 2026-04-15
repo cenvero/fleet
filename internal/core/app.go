@@ -47,6 +47,8 @@ type App struct {
 	ReverseRPC          func(string, proto.Envelope) (proto.Envelope, error)
 	ReverseStatusLookup func(string) (ReverseSessionInfo, error)
 	ReverseDisconnect   func(string) error
+
+	serverMu sync.RWMutex
 }
 
 func Open(configDir string) (*App, error) {
@@ -154,14 +156,8 @@ func (a *App) AddServer(record ServerRecord) error {
 		record.CreatedAt = time.Now().UTC()
 	}
 	record.UpdatedAt = time.Now().UTC()
-	path := filepath.Join(a.ConfigDir, "servers", record.Name+".toml")
-	f, err := os.Create(path)
-	if err != nil {
+	if err := a.writeServerFile(record); err != nil {
 		return fmt.Errorf("create server record: %w", err)
-	}
-	defer f.Close()
-	if err := toml.NewEncoder(f).Encode(record); err != nil {
-		return fmt.Errorf("encode server record: %w", err)
 	}
 	return a.AuditLog.Append(logs.AuditEntry{
 		Action:   "server.add",
@@ -172,7 +168,9 @@ func (a *App) AddServer(record ServerRecord) error {
 }
 
 func (a *App) ListServers() ([]ServerRecord, error) {
+	a.serverMu.RLock()
 	entries, err := os.ReadDir(filepath.Join(a.ConfigDir, "servers"))
+	a.serverMu.RUnlock()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -185,8 +183,11 @@ func (a *App) ListServers() ([]ServerRecord, error) {
 			continue
 		}
 		path := filepath.Join(a.ConfigDir, "servers", entry.Name())
+		a.serverMu.RLock()
 		var server ServerRecord
-		if _, err := toml.DecodeFile(path, &server); err != nil {
+		_, err := toml.DecodeFile(path, &server)
+		a.serverMu.RUnlock()
+		if err != nil {
 			return nil, fmt.Errorf("decode server %s: %w", entry.Name(), err)
 		}
 		servers = append(servers, server)
@@ -198,9 +199,12 @@ func (a *App) ListServers() ([]ServerRecord, error) {
 }
 
 func (a *App) GetServer(name string) (ServerRecord, error) {
-	var server ServerRecord
 	path := filepath.Join(a.ConfigDir, "servers", name+".toml")
-	if _, err := toml.DecodeFile(path, &server); err != nil {
+	a.serverMu.RLock()
+	var server ServerRecord
+	_, err := toml.DecodeFile(path, &server)
+	a.serverMu.RUnlock()
+	if err != nil {
 		return ServerRecord{}, fmt.Errorf("load server %s: %w", name, err)
 	}
 	return server, nil
@@ -208,10 +212,16 @@ func (a *App) GetServer(name string) (ServerRecord, error) {
 
 func (a *App) SaveServer(server ServerRecord) error {
 	server.UpdatedAt = time.Now().UTC()
+	return a.writeServerFile(server)
+}
+
+func (a *App) writeServerFile(server ServerRecord) error {
 	path := filepath.Join(a.ConfigDir, "servers", server.Name+".toml")
+	a.serverMu.Lock()
+	defer a.serverMu.Unlock()
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("save server %s: %w", server.Name, err)
+		return fmt.Errorf("write server %s: %w", server.Name, err)
 	}
 	defer f.Close()
 	return toml.NewEncoder(f).Encode(server)
