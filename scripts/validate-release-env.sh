@@ -4,7 +4,6 @@ set -euo pipefail
 : "${MINISIGN_SECRET_KEY:?MINISIGN_SECRET_KEY is required}"
 : "${MINISIGN_PASSWORD:?MINISIGN_PASSWORD is required}"
 : "${MINISIGN_PUBLIC_KEY:?MINISIGN_PUBLIC_KEY is required}"
-: "${RELEASE_BOT_TOKEN:?RELEASE_BOT_TOKEN is required}"
 
 tmp="$(mktemp)"
 trap 'rm -f "${tmp}"' EXIT INT TERM

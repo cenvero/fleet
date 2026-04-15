@@ -26,7 +26,6 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
-          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
         run: ./scripts/validate-release-env.sh
       - name: Write minisign key
         env:
@@ -69,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
         with:
           name: release-dist
@@ -120,10 +119,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y minisign
       - name: Download archive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          curl -fsSL --retry 5 --retry-delay 10 "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz" -o fleet.tar.gz
-          curl -fsSL --retry 5 --retry-delay 10 "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz.minisig" -o fleet.tar.gz.minisig
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --pattern "fleet_${VERSION}_linux_amd64.tar.gz" \
+            --pattern "fleet_${VERSION}_linux_amd64.tar.gz.minisig" \
+            --dir .
       - name: Verify signature
         env:
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
@@ -137,10 +141,12 @@ jobs:
             echo "minisign public key placeholder is not allowed" >&2
             exit 1
           }
-          minisign -Vm fleet.tar.gz -P "${key_payload}" -x fleet.tar.gz.minisig
+          VERSION="${GITHUB_REF_NAME#v}"
+          minisign -Vm "fleet_${VERSION}_linux_amd64.tar.gz" -P "${key_payload}" -x "fleet_${VERSION}_linux_amd64.tar.gz.minisig"
       - name: Verify binary runs
         run: |
-          tar -xzf fleet.tar.gz
+          VERSION="${GITHUB_REF_NAME#v}"
+          tar -xzf "fleet_${VERSION}_linux_amd64.tar.gz"
           ./fleet --version
 
   deploy-pages:
