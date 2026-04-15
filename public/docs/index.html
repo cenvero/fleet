@@ -221,6 +221,17 @@
       overflow-x: auto; white-space: pre; line-height: 1.65;
     }
     .ic-cmd .c { color: #3a5550; }
+    .ic-your-badge {
+      margin-left: auto; font-family: var(--mono); font-size: 0.63rem;
+      padding: 2px 9px; border-radius: 999px;
+      background: var(--accent-soft); border: 1px solid var(--border-acc);
+      color: var(--accent); white-space: nowrap;
+    }
+    .install-card.your-os {
+      border-color: rgba(0,212,170,0.35);
+      box-shadow: 0 0 0 1px rgba(0,212,170,0.1), 0 8px 32px rgba(0,0,0,0.3);
+      order: -1;
+    }
 
     /* ── CODE BLOCKS ────────────────────────────────── */
     code {
@@ -465,7 +476,7 @@
       <div class="install-grid">
 
         <!-- macOS -->
-        <div class="install-card featured">
+        <div class="install-card featured" data-os="mac">
           <div class="ic-head">
             <div class="ic-os-icon">🍎</div>
             <div class="ic-title">macOS</div>
@@ -488,7 +499,7 @@ brew upgrade cenvero-fleet</div>
         </div>
 
         <!-- Linux -->
-        <div class="install-card">
+        <div class="install-card" data-os="linux">
           <div class="ic-head">
             <div class="ic-os-icon">🐧</div>
             <div class="ic-title">Linux</div>
@@ -504,7 +515,7 @@ curl -fsSL https://fleet.cenvero.org/install | sh</div>
         </div>
 
         <!-- Windows -->
-        <div class="install-card">
+        <div class="install-card" data-os="windows">
           <div class="ic-head">
             <div class="ic-os-icon">⊞</div>
             <div class="ic-title">Windows</div>
@@ -974,6 +985,27 @@ fleet database shift \
 </footer>
 
 <script>
+  // OS detection — highlight & move matching install card to front
+  (function() {
+    const ua = navigator.userAgent;
+    let os = 'linux';
+    if (/Windows/i.test(ua))                                              os = 'windows';
+    else if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua))   os = 'mac';
+
+    const card = document.querySelector('.install-card[data-os="' + os + '"]');
+    if (!card) return;
+    card.classList.add('your-os');
+    const head = card.querySelector('.ic-head');
+    if (head) {
+      const badge = document.createElement('span');
+      badge.className = 'ic-your-badge';
+      badge.textContent = 'your platform';
+      head.appendChild(badge);
+    }
+    const grid = card.parentElement;
+    if (grid) grid.prepend(card);
+  })();
+
   function copy(btn) {
     const pre = btn.nextElementSibling;
     navigator.clipboard.writeText(pre.innerText).then(() => {

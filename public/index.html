@@ -272,6 +272,17 @@
       overflow-x: auto; white-space: pre; line-height: 1.65;
     }
     .ic-cmd .c { color: #3a5248; }
+    .ic-your-badge {
+      margin-left: auto; font-family: var(--mono); font-size: 0.63rem;
+      padding: 2px 9px; border-radius: 999px;
+      background: var(--accent-soft); border: 1px solid rgba(0,212,170,0.35);
+      color: var(--accent); white-space: nowrap;
+    }
+    .install-card.your-os {
+      border-color: rgba(0,212,170,0.35);
+      box-shadow: 0 0 0 1px rgba(0,212,170,0.1), 0 8px 32px rgba(0,0,0,0.3);
+      order: -1;
+    }
 
     /* ── FOOTER ── */
     footer {
@@ -443,7 +454,7 @@ fleet dashboard</pre>
   <div class="install-grid">
 
     <!-- macOS -->
-    <div class="install-card featured">
+    <div class="install-card featured" data-os="mac">
       <div class="ic-head">
         <div class="ic-os-icon">🍎</div>
         <div class="ic-title">macOS</div>
@@ -463,7 +474,7 @@ brew install cenvero-fleet</div>
     </div>
 
     <!-- Linux -->
-    <div class="install-card">
+    <div class="install-card" data-os="linux">
       <div class="ic-head">
         <div class="ic-os-icon">🐧</div>
         <div class="ic-title">Linux</div>
@@ -478,7 +489,7 @@ brew install cenvero-fleet</div>
     </div>
 
     <!-- Windows -->
-    <div class="install-card">
+    <div class="install-card" data-os="windows">
       <div class="ic-head">
         <div class="ic-os-icon">⊞</div>
         <div class="ic-title">Windows</div>
@@ -507,6 +518,30 @@ brew install cenvero-fleet</div>
 </footer>
 
 <script>
+  // OS detection — highlight & move matching install card to front
+  (function() {
+    const ua = navigator.userAgent;
+    let os = 'linux';
+    if (/Windows/i.test(ua))                          os = 'windows';
+    else if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua)) os = 'mac';
+    else if (/Android/i.test(ua))                     os = 'linux';
+
+    const card = document.querySelector('.install-card[data-os="' + os + '"]');
+    if (!card) return;
+    card.classList.add('your-os');
+    // insert "your platform" badge in header
+    const head = card.querySelector('.ic-head');
+    if (head) {
+      const badge = document.createElement('span');
+      badge.className = 'ic-your-badge';
+      badge.textContent = 'your platform';
+      head.appendChild(badge);
+    }
+    // move to front of grid
+    const grid = card.parentElement;
+    if (grid) grid.prepend(card);
+  })();
+
   function toggleMenu(btn) {
     const m = document.getElementById('nav-mobile');
     m.classList.toggle('open');
