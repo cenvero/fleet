@@ -103,10 +103,11 @@ done < <(
   jq -c --arg version "${FLEET_VERSION}" '
     .[]
     | select(.type == "Archive" or .type == "Zip")
-    | select((.extra.Binary // (.extra.Binaries[0] // "")) == "fleet" or (.extra.Binary // (.extra.Binaries[0] // "")) == "fleet-agent")
+    | ((.extra.Binary // (.extra.Binaries[0] // "")) | gsub("\\.exe$"; "")) as $bin
+    | select($bin == "fleet" or $bin == "fleet-agent")
     | select(.name | contains(($version | ltrimstr("v")) + "_"))
     | {
-        binary: (.extra.Binary // (.extra.Binaries[0] // "")),
+        binary: $bin,
         name: .name,
         path: .path,
         goos: .goos,
