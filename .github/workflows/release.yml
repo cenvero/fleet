@@ -53,6 +53,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TOKEN: ${{ secrets.HOMEBREW_TOKEN }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           MINISIGN_KEY_FILE: .release/minisign.key
       - name: Upload release dist

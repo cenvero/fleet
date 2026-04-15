@@ -100,7 +100,7 @@ brews:
     repository:
       owner: cenvero
       name: homebrew-fleet
-      token: "{{ .Env.GITHUB_TOKEN }}"
+      token: "{{ .Env.HOMEBREW_TOKEN }}"
     homepage: "https://fleet.cenvero.org"
     description: "Self-hosted decentralized fleet management platform"
     license: "AGPL-3.0-or-later"
