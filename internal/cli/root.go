@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -308,7 +309,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 						if strings.EqualFold(strings.TrimSpace(authChoice), "p") ||
 							strings.HasPrefix(strings.ToLower(authChoice), "p") {
 							fmt.Fprintf(cmd.OutOrStdout(), "Password: ")
-							if pw, err := term.ReadPassword(int(os.Stdin.Fd())); err == nil {
+							if pw, err := term.ReadPassword(syscall.Stdin); err == nil {
 								loginPassword = string(pw)
 								fmt.Fprintln(cmd.OutOrStdout())
 							} else {
