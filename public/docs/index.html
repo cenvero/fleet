@@ -6,171 +6,270 @@
   <title>Docs — Cenvero Fleet</title>
   <meta name="description" content="Full documentation for Cenvero Fleet: installation, server management, SSH access, services, logs, alerts, and more.">
   <link rel="icon" href="https://cdn.cenvero.com/favicon.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0a0e14;
-      --bg-soft: #121926;
-      --card: rgba(18,25,38,0.82);
-      --text: #f4f7fb;
-      --muted: #98a6bc;
+      --bg: #080d14;
+      --bg-soft: #0f1620;
+      --card: rgba(15,22,32,0.85);
+      --text: #f0f4fa;
+      --muted: #8a9ab8;
       --accent: #00d4aa;
-      --accent-soft: rgba(0,212,170,0.14);
-      --border: rgba(255,255,255,0.08);
-      --code-bg: rgba(8,15,26,0.96);
-      --mono: "SFMono-Regular","JetBrains Mono",ui-monospace,monospace;
-      --sans: "Avenir Next","Segoe UI","Helvetica Neue",sans-serif;
-      --sidebar-w: 240px;
+      --accent2: #3b82f6;
+      --accent-soft: rgba(0,212,170,0.12);
+      --border: rgba(255,255,255,0.07);
+      --code-bg: rgba(5,12,22,0.98);
+      --mono: 'JetBrains Mono', 'SFMono-Regular', ui-monospace, monospace;
+      --sans: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
+      --sidebar-w: 248px;
+      --nav-h: 56px;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
     body {
       color: var(--text);
       font-family: var(--sans);
-      background: linear-gradient(180deg, #081018 0%, #0a0e14 60%);
+      background: var(--bg);
       min-height: 100vh;
       font-size: 15px;
-      line-height: 1.7;
+      line-height: 1.72;
     }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
-    /* NAV */
+    /* ── NAV ─────────────────────────────────────── */
     .topnav {
-      position: sticky; top: 0; z-index: 100;
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 0 28px; height: 54px;
-      backdrop-filter: blur(14px);
-      background: rgba(10,14,20,0.88);
+      position: sticky; top: 0; z-index: 200;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 clamp(16px, 4vw, 32px);
+      height: var(--nav-h);
+      backdrop-filter: blur(16px);
+      background: rgba(8,13,20,0.92);
       border-bottom: 1px solid var(--border);
     }
-    .brand { font-family: var(--mono); font-size: 0.9rem; letter-spacing: 0.08em; color: var(--text); }
+    .brand {
+      font-family: var(--mono); font-size: 0.88rem;
+      letter-spacing: 0.06em; color: var(--text); white-space: nowrap;
+    }
     .brand span { color: var(--accent); }
-    .topnav-links { display: flex; gap: 22px; font-size: 0.9rem; color: var(--muted); }
-    .topnav-links a { color: var(--muted); }
+    .topnav-links { display: flex; gap: 24px; font-size: 0.88rem; }
+    .topnav-links a { color: var(--muted); transition: color 160ms; }
     .topnav-links a:hover { color: var(--text); text-decoration: none; }
+    .topnav-links a.active { color: var(--text); }
 
-    /* LAYOUT */
-    .layout { display: flex; max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+    /* hamburger — mobile only */
+    .menu-btn {
+      display: none; background: none; border: none; cursor: pointer;
+      padding: 6px; color: var(--muted); flex-direction: column; gap: 5px;
+    }
+    .menu-btn span {
+      display: block; width: 22px; height: 2px;
+      background: currentColor; border-radius: 2px; transition: all 200ms;
+    }
+    .menu-btn.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .menu-btn.open span:nth-child(2) { opacity: 0; }
+    .menu-btn.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
-    /* SIDEBAR */
+    /* ── LAYOUT ──────────────────────────────────── */
+    .layout {
+      display: flex;
+      max-width: 1260px;
+      margin: 0 auto;
+      padding: 0 clamp(16px, 4vw, 28px);
+    }
+
+    /* ── SIDEBAR ─────────────────────────────────── */
     .sidebar {
       width: var(--sidebar-w);
       flex-shrink: 0;
       position: sticky;
-      top: 54px;
-      height: calc(100vh - 54px);
+      top: var(--nav-h);
+      height: calc(100vh - var(--nav-h));
       overflow-y: auto;
-      padding: 28px 16px 40px 0;
+      padding: 32px 12px 48px 0;
       border-right: 1px solid var(--border);
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
     }
     .sidebar::-webkit-scrollbar { width: 4px; }
     .sidebar::-webkit-scrollbar-track { background: transparent; }
     .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-    .sidebar-group { margin-bottom: 24px; }
+
+    .sidebar-group { margin-bottom: 28px; }
     .sidebar-group-title {
-      font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em;
-      text-transform: uppercase; color: var(--accent); margin-bottom: 8px; padding-left: 12px;
+      font-family: var(--mono); font-size: 0.68rem;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--accent); margin-bottom: 6px; padding-left: 12px;
     }
     .sidebar a {
-      display: block; padding: 5px 12px; border-radius: 7px;
-      color: var(--muted); font-size: 0.88rem;
+      display: block; padding: 5px 12px; border-radius: 8px;
+      color: var(--muted); font-size: 0.875rem; transition: all 140ms;
     }
     .sidebar a:hover { color: var(--text); background: var(--accent-soft); text-decoration: none; }
-    .sidebar a.active { color: var(--text); background: var(--accent-soft); }
+    .sidebar a.active { color: var(--text); background: var(--accent-soft); font-weight: 500; }
 
-    /* CONTENT */
+    /* sidebar overlay (mobile) */
+    .sidebar-overlay {
+      display: none;
+      position: fixed; inset: 0; z-index: 150;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(2px);
+    }
+    .sidebar-overlay.open { display: block; }
+
+    /* ── CONTENT ─────────────────────────────────── */
     .content {
       flex: 1; min-width: 0;
-      padding: 40px 0 80px 44px;
+      padding: 44px 0 96px 48px;
     }
-    .content > section { margin-bottom: 64px; scroll-margin-top: 70px; }
+    .content > section {
+      margin-bottom: 72px;
+      scroll-margin-top: calc(var(--nav-h) + 16px);
+    }
 
-    h1 { font-size: 2.4rem; letter-spacing: -0.04em; margin-bottom: 10px; line-height: 1.15; }
-    h2 { font-size: 1.6rem; letter-spacing: -0.03em; margin-bottom: 16px; margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
-    h3 { font-size: 1.1rem; color: var(--accent); font-family: var(--mono); letter-spacing: 0.04em; margin: 28px 0 12px; }
-    h4 { font-size: 0.95rem; color: var(--text); margin: 18px 0 8px; }
+    h1 {
+      font-size: clamp(1.9rem, 4vw, 2.6rem);
+      font-weight: 700; letter-spacing: -0.04em;
+      line-height: 1.12; margin-bottom: 12px;
+    }
+    h2 {
+      font-size: clamp(1.25rem, 3vw, 1.7rem);
+      font-weight: 600; letter-spacing: -0.03em;
+      margin-bottom: 18px; padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 0.82rem; color: var(--accent);
+      font-family: var(--mono); letter-spacing: 0.1em;
+      text-transform: uppercase; margin: 32px 0 14px;
+    }
+    h4 { font-size: 0.94rem; color: var(--text); font-weight: 600; margin: 20px 0 8px; }
     p { color: var(--muted); margin-bottom: 14px; }
     ul, ol { color: var(--muted); padding-left: 22px; margin-bottom: 14px; }
-    li { margin-bottom: 4px; }
+    li { margin-bottom: 5px; }
     strong { color: var(--text); font-weight: 600; }
-    .lead { font-size: 1.05rem; color: #b8c6d9; margin-bottom: 24px; }
+    .lead { font-size: 1.05rem; color: #b2c4dc; margin-bottom: 28px; }
 
-    /* CODE */
+    /* ── CODE ────────────────────────────────────── */
     code {
-      font-family: var(--mono); font-size: 0.85em;
+      font-family: var(--mono); font-size: 0.84em;
       background: rgba(0,212,170,0.1); color: var(--accent);
-      padding: 2px 6px; border-radius: 5px;
+      padding: 2px 7px; border-radius: 5px;
     }
-    .code-block {
-      position: relative; margin: 16px 0;
-    }
+    .code-block { position: relative; margin: 18px 0; }
     pre {
-      font-family: var(--mono); font-size: 0.84rem; line-height: 1.65;
+      font-family: var(--mono); font-size: 0.83rem; line-height: 1.7;
       background: var(--code-bg);
-      border: 1px solid rgba(0,212,170,0.18);
-      border-radius: 12px; padding: 18px 20px;
-      overflow-x: auto; color: #d4efea;
+      border: 1px solid rgba(0,212,170,0.15);
+      border-radius: 14px; padding: 20px 22px;
+      overflow-x: auto; color: #c8e6e0;
       white-space: pre;
     }
-    pre .c { color: #4a6a60; }
+    pre .c  { color: #3d5a52; }
     pre .kw { color: #00d4aa; }
     pre .str { color: #9fe7c8; }
     pre .flag { color: #7dd3c0; }
     .copy-btn {
-      position: absolute; top: 10px; right: 10px;
-      background: rgba(0,212,170,0.12); border: 1px solid rgba(0,212,170,0.22);
-      color: var(--accent); font-family: var(--mono); font-size: 0.72rem;
-      padding: 4px 10px; border-radius: 6px; cursor: pointer;
-      transition: background 160ms;
+      position: absolute; top: 11px; right: 12px;
+      background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.2);
+      color: var(--accent); font-family: var(--mono); font-size: 0.7rem;
+      padding: 4px 11px; border-radius: 6px; cursor: pointer; transition: background 160ms;
     }
     .copy-btn:hover { background: rgba(0,212,170,0.22); }
 
-    /* CALLOUTS */
+    /* ── CALLOUT ─────────────────────────────────── */
     .callout {
-      border-left: 3px solid var(--accent); background: var(--accent-soft);
-      border-radius: 0 10px 10px 0; padding: 14px 18px; margin: 18px 0;
-      color: #b8d9d0; font-size: 0.9rem;
+      border-left: 3px solid var(--accent);
+      background: linear-gradient(135deg, rgba(0,212,170,0.09) 0%, rgba(0,212,170,0.04) 100%);
+      border-radius: 0 12px 12px 0; padding: 14px 20px; margin: 20px 0;
+      color: #a8cfc7; font-size: 0.9rem;
     }
     .callout strong { color: var(--accent); }
 
-    /* TABLES */
-    .table-wrap { overflow-x: auto; margin: 16px 0; }
-    table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
-    th { text-align: left; color: var(--accent); font-family: var(--mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 8px 14px; border-bottom: 1px solid var(--border); }
-    td { padding: 9px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--muted); vertical-align: top; }
-    td code { font-size: 0.82em; }
+    /* ── TABLES ──────────────────────────────────── */
+    .table-wrap { overflow-x: auto; margin: 18px 0; border-radius: 12px; border: 1px solid var(--border); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
+    th {
+      text-align: left; color: var(--accent);
+      font-family: var(--mono); font-size: 0.72rem;
+      text-transform: uppercase; letter-spacing: 0.1em;
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      background: rgba(0,212,170,0.05);
+    }
+    td {
+      padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.04);
+      color: var(--muted); vertical-align: top;
+    }
+    td code { font-size: 0.82em; white-space: nowrap; }
     tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
 
-    /* CARDS */
-    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0; }
+    /* ── CARDS ───────────────────────────────────── */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px; margin: 22px 0;
+    }
     .card {
       border: 1px solid var(--border); border-radius: 14px;
-      padding: 18px 20px; background: var(--card);
+      padding: 20px 22px; background: var(--card);
+      transition: border-color 200ms, transform 200ms;
     }
-    .card h4 { color: var(--accent); font-family: var(--mono); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 8px; }
-    .card p { font-size: 0.88rem; margin: 0; }
+    .card:hover { border-color: rgba(0,212,170,0.25); transform: translateY(-2px); }
+    .card h4 {
+      color: var(--accent); font-family: var(--mono); font-size: 0.76rem;
+      text-transform: uppercase; letter-spacing: 0.1em; margin: 0 0 10px;
+    }
+    .card p { font-size: 0.875rem; margin: 0; }
 
-    /* BADGE */
+    /* ── BADGE ───────────────────────────────────── */
     .badge {
-      display: inline-block; font-family: var(--mono); font-size: 0.72rem;
-      padding: 2px 8px; border-radius: 999px; border: 1px solid;
+      display: inline-block; font-family: var(--mono); font-size: 0.7rem;
+      padding: 2px 9px; border-radius: 999px; border: 1px solid;
       vertical-align: middle; margin-left: 8px;
     }
     .badge-linux { color: #7dd3c0; border-color: rgba(125,211,192,0.35); }
-    .badge-all { color: #a0b4cc; border-color: rgba(160,180,204,0.35); }
+    .badge-all   { color: #a0b4cc; border-color: rgba(160,180,204,0.35); }
 
+    /* ── FOOTER ──────────────────────────────────── */
     footer {
-      border-top: 1px solid var(--border); margin-top: 0;
-      padding: 24px 28px; color: var(--muted);
-      display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
-      font-size: 0.88rem;
+      border-top: 1px solid var(--border);
+      padding: 28px clamp(16px, 4vw, 32px);
+      color: var(--muted); font-size: 0.875rem;
+      display: flex; justify-content: space-between;
+      align-items: center; gap: 16px; flex-wrap: wrap;
     }
 
-    @media (max-width: 860px) {
-      .sidebar { display: none; }
-      .content { padding: 28px 0 60px; }
+    /* ── MOBILE ──────────────────────────────────── */
+    @media (max-width: 900px) {
+      .menu-btn { display: flex; }
       .topnav-links { display: none; }
+
+      .sidebar {
+        position: fixed;
+        top: 0; left: 0; bottom: 0;
+        z-index: 160;
+        width: min(var(--sidebar-w), 80vw);
+        height: 100vh;
+        padding-top: calc(var(--nav-h) + 24px);
+        background: var(--bg-soft);
+        border-right: 1px solid rgba(0,212,170,0.12);
+        transform: translateX(-110%);
+        transition: transform 260ms cubic-bezier(0.4,0,0.2,1);
+      }
+      .sidebar.open { transform: translateX(0); }
+
+      .content { padding: 32px 0 72px; }
+
       .card-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 540px) {
+      pre { font-size: 0.77rem; padding: 16px; }
+      h1  { font-size: 1.7rem; }
+      h2  { font-size: 1.25rem; }
     }
   </style>
 </head>
@@ -180,14 +279,19 @@
   <a class="brand" href="/">cenvero / <span>fleet</span></a>
   <div class="topnav-links">
     <a href="/">Home</a>
-    <a href="/docs/" style="color:var(--text)">Docs</a>
+    <a href="/docs/" class="active">Docs</a>
     <a href="https://github.com/cenvero/fleet">GitHub</a>
     <a href="https://github.com/cenvero/fleet/releases">Releases</a>
   </div>
+  <button class="menu-btn" id="menuBtn" aria-label="Toggle sidebar" onclick="toggleSidebar()">
+    <span></span><span></span><span></span>
+  </button>
 </nav>
 
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+
 <div class="layout">
-  <nav class="sidebar">
+  <nav class="sidebar" id="sidebar">
     <div class="sidebar-group">
       <div class="sidebar-group-title">Getting Started</div>
       <a href="#install">Install</a>
@@ -257,6 +361,12 @@
         <pre>curl -fsSL https://fleet.cenvero.org/install | sh</pre>
       </div>
 
+      <h3>Homebrew (macOS / Linux)</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>brew install cenvero/fleet/cenvero-fleet</pre>
+      </div>
+
       <h3>Windows (PowerShell)</h3>
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this)">copy</button>
@@ -270,7 +380,7 @@
 cd fleet
 make build</pre>
       </div>
-      <p>Requires Go 1.26. Produces <code>fleet</code> and <code>fleet-agent</code> in the repo root.</p>
+      <p>Requires Go 1.24+. Produces <code>fleet</code> and <code>fleet-agent</code> in the repo root.</p>
 
       <div class="callout">
         <strong>Release verification</strong> — all release archives are signed with minisign. The installer verifies the signature against the embedded public key before swapping the binary.
@@ -284,7 +394,7 @@ make build</pre>
         <button class="copy-btn" onclick="copy(this)">copy</button>
         <pre>fleet init</pre>
       </div>
-      <p>This creates the config directory (default <code>~/.cenvero-fleet/</code>), generates controller keys, initialises the SQLite databases, and writes <code>config.toml</code>.</p>
+      <p>This creates the config directory (default <code>~/.cenvero-fleet/</code>), generates controller keys, initialises the SQLite databases, and writes <code>config.toml</code>. All other <code>fleet</code> commands are blocked until <code>fleet init</code> has been run.</p>
       <p>Verify everything looks right:</p>
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this)">copy</button>
@@ -341,7 +451,7 @@ fleet server remove web-01</pre>
 
     <section id="auto-install">
       <h2>Auto-install Agent</h2>
-      <p>For direct-mode servers the agent is <strong>automatically installed</strong> by default — no extra flags needed. When you run <code>fleet server add</code> (interactive or not), the CLI will prompt for login credentials and SSH in to install the agent as a systemd service.</p>
+      <p>For direct-mode servers the agent is <strong>automatically installed</strong> by default — no extra flags needed. When you run <code>fleet server add</code> (interactive or not), the CLI shows a preview of what will be installed and asks for confirmation before SSHing in.</p>
 
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this)">copy</button>
@@ -365,6 +475,7 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
 
       <p>The auto-install flow:</p>
       <ol>
+        <li>Shows an install preview (files and services that will be created)</li>
         <li>SSHes to the server using the provided login credentials (key or password)</li>
         <li>Detects the CPU architecture (<code>uname -m</code>)</li>
         <li>Downloads the correct <code>fleet-agent</code> release binary from GitHub</li>
@@ -579,7 +690,7 @@ fleet key rotate</pre>
 
     <section id="updates">
       <h2>Updates</h2>
-      <p>Cenvero Fleet manages its own updates. The default policy is <code>notify-only</code> — the controller never silently replaces itself.</p>
+      <p>Cenvero Fleet manages its own updates. Agents are automatically kept in sync with the controller version whenever they connect.</p>
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this)">copy</button>
         <pre><span class="c"># Check for available updates</span>
@@ -596,6 +707,10 @@ fleet update channel stable
 fleet update channel beta</pre>
       </div>
       <p>Available channels: <code>stable</code>, <code>beta</code>, <code>alpha</code>. Update artifacts are signature-verified before applying.</p>
+
+      <div class="callout">
+        <strong>Homebrew installs</strong> — if fleet was installed via Homebrew, <code>fleet update apply</code> will skip self-update and show the correct <code>brew upgrade cenvero-fleet</code> command instead. Agents are still updated regardless.
+      </div>
     </section>
 
     <section id="config">
@@ -665,6 +780,7 @@ fleet database shift \
             <tr><td><code>fleet config show|validate|backup|restore</code></td><td>Manage controller config</td></tr>
             <tr><td><code>fleet database show|shift</code></td><td>Inspect or migrate the database backend</td></tr>
             <tr><td><code>fleet template list|apply</code></td><td>Manage server templates</td></tr>
+            <tr><td><code>fleet self-uninstall</code></td><td>Remove fleet binary and config directory</td></tr>
           </tbody>
         </table>
       </div>
@@ -718,6 +834,16 @@ fleet database shift \
     });
   }
 
+  function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebarOverlay');
+    const btn = document.getElementById('menuBtn');
+    const open = sidebar.classList.toggle('open');
+    overlay.classList.toggle('open', open);
+    btn.classList.toggle('open', open);
+    document.body.style.overflow = open ? 'hidden' : '';
+  }
+
   // Highlight active sidebar link on scroll
   const sections = document.querySelectorAll('section[id]');
   const links = document.querySelectorAll('.sidebar a');
@@ -729,8 +855,14 @@ fleet database shift \
         });
       }
     });
-  }, { rootMargin: '-20% 0px -70% 0px' });
+  }, { rootMargin: '-15% 0px -70% 0px' });
   sections.forEach(s => obs.observe(s));
+
+  // Close sidebar when a link is clicked (mobile)
+  links.forEach(l => l.addEventListener('click', () => {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar.classList.contains('open')) toggleSidebar();
+  }));
 </script>
 </body>
 </html>

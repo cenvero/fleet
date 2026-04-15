@@ -398,10 +398,8 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 		Details:  fmt.Sprintf("fingerprint=%s capabilities=%d", info.HostKeyFingerprint, len(info.Hello.Capabilities)),
 	})
 
-	// Auto-sync agent version on connect if it differs from the controller.
-	if h.app.Config.Updates.Policy == "auto" &&
-		info.Hello.AgentVersion != "" &&
-		info.Hello.AgentVersion != version.Version {
+	// Always keep agent version in sync with the controller.
+	if info.Hello.AgentVersion != "" && info.Hello.AgentVersion != version.Version {
 		go func() {
 			_ = h.app.AuditLog.Append(logs.AuditEntry{
 				Action:   "agent.auto-update",

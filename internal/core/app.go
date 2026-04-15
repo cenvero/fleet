@@ -953,10 +953,8 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 	}
 	_ = a.SaveServer(server)
 
-	// Auto-sync agent version on connect if it differs from the controller.
-	if a.Config.Updates.Policy == "auto" &&
-		hello.AgentVersion != "" &&
-		hello.AgentVersion != version.Version {
+	// Always keep agent version in sync with the controller.
+	if hello.AgentVersion != "" && hello.AgentVersion != version.Version {
 		go func() {
 			_ = a.AuditLog.Append(logs.AuditEntry{
 				Action:   "agent.auto-update",
