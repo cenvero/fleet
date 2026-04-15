@@ -22,8 +22,6 @@ builds:
     goarm:
       - "7"
     ignore:
-      - goos: windows
-        goarch: arm64
       - goos: darwin
         goarm: "7"
       - goos: windows
@@ -48,8 +46,6 @@ builds:
     goarm:
       - "7"
     ignore:
-      - goos: windows
-        goarch: arm64
       - goos: darwin
         goarm: "7"
       - goos: windows
