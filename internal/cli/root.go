@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -205,25 +206,122 @@ func newServerCommand(configDir *string) *cobra.Command {
 	var loginUser string
 	var loginPort int
 	var loginKey string
+	var loginPassword string
 	var useSudo bool
+	var noAgent bool
 
 	add := &cobra.Command{
-		Use:   "add <name> <ip>",
+		Use:   "add [name] [ip]",
 		Short: "Add a server to the fleet",
-		Args:  cobra.ExactArgs(2),
+		Args:  cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			scanner := bufio.NewScanner(os.Stdin)
+
+			prompt := func(label, def string) string {
+				if def != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s [%s]: ", label, def)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s: ", label)
+				}
+				scanner.Scan()
+				v := strings.TrimSpace(scanner.Text())
+				if v == "" {
+					return def
+				}
+				return v
+			}
+
+			name := ""
+			address := ""
+			if len(args) >= 1 {
+				name = args[0]
+			}
+			if len(args) >= 2 {
+				address = args[1]
+			}
+
+			// Enter interactive mode when name or address are missing.
+			interactive := name == "" || address == ""
+			if interactive {
+				fmt.Fprintln(cmd.OutOrStdout(), "Adding a server — press Enter to accept defaults.")
+				fmt.Fprintln(cmd.OutOrStdout())
+				if name == "" {
+					name = prompt("Server name", "")
+					if name == "" {
+						return fmt.Errorf("server name is required")
+					}
+				}
+				if address == "" {
+					address = prompt("IP address or hostname", "")
+					if address == "" {
+						return fmt.Errorf("address is required")
+					}
+				}
+				if !cmd.Flags().Changed("mode") {
+					mode = prompt("Transport mode (direct/reverse)", "direct")
+				}
+			}
+
+			parsedMode, err := transport.ParseMode(mode)
+			if err != nil {
+				return err
+			}
+
+			// For direct mode: prompt for login credentials interactively
+			// unless --no-agent was passed or credentials were given as flags.
+			if parsedMode == transport.ModeDirect && !noAgent {
+				if loginUser == "" {
+					if interactive {
+						loginUser = prompt("Login user for agent install (leave blank to skip)", "root")
+					} else {
+						// non-interactive: ask on stdin since --login-user was not given
+						fmt.Fprintf(cmd.OutOrStdout(), "Login user for agent install [root] (--no-agent to skip): ")
+						scanner.Scan()
+						v := strings.TrimSpace(scanner.Text())
+						if v == "" {
+							v = "root"
+						}
+						loginUser = v
+					}
+				}
+				if loginUser != "" && loginKey == "" && loginPassword == "" {
+					if interactive {
+						authType := prompt("Auth type (key/password)", "key")
+						if strings.HasPrefix(authType, "p") {
+							fmt.Fprintf(cmd.OutOrStdout(), "Password: ")
+							scanner.Scan()
+							loginPassword = strings.TrimSpace(scanner.Text())
+						} else {
+							loginKey = prompt("Path to SSH private key", "~/.ssh/id_ed25519")
+							if loginKey == "~/.ssh/id_ed25519" {
+								home, _ := os.UserHomeDir()
+								loginKey = filepath.Join(home, ".ssh", "id_ed25519")
+							}
+						}
+					}
+				}
+				if loginUser != "" && loginPort == 22 && interactive {
+					lps := prompt("Login SSH port", "22")
+					lpi, err := strconv.Atoi(lps)
+					if err == nil {
+						loginPort = lpi
+					}
+				}
+				if loginUser != "" && !cmd.Flags().Changed("sudo") && interactive {
+					s := prompt("Use sudo? (yes/no)", "no")
+					useSudo = strings.HasPrefix(strings.ToLower(s), "y")
+				}
+			}
+
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
 			}
 			defer app.Close()
-			parsedMode, err := transport.ParseMode(mode)
-			if err != nil {
-				return err
-			}
+
 			if err := app.AddServer(core.ServerRecord{
-				Name:    args[0],
-				Address: args[1],
+				Name:    name,
+				Address: address,
 				Mode:    parsedMode,
 				Port:    port,
 				User:    user,
@@ -232,32 +330,34 @@ func newServerCommand(configDir *string) *cobra.Command {
 				return err
 			}
 
-			if loginUser != "" && parsedMode == transport.ModeDirect {
-				fmt.Fprintf(cmd.OutOrStdout(), "Installing agent on %s...\n", args[0])
+			if loginUser != "" && parsedMode == transport.ModeDirect && !noAgent {
+				fmt.Fprintf(cmd.OutOrStdout(), "\nInstalling agent on %s...\n", name)
 				lp := loginPort
 				if lp == 0 {
 					lp = 22
 				}
-				if err := app.AutoInstallAgent(args[0], loginUser, loginKey, lp, useSudo); err != nil {
+				if err := app.AutoInstallAgent(name, loginUser, loginKey, loginPassword, lp, useSudo); err != nil {
 					return fmt.Errorf("agent install failed (server was added): %w\n"+
-						"Run 'fleet server bootstrap %s --login-user %s' to retry manually", err, args[0], loginUser)
+						"Run 'fleet server bootstrap %s --login-user %s' to retry manually", err, name, loginUser)
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Agent installed and running. Connect with: fleet server reconnect %s\n", args[0])
-			} else if parsedMode == transport.ModeDirect && loginUser == "" {
-				record, _ := app.GetServer(args[0])
+				fmt.Fprintf(cmd.OutOrStdout(), "Agent installed and running. Connect with: fleet server reconnect %s\n", name)
+			} else if parsedMode == transport.ModeDirect && (noAgent || loginUser == "") {
+				record, _ := app.GetServer(name)
 				fmt.Fprintln(cmd.OutOrStdout(), core.AgentInstallInstructions(record, parsedMode))
 			}
 			return nil
 		},
 	}
-	add.Flags().StringVar(&mode, "mode", "direct", "server transport mode")
+	add.Flags().StringVar(&mode, "mode", "direct", "server transport mode (direct/reverse)")
 	add.Flags().IntVar(&port, "port", 2222, "agent SSH port (after install)")
 	add.Flags().StringVar(&user, "user", "root", "agent SSH username")
 	add.Flags().StringVar(&keyPath, "key", "", "SSH key path override")
-	add.Flags().StringVar(&loginUser, "login-user", "", "initial SSH login user for agent install (e.g. root, ubuntu)")
-	add.Flags().IntVar(&loginPort, "login-port", 22, "SSH port for initial login")
-	add.Flags().StringVar(&loginKey, "login-key", "", "SSH key for initial login (defaults to fleet key)")
+	add.Flags().StringVar(&loginUser, "login-user", "", "login user for agent auto-install (e.g. root, ubuntu)")
+	add.Flags().IntVar(&loginPort, "login-port", 22, "SSH port for login")
+	add.Flags().StringVar(&loginKey, "login-key", "", "SSH private key for login")
+	add.Flags().StringVar(&loginPassword, "login-password", "", "SSH password for login (use key auth when possible)")
 	add.Flags().BoolVar(&useSudo, "sudo", false, "use sudo for agent install commands")
+	add.Flags().BoolVar(&noAgent, "no-agent", false, "skip agent auto-install")
 
 	serverCmd.AddCommand(add)
 	var listFormat string

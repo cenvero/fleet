@@ -45,6 +45,7 @@ type BootstrapRequest struct {
 	Port             int
 	User             string
 	PrivateKeyPath   string
+	Password         string
 	KnownHostsPath   string
 	AcceptNewHostKey bool
 	Uploads          []BootstrapUpload
@@ -383,9 +384,19 @@ type sshBootstrapExecutor struct {
 }
 
 func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapRequest) error {
-	signer, err := fleetcrypto.LoadPrivateKeySigner(req.PrivateKeyPath, nil)
-	if err != nil {
-		return err
+	var authMethods []ssh.AuthMethod
+	if req.Password != "" {
+		authMethods = append(authMethods, ssh.Password(req.Password))
+	}
+	if req.PrivateKeyPath != "" {
+		signer, err := fleetcrypto.LoadPrivateKeySigner(req.PrivateKeyPath, nil)
+		if err != nil {
+			return err
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+	}
+	if len(authMethods) == 0 {
+		return fmt.Errorf("bootstrap: no authentication method provided (need --login-key or --login-password)")
 	}
 
 	hostKeyCallback, err := transport.NewTOFUHostKeyCallback(req.KnownHostsPath, req.AcceptNewHostKey, &transport.HostKeyState{})
@@ -399,7 +410,7 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 			Ciphers: transport.SupportedCiphers(),
 		},
 		User:            req.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}

@@ -21,7 +21,7 @@ const agentGitHubRepo = "cenvero/fleet"
 // AutoInstallAgent downloads and installs fleet-agent on a remote Linux server via SSH,
 // creates a systemd service, and marks the agent as managed in the server record.
 // If version.Version is "dev", it falls back to uploading a local binary.
-func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath string, loginPort int, useSudo bool) error {
+func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPassword string, loginPort int, useSudo bool) error {
 	server, err := a.GetServer(serverName)
 	if err != nil {
 		return err
@@ -94,6 +94,7 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath string, login
 		Port:             loginPort,
 		User:             loginUser,
 		PrivateKeyPath:   loginKeyPath,
+		Password:         loginPassword,
 		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
 		AcceptNewHostKey: true,
 		Uploads:          uploads,
