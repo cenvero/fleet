@@ -18,6 +18,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/store"
@@ -302,11 +304,18 @@ func newServerCommand(configDir *string) *cobra.Command {
 				}
 				if loginUser != "" && loginKey == "" && loginPassword == "" {
 					if interactive {
-						authType := prompt("Auth type (key/password)", "key")
-						if strings.HasPrefix(authType, "p") {
+						authChoice := prompt("Auth method — [K]ey or [P]assword", "K")
+						if strings.EqualFold(strings.TrimSpace(authChoice), "p") ||
+							strings.HasPrefix(strings.ToLower(authChoice), "p") {
 							fmt.Fprintf(cmd.OutOrStdout(), "Password: ")
-							scanner.Scan()
-							loginPassword = strings.TrimSpace(scanner.Text())
+							if pw, err := term.ReadPassword(int(os.Stdin.Fd())); err == nil {
+								loginPassword = string(pw)
+								fmt.Fprintln(cmd.OutOrStdout())
+							} else {
+								// fallback if stdin is not a real tty
+								scanner.Scan()
+								loginPassword = strings.TrimSpace(scanner.Text())
+							}
 						} else {
 							loginKey = prompt("Path to SSH private key", "~/.ssh/id_ed25519")
 							if loginKey == "~/.ssh/id_ed25519" {

@@ -224,7 +224,7 @@ func buildRemoteDownloadInstallScript(server ServerRecord, sudo, serviceName, ve
 		"DLDIR=\"$(mktemp -d)\"",
 		"trap 'rm -rf \"$DLDIR\"' EXIT",
 		"TARBALL=\"$DLDIR/fleet-agent.tar.gz\"",
-		"URL=\"https://github.com/${REPO}/releases/download/${VERSION}/fleet-agent_${VERSION}_linux_${ARCH}.tar.gz\"",
+		"URL=\"https://github.com/${REPO}/releases/download/v${VERSION}/fleet-agent_${VERSION}_linux_${ARCH}.tar.gz\"",
 		"",
 		"if command -v curl >/dev/null 2>&1; then",
 		"  curl -fsSL \"$URL\" -o \"$TARBALL\"",
