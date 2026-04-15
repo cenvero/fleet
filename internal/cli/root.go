@@ -331,11 +331,21 @@ func newServerCommand(configDir *string) *cobra.Command {
 			}
 
 			if loginUser != "" && parsedMode == transport.ModeDirect && !noAgent {
-				fmt.Fprintf(cmd.OutOrStdout(), "\nInstalling agent on %s...\n", name)
 				lp := loginPort
 				if lp == 0 {
 					lp = 22
 				}
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintf(cmd.OutOrStdout(), "The following will be installed on %s (%s:%d):\n", name, address, lp)
+				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent binary  →  /usr/local/bin/fleet-agent")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent.service  →  systemd unit (enabled on boot)")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • authorized_keys entry for this controller's public key")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "To skip, press Ctrl+C now or re-run with --no-agent.")
+				fmt.Fprintf(cmd.OutOrStdout(), "Press Enter to continue: ")
+				scanner.Scan()
+
+				fmt.Fprintf(cmd.OutOrStdout(), "\nInstalling agent on %s...\n", name)
 				if err := app.AutoInstallAgent(name, loginUser, loginKey, loginPassword, lp, useSudo); err != nil {
 					return fmt.Errorf("agent install failed (server was added): %w\n"+
 						"Run 'fleet server bootstrap %s --login-user %s' to retry manually", err, name, loginUser)
