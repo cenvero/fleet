@@ -106,6 +106,9 @@ brews:
     license: "AGPL-3.0-or-later"
     directory: Formula
     skip_upload: auto
+    commit_author:
+      name: cenvero-bot
+      email: 276044322+cenvero-bot@users.noreply.github.com
     install: |
       bin.install "fleet"
     test: |
