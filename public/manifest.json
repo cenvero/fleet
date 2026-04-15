@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-15T10:47:16Z",
+  "generated_at": "2026-04-15T12:57:46Z",
   "channels": {
     "stable": {
       "version": "v1.2.0",
@@ -12,7 +12,15 @@
         "v1.2.0"
       ]
     },
-    "beta": {},
+    "beta": {
+      "version": "v1.3.3-beta.1",
+      "release_date": "2026-04-15T12:57:46Z",
+      "release_notes_url": "https://github.com/cenvero/fleet/releases/tag/v1.3.3-beta.1",
+      "min_supported": "v1.3.3-beta.1",
+      "history": [
+        "v1.3.3-beta.1"
+      ]
+    },
     "alpha": {
       "version": "v0.1.0-alpha.1",
       "release_date": "2026-04-15T07:48:22Z",
@@ -163,6 +171,44 @@
         "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.2.0/fleet_1.2.0_linux_amd64.tar.gz.minisig",
         "size": 8418251
       }
+    },
+    "v1.3.3-beta.1": {
+      "darwin-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_darwin_arm64.tar.gz",
+        "sha256": "7fcd43385af7c148b763fc2e4c2437fd6bfb742c325c4ead8ff91848e5d07a8e",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_darwin_arm64.tar.gz.minisig",
+        "size": 7914680
+      },
+      "linux-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_linux_arm64.tar.gz",
+        "sha256": "5cad48eb0e145d0bc8bc7db78b1efcefe8fd611864d3ef65d0d568dcdb17ce06",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_linux_arm64.tar.gz.minisig",
+        "size": 7701806
+      },
+      "windows-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_windows_amd64.zip",
+        "sha256": "ed30eefdea1f12121158d5ac3118c120788f13a5b054f7db5f748d48a462a324",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_windows_amd64.zip.minisig",
+        "size": 8590877
+      },
+      "linux-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_linux_amd64.tar.gz",
+        "sha256": "c358e72554ea990efc2cefb92973b8515268bac2fbc9918478176dec4a03f5da",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_linux_amd64.tar.gz.minisig",
+        "size": 8418314
+      },
+      "windows-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_windows_arm64.zip",
+        "sha256": "e3a4aa146562f849877d72946d1f2da67e5a1b5a03924d7354646bfba119bb3d",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_windows_arm64.zip.minisig",
+        "size": 7726719
+      },
+      "darwin-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_darwin_amd64.tar.gz",
+        "sha256": "20de83419527846dc3d73aea466b7c63bb3d0f2374792f7878437b9ee865d3c9",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet_1.3.3-beta.1_darwin_amd64.tar.gz.minisig",
+        "size": 8463902
+      }
     }
   },
   "agent_binaries": {
@@ -304,6 +350,44 @@
         "sha256": "adb6482cdccc81977214bee1131447e1b75b53a89ec9f1a9f654f4bcd412f3fd",
         "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.2.0/fleet-agent_1.2.0_windows_arm64.zip.minisig",
         "size": 3164199
+      }
+    },
+    "v1.3.3-beta.1": {
+      "windows-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_windows_amd64.zip",
+        "sha256": "c377b1a61eb5db66cdcf1de683da777379ccc1f86b0e881090bca50b458f1a2e",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_windows_amd64.zip.minisig",
+        "size": 3532421
+      },
+      "windows-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_windows_arm64.zip",
+        "sha256": "77750dbfee89e54277e0287c0bf62aacb1bcb1ca9af1ff2f6cc6b56da65e9108",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_windows_arm64.zip.minisig",
+        "size": 3164257
+      },
+      "linux-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_linux_amd64.tar.gz",
+        "sha256": "edf74caaf9fd350b2f6692790daf63f716d69cf728a97cc82175d2075d895d0e",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_linux_amd64.tar.gz.minisig",
+        "size": 3432442
+      },
+      "linux-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_linux_arm64.tar.gz",
+        "sha256": "3d37749117a521e393e87270bd896111bea7d62d0a0dc9df44e87b9e0b06eb9f",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_linux_arm64.tar.gz.minisig",
+        "size": 3112813
+      },
+      "darwin-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_darwin_arm64.tar.gz",
+        "sha256": "2cb1240e4877ca5340abf79f19f30e0c6d3a3cf3093e9c38982b2f888bca00f1",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_darwin_arm64.tar.gz.minisig",
+        "size": 3201155
+      },
+      "darwin-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_darwin_amd64.tar.gz",
+        "sha256": "7dc3d1b3440f2ed6aea2d70e7fdbbc287274612831070a327084bfadad3f879c",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.3.3-beta.1/fleet-agent_1.3.3-beta.1_darwin_amd64.tar.gz.minisig",
+        "size": 3457679
       }
     }
   }
