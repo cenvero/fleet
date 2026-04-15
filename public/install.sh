@@ -51,37 +51,70 @@ if [ "${HAS_MINISIGN}" = "0" ]; then
   printf "\n"
 
   if [ "$OS" = "darwin" ]; then
-    warn "Install with Homebrew:  brew install minisign"
-    printf "\n"
-    ask "Install minisign via brew now and continue?"
-    read -r REPLY </dev/tty || REPLY="n"
-    case "$REPLY" in
-      [Yy]|[Yy][Ee][Ss])
-        step "Installing minisign via Homebrew"
-        brew install minisign
-        HAS_MINISIGN=1
-        ok "minisign installed"
-        ;;
-      *)
-        warn "Continuing without signature verification."
-        ;;
-    esac
+    # macOS — install via Homebrew, no sudo needed
+    if ! command -v brew >/dev/null 2>&1; then
+      warn "Homebrew is not installed either. Visit https://brew.sh to install it first."
+      ask "Continue without signature verification?"
+      read -r REPLY </dev/tty || REPLY="n"
+      case "$REPLY" in
+        [Yy]|[Yy][Ee][Ss]) warn "Continuing — checksum will still be verified." ;;
+        *) die "Aborted." ;;
+      esac
+    else
+      ask "Install minisign via Homebrew now and continue?"
+      read -r REPLY </dev/tty || REPLY="n"
+      case "$REPLY" in
+        [Yy]|[Yy][Ee][Ss])
+          step "Installing minisign via Homebrew"
+          brew install minisign
+          HAS_MINISIGN=1
+          ok "minisign installed"
+          ;;
+        *)
+          warn "Continuing without signature verification."
+          ;;
+      esac
+    fi
+
   elif [ "$OS" = "linux" ]; then
-    warn "Install with your package manager, e.g.:"
-    warn "  Debian/Ubuntu:  sudo apt install minisign"
-    warn "  Arch:           sudo pacman -S minisign"
-    warn "  Alpine:         sudo apk add minisign"
-    printf "\n"
-    ask "Continue without signature verification?"
-    read -r REPLY </dev/tty || REPLY="n"
-    case "$REPLY" in
-      [Yy]|[Yy][Ee][Ss])
-        warn "Continuing — checksum will still be verified."
-        ;;
-      *)
-        die "Aborted. Install minisign and re-run."
-        ;;
-    esac
+    # Linux — detect package manager and install with sudo
+    if command -v apt-get >/dev/null 2>&1; then
+      PKG_CMD="sudo apt-get install -y minisign"
+    elif command -v dnf >/dev/null 2>&1; then
+      PKG_CMD="sudo dnf install -y minisign"
+    elif command -v yum >/dev/null 2>&1; then
+      PKG_CMD="sudo yum install -y minisign"
+    elif command -v pacman >/dev/null 2>&1; then
+      PKG_CMD="sudo pacman -S --noconfirm minisign"
+    elif command -v apk >/dev/null 2>&1; then
+      PKG_CMD="sudo apk add minisign"
+    else
+      PKG_CMD=""
+    fi
+
+    if [ -n "${PKG_CMD}" ]; then
+      ask "Install minisign now (${PKG_CMD}) and continue?"
+      read -r REPLY </dev/tty || REPLY="n"
+      case "$REPLY" in
+        [Yy]|[Yy][Ee][Ss])
+          step "Installing minisign"
+          eval "${PKG_CMD}"
+          HAS_MINISIGN=1
+          ok "minisign installed"
+          ;;
+        *)
+          warn "Continuing without signature verification."
+          ;;
+      esac
+    else
+      warn "Could not detect a package manager to install minisign."
+      ask "Continue without signature verification?"
+      read -r REPLY </dev/tty || REPLY="n"
+      case "$REPLY" in
+        [Yy]|[Yy][Ee][Ss]) warn "Continuing — checksum will still be verified." ;;
+        *) die "Aborted. Install minisign manually and re-run." ;;
+      esac
+    fi
   fi
   printf "\n"
 fi
