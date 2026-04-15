@@ -202,7 +202,8 @@ INSTALL_DIR="/usr/local/bin"
 USED_SUDO=0
 
 if [ "$OS" = "linux" ]; then
-  # On Linux always install to /usr/local/bin — use sudo
+  # On Linux install to /usr/bin — use sudo
+  INSTALL_DIR="/usr/bin"
   if [ "$(id -u)" = "0" ]; then
     install -m 0755 "${SOURCE_FILE}" "${INSTALL_DIR}/fleet"
   else
