@@ -196,6 +196,7 @@
         <a href="#features">Features</a>
         <a href="#install">Install</a>
         <a href="#modes">Modes</a>
+        <a href="/docs/">Docs</a>
         <a href="https://github.com/cenvero/fleet">GitHub</a>
       </div>
     </nav>
@@ -263,7 +264,14 @@
       <div class="card">
 <pre>$ curl -fsSL https://fleet.cenvero.org/install | sh
 $ fleet init
-$ fleet server add web-01 192.168.1.10 --mode direct</pre>
+$ fleet server add web-01 192.0.2.10 --mode direct \
+    --login-user root --login-key ~/.ssh/id_ed25519
+$ fleet ssh web-01
+$ fleet exec --all uptime</pre>
+      </div>
+      <div style="margin-top:18px;display:flex;gap:14px;flex-wrap:wrap">
+        <a class="button primary" href="/docs/">Read the docs</a>
+        <a class="button secondary" href="https://github.com/cenvero/fleet/releases">Download releases</a>
       </div>
     </section>
 

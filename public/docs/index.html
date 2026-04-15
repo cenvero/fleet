@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docs — Cenvero Fleet</title>
+  <meta name="description" content="Full documentation for Cenvero Fleet: installation, server management, SSH access, services, logs, alerts, and more.">
+  <link rel="icon" href="https://cdn.cenvero.com/favicon.svg" type="image/svg+xml">
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --bg-soft: #121926;
+      --card: rgba(18,25,38,0.82);
+      --text: #f4f7fb;
+      --muted: #98a6bc;
+      --accent: #00d4aa;
+      --accent-soft: rgba(0,212,170,0.14);
+      --border: rgba(255,255,255,0.08);
+      --code-bg: rgba(8,15,26,0.96);
+      --mono: "SFMono-Regular","JetBrains Mono",ui-monospace,monospace;
+      --sans: "Avenir Next","Segoe UI","Helvetica Neue",sans-serif;
+      --sidebar-w: 240px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      color: var(--text);
+      font-family: var(--sans);
+      background: linear-gradient(180deg, #081018 0%, #0a0e14 60%);
+      min-height: 100vh;
+      font-size: 15px;
+      line-height: 1.7;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* NAV */
+    .topnav {
+      position: sticky; top: 0; z-index: 100;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0 28px; height: 54px;
+      backdrop-filter: blur(14px);
+      background: rgba(10,14,20,0.88);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { font-family: var(--mono); font-size: 0.9rem; letter-spacing: 0.08em; color: var(--text); }
+    .brand span { color: var(--accent); }
+    .topnav-links { display: flex; gap: 22px; font-size: 0.9rem; color: var(--muted); }
+    .topnav-links a { color: var(--muted); }
+    .topnav-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* LAYOUT */
+    .layout { display: flex; max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+
+    /* SIDEBAR */
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: 54px;
+      height: calc(100vh - 54px);
+      overflow-y: auto;
+      padding: 28px 16px 40px 0;
+      border-right: 1px solid var(--border);
+    }
+    .sidebar::-webkit-scrollbar { width: 4px; }
+    .sidebar::-webkit-scrollbar-track { background: transparent; }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .sidebar-group { margin-bottom: 24px; }
+    .sidebar-group-title {
+      font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 8px; padding-left: 12px;
+    }
+    .sidebar a {
+      display: block; padding: 5px 12px; border-radius: 7px;
+      color: var(--muted); font-size: 0.88rem;
+    }
+    .sidebar a:hover { color: var(--text); background: var(--accent-soft); text-decoration: none; }
+    .sidebar a.active { color: var(--text); background: var(--accent-soft); }
+
+    /* CONTENT */
+    .content {
+      flex: 1; min-width: 0;
+      padding: 40px 0 80px 44px;
+    }
+    .content > section { margin-bottom: 64px; scroll-margin-top: 70px; }
+
+    h1 { font-size: 2.4rem; letter-spacing: -0.04em; margin-bottom: 10px; line-height: 1.15; }
+    h2 { font-size: 1.6rem; letter-spacing: -0.03em; margin-bottom: 16px; margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    h3 { font-size: 1.1rem; color: var(--accent); font-family: var(--mono); letter-spacing: 0.04em; margin: 28px 0 12px; }
+    h4 { font-size: 0.95rem; color: var(--text); margin: 18px 0 8px; }
+    p { color: var(--muted); margin-bottom: 14px; }
+    ul, ol { color: var(--muted); padding-left: 22px; margin-bottom: 14px; }
+    li { margin-bottom: 4px; }
+    strong { color: var(--text); font-weight: 600; }
+    .lead { font-size: 1.05rem; color: #b8c6d9; margin-bottom: 24px; }
+
+    /* CODE */
+    code {
+      font-family: var(--mono); font-size: 0.85em;
+      background: rgba(0,212,170,0.1); color: var(--accent);
+      padding: 2px 6px; border-radius: 5px;
+    }
+    .code-block {
+      position: relative; margin: 16px 0;
+    }
+    pre {
+      font-family: var(--mono); font-size: 0.84rem; line-height: 1.65;
+      background: var(--code-bg);
+      border: 1px solid rgba(0,212,170,0.18);
+      border-radius: 12px; padding: 18px 20px;
+      overflow-x: auto; color: #d4efea;
+      white-space: pre;
+    }
+    pre .c { color: #4a6a60; }
+    pre .kw { color: #00d4aa; }
+    pre .str { color: #9fe7c8; }
+    pre .flag { color: #7dd3c0; }
+    .copy-btn {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(0,212,170,0.12); border: 1px solid rgba(0,212,170,0.22);
+      color: var(--accent); font-family: var(--mono); font-size: 0.72rem;
+      padding: 4px 10px; border-radius: 6px; cursor: pointer;
+      transition: background 160ms;
+    }
+    .copy-btn:hover { background: rgba(0,212,170,0.22); }
+
+    /* CALLOUTS */
+    .callout {
+      border-left: 3px solid var(--accent); background: var(--accent-soft);
+      border-radius: 0 10px 10px 0; padding: 14px 18px; margin: 18px 0;
+      color: #b8d9d0; font-size: 0.9rem;
+    }
+    .callout strong { color: var(--accent); }
+
+    /* TABLES */
+    .table-wrap { overflow-x: auto; margin: 16px 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+    th { text-align: left; color: var(--accent); font-family: var(--mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+    td { padding: 9px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--muted); vertical-align: top; }
+    td code { font-size: 0.82em; }
+    tr:last-child td { border-bottom: none; }
+
+    /* CARDS */
+    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0; }
+    .card {
+      border: 1px solid var(--border); border-radius: 14px;
+      padding: 18px 20px; background: var(--card);
+    }
+    .card h4 { color: var(--accent); font-family: var(--mono); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 8px; }
+    .card p { font-size: 0.88rem; margin: 0; }
+
+    /* BADGE */
+    .badge {
+      display: inline-block; font-family: var(--mono); font-size: 0.72rem;
+      padding: 2px 8px; border-radius: 999px; border: 1px solid;
+      vertical-align: middle; margin-left: 8px;
+    }
+    .badge-linux { color: #7dd3c0; border-color: rgba(125,211,192,0.35); }
+    .badge-all { color: #a0b4cc; border-color: rgba(160,180,204,0.35); }
+
+    footer {
+      border-top: 1px solid var(--border); margin-top: 0;
+      padding: 24px 28px; color: var(--muted);
+      display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+      font-size: 0.88rem;
+    }
+
+    @media (max-width: 860px) {
+      .sidebar { display: none; }
+      .content { padding: 28px 0 60px; }
+      .topnav-links { display: none; }
+      .card-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a class="brand" href="/">cenvero / <span>fleet</span></a>
+  <div class="topnav-links">
+    <a href="/">Home</a>
+    <a href="/docs/" style="color:var(--text)">Docs</a>
+    <a href="https://github.com/cenvero/fleet">GitHub</a>
+    <a href="https://github.com/cenvero/fleet/releases">Releases</a>
+  </div>
+</nav>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Getting Started</div>
+      <a href="#install">Install</a>
+      <a href="#init">Initialize</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Servers</div>
+      <a href="#server-add">Add a Server</a>
+      <a href="#auto-install">Auto-install Agent</a>
+      <a href="#transport">Transport Modes</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Operations</div>
+      <a href="#ssh">Shell Access</a>
+      <a href="#exec">Run Commands</a>
+      <a href="#services">Services</a>
+      <a href="#logs">Logs</a>
+      <a href="#firewall">Firewall &amp; Ports</a>
+      <a href="#alerts">Alerts</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Controller</div>
+      <a href="#dashboard">Dashboard</a>
+      <a href="#keys">Keys</a>
+      <a href="#updates">Updates</a>
+      <a href="#config">Configuration</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Reference</div>
+      <a href="#commands">All Commands</a>
+      <a href="#layout">Directory Layout</a>
+    </div>
+  </nav>
+
+  <main class="content">
+
+    <section id="overview">
+      <h1>Cenvero Fleet Docs</h1>
+      <p class="lead">One controller. Two transport modes. Full control — no cloud required.</p>
+      <div class="card-grid">
+        <div class="card">
+          <h4>Controller binary</h4>
+          <p>The <code>fleet</code> binary manages servers, services, logs, alerts, keys, and updates from your local machine.</p>
+        </div>
+        <div class="card">
+          <h4>Agent binary</h4>
+          <p>The <code>fleet-agent</code> binary runs on each managed server. It can be installed automatically or manually.</p>
+        </div>
+        <div class="card">
+          <h4>Direct mode</h4>
+          <p>The controller SSHes into the agent on demand. Use when the controller can reach the server.</p>
+        </div>
+        <div class="card">
+          <h4>Reverse mode</h4>
+          <p>The agent dials out to the controller. Use when the server is behind NAT or a firewall.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p>The one-liner installer detects your platform and installs the <code>fleet</code> controller binary.</p>
+
+      <h3>Linux &amp; macOS</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>curl -fsSL https://fleet.cenvero.org/install | sh</pre>
+      </div>
+
+      <h3>Windows (PowerShell)</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>irm https://fleet.cenvero.org/install.ps1 | iex</pre>
+      </div>
+
+      <h3>Build from source</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>git clone https://github.com/cenvero/fleet
+cd fleet
+make build</pre>
+      </div>
+      <p>Requires Go 1.26. Produces <code>fleet</code> and <code>fleet-agent</code> in the repo root.</p>
+
+      <div class="callout">
+        <strong>Release verification</strong> — all release archives are signed with minisign. The installer verifies the signature against the embedded public key before swapping the binary.
+      </div>
+    </section>
+
+    <section id="init">
+      <h2>Initialize</h2>
+      <p>Run once on the machine that will act as the controller:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet init</pre>
+      </div>
+      <p>This creates the config directory (default <code>~/.cenvero-fleet/</code>), generates controller keys, initialises the SQLite databases, and writes <code>config.toml</code>.</p>
+      <p>Verify everything looks right:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet status
+fleet config show</pre>
+      </div>
+    </section>
+
+    <section id="server-add">
+      <h2>Add a Server</h2>
+      <p>Register a server and connect to it:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># direct mode — controller reaches the server</span>
+fleet server add web-01 192.0.2.10 <span class="flag">--mode</span> direct
+
+<span class="c"># reverse mode — server dials out to the controller</span>
+fleet server add edge-01 unknown <span class="flag">--mode</span> reverse</pre>
+      </div>
+
+      <h3>Server add flags</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>--mode</code></td><td>direct</td><td>Transport mode: <code>direct</code> or <code>reverse</code></td></tr>
+            <tr><td><code>--port</code></td><td>2222</td><td>Fleet agent port on the remote server</td></tr>
+            <tr><td><code>--user</code></td><td>root</td><td>SSH user the agent runs as</td></tr>
+            <tr><td><code>--login-user</code></td><td>—</td><td>Login user for auto-installing the agent (triggers auto-install)</td></tr>
+            <tr><td><code>--login-port</code></td><td>22</td><td>Standard SSH port for the auto-install login</td></tr>
+            <tr><td><code>--login-key</code></td><td>—</td><td>Path to SSH private key for auto-install login</td></tr>
+            <tr><td><code>--sudo</code></td><td>false</td><td>Use sudo during auto-install if login user is not root</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Server management commands</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet server list
+fleet server show web-01
+fleet server reconnect web-01
+fleet server bootstrap web-01
+fleet server remove web-01</pre>
+      </div>
+    </section>
+
+    <section id="auto-install">
+      <h2>Auto-install Agent</h2>
+      <p>On Linux servers, pass <code>--login-user</code> to have the controller SSH in, download the agent from the GitHub release, install it as a systemd service, and configure everything automatically:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Auto-install using root login (most common)</span>
+fleet server add web-01 192.0.2.10 \
+  <span class="flag">--mode</span> direct \
+  <span class="flag">--login-user</span> root \
+  <span class="flag">--login-port</span> 22 \
+  <span class="flag">--login-key</span> ~/.ssh/id_ed25519
+
+<span class="c"># Auto-install using a sudo-capable user</span>
+fleet server add web-01 192.0.2.10 \
+  <span class="flag">--mode</span> direct \
+  <span class="flag">--login-user</span> ubuntu \
+  <span class="flag">--sudo</span></pre>
+      </div>
+
+      <p>The auto-install flow:</p>
+      <ol>
+        <li>SSHes to the server using the provided login credentials</li>
+        <li>Detects the CPU architecture (<code>uname -m</code>)</li>
+        <li>Downloads the correct <code>fleet-agent</code> release binary from GitHub</li>
+        <li>Installs it to <code>/usr/local/bin/fleet-agent</code></li>
+        <li>Creates and enables a <code>fleet-agent.service</code> systemd unit</li>
+        <li>Starts the service and registers the server in the controller</li>
+      </ol>
+
+      <div class="callout">
+        <strong>Linux only</strong> — auto-install requires systemd and is only supported on Linux. For macOS or Windows agents, see the manual setup instructions printed by <code>fleet server add</code> when <code>--login-user</code> is omitted.
+      </div>
+
+      <h3>Teardown</h3>
+      <p>Removing a managed server automatically tears down the agent:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet server remove web-01</pre>
+      </div>
+      <p>This stops and disables the <code>fleet-agent.service</code>, removes the binary, and deletes the server record from the controller.</p>
+    </section>
+
+    <section id="transport">
+      <h2>Transport Modes</h2>
+      <div class="card-grid">
+        <div class="card">
+          <h4>Direct mode</h4>
+          <p>Controller initiates an SSH connection to the agent on each operation. The server must be reachable from the controller's network. Best for servers in the same network or with public IPs.</p>
+        </div>
+        <div class="card">
+          <h4>Reverse mode</h4>
+          <p>The agent dials out to the controller's reverse listener and holds the connection open. The controller sends RPCs through the established tunnel. Best for NAT'd or firewalled servers.</p>
+        </div>
+      </div>
+      <p>You can mix both modes in one deployment. Start the controller daemon for reverse sessions:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet daemon</pre>
+      </div>
+      <p>Start a reverse agent on the remote server:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet-agent reverse \
+  <span class="flag">--controller</span> controller.example.com:9443 \
+  <span class="flag">--server-name</span> edge-01</pre>
+      </div>
+    </section>
+
+    <section id="ssh">
+      <h2>Shell Access</h2>
+      <p>Open an interactive root shell on any managed server:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet ssh web-01</pre>
+      </div>
+      <p>This invokes the system <code>ssh</code> binary using the fleet controller key and connects to the agent's SSH port (default 2222) with the fleet host key pinned. No separate SSH key setup or host verification needed.</p>
+
+      <div class="callout">
+        <strong>Root access</strong> — the agent runs as root and fleet always connects as root. This is required for systemd, firewall, and privileged operations.
+      </div>
+    </section>
+
+    <section id="exec">
+      <h2>Run Commands</h2>
+      <p>Run a one-off shell command on a single server:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet exec web-01 uptime
+fleet exec web-01 "df -h /"
+fleet exec web-01 "cat /etc/os-release"
+fleet exec web-01 "systemctl status nginx"</pre>
+      </div>
+
+      <p>Run the same command across <strong>all servers</strong> concurrently:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet exec <span class="flag">--all</span> uptime
+fleet exec <span class="flag">--all</span> "free -m"
+fleet exec <span class="flag">--all</span> "apt list --upgradable 2>/dev/null | head"</pre>
+      </div>
+
+      <p>Output is shown per-server with the server name prefix. Non-zero exit codes are reported as errors. Commands run through <code>/bin/sh -c</code> on the agent.</p>
+    </section>
+
+    <section id="services">
+      <h2>Services</h2>
+      <p class="lead">Track and control systemd services on Linux agents. <span class="badge badge-linux">linux</span></p>
+
+      <h3>Track a service</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Add with log file tracking</span>
+fleet service add web-01 nginx.service \
+  <span class="flag">--log</span> /var/log/nginx/access.log \
+  <span class="flag">--critical</span>
+
+<span class="c"># List tracked services</span>
+fleet service list web-01</pre>
+      </div>
+
+      <h3>Control services</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet service start   web-01 nginx.service
+fleet service stop    web-01 nginx.service
+fleet service restart web-01 nginx.service</pre>
+      </div>
+    </section>
+
+    <section id="logs">
+      <h2>Logs</h2>
+      <p>Read tracked service logs live or from the controller-side cache.</p>
+
+      <h3>Live log stream</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Read recent lines</span>
+fleet service logs web-01 nginx.service
+
+<span class="c"># Follow in real time</span>
+fleet service logs web-01 nginx.service <span class="flag">--follow</span></pre>
+      </div>
+
+      <h3>Cached logs</h3>
+      <p>The controller caches log segments locally. Access them even when the server is offline:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet service logs web-01 nginx.service <span class="flag">--cached</span></pre>
+      </div>
+      <p>The cache is retained by size, count, and age. Defaults can be changed in <code>config.toml</code>.</p>
+    </section>
+
+    <section id="firewall">
+      <h2>Firewall &amp; Ports</h2>
+      <p class="lead">Manage UFW rules and open/close ports on Linux agents. <span class="badge badge-linux">linux</span></p>
+
+      <h3>Firewall</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet firewall status  web-01
+fleet firewall enable  web-01
+fleet firewall disable web-01
+fleet firewall add     web-01 "allow 443/tcp"
+fleet firewall remove  web-01 "allow 443/tcp"</pre>
+      </div>
+
+      <h3>Ports</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet port list  web-01
+fleet port open  web-01 443
+fleet port close web-01 443</pre>
+      </div>
+    </section>
+
+    <section id="alerts">
+      <h2>Alerts</h2>
+      <p>Cenvero Fleet evaluates metric thresholds and fires alerts when servers breach them.</p>
+
+      <h3>View and manage alerts</h3>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># List all active alerts</span>
+fleet alerts
+
+<span class="c"># Filter by server</span>
+fleet alerts <span class="flag">--server</span> web-01
+
+<span class="c"># Acknowledge an alert</span>
+fleet alerts ack &lt;id&gt;
+
+<span class="c"># Suppress for a duration</span>
+fleet alerts suppress &lt;id&gt; <span class="flag">--for</span> 6h</pre>
+      </div>
+    </section>
+
+    <section id="dashboard">
+      <h2>Dashboard</h2>
+      <p>The <code>fleet dashboard</code> command opens a full-terminal TUI with multiple panels:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet dashboard</pre>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Panel</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>Overview</td><td>Controller status, server count, alert summary</td></tr>
+            <tr><td>Servers</td><td>Per-server health, mode, last seen, metrics</td></tr>
+            <tr><td>Services</td><td>Service status across all tracked servers</td></tr>
+            <tr><td>Logs</td><td>Recent log lines, cached and live</td></tr>
+            <tr><td>Alerts</td><td>Active alerts with ack and suppress actions</td></tr>
+            <tr><td>Ops</td><td>Quick access to common operations</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Keyboard navigation with arrow keys and <code>Tab</code>. Mouse click supported. Press <code>q</code> or <code>Ctrl+C</code> to exit.</p>
+    </section>
+
+    <section id="keys">
+      <h2>Keys</h2>
+      <p>The controller uses Ed25519 keys for SSH authentication. Inspect and rotate them:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Show controller key fingerprint</span>
+fleet key fingerprint
+
+<span class="c"># Rotate the controller key</span>
+fleet key rotate</pre>
+      </div>
+      <p>Key rotation pushes the new public key to all connected servers' <code>authorized_keys</code> before replacing the local private key. Rollout is safe for both direct and reverse fleets.</p>
+    </section>
+
+    <section id="updates">
+      <h2>Updates</h2>
+      <p>Cenvero Fleet manages its own updates. The default policy is <code>notify-only</code> — the controller never silently replaces itself.</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Check for available updates</span>
+fleet update check
+
+<span class="c"># Apply the latest release</span>
+fleet update apply
+
+<span class="c"># Roll back to the previous version</span>
+fleet update rollback
+
+<span class="c"># Switch update channel</span>
+fleet update channel stable
+fleet update channel beta</pre>
+      </div>
+      <p>Available channels: <code>stable</code>, <code>beta</code>, <code>alpha</code>. Update artifacts are signature-verified before applying.</p>
+    </section>
+
+    <section id="config">
+      <h2>Configuration</h2>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Show current config</span>
+fleet config show
+
+<span class="c"># Validate config file syntax</span>
+fleet config validate
+
+<span class="c"># Backup and restore</span>
+fleet config backup
+fleet config restore
+
+<span class="c"># Export / import (for migration)</span>
+fleet config export
+fleet config import</pre>
+      </div>
+
+      <h3>Database backend</h3>
+      <p>The default backend is SQLite. To shift to PostgreSQL, MySQL, or MariaDB:</p>
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet database show
+fleet database shift \
+  <span class="flag">--backend</span> postgres \
+  <span class="flag">--dsn</span> <span class="str">'postgres://user:pass@host:5432/fleet?sslmode=require'</span></pre>
+      </div>
+    </section>
+
+    <section id="commands">
+      <h2>All Commands</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Command</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>fleet init</code></td><td>Initialize the controller config, keys, and databases</td></tr>
+            <tr><td><code>fleet status</code></td><td>Show controller status and server summary</td></tr>
+            <tr><td><code>fleet dashboard</code></td><td>Open the terminal dashboard TUI</td></tr>
+            <tr><td><code>fleet daemon</code></td><td>Start the controller daemon (required for reverse mode)</td></tr>
+            <tr><td><code>fleet server add &lt;name&gt; &lt;ip&gt;</code></td><td>Register a server; auto-installs agent if <code>--login-user</code> given</td></tr>
+            <tr><td><code>fleet server list</code></td><td>List all registered servers</td></tr>
+            <tr><td><code>fleet server show &lt;name&gt;</code></td><td>Show server details and last observed state</td></tr>
+            <tr><td><code>fleet server reconnect &lt;name&gt;</code></td><td>Force reconnect and refresh server info</td></tr>
+            <tr><td><code>fleet server bootstrap &lt;name&gt;</code></td><td>Run remote bootstrap script on server</td></tr>
+            <tr><td><code>fleet server metrics &lt;name&gt;</code></td><td>Show current server metrics</td></tr>
+            <tr><td><code>fleet server remove &lt;name&gt;</code></td><td>Remove server (tears down managed agent)</td></tr>
+            <tr><td><code>fleet ssh &lt;name&gt;</code></td><td>Open interactive root shell on server</td></tr>
+            <tr><td><code>fleet exec &lt;name&gt; &lt;cmd&gt;</code></td><td>Run a command on one server</td></tr>
+            <tr><td><code>fleet exec --all &lt;cmd&gt;</code></td><td>Run a command on all servers concurrently</td></tr>
+            <tr><td><code>fleet service add &lt;server&gt; &lt;svc&gt;</code></td><td>Track a service on a server</td></tr>
+            <tr><td><code>fleet service list &lt;server&gt;</code></td><td>List tracked services</td></tr>
+            <tr><td><code>fleet service start|stop|restart &lt;server&gt; &lt;svc&gt;</code></td><td>Control a service</td></tr>
+            <tr><td><code>fleet service logs &lt;server&gt; &lt;svc&gt;</code></td><td>Read or follow service logs</td></tr>
+            <tr><td><code>fleet firewall status|enable|disable &lt;server&gt;</code></td><td>Manage UFW on a server</td></tr>
+            <tr><td><code>fleet firewall add|remove &lt;server&gt; &lt;rule&gt;</code></td><td>Add or remove a UFW rule</td></tr>
+            <tr><td><code>fleet port list|open|close &lt;server&gt; &lt;port&gt;</code></td><td>Manage open ports</td></tr>
+            <tr><td><code>fleet alerts</code></td><td>List active alerts</td></tr>
+            <tr><td><code>fleet alerts ack &lt;id&gt;</code></td><td>Acknowledge an alert</td></tr>
+            <tr><td><code>fleet alerts suppress &lt;id&gt;</code></td><td>Suppress an alert for a duration</td></tr>
+            <tr><td><code>fleet key fingerprint</code></td><td>Show controller key fingerprint</td></tr>
+            <tr><td><code>fleet key rotate</code></td><td>Rotate controller key across fleet</td></tr>
+            <tr><td><code>fleet update check|apply|rollback</code></td><td>Manage controller updates</td></tr>
+            <tr><td><code>fleet update channel &lt;name&gt;</code></td><td>Set update channel</td></tr>
+            <tr><td><code>fleet config show|validate|backup|restore</code></td><td>Manage controller config</td></tr>
+            <tr><td><code>fleet database show|shift</code></td><td>Inspect or migrate the database backend</td></tr>
+            <tr><td><code>fleet template list|apply</code></td><td>Manage server templates</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="layout">
+      <h2>Directory Layout</h2>
+      <p>Default location: <code>~/.cenvero-fleet/</code></p>
+      <div class="code-block">
+        <pre>~/.cenvero-fleet/
+├── config.toml          <span class="c"># controller configuration</span>
+├── instance.id          <span class="c"># stable instance identifier</span>
+├── keys/
+│   ├── id_ed25519       <span class="c"># controller private key</span>
+│   ├── id_ed25519.pub
+│   ├── known_hosts      <span class="c"># pinned agent host keys</span>
+│   └── rotations/       <span class="c"># previous key versions</span>
+├── servers/             <span class="c"># per-server TOML records</span>
+├── templates/           <span class="c"># reusable server templates</span>
+├── logs/
+│   ├── _aggregated/     <span class="c"># cached remote log segments</span>
+│   └── _audit.log       <span class="c"># controller audit log</span>
+├── alerts/              <span class="c"># alert state store</span>
+├── data/
+│   ├── state.db         <span class="c"># server and service state</span>
+│   ├── metrics.db       <span class="c"># metrics history</span>
+│   └── events.db        <span class="c"># event log</span>
+├── backups/             <span class="c"># config backup archives</span>
+└── tmp/</pre>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div>© 2026 Cenvero. Cenvero Fleet is licensed under AGPL-3.0-or-later.</div>
+  <div>
+    <a href="https://github.com/cenvero/fleet">GitHub</a> ·
+    <a href="https://github.com/cenvero/fleet/releases">Releases</a> ·
+    <a href="mailto:security@cenvero.org">security@cenvero.org</a>
+  </div>
+</footer>
+
+<script>
+  function copy(btn) {
+    const pre = btn.nextElementSibling;
+    navigator.clipboard.writeText(pre.innerText).then(() => {
+      btn.textContent = 'copied';
+      setTimeout(() => btn.textContent = 'copy', 1800);
+    });
+  }
+
+  // Highlight active sidebar link on scroll
+  const sections = document.querySelectorAll('section[id]');
+  const links = document.querySelectorAll('.sidebar a');
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => {
+          l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id);
+        });
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(s => obs.observe(s));
+</script>
+</body>
+</html>

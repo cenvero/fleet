@@ -71,7 +71,39 @@ fleet init
 
 This creates the controller config directory, key material, database files, audit log, and default runtime configuration.
 
-### 2. Direct mode: local or reachable agent
+### 2. Add a server with automatic agent install
+
+For Linux servers, pass `--login-user` to have the controller SSH in, download `fleet-agent` from the GitHub release, install it as a systemd service, and start it:
+
+```bash
+fleet server add web-01 192.0.2.10 \
+  --mode direct \
+  --login-user root \
+  --login-key ~/.ssh/id_ed25519
+```
+
+Or with a sudo-capable user:
+
+```bash
+fleet server add web-01 192.0.2.10 \
+  --mode direct \
+  --login-user ubuntu \
+  --sudo
+```
+
+The auto-install:
+- Detects the server arch via `uname -m`
+- Downloads the correct `fleet-agent` release binary
+- Installs it to `/usr/local/bin/fleet-agent`
+- Creates, enables, and starts `fleet-agent.service` via systemd
+
+Removing a server tears it down automatically:
+
+```bash
+fleet server remove web-01
+```
+
+### 3. Direct mode: manual agent setup
 
 Start an agent that accepts the controller public key:
 
@@ -79,7 +111,7 @@ Start an agent that accepts the controller public key:
 ./fleet-agent serve --authorized-keys ~/.cenvero-fleet/keys/id_ed25519.pub
 ```
 
-Add it to the fleet and perform the first live handshake:
+Add it to the fleet:
 
 ```bash
 ./fleet server add demo 127.0.0.1 --mode direct --port 2222
@@ -87,7 +119,7 @@ Add it to the fleet and perform the first live handshake:
 ./fleet service list demo
 ```
 
-### 3. Reverse mode: controller listens, agent dials out
+### 4. Reverse mode: agent dials out
 
 Start the controller daemon:
 
@@ -101,10 +133,10 @@ Register the server on the controller:
 ./fleet server add edge-01 unknown --mode reverse
 ```
 
-Then start the reverse agent:
+Then start the reverse agent on the remote server:
 
 ```bash
-./fleet-agent reverse --mode reverse --controller 127.0.0.1:9443 --server-name edge-01
+./fleet-agent reverse --controller controller.example.com:9443 --server-name edge-01
 ```
 
 Once the reverse session comes up, the controller can use the same live service, metrics, logs, and alerting flows through that tunnel.
@@ -122,11 +154,19 @@ Controller lifecycle:
 
 Server management:
 
-- `fleet server add <name> <ip>`
+- `fleet server add <name> <ip> [--login-user root --login-key ~/.ssh/id_ed25519]`
 - `fleet server list`
+- `fleet server show <name>`
 - `fleet server reconnect <name>`
 - `fleet server bootstrap <name>`
 - `fleet server metrics <name>`
+- `fleet server remove <name>`
+
+Shell access and remote execution:
+
+- `fleet ssh <server>` — interactive root shell via fleet key
+- `fleet exec <server> <command>` — run one command on one server
+- `fleet exec --all <command>` — run one command across all servers concurrently
 
 Service and log operations:
 
@@ -256,7 +296,9 @@ make release-ready
 
 ## Documentation
 
-The main docs live under [`docs/`](docs/index.md):
+Full documentation is available at **[fleet.cenvero.org/docs/](https://fleet.cenvero.org/docs/)**.
+
+Markdown source lives under [`docs/`](docs/index.md):
 
 - [Getting Started](docs/getting-started.md)
 - [Transport Modes](docs/transport-modes.md)
