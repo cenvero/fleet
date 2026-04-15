@@ -104,7 +104,7 @@ done < <(
     .[]
     | select(.type == "Archive")
     | select((.extra.Binary // (.extra.Binaries[0] // "")) == "fleet" or (.extra.Binary // (.extra.Binaries[0] // "")) == "fleet-agent")
-    | select(.name | contains($version + "_"))
+    | select(.name | contains(($version | ltrimstr("v")) + "_"))
     | {
         binary: (.extra.Binary // (.extra.Binaries[0] // "")),
         name: .name,

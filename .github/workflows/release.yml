@@ -122,8 +122,8 @@ jobs:
       - name: Download archive
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz" -o fleet.tar.gz
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz.minisig" -o fleet.tar.gz.minisig
+          curl -fsSL --retry 5 --retry-delay 10 "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz" -o fleet.tar.gz
+          curl -fsSL --retry 5 --retry-delay 10 "https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/fleet_${VERSION}_linux_amd64.tar.gz.minisig" -o fleet.tar.gz.minisig
       - name: Verify signature
         env:
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
