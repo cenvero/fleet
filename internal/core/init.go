@@ -282,10 +282,21 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	policy := update.PolicyNotifyOnly
 	if IsHomebrewInstall(executablePath) {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Step 6 of 7 — Updates")
+		fmt.Fprintln(out, "Step 6 of 7 — Update notifications")
 		fmt.Fprintln(out, "─────────────────────────────────────")
 		fmt.Fprintln(out, "  Homebrew install detected — updates are managed by Homebrew.")
 		fmt.Fprintln(out, "  Run 'brew upgrade cenvero-fleet' to update when a new version is available.")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "  Fleet can remind you when a new version is available:")
+		fmt.Fprintln(out, "    [1] Notify me (show reminder on each fleet command)")
+		fmt.Fprintln(out, "    [2] Disabled  (no reminders)")
+		notifyChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
+		if err != nil {
+			return InitResult{}, err
+		}
+		if notifyChoice == "2" {
+			policy = update.PolicyDisabled
+		}
 	} else {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Step 6 of 7 — Update channel & policy")
