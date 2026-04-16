@@ -5,7 +5,6 @@ package core
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,7 +25,35 @@ const (
 	sshMaxRetries        = 3
 )
 
-// RunSSHSession opens an interactive root shell on the named server.
+// SSH wire-format structs for PTY and window-change channel requests (RFC 4254).
+// These are sent as channel requests on the fleet-shell channel — same wire
+// encoding used by standard SSH, but over the fleet agent's own authenticated
+// channel type so only fleet clients can open a shell.
+type ptyRequestPayload struct {
+	Term     string
+	Columns  uint32
+	Rows     uint32
+	Width    uint32
+	Height   uint32
+	Modelist string
+}
+
+type windowChangePayload struct {
+	Columns uint32
+	Rows    uint32
+	Width   uint32
+	Height  uint32
+}
+
+// RunSSHSession opens an interactive shell through the fleet agent's own SSH
+// transport (fleet-shell channel on the agent port — not port 22).
+//
+// Security model:
+//   - The connection is authenticated with the controller's Ed25519 key.
+//   - The channel type "fleet-shell" is unknown to standard SSH clients — a
+//     port scanner will see "SSH-2.0-CenveroFleet_1" and be unable to open
+//     any session without both the correct key and the fleet channel type.
+//
 // If the connection drops it automatically retries up to 3 times before giving up.
 func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 	server, err := a.GetServer(serverName)
@@ -42,7 +69,7 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 
 	knownHostsPath := a.Config.Crypto.KnownHostsPath
 	promptFn := func(hostname, oldFP, newFP string) bool {
-		fmt.Fprintf(out, "\n⚠  WARNING: host key for %s has changed!\n", hostname)
+		fmt.Fprintf(out, "\n  WARNING: host key for %s has changed!\n", hostname)
 		fmt.Fprintf(out, "   Old fingerprint: %s\n", oldFP)
 		fmt.Fprintf(out, "   New fingerprint: %s\n", newFP)
 		fmt.Fprintf(out, "\nThis could indicate a server rebuild or a man-in-the-middle attack.\n")
@@ -78,7 +105,7 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		}
 
 		err = a.runSSHOnce(addr, clientConfig, &state, out)
-		if err == nil || isCleanSSHExit(err) {
+		if err == nil {
 			return nil
 		}
 		if isTerminalSSHError(err) {
@@ -100,11 +127,14 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 	}
 	defer client.Close()
 
+	// Only show fingerprint the very first time a host is pinned (TOFU).
+	// Already-known hosts show nothing. Host-key changes trigger the warning
+	// prompt handled by promptFn in RunSSHSession above.
 	if state.Outcome == "pinned" {
 		fmt.Fprintf(out, "Fingerprint: %s (saved to fleet known hosts)\n", state.Fingerprint)
 	}
 
-	// Keepalive: send ping every 30s; close connection if server stops responding.
+	// Keepalive: send ping every 30s; close the connection if server stops responding.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -117,7 +147,6 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 			case <-ticker.C:
 				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
 				if err != nil {
-					// Server unreachable — close so session.Wait() unblocks.
 					_ = client.Close()
 					return
 				}
@@ -125,11 +154,22 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 		}
 	}()
 
-	session, err := client.NewSession()
+	// Open a fleet-shell channel instead of a standard "session" channel.
+	// The agent only accepts fleet-rpc and fleet-shell — standard SSH clients
+	// connecting to the agent port cannot open any shell.
+	channel, reqs, err := client.OpenChannel(transport.ShellChannelType, nil)
 	if err != nil {
-		return fmt.Errorf("new session: %w", err)
+		return fmt.Errorf("open fleet-shell channel: %w", err)
 	}
-	defer session.Close()
+	defer channel.Close()
+
+	go func() {
+		for req := range reqs {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}()
 
 	fd := stdinFd()
 	if term.IsTerminal(fd) {
@@ -140,34 +180,41 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 		defer term.Restore(fd, oldState) //nolint:errcheck
 
 		w, h, _ := term.GetSize(fd)
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          1,
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
+		ptyPayload := ssh.Marshal(ptyRequestPayload{
+			Term:    "xterm-256color",
+			Columns: uint32(w),
+			Rows:    uint32(h),
+		})
+		ok, err := channel.SendRequest("pty-req", true, ptyPayload)
+		if err != nil {
+			return fmt.Errorf("pty-req: %w", err)
 		}
-		if err := session.RequestPty("xterm-256color", h, w, modes); err != nil {
-			return fmt.Errorf("request pty: %w", err)
+		if !ok {
+			return fmt.Errorf("agent rejected pty-req")
 		}
 
-		go watchWindowResize(session, fd, done)
+		go watchWindowResize(channel, fd, done)
 	}
 
-	session.Stdin = os.Stdin
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
-
-	if err := session.Shell(); err != nil {
-		return fmt.Errorf("start shell: %w", err)
+	ok, err := channel.SendRequest("shell", true, nil)
+	if err != nil {
+		return fmt.Errorf("shell request: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("agent rejected shell request")
 	}
 
-	return session.Wait()
-}
+	// Proxy I/O between the local terminal and the remote shell.
+	go func() { _, _ = io.Copy(channel, os.Stdin) }()
+	go func() { _, _ = io.Copy(os.Stderr, channel.Stderr()) }()
 
-// isCleanSSHExit returns true when the remote shell exited on its own (user typed
-// exit/logout or a command returned non-zero) — these are not reconnect-worthy.
-func isCleanSSHExit(err error) bool {
-	var exitErr *ssh.ExitError
-	return errors.As(err, &exitErr)
+	// Blocks until the shell exits (channel closed by agent) or the connection drops.
+	// nil means clean exit — no reconnect needed.
+	_, err = io.Copy(os.Stdout, channel)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "eof") {
+		return nil
+	}
+	return err
 }
 
 // isTerminalSSHError returns true for errors that will never succeed on retry —
@@ -182,7 +229,6 @@ func isTerminalSSHError(err error) bool {
 		"no supported methods remain",
 		"handshake failed",
 		"host key",
-		"rejected",
 		"permission denied",
 	} {
 		if strings.Contains(strings.ToLower(msg), phrase) {

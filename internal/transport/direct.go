@@ -19,6 +19,12 @@ import (
 
 const RPCChannelType = "fleet-rpc"
 
+// ShellChannelType is the SSH channel type used for interactive shell sessions
+// through the fleet agent. Only fleet clients know this type — port scanners
+// using standard SSH tooling cannot open a shell even if they somehow have a
+// valid key.
+const ShellChannelType = "fleet-shell"
+
 func (c Connector) DialContext(ctx context.Context, target ServerTarget) (*Session, error) {
 	if target.Port == 0 {
 		target.Port = 22

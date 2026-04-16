@@ -48,6 +48,10 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 		Config: ssh.Config{
 			Ciphers: transport.SupportedCiphers(),
 		},
+		// Identifies this port as a Cenvero Fleet agent to anyone who scans it.
+		// Standard SSH clients cannot open sessions anyway — they don't know the
+		// fleet-rpc / fleet-shell channel types.
+		ServerVersion: "SSH-2.0-CenveroFleet_1",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
 			if err != nil {
@@ -96,6 +100,7 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 		Config: ssh.Config{
 			Ciphers: transport.SupportedCiphers(),
 		},
+		ServerVersion: "SSH-2.0-CenveroFleet_1",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
 			if err != nil {
@@ -126,16 +131,23 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 	go ssh.DiscardRequests(reqs)
 
 	for newChannel := range chans {
-		if newChannel.ChannelType() != transport.RPCChannelType {
+		switch newChannel.ChannelType() {
+		case transport.RPCChannelType:
+			channel, requests, err := newChannel.Accept()
+			if err != nil {
+				continue
+			}
+			go ssh.DiscardRequests(requests)
+			go s.serveRPC(channel)
+		case transport.ShellChannelType:
+			channel, requests, err := newChannel.Accept()
+			if err != nil {
+				continue
+			}
+			go serveShell(channel, requests)
+		default:
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
-			continue
 		}
-		channel, requests, err := newChannel.Accept()
-		if err != nil {
-			continue
-		}
-		go ssh.DiscardRequests(requests)
-		go s.serveRPC(channel)
 	}
 	return nil
 }

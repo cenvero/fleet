@@ -16,6 +16,6 @@ func stdinFd() int {
 }
 
 // watchWindowResize is a no-op on Windows — SIGWINCH does not exist.
-func watchWindowResize(_ *ssh.Session, _ int, done <-chan struct{}) {
+func watchWindowResize(_ ssh.Channel, _ int, done <-chan struct{}) {
 	<-done
 }

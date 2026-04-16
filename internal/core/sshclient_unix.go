@@ -18,7 +18,10 @@ func stdinFd() int {
 	return int(os.Stdin.Fd()) //#nosec G115 -- fd fits in int on all supported platforms
 }
 
-func watchWindowResize(session *ssh.Session, fd int, done <-chan struct{}) {
+// watchWindowResize listens for SIGWINCH and sends window-change channel
+// requests to the fleet agent so the remote PTY stays in sync with the
+// local terminal size.
+func watchWindowResize(channel ssh.Channel, fd int, done <-chan struct{}) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGWINCH)
 	defer signal.Stop(sigCh)
@@ -29,7 +32,11 @@ func watchWindowResize(session *ssh.Session, fd int, done <-chan struct{}) {
 		case <-sigCh:
 			w, h, err := term.GetSize(fd)
 			if err == nil {
-				_ = session.WindowChange(h, w)
+				payload := ssh.Marshal(windowChangePayload{
+					Columns: uint32(w),
+					Rows:    uint32(h),
+				})
+				_, _ = channel.SendRequest("window-change", false, payload)
 			}
 		}
 	}
