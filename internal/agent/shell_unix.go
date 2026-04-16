@@ -80,7 +80,20 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 			} else {
 				cmd = exec.Command(shell, "-l")
 			}
-			cmd.Env = append(os.Environ(), "TERM="+termType)
+			// Use a clean server-side environment — do NOT inherit os.Environ()
+		// which would be the controller machine's env (wrong HOME, PATH, etc.).
+		cmd.Env = []string{
+			"TERM=" + termType,
+			"SHELL=" + cmd.Path,
+			"LANG=en_US.UTF-8",
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		}
+		// Inherit HOME and USER from the agent process (runs as the deploy user/root).
+		for _, key := range []string{"HOME", "USER", "LOGNAME"} {
+			if val := os.Getenv(key); val != "" {
+				cmd.Env = append(cmd.Env, key+"="+val)
+			}
+		}
 
 			if hasPTY {
 				runShellWithPTY(channel, requests, cmd, cols, rows)
