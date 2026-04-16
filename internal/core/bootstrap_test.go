@@ -69,8 +69,11 @@ func TestBootstrapServerDirectUploadsAgentAndUpdatesServer(t *testing.T) {
 	if got := len(executor.requests[0].Uploads); got != 4 {
 		t.Fatalf("expected 4 uploads for direct bootstrap, got %d", got)
 	}
-	if !strings.Contains(result.ServiceUnit, "serve --mode direct") {
+	if !strings.Contains(result.ServiceUnit, "/opt/cenvero-fleet/fleet-agent serve") {
 		t.Fatalf("expected direct mode service unit, got %q", result.ServiceUnit)
+	}
+	if !strings.Contains(result.ServiceUnit, "--listen") {
+		t.Fatalf("expected --listen flag in direct mode service unit, got %q", result.ServiceUnit)
 	}
 	if result.Script != "" {
 		t.Fatalf("expected executed bootstrap result to omit the raw script payload")
@@ -137,8 +140,11 @@ func TestBootstrapServerReversePrintScript(t *testing.T) {
 	if result.Executed {
 		t.Fatalf("expected print-script result to avoid execution")
 	}
-	if !strings.Contains(result.ServiceUnit, "reverse --mode reverse") {
+	if !strings.Contains(result.ServiceUnit, "/opt/cenvero-fleet/fleet-agent reverse") {
 		t.Fatalf("expected reverse mode service unit, got %q", result.ServiceUnit)
+	}
+	if !strings.Contains(result.ServiceUnit, "--controller") {
+		t.Fatalf("expected --controller flag in reverse mode service unit, got %q", result.ServiceUnit)
 	}
 	if !strings.Contains(result.ServiceUnit, "203.0.113.7:9443") {
 		t.Fatalf("expected controller address in reverse service unit")
