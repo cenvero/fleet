@@ -91,26 +91,27 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 			shellPath := userShell()
 			env := buildEnv(termType, shellPath, extraEnv)
 
-			var cmd *exec.Cmd
 			if req.Type == "exec" {
-				// Run a specific command through the user's own shell.
+				// Non-persistent: exec requests run a one-shot command.
 				var execReq struct{ Command string }
 				_ = ssh.Unmarshal(req.Payload, &execReq)
-				cmd = exec.Command(shellPath, "-c", execReq.Command) //nolint:gosec
-			} else {
-				// Login shell: argv[0] starts with "-" (e.g. "-bash", "-zsh").
-				// This is how OpenSSH signals a login shell — NOT "bash -l".
-				cmd = exec.Command(shellPath)
-				cmd.Args = []string{"-" + filepath.Base(shellPath)}
+				cmd := exec.Command(shellPath, "-c", execReq.Command) //nolint:gosec
+				cmd.Env = env
+				replyReq(req, true)
+				if hasPTY {
+					runWithPTY(channel, requests, cmd, cols, rows)
+				} else {
+					runDirect(channel, requests, cmd)
+				}
+				return
 			}
-			cmd.Env = env
 
+			// Interactive shell — use the persistent session store.
+			// If a session already exists (e.g. after a network drop), attach to it.
+			// If not, create a new one. The session survives disconnects for up to
+			// sessionIdleTimeout (10 min) before the shell is sent SIGHUP.
 			replyReq(req, true)
-			if hasPTY {
-				runWithPTY(channel, requests, cmd, cols, rows)
-			} else {
-				runDirect(channel, requests, cmd)
-			}
+			runPersistentShell(channel, requests, shellPath, env, cols, rows)
 			return
 
 		default:
@@ -139,6 +140,104 @@ func buildEnv(termType, shellPath string, extra []string) []string {
 		)
 	}
 	return append(env, extra...)
+}
+
+// runPersistentShell gets or creates a persistent shell session and attaches
+// the current channel to it. On network drops the shell keeps running and the
+// replay buffer accumulates output. On reconnect the buffer is sent first so
+// the user sees what happened while disconnected.
+func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shellPath string, env []string, cols, rows uint32) {
+	const sessionID = "default"
+
+	session, isNew, err := globalStore.getOrCreate(sessionID, func() (*persistentSession, error) {
+		ptm, pts, err := pty.Open()
+		if err != nil {
+			return nil, err
+		}
+		_ = pty.Setsize(ptm, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+
+		cmd := exec.Command(shellPath)
+		cmd.Args = []string{"-" + filepath.Base(shellPath)}
+		cmd.Env = append(env, "SSH_TTY="+pts.Name())
+		cmd.Stdin = pts
+		cmd.Stdout = pts
+		cmd.Stderr = pts
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setsid:  true,
+			Setctty: true,
+			Ctty:    1,
+		}
+		if err := cmd.Start(); err != nil {
+			_ = pts.Close()
+			_ = ptm.Close()
+			return nil, err
+		}
+		_ = pts.Close()
+
+		// Reap the process once it exits (keeps the PTY output loop from leaking).
+		go func() {
+			_ = cmd.Wait()
+		}()
+
+		return &persistentSession{
+			ptm:    ptm,
+			cmd:    cmd,
+			replay: &replayBuffer{},
+			done:   make(chan struct{}),
+		}, nil
+	})
+	if err != nil {
+		sendExitStatus(channel, 1)
+		return
+	}
+
+	_ = isNew // both paths use the same attach flow
+
+	// Wire the channel to the (new or existing) session.
+	session.attach(channel, cols, rows, globalStore, sessionID)
+
+	// Handle window-change requests while this channel is connected.
+	go func() {
+		for req := range requests {
+			if req.Type == "window-change" {
+				var p windowChangePayload
+				if err := ssh.Unmarshal(req.Payload, &p); err == nil {
+					_ = pty.Setsize(session.ptm, &pty.Winsize{
+						Rows: uint16(p.Rows),
+						Cols: uint16(p.Columns),
+					})
+				}
+			}
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+		}
+	}()
+
+	// Block until the shell exits or the channel closes.
+	select {
+	case <-session.done:
+		sendExitStatus(channel, 0)
+		_ = channel.CloseWrite()
+	case <-channelDone(channel):
+		// Network drop — shell keeps running, idle timer started in detach().
+	}
+}
+
+// channelDone returns a channel that is closed when the ssh.Channel is closed.
+func channelDone(ch ssh.Channel) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 1)
+		for {
+			_, err := ch.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return done
 }
 
 // runWithPTY allocates a PTY pair, starts the shell with the slave as its
