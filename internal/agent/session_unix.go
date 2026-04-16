@@ -76,7 +76,7 @@ type persistentSession struct {
 // attach wires a new SSH channel to this session.
 // It cancels any pending idle timer, sends the replay buffer so the user
 // sees recent output, then starts proxying live I/O.
-func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store *sessionStore, id string) {
+func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store *sessionStore, id string) <-chan struct{} {
 	s.mu.Lock()
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
@@ -96,10 +96,16 @@ func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store
 
 	// Proxy stdin: channel → PTY master.
 	// When this returns (channel closed / network drop), detach.
+	// Returns a channel that is closed once the input goroutine exits —
+	// the caller uses this to know when the connection dropped without
+	// creating a second competing reader on the same channel.
+	detached := make(chan struct{})
 	go func() {
+		defer close(detached)
 		_, _ = io.Copy(s.ptm, channel)
 		s.detach(channel, store, id)
 	}()
+	return detached
 }
 
 // detach is called when the channel closes (user disconnected / network drop).

@@ -194,9 +194,13 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 	_ = isNew // both paths use the same attach flow
 
 	// Wire the channel to the (new or existing) session.
-	session.attach(channel, cols, rows, globalStore, sessionID)
+	// detached is closed when the channel's input goroutine exits (network drop
+	// or clean disconnect). Using the returned signal avoids a second competing
+	// reader on the same channel — which would steal bytes including Ctrl+C.
+	detached := session.attach(channel, cols, rows, globalStore, sessionID)
 
 	// Handle window-change requests while this channel is connected.
+	// This reads from `requests`, not from `channel`, so no race.
 	go func() {
 		for req := range requests {
 			if req.Type == "window-change" {
@@ -214,30 +218,16 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 		}
 	}()
 
-	// Block until the shell exits or the channel closes.
+	// Block until the shell exits or the channel disconnects.
 	select {
 	case <-session.done:
+		// Shell exited cleanly (user typed exit / process died).
 		sendExitStatus(channel, 0)
 		_ = channel.CloseWrite()
-	case <-channelDone(channel):
-		// Network drop — shell keeps running, idle timer started in detach().
+	case <-detached:
+		// Channel closed — network drop or deliberate disconnect.
+		// Shell keeps running; idle timer started inside detach().
 	}
-}
-
-// channelDone returns a channel that is closed when the ssh.Channel is closed.
-func channelDone(ch ssh.Channel) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 1)
-		for {
-			_, err := ch.Read(buf)
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return done
 }
 
 // runWithPTY allocates a PTY pair, starts the shell with the slave as its
