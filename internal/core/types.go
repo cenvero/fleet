@@ -49,6 +49,7 @@ type RuntimeConfig struct {
 	ControlAddress        string `toml:"control_address" json:"control_address"`
 	DataDir               string `toml:"data_dir" json:"data_dir"`
 	LogDir                string `toml:"log_dir" json:"log_dir"`
+	DefaultAgentPort      int    `toml:"default_agent_port,omitempty" json:"default_agent_port,omitempty"`
 	AggregatedLogDir      string `toml:"aggregated_log_dir" json:"aggregated_log_dir"`
 	AggregatedLogMaxSize  int64  `toml:"aggregated_log_max_size" json:"aggregated_log_max_size"`
 	AggregatedLogMaxFiles int    `toml:"aggregated_log_max_files" json:"aggregated_log_max_files"`
@@ -166,17 +167,19 @@ type ConfigExport struct {
 }
 
 type InitOptions struct {
-	ConfigDir       string
-	Alias           string
-	DefaultMode     transport.Mode
-	CryptoAlgorithm string
-	Passphrase      string
-	UpdateChannel   string
-	UpdatePolicy    update.Policy
-	DatabaseBackend store.Backend
-	DatabaseDSN     string
-	Operator        string
-	ExecutablePath  string
+	ConfigDir        string
+	Alias            string
+	DefaultMode      transport.Mode
+	CryptoAlgorithm  string
+	Passphrase       string
+	UpdateChannel    string
+	UpdatePolicy     update.Policy
+	DatabaseBackend  store.Backend
+	DatabaseDSN      string
+	Operator         string
+	ExecutablePath   string
+	DefaultAgentPort int
+	ListenAddress    string
 }
 
 type InitResult struct {

@@ -40,9 +40,8 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 		return err
 	}
 
-	authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
-	if err != nil {
-		return err
+	if s.AuthorizedKeysPath == "" {
+		return fmt.Errorf("--authorized-keys path is required for direct mode")
 	}
 
 	config := &ssh.ServerConfig{
@@ -50,6 +49,10 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 			Ciphers: transport.SupportedCiphers(),
 		},
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
+			if err != nil {
+				return nil, fmt.Errorf("authorized keys unavailable: %w", err)
+			}
 			if _, ok := authorizedKeys[string(key.Marshal())]; ok {
 				return &ssh.Permissions{
 					Extensions: map[string]string{
@@ -86,15 +89,18 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
-	if err != nil {
-		return err
+	if s.AuthorizedKeysPath == "" {
+		return fmt.Errorf("--authorized-keys path is required for direct mode")
 	}
 	config := &ssh.ServerConfig{
 		Config: ssh.Config{
 			Ciphers: transport.SupportedCiphers(),
 		},
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
+			if err != nil {
+				return nil, fmt.Errorf("authorized keys unavailable: %w", err)
+			}
 			if _, ok := authorizedKeys[string(key.Marshal())]; ok {
 				return &ssh.Permissions{
 					Extensions: map[string]string{
@@ -553,10 +559,13 @@ func controllerIDFromPayload(payload any) string {
 }
 
 func loadAuthorizedKeys(path string) (map[string]struct{}, error) {
-	if path == "" {
-		return nil, fmt.Errorf("authorized keys path is required")
-	}
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		// File not yet written (e.g. install race). Return empty set — connections
+		// will be denied but the service keeps running and will succeed once the
+		// file is in place.
+		return map[string]struct{}{}, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read authorized keys %s: %w", path, err)
 	}
@@ -569,9 +578,6 @@ func loadAuthorizedKeys(path string) (map[string]struct{}, error) {
 		}
 		keys[string(pub.Marshal())] = struct{}{}
 		remaining = rest
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("no valid authorized keys found in %s", path)
 	}
 	return keys, nil
 }

@@ -230,7 +230,7 @@
       font-size: 0.65rem; letter-spacing: 0.05em;
     }
     .install-cmd-row {
-      display: flex; align-items: center;
+      display: flex; align-items: flex-start;
       background: rgba(0,0,0,0.5); border: 1px solid var(--border);
       border-radius: 10px; padding: 14px 16px; gap: 12px;
       margin-bottom: 16px;
@@ -238,10 +238,11 @@
     .install-cmd-row code {
       flex: 1; font-family: var(--mono); font-size: 0.9rem;
       color: var(--accent); background: none; padding: 0;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      white-space: pre-wrap; word-break: break-all;
     }
     .install-cmd-row button {
-      flex-shrink: 0; background: rgba(255,255,255,0.05);
+      flex-shrink: 0; align-self: flex-start;
+      background: rgba(255,255,255,0.05);
       border: 1px solid var(--border); color: var(--text);
       font-family: var(--mono); font-size: 0.75rem; padding: 6px 14px;
       border-radius: 8px; cursor: pointer; transition: all 200ms ease;

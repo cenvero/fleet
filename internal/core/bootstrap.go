@@ -26,7 +26,8 @@ import (
 const (
 	defaultAgentUser       = "cenvero-agent"
 	defaultServiceName     = "cenvero-fleet-agent"
-	defaultAgentBinaryPath = "/usr/local/bin/fleet-agent"
+	defaultAgentBinDir     = "/opt/cenvero-fleet"
+	defaultAgentBinaryPath = "/opt/cenvero-fleet/fleet-agent"
 	defaultStateDir        = "/var/lib/cenvero-fleet-agent"
 	defaultConfigDir       = "/etc/cenvero-fleet-agent"
 	defaultDirectListen    = "0.0.0.0:2222"
@@ -216,7 +217,11 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 	agentListenAddr := strings.TrimSpace(opts.AgentListenAddr)
 	agentPort := server.Port
 	if agentPort == 0 || agentPort == 22 {
-		agentPort = 2222
+		if a.Config.Runtime.DefaultAgentPort > 0 {
+			agentPort = a.Config.Runtime.DefaultAgentPort
+		} else {
+			agentPort = 2222
+		}
 	}
 	if agentListenAddr == "" && server.Mode == transport.ModeDirect {
 		agentListenAddr = fmt.Sprintf("0.0.0.0:%d", agentPort)
@@ -306,14 +311,14 @@ func buildAgentServiceUnit(server ServerRecord, cfg resolvedBootstrapConfig) (st
 	var execStart string
 	switch server.Mode {
 	case transport.ModeDirect:
-		execStart = fmt.Sprintf("%s serve --mode direct --listen %s --host-key %s --authorized-keys %s",
+		execStart = fmt.Sprintf("%s serve --listen %s --host-key %s --authorized-keys %s",
 			defaultAgentBinaryPath,
 			shellQuote(cfg.agentListenAddr),
 			shellQuote(filepath.Join(defaultStateDir, "ssh_host_ed25519_key")),
 			shellQuote(defaultDirectAuthorizedKeysPath()),
 		)
 	case transport.ModeReverse:
-		execStart = fmt.Sprintf("%s reverse --mode reverse --controller %s --server-name %s --host-key %s --known-hosts %s",
+		execStart = fmt.Sprintf("%s reverse --controller %s --server-name %s --host-key %s --known-hosts %s",
 			defaultAgentBinaryPath,
 			shellQuote(cfg.controllerAddress),
 			shellQuote(server.Name),
@@ -355,12 +360,13 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 		"SERVICE_NAME=" + shellQuote(cfg.serviceName),
 		"STATE_DIR=" + shellQuote(defaultStateDir),
 		"CONFIG_DIR=" + shellQuote(defaultConfigDir),
+		"BIN_DIR=" + shellQuote(defaultAgentBinDir),
 		"BIN_PATH=" + shellQuote(defaultAgentBinaryPath),
 		"TEMP_BIN=" + shellQuote(cfg.tempBinaryPath),
 		"TEMP_UNIT=" + shellQuote(cfg.tempUnitPath),
 		"TEMP_SCRIPT=" + shellQuote(cfg.tempScriptPath),
 		"",
-		sudo + "mkdir -p \"$STATE_DIR\" \"$CONFIG_DIR\"",
+		sudo + "mkdir -p \"$BIN_DIR\" \"$STATE_DIR\" \"$CONFIG_DIR\"",
 		sudo + "install -m 0755 \"$TEMP_BIN\" \"$BIN_PATH\"",
 		sudo + "install -m 0644 \"$TEMP_UNIT\" /etc/systemd/system/\"$SERVICE_NAME\".service",
 	}

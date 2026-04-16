@@ -46,6 +46,9 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 
 	serviceName := defaultServiceName
 	agentPort := 2222
+	if a.Config.Runtime.DefaultAgentPort > 0 {
+		agentPort = a.Config.Runtime.DefaultAgentPort
+	}
 
 	serviceUnit, err := buildAgentServiceUnit(server, resolvedBootstrapConfig{
 		serviceName:     serviceName,
@@ -129,20 +132,28 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 
 // TeardownAgent SSHes to the server using stored login credentials and removes the managed agent.
 func (a *App) TeardownAgent(server ServerRecord) error {
+	return a.TeardownAgentWithPassword(server, "")
+}
+
+// TeardownAgentWithPassword is like TeardownAgent but accepts an explicit password,
+// overriding key-based auth. Used by the --via-ssh remove flow.
+func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) error {
 	if !server.Agent.Managed {
 		return nil
 	}
 
 	loginUser := server.Agent.LoginUser
 	if loginUser == "" {
-		return fmt.Errorf("cannot teardown agent on %q: no login user stored", server.Name)
+		return fmt.Errorf("cannot teardown agent on %q: no login user stored (pass --login-user)", server.Name)
 	}
 	loginPort := server.Agent.LoginPort
 	if loginPort == 0 {
 		loginPort = 22
 	}
 	loginKeyPath := server.Agent.LoginKey
-	if loginKeyPath == "" {
+	if password != "" {
+		loginKeyPath = "" // use password auth
+	} else if loginKeyPath == "" {
 		loginKeyPath = filepath.Join(a.ConfigDir, "keys", a.Config.Crypto.PrimaryKey)
 	}
 
@@ -158,8 +169,9 @@ func (a *App) TeardownAgent(server ServerRecord) error {
 		Port:             loginPort,
 		User:             loginUser,
 		PrivateKeyPath:   loginKeyPath,
+		Password:         password,
 		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
-		AcceptNewHostKey: false,
+		AcceptNewHostKey: true,
 		Uploads: []BootstrapUpload{
 			{Path: "/tmp/cenvero-fleet-teardown.sh", Mode: 0o700, Content: []byte(script)},
 		},
@@ -194,7 +206,7 @@ func AgentInstallInstructions(server ServerRecord, mode transport.Mode) string {
 		return fmt.Sprintf(
 			"To install the agent on %s, download fleet-agent_%s for your OS/arch from\n"+
 				"https://github.com/%s/releases and run:\n\n"+
-				"  fleet-agent serve --mode direct --listen 0.0.0.0:2222\n\n"+
+				"  fleet-agent serve --listen 0.0.0.0:2222\n\n"+
 				"Add it to your init system and ensure port 2222 is reachable.\n"+
 				"Then run: fleet server reconnect %s",
 			server.Name, ver, agentGitHubRepo, server.Name,
@@ -209,6 +221,7 @@ func buildRemoteDownloadInstallScript(server ServerRecord, sudo, serviceName, ve
 		"SERVICE_NAME=" + shellQuote(serviceName),
 		"STATE_DIR=" + shellQuote(defaultStateDir),
 		"CONFIG_DIR=" + shellQuote(defaultConfigDir),
+		"BIN_DIR=" + shellQuote(defaultAgentBinDir),
 		"BIN_PATH=" + shellQuote(defaultAgentBinaryPath),
 		"VERSION=" + shellQuote(ver),
 		"REPO=" + shellQuote(agentGitHubRepo),
@@ -253,6 +266,8 @@ func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName string
 		"SERVICE_NAME=" + shellQuote(serviceName),
 		"STATE_DIR=" + shellQuote(defaultStateDir),
 		"CONFIG_DIR=" + shellQuote(defaultConfigDir),
+		"BIN_DIR=" + shellQuote(defaultAgentBinDir),
+		"BIN_PATH=" + shellQuote(defaultAgentBinaryPath),
 		"",
 	}
 	lines = append(lines, buildAgentSetupLines(sudo, serviceName, "/tmp/cenvero-fleet-agent.bin")...)
@@ -265,7 +280,7 @@ func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName string
 
 func buildAgentSetupLines(sudo, serviceName, binarySource string) []string {
 	return []string{
-		sudo + "mkdir -p \"$STATE_DIR\" \"$CONFIG_DIR\"",
+		sudo + "mkdir -p \"$BIN_DIR\" \"$STATE_DIR\" \"$CONFIG_DIR\"",
 		sudo + "install -m 0755 " + binarySource + " \"$BIN_PATH\"",
 		sudo + "install -m 0644 /tmp/cenvero-fleet-agent.service /etc/systemd/system/" + shellQuote(serviceName) + ".service",
 		sudo + "install -m 0600 /tmp/cenvero-fleet-authorized_keys \"$STATE_DIR/authorized_keys\"",
@@ -286,7 +301,7 @@ func buildAgentTeardownScript(serviceName, sudo string) string {
 		sudo + "systemctl disable --now \"$SERVICE_NAME\".service 2>/dev/null || true",
 		sudo + "rm -f /etc/systemd/system/\"$SERVICE_NAME\".service",
 		sudo + "systemctl daemon-reload",
-		sudo + "rm -f " + shellQuote(defaultAgentBinaryPath),
+		sudo + "rm -rf " + shellQuote(defaultAgentBinDir),
 		sudo + "rm -rf " + shellQuote(defaultStateDir) + " " + shellQuote(defaultConfigDir),
 		"rm -f /tmp/cenvero-fleet-teardown.sh",
 		"echo \"" + version.ProductName + " agent removed\"",

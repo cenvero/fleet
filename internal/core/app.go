@@ -227,25 +227,86 @@ func (a *App) writeServerFile(server ServerRecord) error {
 	return toml.NewEncoder(f).Encode(server)
 }
 
+// RemoveOptions controls how fleet server remove behaves when an agent is managed.
+type RemoveOptions struct {
+	// Force deletes the server record from the controller without attempting
+	// agent teardown. Use when the server is unreachable or already gone.
+	Force bool
+
+	// OverrideSSH, when true, uses the login credentials below instead of
+	// the ones stored at install time. Useful when credentials have changed.
+	OverrideSSH   bool
+	LoginUser     string
+	LoginKey      string
+	LoginPassword string
+	LoginPort     int
+}
+
 func (a *App) RemoveServer(name string) error {
+	return a.RemoveServerWithOptions(name, RemoveOptions{})
+}
+
+func (a *App) RemoveServerWithOptions(name string, opts RemoveOptions) error {
 	server, err := a.GetServer(name)
 	if err != nil {
 		return err
 	}
-	if server.Agent.Managed {
-		if teardownErr := a.TeardownAgent(server); teardownErr != nil {
-			return fmt.Errorf("teardown agent on %s: %w", name, teardownErr)
+	if server.Agent.Managed && !opts.Force {
+		// Apply SSH credential overrides if requested
+		if opts.OverrideSSH {
+			if opts.LoginUser != "" {
+				server.Agent.LoginUser = opts.LoginUser
+			}
+			if opts.LoginKey != "" {
+				server.Agent.LoginKey = opts.LoginKey
+			}
+			if opts.LoginPassword != "" {
+				// store temporarily so TeardownAgent can use it
+				server.Agent.LoginKey = "" // prefer password when explicitly given
+			}
+			if opts.LoginPort > 0 {
+				server.Agent.LoginPort = opts.LoginPort
+			}
+		}
+		if teardownErr := a.teardownAgentWithPassword(server, opts.LoginPassword); teardownErr != nil {
+			return fmt.Errorf("agent teardown on %q failed: %w\n\n"+
+				"  To remove the server record without cleaning up the agent:\n"+
+				"    fleet server remove %s --force\n\n"+
+				"  To retry with different SSH credentials:\n"+
+				"    fleet server remove %s --via-ssh --login-user <user> [--login-key <path> | --login-password <pw>]",
+				name, teardownErr, name, name)
 		}
 	}
 	path := filepath.Join(a.ConfigDir, "servers", name+".toml")
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove server %s: %w", name, err)
 	}
+	details := "agent_managed=false"
+	if server.Agent.Managed {
+		if opts.Force {
+			details = "agent_managed=true force=true (agent left running)"
+		} else {
+			details = "agent_managed=true teardown=ok"
+		}
+	}
 	return a.AuditLog.Append(logs.AuditEntry{
 		Action:   "server.remove",
 		Target:   name,
 		Operator: a.operator(),
+		Details:  details,
 	})
+}
+
+// teardownAgentWithPassword is like TeardownAgent but accepts an optional
+// password override (for --via-ssh flows where stored credentials are stale).
+func (a *App) teardownAgentWithPassword(server ServerRecord, password string) error {
+	if password != "" {
+		// Temporarily override: clear stored key so bootstrap uses password auth.
+		override := server
+		override.Agent.LoginKey = ""
+		return a.TeardownAgentWithPassword(override, password)
+	}
+	return a.TeardownAgent(server)
 }
 
 func (a *App) ReconnectServer(name string, acceptNewHostKey bool) error {

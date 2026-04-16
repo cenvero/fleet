@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +86,12 @@ func Initialize(opts InitOptions) (InitResult, error) {
 	cfg.Database = store.WithDefaults(cfg.Database, opts.ConfigDir)
 	if opts.CryptoAlgorithm == string(crypto.AlgorithmRSA4096) {
 		cfg.Crypto.PrimaryKey = "id_rsa4096"
+	}
+	if opts.DefaultAgentPort > 0 {
+		cfg.Runtime.DefaultAgentPort = opts.DefaultAgentPort
+	}
+	if opts.ListenAddress != "" {
+		cfg.Runtime.ListenAddress = opts.ListenAddress
 	}
 
 	algo, err := crypto.ParseAlgorithm(opts.CryptoAlgorithm)
@@ -164,7 +171,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	fmt.Fprintln(out, "└─────────────────────────────────────────────────────────────┘")
 	fmt.Fprintln(out)
 
-	fmt.Fprintln(out, "Step 1 of 5 — Configuration directory")
+	fmt.Fprintln(out, "Step 1 of 7 — Configuration directory")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintf(out, "  [1] %s              (recommended, per-user)\n", defaultDir)
 	fmt.Fprintln(out, "  [2] /etc/cenvero-fleet            (system-wide, requires sudo)")
@@ -188,7 +195,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 2 of 5 — Short alias")
+	fmt.Fprintln(out, "Step 2 of 7 — Short alias")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  [1] Use 'fleet' (default)")
 	fmt.Fprintln(out, "  [2] Custom alias")
@@ -208,10 +215,10 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 3 of 5 — Default transport mode")
+	fmt.Fprintln(out, "Step 3 of 7 — Default transport mode")
 	fmt.Fprintln(out, "─────────────────────────────────────")
-	fmt.Fprintln(out, "  [1] Reverse mode (agent connects to you)")
-	fmt.Fprintln(out, "  [2] Direct mode (you connect to agent)")
+	fmt.Fprintln(out, "  [1] Reverse mode (agent connects to you — works behind NAT)")
+	fmt.Fprintln(out, "  [2] Direct mode  (you SSH into the agent — agent must be reachable)")
 	fmt.Fprintln(out, "  [3] Decide per server (no default)")
 	modeChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
 	if err != nil {
@@ -226,7 +233,33 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 4 of 6 — Cryptography")
+	fmt.Fprintln(out, "Step 4 of 7 — Networking")
+	fmt.Fprintln(out, "─────────────────────────────────────")
+	defaultAgentPort := 0
+	listenAddress := ""
+	if mode == transport.ModeDirect || mode == transport.ModePerNode {
+		fmt.Fprintln(out, "  Direct mode: the agent exposes an SSH port so this controller can connect.")
+		agentPortStr, err := prompt(reader, out, "  Default agent SSH port [2222]: ", "2222")
+		if err != nil {
+			return InitResult{}, err
+		}
+		p, err := strconv.Atoi(strings.TrimSpace(agentPortStr))
+		if err != nil || p < 1 || p > 65535 {
+			return InitResult{}, fmt.Errorf("invalid agent port %q", agentPortStr)
+		}
+		defaultAgentPort = p
+	}
+	if mode == transport.ModeReverse || mode == transport.ModePerNode {
+		fmt.Fprintln(out, "  Reverse mode: agents dial this controller — it must have a reachable static IP.")
+		fmt.Fprintln(out, "  Use 0.0.0.0 to listen on all interfaces, or set a specific IP.")
+		listenAddress, err = prompt(reader, out, "  Controller listen address [0.0.0.0:9443]: ", "0.0.0.0:9443")
+		if err != nil {
+			return InitResult{}, err
+		}
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Step 5 of 7 — Cryptography")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  Algorithm:")
 	fmt.Fprintln(out, "    [1] Ed25519  (recommended)")
@@ -263,7 +296,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 5 of 6 — Update channel & policy")
+	fmt.Fprintln(out, "Step 6 of 7 — Update channel & policy")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  Channel:")
 	fmt.Fprintln(out, "    [1] stable (recommended)")
@@ -293,7 +326,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 6 of 6 — Database backend")
+	fmt.Fprintln(out, "Step 7 of 7 — Database backend")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  [1] SQLite   (recommended, separate local files)")
 	fmt.Fprintln(out, "  [2] PostgreSQL")
@@ -324,16 +357,18 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	return Initialize(InitOptions{
-		ConfigDir:       configDir,
-		Alias:           alias,
-		DefaultMode:     mode,
-		CryptoAlgorithm: algo,
-		Passphrase:      passphrase,
-		UpdateChannel:   channel,
-		UpdatePolicy:    policy,
-		DatabaseBackend: backend,
-		DatabaseDSN:     dsn,
-		ExecutablePath:  executablePath,
+		ConfigDir:        configDir,
+		Alias:            alias,
+		DefaultMode:      mode,
+		CryptoAlgorithm:  algo,
+		Passphrase:       passphrase,
+		UpdateChannel:    channel,
+		UpdatePolicy:     policy,
+		DatabaseBackend:  backend,
+		DatabaseDSN:      dsn,
+		ExecutablePath:   executablePath,
+		DefaultAgentPort: defaultAgentPort,
+		ListenAddress:    listenAddress,
 	})
 }
 

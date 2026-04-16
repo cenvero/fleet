@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -38,13 +39,26 @@ func NewRootCommand() *cobra.Command {
 		Use:   "fleet",
 		Short: "Cenvero Fleet controller",
 		Long:  "Cenvero Fleet is a self-hosted, decentralized fleet management platform.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !core.IsInitialized(configDir) {
+				fmt.Fprintln(cmd.OutOrStdout(), "Welcome to Cenvero Fleet.")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "Fleet is not initialized yet. Run the setup wizard first:")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "  fleet init")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "To report an issue: fleet report")
+				return nil
+			}
+			return cmd.Help()
+		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if configDir == "" {
 				configDir = core.DefaultConfigDir("")
 			}
 			// Commands that are always allowed before init
 			switch cmd.Name() {
-			case "init", "help", "self-uninstall", "completion", "fleet":
+			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet":
 				return nil
 			}
 			if cmd.HasParent() {
@@ -86,6 +100,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newKeyCommand(&configDir))
 	root.AddCommand(newUpdateCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
+	root.AddCommand(newReportCommand())
 	return root
 }
 
@@ -100,6 +115,8 @@ func newInitCommand(configDir *string) *cobra.Command {
 		passphrase     string
 		dbBackend      string
 		dbDSN          string
+		agentPort      int
+		listenAddress  string
 	)
 
 	cmd := &cobra.Command{
@@ -113,16 +130,18 @@ func newInitCommand(configDir *string) *cobra.Command {
 					return err
 				}
 				result, err := core.Initialize(core.InitOptions{
-					ConfigDir:       *configDir,
-					Alias:           alias,
-					DefaultMode:     parsedMode,
-					CryptoAlgorithm: algorithm,
-					Passphrase:      passphrase,
-					UpdateChannel:   channel,
-					UpdatePolicy:    update.Policy(policy),
-					DatabaseBackend: store.Backend(strings.TrimSpace(strings.ToLower(dbBackend))),
-					DatabaseDSN:     dbDSN,
-					ExecutablePath:  executable,
+					ConfigDir:        *configDir,
+					Alias:            alias,
+					DefaultMode:      parsedMode,
+					CryptoAlgorithm:  algorithm,
+					Passphrase:       passphrase,
+					UpdateChannel:    channel,
+					UpdatePolicy:     update.Policy(policy),
+					DatabaseBackend:  store.Backend(strings.TrimSpace(strings.ToLower(dbBackend))),
+					DatabaseDSN:      dbDSN,
+					ExecutablePath:   executable,
+					DefaultAgentPort: agentPort,
+					ListenAddress:    listenAddress,
 				})
 				if err != nil {
 					return err
@@ -149,6 +168,8 @@ func newInitCommand(configDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&passphrase, "passphrase", "", "passphrase for private keys in non-interactive mode")
 	cmd.Flags().StringVar(&dbBackend, "db-backend", "sqlite", "database backend: sqlite, postgres, mysql, mariadb")
 	cmd.Flags().StringVar(&dbDSN, "db-dsn", "", "database DSN for postgres, mysql, or mariadb")
+	cmd.Flags().IntVar(&agentPort, "agent-port", 0, "default agent SSH port for direct mode (0 = use 2222)")
+	cmd.Flags().StringVar(&listenAddress, "listen-address", "", "controller listen address for reverse-mode agents (e.g. 0.0.0.0:9443)")
 	return cmd
 }
 
@@ -362,8 +383,8 @@ func newServerCommand(configDir *string) *cobra.Command {
 				}
 				fmt.Fprintln(cmd.OutOrStdout())
 				fmt.Fprintf(cmd.OutOrStdout(), "The following will be installed on %s (%s:%d):\n", name, address, lp)
-				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent binary  →  /usr/local/bin/fleet-agent")
-				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent.service  →  systemd unit (enabled on boot)")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent binary  →  /opt/cenvero-fleet/fleet-agent")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • cenvero-fleet-agent.service  →  systemd unit (enabled on boot)")
 				fmt.Fprintln(cmd.OutOrStdout(), "  • authorized_keys entry for this controller's public key")
 				fmt.Fprintln(cmd.OutOrStdout())
 				fmt.Fprintln(cmd.OutOrStdout(), "To skip, press Ctrl+C now or re-run with --no-agent.")
@@ -451,19 +472,85 @@ func newServerCommand(configDir *string) *cobra.Command {
 			return writeJSON(cmd, snapshot)
 		},
 	})
-	serverCmd.AddCommand(&cobra.Command{
+	removeCmd := &cobra.Command{
 		Use:   "remove <name>",
-		Short: "Remove a server",
-		Args:  cobra.ExactArgs(1),
+		Short: "Remove a server (and tear down its agent if managed)",
+		Long: `Removes a server from the fleet.
+
+If the agent is managed, fleet will SSH to the server using the stored login
+credentials and remove the systemd service, binary, and state directory.
+
+If the server is unreachable or credentials have changed, use one of:
+
+  --force          Delete the server record without touching the agent.
+  --via-ssh        Retry teardown with different SSH credentials.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			force, _ := cmd.Flags().GetBool("force")
+			viaSSH, _ := cmd.Flags().GetBool("via-ssh")
+			loginUser, _ := cmd.Flags().GetString("login-user")
+			loginKey, _ := cmd.Flags().GetString("login-key")
+			loginPassword, _ := cmd.Flags().GetString("login-password")
+			loginPort, _ := cmd.Flags().GetInt("login-port")
+
+			if viaSSH && loginUser == "" {
+				// Prompt for missing login user interactively
+				scanner := bufio.NewScanner(os.Stdin)
+				fmt.Fprintf(cmd.OutOrStdout(), "Login user for SSH teardown: ")
+				scanner.Scan()
+				loginUser = strings.TrimSpace(scanner.Text())
+				if loginUser == "" {
+					return fmt.Errorf("--login-user is required with --via-ssh")
+				}
+			}
+			if viaSSH && loginKey == "" && loginPassword == "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Auth method — [K]ey or [P]assword [K]: ")
+				scanner := bufio.NewScanner(os.Stdin)
+				scanner.Scan()
+				choice := strings.TrimSpace(scanner.Text())
+				if strings.EqualFold(choice, "p") || strings.HasPrefix(strings.ToLower(choice), "p") {
+					fmt.Fprintf(cmd.OutOrStdout(), "Password: ")
+					if pw, err := term.ReadPassword(0); err == nil {
+						loginPassword = string(pw)
+						fmt.Fprintln(cmd.OutOrStdout())
+					}
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "Path to SSH private key [~/.ssh/id_ed25519]: ")
+					scanner.Scan()
+					loginKey = strings.TrimSpace(scanner.Text())
+					if loginKey == "" {
+						loginKey = "~/.ssh/id_ed25519"
+					}
+					if strings.HasPrefix(loginKey, "~/") {
+						home, _ := os.UserHomeDir()
+						loginKey = filepath.Join(home, loginKey[2:])
+					}
+				}
+			}
+
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
 			}
 			defer app.Close()
-			return app.RemoveServer(args[0])
+
+			return app.RemoveServerWithOptions(args[0], core.RemoveOptions{
+				Force:         force,
+				OverrideSSH:   viaSSH,
+				LoginUser:     loginUser,
+				LoginKey:      loginKey,
+				LoginPassword: loginPassword,
+				LoginPort:     loginPort,
+			})
 		},
-	})
+	}
+	removeCmd.Flags().Bool("force", false, "delete server record from controller without touching the agent")
+	removeCmd.Flags().Bool("via-ssh", false, "retry agent teardown via SSH with the credentials below")
+	removeCmd.Flags().String("login-user", "", "SSH login user for teardown (--via-ssh)")
+	removeCmd.Flags().String("login-key", "", "SSH private key path for teardown (--via-ssh)")
+	removeCmd.Flags().String("login-password", "", "SSH password for teardown (--via-ssh)")
+	removeCmd.Flags().Int("login-port", 0, "SSH port for teardown (--via-ssh, default 22)")
+	serverCmd.AddCommand(removeCmd)
 	reconnect := &cobra.Command{
 		Use:   "reconnect <name>",
 		Short: "Reconnect to a server and optionally accept a new host key",
@@ -1055,6 +1142,28 @@ func newConfigCommand(configDir *string) *cobra.Command {
 			return app.Import(export)
 		},
 	})
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "agent-port <port>",
+		Short: "Set the default agent SSH port used when installing agents",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			port, err := strconv.Atoi(args[0])
+			if err != nil || port < 1 || port > 65535 {
+				return fmt.Errorf("invalid port %q: must be 1-65535", args[0])
+			}
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			app.Config.Runtime.DefaultAgentPort = port
+			if err := core.SaveConfig(core.ConfigPath(*configDir), app.Config); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "default agent port set to %d\n", port)
+			return nil
+		},
+	})
 	return configCmd
 }
 
@@ -1313,6 +1422,27 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 	return cmd
 }
 
+func newReportCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "report",
+		Short: "Show where to report bugs and get support",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Fprintln(cmd.OutOrStdout(), "Cenvero Fleet — bug reports & support")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "  GitHub Issues  https://github.com/cenvero/fleet/issues")
+			fmt.Fprintln(cmd.OutOrStdout(), "  Email          support@cenvero.org")
+			fmt.Fprintln(cmd.OutOrStdout(), "  Docs           https://fleet.cenvero.org/docs")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "When reporting, please include:")
+			fmt.Fprintf(cmd.OutOrStdout(), "  • Fleet version  fleet version\n")
+			fmt.Fprintf(cmd.OutOrStdout(), "  • OS and arch    %s\n", goRuntimeInfo())
+			fmt.Fprintln(cmd.OutOrStdout(), "  • Steps to reproduce the issue")
+			fmt.Fprintln(cmd.OutOrStdout(), "  • Relevant logs  fleet logs audit")
+			return nil
+		},
+	}
+}
+
 func openApp(configDir string) (*core.App, error) {
 	app, err := core.Open(configDir)
 	if err != nil {
@@ -1359,6 +1489,10 @@ func writeServerTable(cmd *cobra.Command, servers []core.ServerRecord) error {
 		}
 	}
 	return w.Flush()
+}
+
+func goRuntimeInfo() string {
+	return runtime.GOOS + "/" + runtime.GOARCH
 }
 
 func writeLogOutput(cmd *cobra.Command, result proto.LogReadResult, exportPath string) error {

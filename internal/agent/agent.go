@@ -70,18 +70,18 @@ func NewRootCommand() *cobra.Command {
 		},
 	}
 
-	root.Flags().StringVar(&mode, "mode", "direct", "transport mode to advertise")
-	root.Flags().StringVar(&listenAddress, "listen", "127.0.0.1:2222", "agent listen address for direct mode")
-	root.Flags().StringVar(&hostKeyPath, "host-key", DefaultHostKeyPath(), "SSH host key path")
-	root.Flags().StringVar(&authorizedKeysPath, "authorized-keys", "", "authorized_keys file that may connect to the agent")
-	root.Flags().StringVar(&controllerAddress, "controller", "127.0.0.1:9443", "controller address for reverse mode")
-	root.Flags().StringVar(&serverName, "server-name", "", "registered Cenvero Fleet server name for reverse mode")
-	root.Flags().StringVar(&knownHostsPath, "known-hosts", DefaultControllerKnownHostsPath(), "known_hosts file used to pin the controller host key in reverse mode")
-	root.Flags().BoolVar(&acceptNewHostKey, "accept-new-host-key", false, "accept a replacement controller host key after manual verification")
-	root.Flags().DurationVar(&retryMin, "retry-min", time.Second, "minimum reconnect backoff for reverse mode")
-	root.Flags().DurationVar(&retryMax, "retry-max", 30*time.Second, "maximum reconnect backoff for reverse mode")
-	root.Flags().DurationVar(&offlineMetricsInterval, "offline-metrics-interval", time.Minute, "how often to queue local metrics while the controller is unreachable")
-	root.Flags().StringVar(&metricsQueuePath, "metrics-queue", DefaultMetricsQueuePath(), "path used to persist queued reverse-mode metrics while disconnected")
+	root.PersistentFlags().StringVar(&mode, "mode", "direct", "transport mode to advertise")
+	root.PersistentFlags().StringVar(&listenAddress, "listen", "127.0.0.1:2222", "agent listen address for direct mode")
+	root.PersistentFlags().StringVar(&hostKeyPath, "host-key", DefaultHostKeyPath(), "SSH host key path")
+	root.PersistentFlags().StringVar(&authorizedKeysPath, "authorized-keys", "", "authorized_keys file that may connect to the agent")
+	root.PersistentFlags().StringVar(&controllerAddress, "controller", "127.0.0.1:9443", "controller address for reverse mode")
+	root.PersistentFlags().StringVar(&serverName, "server-name", "", "registered Cenvero Fleet server name for reverse mode")
+	root.PersistentFlags().StringVar(&knownHostsPath, "known-hosts", DefaultControllerKnownHostsPath(), "known_hosts file used to pin the controller host key in reverse mode")
+	root.PersistentFlags().BoolVar(&acceptNewHostKey, "accept-new-host-key", false, "accept a replacement controller host key after manual verification")
+	root.PersistentFlags().DurationVar(&retryMin, "retry-min", time.Second, "minimum reconnect backoff for reverse mode")
+	root.PersistentFlags().DurationVar(&retryMax, "retry-max", 30*time.Second, "maximum reconnect backoff for reverse mode")
+	root.PersistentFlags().DurationVar(&offlineMetricsInterval, "offline-metrics-interval", time.Minute, "how often to queue local metrics while the controller is unreachable")
+	root.PersistentFlags().StringVar(&metricsQueuePath, "metrics-queue", DefaultMetricsQueuePath(), "path used to persist queued reverse-mode metrics while disconnected")
 	root.AddCommand(&cobra.Command{
 		Use:   "capabilities",
 		Short: "Print the detected agent capabilities",
@@ -115,20 +115,13 @@ func NewRootCommand() *cobra.Command {
 		Short: "Run the direct-mode SSH transport listener",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
-			parsedMode, err := transport.ParseMode(mode)
-			if err != nil {
-				return err
-			}
-			if parsedMode != transport.ModeDirect {
-				return fmt.Errorf("agent serve currently supports direct mode only")
-			}
 			listener, err := net.Listen("tcp", listenAddress)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet agent listening on %s\n", listener.Addr())
 			server := Server{
-				Mode:               parsedMode,
+				Mode:               transport.ModeDirect,
 				HostKeyPath:        hostKeyPath,
 				AuthorizedKeysPath: authorizedKeysPath,
 			}
@@ -140,15 +133,8 @@ func NewRootCommand() *cobra.Command {
 		Short: "Connect outward to a reverse-mode controller and serve RPCs over the tunnel",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
-			parsedMode, err := transport.ParseMode(mode)
-			if err != nil {
-				return err
-			}
-			if parsedMode != transport.ModeReverse {
-				return fmt.Errorf("agent reverse currently requires --mode reverse")
-			}
 			server := Server{
-				Mode:                     parsedMode,
+				Mode:                     transport.ModeReverse,
 				HostKeyPath:              hostKeyPath,
 				ControllerAddress:        controllerAddress,
 				ControllerKnownHostsPath: knownHostsPath,
