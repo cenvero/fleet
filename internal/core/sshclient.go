@@ -81,9 +81,12 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		if err == nil || isCleanSSHExit(err) {
 			return nil
 		}
+		if isTerminalSSHError(err) {
+			return err
+		}
 
 		if attempt < sshMaxRetries {
-			fmt.Fprintf(out, "\nConnection lost. Retrying in 5s...\n")
+			fmt.Fprintf(out, "\nConnection lost (%v). Retrying in 5s...\n", err)
 		}
 	}
 
@@ -165,4 +168,26 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 func isCleanSSHExit(err error) bool {
 	var exitErr *ssh.ExitError
 	return errors.As(err, &exitErr)
+}
+
+// isTerminalSSHError returns true for errors that will never succeed on retry —
+// authentication failures, handshake errors, host key rejections.
+func isTerminalSSHError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, phrase := range []string{
+		"unable to authenticate",
+		"no supported methods remain",
+		"handshake failed",
+		"host key",
+		"rejected",
+		"permission denied",
+	} {
+		if strings.Contains(strings.ToLower(msg), phrase) {
+			return true
+		}
+	}
+	return false
 }

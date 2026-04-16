@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,14 +89,42 @@ func HomebrewUpdateHint(configDir, manifestURL string, policy update.Policy) str
 			}
 		}
 	}
-	current := version.Version
-	if !strings.HasPrefix(current, "v") {
-		current = "v" + current
-	}
-	if cache.Latest != "" && cache.Latest != current {
+	if cache.Latest != "" && isNewerVersion(cache.Latest, version.Version) {
 		return cache.Latest
 	}
 	return ""
+}
+
+// isNewerVersion returns true if candidate is strictly newer than current.
+// Both strings may or may not carry a leading "v".
+func isNewerVersion(candidate, current string) bool {
+	return semverCompare(candidate, current) > 0
+}
+
+func semverCompare(a, b string) int {
+	av := strings.TrimPrefix(a, "v")
+	bv := strings.TrimPrefix(b, "v")
+	ap := strings.SplitN(av, "-", 2)
+	bp := strings.SplitN(bv, "-", 2)
+	ac := strings.Split(ap[0], ".")
+	bc := strings.Split(bp[0], ".")
+	for len(ac) < 3 {
+		ac = append(ac, "0")
+	}
+	for len(bc) < 3 {
+		bc = append(bc, "0")
+	}
+	for i := 0; i < 3; i++ {
+		an, _ := strconv.Atoi(ac[i])
+		bn, _ := strconv.Atoi(bc[i])
+		if an != bn {
+			if an > bn {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
@@ -284,6 +313,79 @@ func agentServiceName(server ServerRecord) string {
 		return defaultServiceName
 	}
 	return ""
+}
+
+type SyncAgentResult struct {
+	Server         string `json:"server"`
+	AgentVersion   string `json:"agent_version"`
+	WantedVersion  string `json:"wanted_version"`
+	AlreadySynced  bool   `json:"already_synced,omitempty"`
+	Updated        bool   `json:"updated,omitempty"`
+	RestartHandled bool   `json:"restart_handled,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+type FleetSyncAgentResult struct {
+	ControllerVersion string            `json:"controller_version"`
+	Agents            []SyncAgentResult `json:"agents"`
+	Synced            int               `json:"synced"`
+	AlreadyUpToDate   int               `json:"already_up_to_date"`
+	Failed            int               `json:"failed"`
+}
+
+// SyncAgent checks whether each managed server's agent version matches the
+// controller version and, if not, triggers an update + service restart.
+// Pass serverNames=nil to target every registered server.
+func (a *App) SyncAgent(ctx context.Context, serverNames []string) (FleetSyncAgentResult, error) {
+	targets, err := a.updateTargets(serverNames)
+	if err != nil {
+		return FleetSyncAgentResult{}, err
+	}
+
+	result := FleetSyncAgentResult{
+		ControllerVersion: version.Version,
+		Agents:            make([]SyncAgentResult, 0, len(targets)),
+	}
+
+	for _, server := range targets {
+		r := a.syncAgentOne(ctx, server)
+		result.Agents = append(result.Agents, r)
+		switch {
+		case r.Error != "":
+			result.Failed++
+		case r.AlreadySynced:
+			result.AlreadyUpToDate++
+		default:
+			result.Synced++
+		}
+	}
+	return result, nil
+}
+
+func (a *App) syncAgentOne(ctx context.Context, server ServerRecord) SyncAgentResult {
+	agentVer := strings.TrimSpace(server.Observed.AgentVersion)
+	want := version.Version
+
+	base := SyncAgentResult{
+		Server:        server.Name,
+		AgentVersion:  agentVer,
+		WantedVersion: want,
+	}
+
+	if agentVer != "" && !isNewerVersion(want, agentVer) && !isNewerVersion(agentVer, want) {
+		base.AlreadySynced = true
+		return base
+	}
+
+	applied := a.applyAgentUpdate(ctx, server)
+	if applied.Error != "" {
+		base.Error = applied.Error
+		return base
+	}
+	base.AgentVersion = applied.Version
+	base.Updated = applied.Applied
+	base.RestartHandled = applied.RestartScheduled
+	return base
 }
 
 func (a *App) RollbackUpdate() (update.RollbackResult, error) {

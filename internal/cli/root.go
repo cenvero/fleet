@@ -107,6 +107,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newTemplateCommand(&configDir))
 	root.AddCommand(newKeyCommand(&configDir))
 	root.AddCommand(newUpdateCommand(&configDir))
+	root.AddCommand(newSyncAgentCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
 	return root
@@ -1632,6 +1633,34 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "run on all servers concurrently")
+	return cmd
+}
+
+func newSyncAgentCommand(configDir *string) *cobra.Command {
+	var targetServers []string
+	cmd := &cobra.Command{
+		Use:   "sync-agent",
+		Short: "Sync agent version to match the controller, restarting the service if updated",
+		Long: `Checks the agent version on every managed server (or the servers you specify
+with --server) against the currently installed controller version.
+
+If the versions differ, the latest agent binary is downloaded on the remote
+server, verified, and the agent service is restarted automatically.
+Servers already running the correct version are skipped.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			result, err := app.SyncAgent(cmd.Context(), targetServers)
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd, result)
+		},
+	}
+	cmd.Flags().StringArrayVar(&targetServers, "server", nil, "sync only the specified server(s) instead of all")
 	return cmd
 }
 

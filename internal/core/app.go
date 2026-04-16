@@ -205,9 +205,68 @@ func (a *App) GetServer(name string) (ServerRecord, error) {
 	_, err := toml.DecodeFile(path, &server)
 	a.serverMu.RUnlock()
 	if err != nil {
+		if os.IsNotExist(err) {
+			if suggestion := a.suggestServer(name); suggestion != "" {
+				return ServerRecord{}, fmt.Errorf("server %q not found — did you mean %q?", name, suggestion)
+			}
+			return ServerRecord{}, fmt.Errorf("server %q not found — run 'fleet server list' to see all servers", name)
+		}
 		return ServerRecord{}, fmt.Errorf("load server %s: %w", name, err)
 	}
 	return server, nil
+}
+
+// suggestServer returns the closest matching server name using simple edit distance.
+func (a *App) suggestServer(name string) string {
+	servers, err := a.ListServers()
+	if err != nil || len(servers) == 0 {
+		return ""
+	}
+	best := ""
+	bestDist := len(name) + 1
+	for _, s := range servers {
+		d := editDistance(name, s.Name)
+		if d < bestDist && d <= 3 {
+			bestDist = d
+			best = s.Name
+		}
+	}
+	return best
+}
+
+func editDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	dp := make([][]int, la+1)
+	for i := range dp {
+		dp[i] = make([]int, lb+1)
+		dp[i][0] = i
+	}
+	for j := 0; j <= lb; j++ {
+		dp[0][j] = j
+	}
+	for i := 1; i <= la; i++ {
+		for j := 1; j <= lb; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1]
+			} else {
+				dp[i][j] = 1 + min3(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+			}
+		}
+	}
+	return dp[la][lb]
+}
+
+func min3(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
 }
 
 func (a *App) SaveServer(server ServerRecord) error {
