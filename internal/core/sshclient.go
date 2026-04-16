@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -103,7 +101,7 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 		fmt.Fprintf(out, "Fingerprint: %s (saved to fleet known hosts)\n", state.Fingerprint)
 	}
 
-	// Keepalive: send ping every 30s; close connection if server stops responding
+	// Keepalive: send ping every 30s; close connection if server stops responding.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -114,8 +112,10 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 			case <-done:
 				return
 			case <-ticker.C:
-				if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-					client.Close()
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				if err != nil {
+					// Server unreachable — close so session.Wait() unblocks.
+					_ = client.Close()
 					return
 				}
 			}
@@ -128,7 +128,7 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 	}
 	defer session.Close()
 
-	fd := int(os.Stdin.Fd())
+	fd := stdinFd()
 	if term.IsTerminal(fd) {
 		oldState, err := term.MakeRaw(fd)
 		if err != nil {
@@ -165,21 +165,4 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 func isCleanSSHExit(err error) bool {
 	var exitErr *ssh.ExitError
 	return errors.As(err, &exitErr)
-}
-
-func watchWindowResize(session *ssh.Session, fd int, done <-chan struct{}) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-	defer signal.Stop(sigCh)
-	for {
-		select {
-		case <-done:
-			return
-		case <-sigCh:
-			w, h, err := term.GetSize(fd)
-			if err == nil {
-				_ = session.WindowChange(h, w)
-			}
-		}
-	}
 }
