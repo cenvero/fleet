@@ -9,6 +9,10 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: pages-deployment
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy to GitHub Pages
