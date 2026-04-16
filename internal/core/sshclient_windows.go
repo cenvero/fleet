@@ -12,7 +12,7 @@ import (
 )
 
 func stdinFd() int {
-	return int(os.Stdin.Fd()) //nolint:gosec
+	return int(os.Stdin.Fd()) //#nosec G115 -- fd fits in int on all supported platforms
 }
 
 // watchWindowResize is a no-op on Windows — SIGWINCH does not exist.

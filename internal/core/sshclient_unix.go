@@ -15,7 +15,7 @@ import (
 )
 
 func stdinFd() int {
-	return int(os.Stdin.Fd()) //nolint:gosec -- fd fits in int on all supported platforms
+	return int(os.Stdin.Fd()) //#nosec G115 -- fd fits in int on all supported platforms
 }
 
 func watchWindowResize(session *ssh.Session, fd int, done <-chan struct{}) {
