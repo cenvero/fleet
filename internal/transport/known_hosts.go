@@ -4,6 +4,7 @@
 package transport
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"net"
@@ -72,6 +73,67 @@ func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyS
 		}
 		return nil
 	}, nil
+}
+
+// NewInteractiveHostKeyCallback creates a host key callback that:
+//   - Accepts and pins new hosts (TOFU)
+//   - Shows the fingerprint when pinning a new host
+//   - Prompts via promptFn when an existing host key changes; returns error if rejected
+func NewInteractiveHostKeyCallback(path string, promptFn func(hostname, oldFP, newFP string) bool, state *HostKeyState) (ssh.HostKeyCallback, error) {
+	if err := ensureKnownHostsFile(path); err != nil {
+		return nil, err
+	}
+	base, err := knownhosts.New(path)
+	if err != nil {
+		return nil, fmt.Errorf("load known_hosts %s: %w", path, err)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		normalized := knownhosts.Normalize(remote.String())
+		fp := ssh.FingerprintSHA256(key)
+		if state != nil {
+			state.Fingerprint = fp
+			state.StoredAs = normalized
+		}
+		err := base(hostname, remote, key)
+		if err == nil {
+			if state != nil {
+				state.Outcome = "known"
+			}
+			return nil
+		}
+		var keyErr *knownhosts.KeyError
+		if !errors.As(err, &keyErr) {
+			return err
+		}
+		if len(keyErr.Want) == 0 {
+			// New host — TOFU pin
+			if addErr := appendKnownHost(path, remote.String(), key); addErr != nil {
+				return addErr
+			}
+			if state != nil {
+				state.Outcome = "pinned"
+			}
+			return nil
+		}
+		// Host key changed
+		oldFP := ssh.FingerprintSHA256(keyErr.Want[0].Key)
+		if promptFn == nil || !promptFn(normalized, oldFP, fp) {
+			return fmt.Errorf("host key for %s has changed and was rejected", normalized)
+		}
+		if replErr := replaceKnownHost(path, remote.String(), key); replErr != nil {
+			return replErr
+		}
+		if state != nil {
+			state.Outcome = "replaced"
+		}
+		return nil
+	}, nil
+}
+
+// ReadLine reads a single line from a bufio.Reader, used for interactive prompts.
+func ReadLine(r *bufio.Reader) string {
+	line, _ := r.ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 func ensureKnownHostsFile(path string) error {

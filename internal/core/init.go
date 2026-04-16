@@ -276,24 +276,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	case "3":
 		algo = string(crypto.AlgorithmBoth)
 	}
-	passphraseProtect, err := prompt(reader, out, "  Passphrase-protect private key? [Y/n] ", "Y")
-	if err != nil {
-		return InitResult{}, err
-	}
 	passphrase := ""
-	if strings.EqualFold(passphraseProtect, "y") || passphraseProtect == "" {
-		passphrase, err = prompt(reader, out, "  Passphrase: ", "")
-		if err != nil {
-			return InitResult{}, err
-		}
-		confirm, err := prompt(reader, out, "  Confirm passphrase: ", "")
-		if err != nil {
-			return InitResult{}, err
-		}
-		if passphrase == "" || passphrase != confirm {
-			return InitResult{}, fmt.Errorf("passphrase confirmation failed")
-		}
-	}
 
 	channel := "stable"
 	policy := update.PolicyNotifyOnly

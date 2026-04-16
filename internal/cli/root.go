@@ -72,6 +72,14 @@ func NewRootCommand() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Run 'fleet init' first to set up the controller.\n")
 				os.Exit(1)
 			}
+			// Background Homebrew update hint — checks manifest at most once per 10 minutes
+			if core.RuntimeIsHomebrewInstall() {
+				if cfg, err := core.LoadConfig(core.ConfigPath(configDir)); err == nil {
+					if hint := core.HomebrewUpdateHint(configDir, cfg.ManifestURL, cfg.Updates.Policy); hint != "" {
+						fmt.Fprintf(cmd.ErrOrStderr(), "\nUpdate available (%s). To upgrade:\n\n  brew update && brew upgrade cenvero-fleet\n\n", hint)
+					}
+				}
+			}
 			return nil
 		},
 	}
@@ -1295,7 +1303,7 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if core.IsHomebrewInstall(app.ExecutablePath) {
+			if core.RuntimeIsHomebrewInstall() {
 				fmt.Fprintf(cmd.OutOrStdout(), "Current version : %s\n", version.Version)
 				fmt.Fprintf(cmd.OutOrStdout(), "Latest version  : %s\n", latestVersion)
 				if latestVersion != version.Version {
@@ -1324,7 +1332,7 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			if core.IsHomebrewInstall(app.ExecutablePath) {
+			if core.RuntimeIsHomebrewInstall() {
 				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — the controller binary cannot be")
 				fmt.Fprintln(cmd.OutOrStdout(), "self-updated. Use Homebrew to update it:")
 				fmt.Fprintln(cmd.OutOrStdout())
@@ -1352,7 +1360,7 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			if core.IsHomebrewInstall(app.ExecutablePath) {
+			if core.RuntimeIsHomebrewInstall() {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — rollback is handled by Homebrew.")
 				fmt.Fprintln(cmd.ErrOrStderr(), "To roll back: brew install cenvero/fleet/cenvero-fleet@<version>")
 				return fmt.Errorf("rollback not available for Homebrew installs")
@@ -1374,7 +1382,7 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			if core.IsHomebrewInstall(app.ExecutablePath) {
+			if core.RuntimeIsHomebrewInstall() {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — the update channel is determined")
 				fmt.Fprintln(cmd.ErrOrStderr(), "by which Homebrew tap/formula you have installed.")
 				return fmt.Errorf("update channel not configurable for Homebrew installs")
@@ -1638,34 +1646,7 @@ func newSSHCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-
-			server, err := app.GetServer(args[0])
-			if err != nil {
-				return err
-			}
-
-			keyPath := filepath.Join(app.ConfigDir, "keys", app.Config.Crypto.PrimaryKey)
-			knownHostsPath := app.Config.Crypto.KnownHostsPath
-			addr := server.Address
-			port := strconv.Itoa(server.Port)
-			user := server.User
-			if user == "" {
-				user = "root"
-			}
-
-			sshArgs := []string{
-				"-i", keyPath,
-				"-p", port,
-				"-o", "UserKnownHostsFile=" + knownHostsPath,
-				"-o", "StrictHostKeyChecking=accept-new",
-				user + "@" + addr,
-			}
-
-			sshCmd := exec.Command("ssh", sshArgs...) //nolint:gosec
-			sshCmd.Stdin = os.Stdin
-			sshCmd.Stdout = os.Stdout
-			sshCmd.Stderr = os.Stderr
-			return sshCmd.Run()
+			return app.RunSSHSession(args[0], cmd.OutOrStdout())
 		},
 	}
 }

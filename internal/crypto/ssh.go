@@ -6,7 +6,6 @@ package crypto
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -56,11 +55,10 @@ func EnsureEd25519Signer(path string) (ssh.Signer, error) {
 		return nil, fmt.Errorf("generate ed25519 host key: %w", err)
 	}
 
-	pkcs8, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	block, err := ssh.MarshalPrivateKey(privateKey, "")
 	if err != nil {
 		return nil, fmt.Errorf("marshal ed25519 host key: %w", err)
 	}
-	block := &pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}
 	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
 		return nil, fmt.Errorf("write host key %s: %w", path, err)
 	}

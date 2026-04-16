@@ -5,7 +5,10 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,6 +47,55 @@ func IsHomebrewInstall(executablePath string) bool {
 	return strings.Contains(p, "/homebrew/") ||
 		strings.Contains(p, "/cellar/") ||
 		strings.Contains(p, "/linuxbrew/")
+}
+
+// RuntimeIsHomebrewInstall checks the currently running binary path, not the stored config value.
+func RuntimeIsHomebrewInstall() bool {
+	exec, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	return IsHomebrewInstall(exec)
+}
+
+type homebrewHintCache struct {
+	CheckedAt time.Time `json:"checked_at"`
+	Latest    string    `json:"latest"`
+}
+
+// HomebrewUpdateHint returns a non-empty latest version string when a newer stable
+// release is available and the user has not disabled update notifications.
+// It caches the manifest result for 10 minutes to avoid hammering the CDN on every command.
+func HomebrewUpdateHint(configDir, manifestURL string, policy update.Policy) string {
+	if policy == update.PolicyDisabled {
+		return ""
+	}
+	cacheFile := filepath.Join(configDir, "data", "homebrew-update.json")
+	var cache homebrewHintCache
+	if data, err := os.ReadFile(cacheFile); err == nil {
+		_ = json.Unmarshal(data, &cache)
+	}
+	if time.Since(cache.CheckedAt) > 10*time.Minute {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		manifest, err := update.Fetch(ctx, manifestURL)
+		if err == nil {
+			if ch, ok := manifest.Channels["stable"]; ok {
+				cache = homebrewHintCache{CheckedAt: time.Now().UTC(), Latest: ch.Version}
+				if data, err := json.Marshal(cache); err == nil {
+					_ = os.WriteFile(cacheFile, data, 0o600)
+				}
+			}
+		}
+	}
+	current := version.Version
+	if !strings.HasPrefix(current, "v") {
+		current = "v" + current
+	}
+	if cache.Latest != "" && cache.Latest != current {
+		return cache.Latest
+	}
+	return ""
 }
 
 func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {

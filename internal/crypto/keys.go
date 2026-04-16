@@ -105,12 +105,17 @@ func generateEd25519(dir string, passphrase []byte) error {
 	if err != nil {
 		return fmt.Errorf("generate ed25519 key: %w", err)
 	}
-	pkcs8, err := x509.MarshalPKCS8PrivateKey(priv)
+	var block *pem.Block
+	if len(passphrase) > 0 {
+		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, "", passphrase)
+	} else {
+		block, err = ssh.MarshalPrivateKey(priv, "")
+	}
 	if err != nil {
 		return fmt.Errorf("marshal ed25519 private key: %w", err)
 	}
-	if err := writePEM(filepath.Join(dir, "id_ed25519"), "PRIVATE KEY", pkcs8, passphrase); err != nil {
-		return err
+	if err := os.WriteFile(filepath.Join(dir, "id_ed25519"), pem.EncodeToMemory(block), 0o600); err != nil {
+		return fmt.Errorf("write ed25519 private key: %w", err)
 	}
 	pub, err := ssh.NewPublicKey(priv.Public())
 	if err != nil {
