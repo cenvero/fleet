@@ -17,6 +17,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     runs-on: ubuntu-latest
+    if: github.actor != 'cenvero-bot'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v6
