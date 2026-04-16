@@ -51,7 +51,7 @@ type windowChangePayload struct {
 // Security model:
 //   - The connection is authenticated with the controller's Ed25519 key.
 //   - The channel type "fleet-shell" is unknown to standard SSH clients — a
-//     port scanner will see "SSH-2.0-CenveroFleet_1" and be unable to open
+//     port scanner will see "SSH-2.0-cenvero-fleet-agent" and be unable to open
 //     any session without both the correct key and the fleet channel type.
 //
 // If the connection drops it automatically retries up to 3 times before giving up.

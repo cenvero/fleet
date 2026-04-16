@@ -51,7 +51,7 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 		// Identifies this port as a Cenvero Fleet agent to anyone who scans it.
 		// Standard SSH clients cannot open sessions anyway — they don't know the
 		// fleet-rpc / fleet-shell channel types.
-		ServerVersion: "SSH-2.0-CenveroFleet_1",
+		ServerVersion: "SSH-2.0-cenvero-fleet-agent",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
 			if err != nil {
@@ -100,7 +100,7 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 		Config: ssh.Config{
 			Ciphers: transport.SupportedCiphers(),
 		},
-		ServerVersion: "SSH-2.0-CenveroFleet_1",
+		ServerVersion: "SSH-2.0-cenvero-fleet-agent",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			authorizedKeys, err := loadAuthorizedKeys(s.AuthorizedKeysPath)
 			if err != nil {
