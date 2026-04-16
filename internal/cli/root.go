@@ -1291,11 +1291,27 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			version, binary, err := manifest.BinaryFor(app.Config.Updates.Channel, false)
+			latestVersion, binary, err := manifest.BinaryFor(app.Config.Updates.Channel, false)
 			if err != nil {
 				return err
 			}
-			return writeJSON(cmd, map[string]any{"version": version, "binary": binary})
+			if core.IsHomebrewInstall(app.ExecutablePath) {
+				fmt.Fprintf(cmd.OutOrStdout(), "Current version : %s\n", version.Version)
+				fmt.Fprintf(cmd.OutOrStdout(), "Latest version  : %s\n", latestVersion)
+				if latestVersion != version.Version {
+					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(cmd.OutOrStdout(), "A newer version is available. To update, run:")
+					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(cmd.OutOrStdout(), "  brew update && brew upgrade cenvero-fleet")
+					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(cmd.OutOrStdout(), "Agents on managed servers will be updated automatically once")
+					fmt.Fprintln(cmd.OutOrStdout(), "you run fleet update apply after upgrading.")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "You are on the latest version.")
+				}
+				return nil
+			}
+			return writeJSON(cmd, map[string]any{"version": latestVersion, "binary": binary})
 		},
 	})
 	var targetServers []string
@@ -1309,9 +1325,14 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 			}
 			defer app.Close()
 			if core.IsHomebrewInstall(app.ExecutablePath) {
-				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — skipping controller self-update.")
-				fmt.Fprintln(cmd.OutOrStdout(), "To update the controller run:  brew upgrade cenvero-fleet")
+				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — the controller binary cannot be")
+				fmt.Fprintln(cmd.OutOrStdout(), "self-updated. Use Homebrew to update it:")
 				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "  brew update && brew upgrade cenvero-fleet")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "After upgrading, run 'fleet update apply' again to roll out the")
+				fmt.Fprintln(cmd.OutOrStdout(), "new agent version to your managed servers.")
+				return nil
 			}
 			result, err := app.ApplyFleetUpdate(cmd.Context(), targetServers)
 			if err != nil {
@@ -1331,6 +1352,11 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
+			if core.IsHomebrewInstall(app.ExecutablePath) {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — rollback is handled by Homebrew.")
+				fmt.Fprintln(cmd.ErrOrStderr(), "To roll back: brew install cenvero/fleet/cenvero-fleet@<version>")
+				return fmt.Errorf("rollback not available for Homebrew installs")
+			}
 			result, err := app.RollbackUpdate()
 			if err != nil {
 				return err
@@ -1348,6 +1374,11 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
+			if core.IsHomebrewInstall(app.ExecutablePath) {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — the update channel is determined")
+				fmt.Fprintln(cmd.ErrOrStderr(), "by which Homebrew tap/formula you have installed.")
+				return fmt.Errorf("update channel not configurable for Homebrew installs")
+			}
 			return app.UpdateChannel(args[0])
 		},
 	})

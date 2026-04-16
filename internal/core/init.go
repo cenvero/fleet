@@ -295,34 +295,42 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		}
 	}
 
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 6 of 7 — Update channel & policy")
-	fmt.Fprintln(out, "─────────────────────────────────────")
-	fmt.Fprintln(out, "  Channel:")
-	fmt.Fprintln(out, "    [1] stable (recommended)")
-	fmt.Fprintln(out, "    [2] beta   (early features)")
-	channelChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
-	if err != nil {
-		return InitResult{}, err
-	}
 	channel := "stable"
-	if channelChoice == "2" {
-		channel = "beta"
-	}
-	fmt.Fprintln(out, "  Policy:")
-	fmt.Fprintln(out, "    [1] Auto-update (check daily, prompt before applying)")
-	fmt.Fprintln(out, "    [2] Notify only")
-	fmt.Fprintln(out, "    [3] Disabled")
-	policyChoice, err := prompt(reader, out, "  Choice [2]: ", "2")
-	if err != nil {
-		return InitResult{}, err
-	}
 	policy := update.PolicyNotifyOnly
-	switch policyChoice {
-	case "1":
-		policy = update.PolicyAutoUpdate
-	case "3":
-		policy = update.PolicyDisabled
+	if IsHomebrewInstall(executablePath) {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Step 6 of 7 — Updates")
+		fmt.Fprintln(out, "─────────────────────────────────────")
+		fmt.Fprintln(out, "  Homebrew install detected — updates are managed by Homebrew.")
+		fmt.Fprintln(out, "  Run 'brew upgrade cenvero-fleet' to update when a new version is available.")
+	} else {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Step 6 of 7 — Update channel & policy")
+		fmt.Fprintln(out, "─────────────────────────────────────")
+		fmt.Fprintln(out, "  Channel:")
+		fmt.Fprintln(out, "    [1] stable (recommended)")
+		fmt.Fprintln(out, "    [2] beta   (early features)")
+		channelChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
+		if err != nil {
+			return InitResult{}, err
+		}
+		if channelChoice == "2" {
+			channel = "beta"
+		}
+		fmt.Fprintln(out, "  Policy:")
+		fmt.Fprintln(out, "    [1] Auto-update (check daily, prompt before applying)")
+		fmt.Fprintln(out, "    [2] Notify only")
+		fmt.Fprintln(out, "    [3] Disabled")
+		policyChoice, err := prompt(reader, out, "  Choice [2]: ", "2")
+		if err != nil {
+			return InitResult{}, err
+		}
+		switch policyChoice {
+		case "1":
+			policy = update.PolicyAutoUpdate
+		case "3":
+			policy = update.PolicyDisabled
+		}
 	}
 
 	fmt.Fprintln(out)
