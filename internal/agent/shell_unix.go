@@ -6,6 +6,7 @@
 package agent
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -41,10 +42,11 @@ type exitStatusPayload struct {
 }
 
 // serveShell handles a fleet-shell channel exactly like OpenSSH sshd does:
-//   - "pty-req" → allocate PTY, record terminal type and size
-//   - "env"     → accept per-session env vars (like AcceptEnv in sshd_config)
-//   - "shell"   → start a login shell (argv[0] = "-bash") with SSH_TTY set
-//   - "exec"    → run a command through the user's shell
+//
+//   - "pty-req"       → allocate PTY, record terminal type and size
+//   - "env"           → accept per-session env vars (like AcceptEnv in sshd_config)
+//   - "shell"         → start a login shell (argv[0] = "-bash") with SSH_TTY set
+//   - "exec"          → run a command through the user's own shell
 //   - "window-change" → resize the PTY while the shell is running
 func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 	defer channel.Close()
@@ -77,8 +79,8 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 
 		case "env":
 			// Accept env vars set by the client before the shell starts.
-			// Real sshd honours AcceptEnv; we accept all of them since the
-			// connection is already fully authenticated.
+			// Real sshd honours AcceptEnv; we accept all since the connection
+			// is already fully authenticated with the controller's key.
 			var p struct{ Name, Value string }
 			if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Name != "" {
 				extraEnv = append(extraEnv, p.Name+"="+p.Value)
@@ -86,21 +88,20 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 			replyReq(req, true)
 
 		case "shell", "exec":
-			shell := userShell()
-			env := buildEnv(termType, shell, extraEnv)
+			shellPath := userShell()
+			env := buildEnv(termType, shellPath, extraEnv)
 
 			var cmd *exec.Cmd
 			if req.Type == "exec" {
-				// fleet exec / ssh host cmd — run through the user's own shell
+				// Run a specific command through the user's own shell.
 				var execReq struct{ Command string }
 				_ = ssh.Unmarshal(req.Payload, &execReq)
-				cmd = exec.Command(shell, "-c", execReq.Command) //nolint:gosec
-				cmd.Args[0] = shell
+				cmd = exec.Command(shellPath, "-c", execReq.Command) //nolint:gosec
 			} else {
-				// Login shell: argv[0] starts with "-" to signal login to bash/zsh/etc.
-				// This is what OpenSSH does — NOT "bash -l".
-				cmd = exec.Command(shell)
-				cmd.Args = []string{"-" + filepath.Base(shell)}
+				// Login shell: argv[0] starts with "-" (e.g. "-bash", "-zsh").
+				// This is how OpenSSH signals a login shell — NOT "bash -l".
+				cmd = exec.Command(shellPath)
+				cmd.Args = []string{"-" + filepath.Base(shellPath)}
 			}
 			cmd.Env = env
 
@@ -118,10 +119,9 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 	}
 }
 
-// buildEnv constructs a clean, server-side environment identical to what
-// OpenSSH sets for a session: user info from /etc/passwd, a sane PATH,
-// LANG, TERM, SHELL, and any extra vars from "env" channel requests.
-// The controller's environment is never passed through.
+// buildEnv builds the session environment identically to OpenSSH:
+// a clean PATH, locale, TERM, SHELL, user identity from /etc/passwd,
+// and MAIL. The controller's own environment is never passed through.
 func buildEnv(termType, shellPath string, extra []string) []string {
 	env := []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -135,14 +135,20 @@ func buildEnv(termType, shellPath string, extra []string) []string {
 			"USER="+u.Username,
 			"LOGNAME="+u.Username,
 			"HOME="+u.HomeDir,
+			fmt.Sprintf("MAIL=/var/mail/%s", u.Username),
 		)
 	}
 	return append(env, extra...)
 }
 
 // runWithPTY allocates a PTY pair, starts the shell with the slave as its
-// controlling terminal, sets SSH_TTY, and proxies I/O. This is the path
-// taken for interactive sessions (pty-req was sent).
+// controlling terminal (new session, Setsid+Setctty), sets SSH_TTY, and
+// proxies I/O. Shutdown sequence mirrors OpenSSH sshd:
+//
+//  1. Shell exits → close ptm (unblocks I/O goroutines)
+//  2. Send exit-status channel request
+//  3. CloseWrite (EOF) → controller closes the channel
+//  4. Wait for I/O goroutines to drain
 func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd, cols, rows uint32) {
 	ptm, pts, err := pty.Open()
 	if err != nil {
@@ -151,14 +157,15 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 	}
 	_ = pty.Setsize(ptm, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 
-	// SSH_TTY = slave PTY path (e.g. /dev/pts/3) — bash uses this for
-	// "is a terminal" checks, and tools like script(1) look for it.
+	// SSH_TTY = slave PTY device path (e.g. /dev/pts/3).
+	// bash, zsh, and tools like script(1) use this to detect a real terminal.
 	cmd.Env = append(cmd.Env, "SSH_TTY="+pts.Name())
 	cmd.Stdin = pts
 	cmd.Stdout = pts
 	cmd.Stderr = pts
-	// New session + controlling terminal — identical to what sshd does.
-	// Ctty:1 matches what creack/pty uses internally (stdout fd in child).
+	// Setsid: new session (detach from agent's controlling terminal)
+	// Setctty + Ctty:1: make the slave PTY the controlling terminal
+	// Ctty:1 = stdout fd in child — matches what creack/pty uses internally
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid:  true,
 		Setctty: true,
@@ -171,10 +178,9 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 		sendExitStatus(channel, 1)
 		return
 	}
-	_ = pts.Close() // parent doesn't need the slave after fork
-	defer ptm.Close()
+	_ = pts.Close() // parent closes slave after fork — shell holds its own ref
 
-	// Process window-change requests while the shell is running.
+	// Handle window-change requests while the shell is running.
 	go func() {
 		for req := range requests {
 			if req.Type == "window-change" {
@@ -194,8 +200,8 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(ptm, channel) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(channel, ptm) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(ptm, channel) }()  // controller → shell stdin
+	go func() { defer wg.Done(); _, _ = io.Copy(channel, ptm) }()  // shell stdout/stderr → controller
 
 	exitCode := 0
 	if err := cmd.Wait(); err != nil {
@@ -203,11 +209,25 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 			exitCode = exitErr.ExitCode()
 		}
 	}
-	wg.Wait()
+
+	// Step 1: close ptm — causes io.Copy(channel, ptm) to get EIO and return,
+	// and causes io.Copy(ptm, channel) to fail on the next Write attempt.
+	_ = ptm.Close()
+
+	// Step 2: send exit-status so the controller knows the exit code.
 	sendExitStatus(channel, exitCode)
+
+	// Step 3: CloseWrite signals EOF to the controller's stdout reader.
+	// The controller then calls channel.Close() which finally unblocks
+	// io.Copy(ptm, channel) that may be stuck in channel.Read().
+	_ = channel.CloseWrite()
+
+	// Step 4: wait for both I/O goroutines to finish cleanly.
+	wg.Wait()
 }
 
-// runDirect handles sessions without a PTY (e.g. fleet exec, scp, rsync).
+// runDirect handles sessions without a PTY — non-interactive commands,
+// piped scripts, etc. stdin/stdout/stderr connect directly to the channel.
 func runDirect(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd) {
 	cmd.Stdin = channel
 	cmd.Stdout = channel
@@ -216,11 +236,13 @@ func runDirect(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd)
 		sendExitStatus(channel, 1)
 		return
 	}
+	// Drain any stray channel requests (e.g. env sent after shell start).
 	go func() {
 		for req := range requests {
 			replyReq(req, false)
 		}
 	}()
+
 	exitCode := 0
 	if err := cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -228,6 +250,7 @@ func runDirect(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd)
 		}
 	}
 	sendExitStatus(channel, exitCode)
+	_ = channel.CloseWrite()
 }
 
 func sendExitStatus(channel ssh.Channel, code int) {
@@ -241,8 +264,8 @@ func replyReq(req *ssh.Request, ok bool) {
 	}
 }
 
-// userShell returns the login shell for the current user by reading /etc/passwd.
-// Falls back to /bin/bash or /bin/sh if the entry is missing or unreadable.
+// userShell returns the login shell for the current user from /etc/passwd.
+// Falls back through bash → zsh → sh if the entry is missing.
 func userShell() string {
 	if u, err := user.Current(); err == nil {
 		if sh := shellFromPasswd(u.Username); sh != "" {
@@ -269,8 +292,7 @@ func shellFromPasswd(username string) string {
 		}
 		fields := strings.SplitN(line, ":", 7)
 		if len(fields) == 7 {
-			sh := strings.TrimSpace(fields[6])
-			if sh != "" {
+			if sh := strings.TrimSpace(fields[6]); sh != "" {
 				return sh
 			}
 		}
