@@ -149,7 +149,6 @@ jq \
   --arg version "${FLEET_VERSION}" \
   --arg release_date "${FLEET_RELEASE_DATE}" \
   --arg release_notes "${FLEET_RELEASE_NOTES_URL}" \
-  --arg min_supported "${FLEET_MIN_SUPPORTED:-}" \
   --argjson binaries "${fleet_entries}" \
   --argjson agent_binaries "${agent_entries}" \
   '
@@ -157,11 +156,11 @@ jq \
   | .channels[$channel].version = $version
   | .channels[$channel].release_date = $release_date
   | .channels[$channel].release_notes_url = $release_notes
-  | .channels[$channel].min_supported = (if $min_supported != "" then $min_supported else (.channels[$channel].min_supported // $version) end)
   | .channels[$channel].history = (
       [(.channels[$channel].history // []) | .[] | select(. != $version)] + [$version]
       | .[-10:]
     )
+  | .channels[$channel].min_supported = .channels[$channel].history[0]
   | .binaries[$version] = $binaries
   | .agent_binaries[$version] = $agent_binaries
   | ([.channels | to_entries[] | .value.history // [] | .[]] | unique) as $active
