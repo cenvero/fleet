@@ -295,9 +295,9 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 			channel = "beta"
 		}
 		fmt.Fprintln(out, "  Policy:")
-		fmt.Fprintln(out, "    [1] Auto-update (check daily, prompt before applying)")
-		fmt.Fprintln(out, "    [2] Notify only")
-		fmt.Fprintln(out, "    [3] Disabled")
+		fmt.Fprintln(out, "    [1] Auto-update  (download and apply automatically)")
+		fmt.Fprintln(out, "    [2] Notify only  (tell you when an update is available, you apply it)")
+		fmt.Fprintln(out, "    [3] Disabled     (no update checks)")
 		policyChoice, err := prompt(reader, out, "  Choice [2]: ", "2")
 		if err != nil {
 			return InitResult{}, err
