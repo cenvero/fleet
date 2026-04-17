@@ -52,21 +52,32 @@ func Recover(opts RecoverOptions, out io.Writer) error {
 	}
 
 	// 2. Version compatibility check.
+	currentVer := version.Version
+	lastVer := strings.TrimSpace(oldCfg.LastSeenVersion)
 	if !opts.SkipVersionCheck {
-		lastVer := strings.TrimSpace(oldCfg.ProductName) // ProductName holds version metadata
-		// The config stores ProductName but not the controller version that last used it.
-		// We track this in the instance_id file comment or audit log — best-effort check:
-		// compare current binary version against what the config's schema expects.
 		if oldCfg.SchemaVersion > 1 {
 			return fmt.Errorf(
 				"config at %s has schema version %d but this fleet binary only supports schema version 1\n\n"+
-					"You need a newer fleet binary. Get the version that matches your previous install:\n\n"+
+					"You need a newer fleet binary to open this config.\n"+
 					"  fleet update check\n\n"+
 					"or download from https://github.com/cenvero/fleet/releases",
 				fromDir, oldCfg.SchemaVersion,
 			)
 		}
-		_ = lastVer // used for informational output below
+		// If we know which binary version last used this config, warn on mismatch.
+		if lastVer != "" && lastVer != currentVer && isNewerVersion(currentVer, lastVer) {
+			fmt.Fprintf(out,
+				"⚠  This config was last used with fleet %s; you are now running fleet %s.\n\n"+
+					"It is safer to first restore the old binary version, verify everything works,\n"+
+					"then upgrade to %s:\n\n"+
+					"  1. Install fleet %s (download from releases or use 'fleet update rollback')\n"+
+					"  2. Run 'fleet --config-dir %s status' to verify\n"+
+					"  3. Then upgrade to the new version\n\n"+
+					"To skip this check and proceed anyway: fleet recover --skip-version-check\n\n",
+				lastVer, currentVer, currentVer, lastVer, fromDir,
+			)
+			return fmt.Errorf("version mismatch: config was last used with fleet %s, current binary is %s", lastVer, currentVer)
+		}
 	}
 
 	// 3. Check database files for SQLite; connectivity for others.
@@ -126,7 +137,10 @@ func Recover(opts RecoverOptions, out io.Writer) error {
 
 	// 4. Print results and next steps.
 	fmt.Fprintf(out, "\nRecovery check passed for: %s\n\n", fromDir)
-	fmt.Fprintf(out, "  Fleet version     : %s\n", version.Version)
+	fmt.Fprintf(out, "  Running version   : %s\n", currentVer)
+	if lastVer != "" {
+		fmt.Fprintf(out, "  Last used version : %s\n", lastVer)
+	}
 	fmt.Fprintf(out, "  Schema version    : %d\n", oldCfg.SchemaVersion)
 	fmt.Fprintf(out, "  Database backend  : %s\n", backend)
 	fmt.Fprintf(out, "  Default mode      : %s\n", oldCfg.DefaultMode)

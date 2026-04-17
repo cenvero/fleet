@@ -199,6 +199,18 @@ func ConfigPath(configDir string) string {
 	return filepath.Join(configDir, "config.toml")
 }
 
+// StampLastSeenVersion writes the running binary's version into the config file
+// so that 'fleet recover' can detect version mismatches later.
+// It is a best-effort write — errors are silently ignored to avoid disrupting
+// normal command execution.
+func StampLastSeenVersion(configPath string, cfg Config) {
+	if cfg.LastSeenVersion == version.Version {
+		return // already up to date, avoid a pointless write
+	}
+	cfg.LastSeenVersion = version.Version
+	_ = SaveConfig(configPath, cfg)
+}
+
 // IsInitialized reports whether the config directory has been set up by `fleet init`.
 func IsInitialized(configDir string) bool {
 	_, err := os.Stat(ConfigPath(configDir))

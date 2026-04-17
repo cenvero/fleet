@@ -85,6 +85,8 @@ func NewRootCommand() *cobra.Command {
 						fmt.Fprintf(cmd.ErrOrStderr(), "\nUpdate available (%s). To upgrade:\n\n  brew update && brew upgrade cenvero-fleet\n\n", hint)
 					}
 				}
+				// Stamp last-seen version so 'fleet recover' can detect mismatches.
+				core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
 			}
 			return nil
 		},
@@ -1357,9 +1359,15 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 					// When running with sudo, $HOME is root's home but SUDO_USER
 					// and SUDO_HOME (set by some distros) point to the real user.
 					if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+						// Try SUDO_HOME first (set by some distros).
 						suggestedDir := core.DefaultConfigDir(os.Getenv("SUDO_HOME"))
 						if suggestedDir == *configDir || os.Getenv("SUDO_HOME") == "" {
-							suggestedDir = fmt.Sprintf("/home/%s/.cenvero-fleet", sudoUser)
+							// Fall back to platform-specific home path.
+							homePrefix := "/home"
+							if runtime.GOOS == "darwin" {
+								homePrefix = "/Users"
+							}
+							suggestedDir = homePrefix + "/" + sudoUser + "/.cenvero-fleet"
 						}
 						fmt.Fprintf(cmd.ErrOrStderr(), "You appear to be running with sudo. Pass --config-dir:\n\n")
 						fmt.Fprintf(cmd.ErrOrStderr(), "  sudo fleet --config-dir %s update apply\n\n", suggestedDir)

@@ -21,6 +21,7 @@ import (
 	"github.com/cenvero/fleet/internal/store"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/update"
+	"github.com/cenvero/fleet/internal/version"
 )
 
 func Initialize(opts InitOptions) (InitResult, error) {
@@ -68,6 +69,7 @@ func Initialize(opts InitOptions) (InitResult, error) {
 	cfg := DefaultConfig(opts.ConfigDir)
 	cfg.Alias = opts.Alias
 	cfg.InitVersion = CurrentInitVersion
+	cfg.LastSeenVersion = version.Version
 	cfg.InstanceID = instanceID
 	cfg.DefaultMode = opts.DefaultMode
 	cfg.Operator = opts.Operator

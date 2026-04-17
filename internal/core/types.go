@@ -27,8 +27,11 @@ type Config struct {
 	ConfigDir     string               `toml:"config_dir" json:"config_dir"`
 	DefaultMode   transport.Mode       `toml:"default_transport_mode" json:"default_transport_mode"`
 	ManifestURL   string               `toml:"manifest_url" json:"manifest_url"`
-	InitializedAt time.Time            `toml:"initialized_at" json:"initialized_at"`
-	Operator      string               `toml:"operator" json:"operator"`
+	InitializedAt   time.Time            `toml:"initialized_at" json:"initialized_at"`
+	// LastSeenVersion is the fleet binary version that last successfully ran
+	// with this config. Used by 'fleet recover' to detect version mismatches.
+	LastSeenVersion string               `toml:"last_seen_version" json:"last_seen_version,omitempty"`
+	Operator        string               `toml:"operator" json:"operator"`
 	Crypto        CryptoConfig         `toml:"crypto" json:"crypto"`
 	Updates       UpdateConfig         `toml:"updates" json:"updates"`
 	Database      store.DatabaseConfig `toml:"database" json:"database"`
