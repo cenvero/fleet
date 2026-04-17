@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	sshKeepaliveInterval = 30 * time.Second
+	sshKeepaliveInterval = 10 * time.Second
+	sshKeepaliveTimeout  = 15 * time.Second
 	sshReconnectDelay    = 5 * time.Second
 	sshMaxRetries        = 3
 )
@@ -100,7 +101,7 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 
 	for attempt := 0; attempt <= sshMaxRetries; attempt++ {
 		if attempt > 0 {
-			fmt.Fprintf(out, "\nReconnecting... (attempt %d/%d)\n", attempt, sshMaxRetries)
+			fmt.Fprintf(out, "\r\nReconnecting... (attempt %d/%d)\r\n", attempt, sshMaxRetries)
 			time.Sleep(sshReconnectDelay)
 		}
 
@@ -113,7 +114,8 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		}
 
 		if attempt < sshMaxRetries {
-			fmt.Fprintf(out, "\nConnection lost (%v). Retrying in 5s...\n", err)
+			fmt.Fprintf(out, "\r\nConnection lost. Reconnecting in %ds... (%d/%d)\r\n",
+				int(sshReconnectDelay.Seconds()), attempt+1, sshMaxRetries)
 		}
 	}
 
@@ -134,7 +136,8 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 		fmt.Fprintf(out, "Fingerprint: %s (saved to fleet known hosts)\n", state.Fingerprint)
 	}
 
-	// Keepalive: send ping every 30s; close the connection if server stops responding.
+	// Keepalive: ping every 10s; if the server doesn't reply within 15s, close
+	// the connection so io.Copy unblocks and the outer loop can reconnect.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -145,7 +148,10 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 			case <-done:
 				return
 			case <-ticker.C:
+				// AfterFunc closes the connection if SendRequest blocks past the timeout.
+				closeTimer := time.AfterFunc(sshKeepaliveTimeout, func() { _ = client.Close() })
 				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				closeTimer.Stop()
 				if err != nil {
 					_ = client.Close()
 					return
@@ -163,8 +169,17 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 	}
 	defer channel.Close()
 
+	// Track clean exit: agent sends "exit-status" before closing channel.
+	// Without this signal, a nil return from io.Copy means connection dropped.
+	cleanExit := make(chan struct{}, 1)
 	go func() {
 		for req := range reqs {
+			if req.Type == "exit-status" {
+				select {
+				case cleanExit <- struct{}{}:
+				default:
+				}
+			}
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
@@ -209,12 +224,20 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 	go func() { _, _ = io.Copy(os.Stderr, channel.Stderr()) }()
 
 	// Blocks until the shell exits (channel closed by agent) or the connection drops.
-	// nil means clean exit — no reconnect needed.
-	_, err = io.Copy(os.Stdout, channel)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "eof") {
+	_, copyErr := io.Copy(os.Stdout, channel)
+
+	// If the agent sent exit-status before closing, it was a clean shell exit — no reconnect.
+	select {
+	case <-cleanExit:
 		return nil
+	default:
 	}
-	return err
+
+	// No exit-status received: connection was dropped.
+	if copyErr == nil || strings.Contains(strings.ToLower(copyErr.Error()), "eof") {
+		return fmt.Errorf("connection dropped")
+	}
+	return copyErr
 }
 
 // isTerminalSSHError returns true for errors that will never succeed on retry —

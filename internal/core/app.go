@@ -369,6 +369,15 @@ func (a *App) RemoveServerWithOptions(name string, opts RemoveOptions) error {
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove server %s: %w", name, err)
 	}
+
+	// Clean up stored host key and reverse-agent public key so stale entries
+	// don't accumulate if the same server name is re-added later.
+	if a.Config.Crypto.KnownHostsPath != "" && server.Address != "" && server.Port > 0 {
+		addr := fmt.Sprintf("%s:%d", server.Address, server.Port)
+		_ = transport.RemoveKnownHost(a.Config.Crypto.KnownHostsPath, addr)
+	}
+	_ = os.Remove(filepath.Join(a.ConfigDir, "keys", "agents", name+".pub"))
+
 	details := "agent_managed=false"
 	if server.Agent.Managed {
 		if opts.Force {

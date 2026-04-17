@@ -53,7 +53,7 @@ func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyS
 		}
 
 		if len(keyErr.Want) == 0 {
-			if err := appendKnownHost(path, remote.String(), key); err != nil {
+			if err := appendKnownHost(path, normalized, key); err != nil {
 				return err
 			}
 			if state != nil {
@@ -65,7 +65,7 @@ func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyS
 		if !acceptReplacement {
 			return fmt.Errorf("host key mismatch for %s: %w", normalized, err)
 		}
-		if err := replaceKnownHost(path, remote.String(), key); err != nil {
+		if err := replaceKnownHost(path, normalized, key); err != nil {
 			return err
 		}
 		if state != nil {
@@ -107,7 +107,7 @@ func NewInteractiveHostKeyCallback(path string, promptFn func(hostname, oldFP, n
 		}
 		if len(keyErr.Want) == 0 {
 			// New host — TOFU pin
-			if addErr := appendKnownHost(path, remote.String(), key); addErr != nil {
+			if addErr := appendKnownHost(path, normalized, key); addErr != nil {
 				return addErr
 			}
 			if state != nil {
@@ -120,7 +120,7 @@ func NewInteractiveHostKeyCallback(path string, promptFn func(hostname, oldFP, n
 		if promptFn == nil || !promptFn(normalized, oldFP, fp) {
 			return fmt.Errorf("host key for %s has changed and was rejected", normalized)
 		}
-		if replErr := replaceKnownHost(path, remote.String(), key); replErr != nil {
+		if replErr := replaceKnownHost(path, normalized, key); replErr != nil {
 			return replErr
 		}
 		if state != nil {
@@ -147,6 +147,41 @@ func ensureKnownHostsFile(path string) error {
 		return fmt.Errorf("create known_hosts file: %w", err)
 	}
 	return nil
+}
+
+// RemoveKnownHost removes all known_hosts entries for the given address.
+// address should be in "host:port" form; it is normalized before matching.
+// No-ops silently if the file does not exist or the address isn't present.
+func RemoveKnownHost(path, address string) error {
+	normalized := knownhosts.Normalize(address)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read known_hosts: %w", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			if trimmed != "" {
+				filtered = append(filtered, line)
+			}
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) > 0 && fields[0] == normalized {
+			continue // drop this entry
+		}
+		filtered = append(filtered, line)
+	}
+	content := strings.Join(filtered, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	return os.WriteFile(path, []byte(content), 0o600)
 }
 
 func appendKnownHost(path, address string, key ssh.PublicKey) error {
@@ -185,7 +220,7 @@ func replaceKnownHost(path, address string, key ssh.PublicKey) error {
 		}
 		filtered = append(filtered, line)
 	}
-	filtered = append(filtered, knownhosts.Line([]string{address}, key))
+	filtered = append(filtered, knownhosts.Line([]string{normalized}, key))
 	content := strings.Join(filtered, "\n")
 	if content != "" {
 		content += "\n"
