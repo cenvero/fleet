@@ -171,7 +171,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	fmt.Fprintln(out, "└─────────────────────────────────────────────────────────────┘")
 	fmt.Fprintln(out)
 
-	fmt.Fprintln(out, "Step 1 of 7 — Configuration directory")
+	fmt.Fprintln(out, "Step 1 of 6 — Configuration directory")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintf(out, "  [1] %s              (recommended, per-user)\n", defaultDir)
 	fmt.Fprintln(out, "  [2] /etc/cenvero-fleet            (system-wide, requires sudo)")
@@ -194,28 +194,10 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		}
 	}
 
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 2 of 7 — Short alias")
-	fmt.Fprintln(out, "─────────────────────────────────────")
-	fmt.Fprintln(out, "  [1] Use 'fleet' (default)")
-	fmt.Fprintln(out, "  [2] Custom alias")
-	aliasChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
-	if err != nil {
-		return InitResult{}, err
-	}
 	alias := "fleet"
-	if aliasChoice == "2" {
-		alias, err = prompt(reader, out, "  Alias (2-8 chars, alphanumeric): ", "")
-		if err != nil {
-			return InitResult{}, err
-		}
-		if err := ValidateAlias(alias); err != nil {
-			return InitResult{}, err
-		}
-	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 3 of 7 — Default transport mode")
+	fmt.Fprintln(out, "Step 2 of 6 — Default transport mode")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  [1] Reverse mode (agent connects to you — works behind NAT)")
 	fmt.Fprintln(out, "  [2] Direct mode  (you SSH into the agent — agent must be reachable)")
@@ -233,7 +215,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 4 of 7 — Networking")
+	fmt.Fprintln(out, "Step 3 of 6 — Networking")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	defaultAgentPort := 0
 	listenAddress := ""
@@ -259,7 +241,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 5 of 7 — Cryptography")
+	fmt.Fprintln(out, "Step 4 of 6 — Cryptography")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  Algorithm:")
 	fmt.Fprintln(out, "    [1] Ed25519  (recommended)")
@@ -282,7 +264,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	policy := update.PolicyNotifyOnly
 	if IsHomebrewInstall(executablePath) {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Step 6 of 7 — Update notifications")
+		fmt.Fprintln(out, "Step 5 of 6 — Update notifications")
 		fmt.Fprintln(out, "─────────────────────────────────────")
 		fmt.Fprintln(out, "  Homebrew install detected — updates are managed by Homebrew.")
 		fmt.Fprintln(out, "  Run 'brew upgrade cenvero-fleet' to update when a new version is available.")
@@ -299,7 +281,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		}
 	} else {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Step 6 of 7 — Update channel & policy")
+		fmt.Fprintln(out, "Step 5 of 6 — Update channel & policy")
 		fmt.Fprintln(out, "─────────────────────────────────────")
 		fmt.Fprintln(out, "  Channel:")
 		fmt.Fprintln(out, "    [1] stable (recommended)")
@@ -328,7 +310,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 7 of 7 — Database backend")
+	fmt.Fprintln(out, "Step 6 of 6 — Database backend")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  [1] SQLite   (recommended, separate local files)")
 	fmt.Fprintln(out, "  [2] PostgreSQL")

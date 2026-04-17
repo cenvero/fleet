@@ -58,12 +58,14 @@ func NewRootCommand() *cobra.Command {
 			}
 			// Commands that are always allowed before init
 			switch cmd.Name() {
-			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet":
+			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
+				"check", "apply", "rollback", "channel",
+				"backup", "recover":
 				return nil
 			}
 			if cmd.HasParent() {
 				switch cmd.Parent().Name() {
-				case "help", "completion":
+				case "help", "completion", "update":
 					return nil
 				}
 			}
@@ -108,6 +110,8 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newKeyCommand(&configDir))
 	root.AddCommand(newUpdateCommand(&configDir))
 	root.AddCommand(newSyncAgentCommand(&configDir))
+	root.AddCommand(newBackupCommand(&configDir))
+	root.AddCommand(newRecoverCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
 	return root
@@ -1328,11 +1332,6 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		Use:   "apply",
 		Short: "Apply the latest controller update and roll it out across managed agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			app, err := openApp(*configDir)
-			if err != nil {
-				return err
-			}
-			defer app.Close()
 			if core.RuntimeIsHomebrewInstall() {
 				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — the controller binary cannot be")
 				fmt.Fprintln(cmd.OutOrStdout(), "self-updated. Use Homebrew to update it:")
@@ -1343,6 +1342,28 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "new agent version to your managed servers.")
 				return nil
 			}
+			app, err := openApp(*configDir)
+			if err != nil {
+				// Config not available — can still self-update the binary only.
+				// This happens when running as root (sudo) and the config dir is
+				// under a different user's home. Suggest --config-dir.
+				if !core.IsInitialized(*configDir) {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Could not open fleet config at %s.\n\n", *configDir)
+					// When running with sudo, $HOME is root's home but SUDO_USER
+					// and SUDO_HOME (set by some distros) point to the real user.
+					if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+						suggestedDir := core.DefaultConfigDir(os.Getenv("SUDO_HOME"))
+						if suggestedDir == *configDir || os.Getenv("SUDO_HOME") == "" {
+							suggestedDir = fmt.Sprintf("/home/%s/.cenvero-fleet", sudoUser)
+						}
+						fmt.Fprintf(cmd.ErrOrStderr(), "You appear to be running with sudo. Pass --config-dir:\n\n")
+						fmt.Fprintf(cmd.ErrOrStderr(), "  sudo fleet --config-dir %s update apply\n\n", suggestedDir)
+					}
+					return err
+				}
+				return err
+			}
+			defer app.Close()
 			result, err := app.ApplyFleetUpdate(cmd.Context(), targetServers)
 			if err != nil {
 				return err
@@ -1392,6 +1413,36 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		},
 	})
 	return updateCmd
+}
+
+func newBackupCommand(configDir *string) *cobra.Command {
+	var outputPath string
+	cmd := &cobra.Command{
+		Use:   "backup",
+		Short: "Back up the fleet config directory to a tar.gz archive",
+		Long: `Creates a compressed archive of the entire fleet configuration directory:
+server records, keys, audit logs, and SQLite database files.
+
+Ephemeral files (lock files, WAL journals, in-progress temp files) are excluded.
+The archive can be used to restore or migrate a fleet controller installation.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if *configDir == "" {
+				*configDir = core.DefaultConfigDir("")
+			}
+			if !core.IsInitialized(*configDir) {
+				return fmt.Errorf("fleet is not initialized at %s — nothing to back up", *configDir)
+			}
+			result, err := core.Backup(*configDir, core.BackupOptions{OutputPath: outputPath})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Backup created: %s\n", result.OutputPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %d files, %s\n", result.FilesCount, formatBytes(result.SizeBytes))
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "output path for the backup archive (default: fleet-backup-<timestamp>.tar.gz)")
+	return cmd
 }
 
 func newSelfUninstallCommand(configDir *string) *cobra.Command {
@@ -1677,5 +1728,59 @@ func newSSHCommand(configDir *string) *cobra.Command {
 			defer app.Close()
 			return app.RunSSHSession(args[0], cmd.OutOrStdout())
 		},
+	}
+}
+
+func newRecoverCommand(configDir *string) *cobra.Command {
+	var (
+		fromDir    string
+		dbBackend  string
+		dbDSN      string
+		skipVerify bool
+	)
+	cmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Re-attach fleet to an existing config directory after a reinstall or migration",
+		Long: `Recover re-points this fleet installation to an existing config directory.
+Use this after reinstalling the OS, moving to a new machine, or after a
+broken upgrade that left the binary without its config.
+
+For SQLite (the default), fleet checks that the database files in the
+config dir still exist. For PostgreSQL/MySQL/MariaDB, it connects with
+the DSN from the existing config and verifies connectivity.
+
+If the controller version does not match what was last used with that
+config, fleet will tell you which version to downgrade to before proceeding.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if fromDir == "" {
+				return fmt.Errorf("--from-dir is required: specify the existing fleet config directory")
+			}
+			return core.Recover(core.RecoverOptions{
+				TargetConfigDir: *configDir,
+				FromDir:         fromDir,
+				DBBackend:       dbBackend,
+				DBDSN:           dbDSN,
+				SkipVersionCheck: skipVerify,
+			}, cmd.OutOrStdout())
+		},
+	}
+	cmd.Flags().StringVar(&fromDir, "from-dir", "", "existing fleet config directory to recover from (required)")
+	cmd.Flags().StringVar(&dbBackend, "db-backend", "", "override the database backend (sqlite, postgres, mysql, mariadb)")
+	cmd.Flags().StringVar(&dbDSN, "db-dsn", "", "override the database DSN (for postgres/mysql/mariadb)")
+	cmd.Flags().BoolVar(&skipVerify, "skip-version-check", false, "skip the version compatibility check (not recommended)")
+	return cmd
+}
+
+// formatBytes formats a byte count as a human-readable string.
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
 }

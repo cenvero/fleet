@@ -11,12 +11,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/pkg/proto"
 	"golang.org/x/crypto/ssh"
 )
+
+// globalUpdateMu ensures only one update.apply runs at a time across all
+// concurrent RPC connections. TryLock returns false immediately if another
+// update is already in progress, so the caller gets an error rather than
+// waiting (which would stall the service restart).
+var globalUpdateMu sync.Mutex
 
 type Server struct {
 	Mode                     transport.Mode
@@ -430,8 +437,22 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload:         info,
 			})
 		case "update.apply":
+			if !globalUpdateMu.TryLock() {
+				_ = proto.Encode(channel, proto.Envelope{
+					Type:            proto.EnvelopeTypeResponse,
+					ProtocolVersion: proto.CurrentProtocolVersion,
+					RequestID:       request.RequestID,
+					Action:          request.Action,
+					Error: &proto.Error{
+						Code:    "update_in_progress",
+						Message: "an update or sync is already in progress on this agent — try again in a moment",
+					},
+				})
+				continue
+			}
 			payload, err := proto.DecodePayload[proto.UpdateApplyPayload](request.Payload)
 			if err != nil {
+				globalUpdateMu.Unlock()
 				_ = proto.Encode(channel, proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
@@ -445,6 +466,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				continue
 			}
 			op, err := s.updater().Apply(context.Background(), payload)
+			globalUpdateMu.Unlock()
 			if err != nil {
 				_ = proto.Encode(channel, errorEnvelope(request, err))
 				continue

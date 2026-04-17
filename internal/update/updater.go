@@ -155,6 +155,22 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 
 	stagedPath := opts.ExecutablePath + ".new"
 	if err := os.WriteFile(stagedPath, payload, normalizeMode(mode)); err != nil {
+		if os.IsPermission(err) {
+			userBin := userBinaryInstallPath()
+			return ApplyResult{}, fmt.Errorf(
+				"cannot write to %s: permission denied\n\n"+
+					"The fleet binary is at a system path that requires root access to update.\n\n"+
+					"Option 1 — run with sudo and pass your config dir:\n"+
+					"  sudo fleet --config-dir %s update apply\n\n"+
+					"Option 2 — reinstall fleet to your user path (no sudo needed):\n"+
+					"  install -m 0755 %s %s\n"+
+					"  Then add %s to your PATH.",
+				opts.ExecutablePath,
+				opts.ConfigDir,
+				opts.ExecutablePath, userBin,
+				filepath.Dir(userBin),
+			)
+		}
 		return ApplyResult{}, fmt.Errorf("write staged executable: %w", err)
 	}
 	defer os.Remove(stagedPath)
@@ -358,6 +374,32 @@ func runtimeExecutableName() string {
 		return "fleet.exe"
 	}
 	return "fleet"
+}
+
+// userBinaryInstallPath returns the recommended user-writable install location
+// for the fleet binary on the current OS. This is shown when a system-path
+// binary can't be updated due to missing write permission.
+func userBinaryInstallPath() string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "windows":
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "Programs", "fleet", "fleet.exe")
+		}
+		if home != "" {
+			return filepath.Join(home, "AppData", "Local", "Programs", "fleet", "fleet.exe")
+		}
+		return `C:\Users\<you>\AppData\Local\Programs\fleet\fleet.exe`
+	default:
+		// Linux and macOS both use XDG_BIN_HOME or ~/.local/bin
+		if xdgBin := os.Getenv("XDG_BIN_HOME"); xdgBin != "" {
+			return filepath.Join(xdgBin, "fleet")
+		}
+		if home != "" {
+			return filepath.Join(home, ".local", "bin", "fleet")
+		}
+		return "~/.local/bin/fleet"
+	}
 }
 
 func normalizeMode(mode os.FileMode) os.FileMode {
