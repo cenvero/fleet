@@ -23,6 +23,10 @@ fleet update channel beta
 
 `fleet update apply` updates the controller first and then rolls updates across managed agents. Partial agent failures are reported instead of bricking the whole rollout.
 
+### Auto-update policy
+
+If you set `policy: auto-update` in `config.toml`, the controller will apply updates automatically when the daemon is running. This policy is not available for Homebrew installs — Homebrew manages the binary and `fleet update apply` cannot replace it. If you accidentally configure `auto-update` on a Homebrew install, `fleet adjust-init` will detect and fix it.
+
 ## Signature and Integrity Model
 
 The release design uses:
@@ -33,6 +37,22 @@ The release design uses:
 - a pinned public key in installers and updater logic
 
 Checksums alone are not enough. If both the artifact and the manifest were tampered with together, a checksum-only model could still pass. The pinned minisign public key is what proves the release was signed by the project.
+
+All non-development channels require at least a SHA-256 checksum in the manifest. A manifest entry with neither a checksum nor a signature is rejected — the binary will not be applied. The `dev` channel is exempt so that local ad-hoc builds can be tested without a full signing pipeline.
+
+## Minimum Supported Version
+
+The manifest tracks `min_supported` per channel. Fleet keeps a rolling window of the 10 most recent releases; the minimum supported version is always the oldest in that window. Agents or controllers older than `min_supported` should be updated before operating alongside newer counterparts.
+
+## Rollback
+
+If an update causes a problem:
+
+```bash
+fleet update rollback
+```
+
+This restores the backup binary saved during the last `fleet update apply`. The rollback state is stored in `data/update-rollback.json` and is removed after a successful rollback.
 
 ## Repo-Side Validation
 

@@ -55,9 +55,19 @@ The interactive flow creates:
 You can inspect the current state with:
 
 ```bash
-./fleet status
-./fleet config show
+fleet status
+fleet config show
 ```
+
+### After upgrading fleet
+
+If you upgrade the binary and see a hint like `⚠ run 'fleet adjust-init'`, run:
+
+```bash
+fleet adjust-init
+```
+
+This walks through any config fields added or removed since you last ran `fleet init`, and updates `config.toml` interactively. It is safe to run at any time.
 
 ## Direct Mode Walkthrough
 
@@ -108,7 +118,7 @@ Register the server first:
 Then start the reverse agent:
 
 ```bash
-./fleet-agent reverse --mode reverse --controller 127.0.0.1:9443 --server-name edge-01
+./fleet-agent reverse --controller 127.0.0.1:9443 --server-name edge-01
 ```
 
 Once connected, the reverse session is visible through the same fleet workflows:
@@ -170,11 +180,34 @@ Open an interactive shell on any server through the fleet agent:
 ./fleet ssh demo
 ```
 
+The shell session stays alive across network drops. If the connection is lost, fleet prints:
+
+```
+Connection lost. Reconnecting in 5s... (1/3)
+```
+
+and retries automatically up to 3 times. Typing `exit` ends the session cleanly with no retry.
+
 Run a one-off command or run it across all servers:
 
 ```bash
 ./fleet exec demo uptime
 ./fleet exec --all uptime
+```
+
+## Backup and Recovery
+
+Create a backup before a major change or migration:
+
+```bash
+fleet backup
+fleet backup --output /path/to/fleet-backup.tar.gz
+```
+
+If you reinstall the OS or move the controller to a new machine and still have the old config directory, re-attach to it with:
+
+```bash
+fleet recover --from-dir /path/to/old-config
 ```
 
 ## Next Recommended Commands
@@ -184,6 +217,7 @@ Once the basic path works, the next useful commands are:
 ```bash
 ./fleet template list
 ./fleet key fingerprint
+./fleet key rotate
 ./fleet update check
 ./fleet database show
 ```

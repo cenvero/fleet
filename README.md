@@ -15,13 +15,17 @@ Today the repository includes:
 - A controller binary with a Cobra CLI and a Bubble Tea terminal dashboard
 - A remote agent binary with direct and reverse SSH transport support
 - Direct-mode and reverse-mode session handling with TOFU host-key pinning
+- Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
 - Metrics polling, alerting, suppression, acknowledgement, and desktop notifications
 - Linux-first service management, firewall control, and remote bootstrap
 - Controller-owned cached service logs with size, count, and age-based retention
 - Managed database backends for SQLite, PostgreSQL, MySQL, and MariaDB
-- Controller key rotation with rollout support for both direct and reverse fleets
+- Controller key rotation with live verification and rollout for both direct and reverse fleets
 - Controller and agent update flow with rollback support
+- Config backup and point-in-time restore (`fleet backup`, `fleet config restore`)
+- Post-reinstall config recovery (`fleet recover`)
+- Versioned config migration wizard (`fleet adjust-init`)
 - Static release assets under `public/` for GitHub Pages distribution
 - CI, CodeQL, Goreleaser, manifest generation, signing sync, and release validation tooling
 
@@ -33,8 +37,9 @@ Implemented now:
 
 - `fleet init` creates the config layout, keys, databases, and audit paths
 - `fleet dashboard` provides a multi-panel TUI with mouse and keyboard navigation
-- `fleet server`, `service`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, and `config` command groups are present
+- `fleet server`, `service`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, and `config` command groups are present
 - Reverse-mode reconnect resilience and queued metrics replay are implemented
+- Persistent shell sessions survive wifi drops and reconnect transparently
 - A 100-agent scale smoke test and release-readiness command are included locally
 
 ## Install
@@ -94,10 +99,10 @@ fleet server add web-01 192.0.2.10 \
 The auto-install:
 - Detects the server arch via `uname -m`
 - Downloads the correct `fleet-agent` release binary
-- Installs it to `/usr/local/bin/fleet-agent`
-- Creates, enables, and starts `fleet-agent.service` via systemd
+- Installs it to `/opt/cenvero-fleet/fleet-agent`
+- Creates, enables, and starts `cenvero-fleet-agent.service` via systemd
 
-Removing a server tears it down automatically:
+Removing a server tears it down automatically and cleans up the stored host key:
 
 ```bash
 fleet server remove web-01
@@ -143,11 +148,12 @@ Once the reverse session comes up, the controller can use the same live service,
 
 ## Command Highlights
 
-The current CLI surface is broad enough to manage the controller, servers, services, templates, keys, and updates from one binary.
+The current CLI surface is broad enough to manage the controller, servers, services, templates, keys, updates, and backups from one binary.
 
 Controller lifecycle:
 
 - `fleet init`
+- `fleet adjust-init`
 - `fleet status`
 - `fleet dashboard`
 - `fleet daemon`
@@ -164,7 +170,7 @@ Server management:
 
 Shell access and remote execution:
 
-- `fleet ssh <server>` — interactive root shell via fleet key
+- `fleet ssh <server>` — interactive shell via fleet key, survives network drops
 - `fleet exec <server> <command>` — run one command on one server
 - `fleet exec --all <command>` — run one command across all servers concurrently
 
@@ -185,15 +191,24 @@ Fleet visibility and control:
 - `fleet alerts ack <id>`
 - `fleet alerts suppress <id> --for 6h`
 
+Backup, restore, and recovery:
+
+- `fleet backup` — create a timestamped `.tar.gz` of the config directory
+- `fleet recover --from-dir <path>` — re-attach to a config directory after reinstall or migration
+- `fleet config backup` — alias into config subcommand
+- `fleet config restore <file>`
+
 Configuration, templates, and keys:
 
 - `fleet database show`
 - `fleet database shift --backend postgres --dsn '...'`
-- `fleet config show|validate|backup|restore|export|import`
+- `fleet config show|validate|export|import`
 - `fleet template list`
 - `fleet template apply <server> <template>`
 - `fleet key fingerprint`
 - `fleet key rotate`
+- `fleet key audit`
+- `fleet key export-pub`
 
 Updates:
 
@@ -214,6 +229,7 @@ By default the controller stores its working state under `~/.cenvero-fleet`, wit
 │   ├── id_ed25519
 │   ├── id_ed25519.pub
 │   ├── known_hosts
+│   ├── agents/
 │   └── rotations/
 ├── servers/
 ├── templates/
@@ -224,7 +240,8 @@ By default the controller stores its working state under `~/.cenvero-fleet`, wit
 ├── data/
 │   ├── state.db
 │   ├── metrics.db
-│   └── events.db
+│   ├── events.db
+│   └── control.token
 ├── backups/
 └── tmp/
 ```
@@ -232,9 +249,10 @@ By default the controller stores its working state under `~/.cenvero-fleet`, wit
 The controller keeps ownership of its data locally:
 
 - SQLite is split into separate workload files instead of one monolithic DB
-- Aggregated service logs are cached under the controller’s `logs/_aggregated/`
+- Aggregated service logs are cached under the controller's `logs/_aggregated/`
 - Log cache retention is enforced by size, retained backup count, and maximum age
-- `fleet config backup` and `fleet config restore` operate on the controller directory rather than a cloud service
+- `fleet backup` and `fleet config restore` operate on the controller directory rather than a cloud service
+- `data/control.token` is a per-session secret protecting the local reverse-hub control socket
 
 ## Database Backends
 
@@ -275,7 +293,7 @@ fleet update apply
 fleet update rollback
 ```
 
-Release artifacts are intended to be minisign-signed, and both the installers and the updater verify checksums and signatures before swapping binaries.
+Release artifacts are minisign-signed, and both the installers and the updater verify checksums and signatures before swapping binaries. All non-dev channels require at least a SHA-256 checksum in the manifest; a bare manifest entry is rejected.
 
 For repo-side release hardening, use:
 

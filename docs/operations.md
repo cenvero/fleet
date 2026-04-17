@@ -14,10 +14,24 @@ fleet server reconnect web-01
 fleet server remove web-01
 ```
 
-For Linux-first remote bootstrap:
+For Linux-first remote bootstrap with automatic agent installation:
 
 ```bash
-fleet server bootstrap web-01 --login-user root --agent-binary ./fleet-agent
+fleet server add web-01 192.0.2.10 --mode direct --login-user root --login-key ~/.ssh/id_ed25519
+```
+
+This SSHes into the server, downloads the correct `fleet-agent` binary, installs it under `/opt/cenvero-fleet/`, and starts it as a systemd service.
+
+Removing a server with a managed agent tears it down on the remote host and removes the stored host-key entry:
+
+```bash
+fleet server remove web-01
+```
+
+To remove the local record without SSH-ing to the server (e.g. the server is gone):
+
+```bash
+fleet server remove web-01 --force
 ```
 
 Reverse-mode servers should be registered before the agent dials in:
@@ -28,13 +42,21 @@ fleet server add edge-01 unknown --mode reverse
 
 ## Shell Access
 
-Open an interactive root shell on any managed server:
+Open an interactive shell on any managed server:
 
 ```bash
 fleet ssh web-01
 ```
 
-This connects through the fleet agent on port 2222 using the fleet key — no need to manage separate SSH credentials.
+This connects through the fleet agent using the fleet controller key — no need to manage separate SSH credentials. The host fingerprint is shown only the first time it is pinned; subsequent connects to the same server print nothing unless the key has changed.
+
+The shell session is persistent: if the network drops mid-session, fleet prints a reconnect notice and retries automatically:
+
+```
+Connection lost. Reconnecting in 5s... (1/3)
+```
+
+Typing `exit` ends the session cleanly with no retry.
 
 Run a one-off command on a single server:
 
@@ -104,7 +126,7 @@ Collect a live snapshot:
 fleet server metrics web-01
 ```
 
-The daemon can also poll metrics on a schedule and feed alert evaluation.
+The daemon also polls metrics on a schedule and feeds alert evaluation.
 
 ## Alerts
 
@@ -174,11 +196,66 @@ fleet key audit
 fleet key rotate
 ```
 
-The rotation path now supports:
+`fleet key rotate` supports both direct and reverse fleets. The result includes two lists:
 
-- direct fleets
-- reverse fleets
-- rollback on verification or cleanup failure
+- `rotated_servers` — servers whose authorized keys were updated
+- `verified_servers` — servers where the new key was confirmed working via a live test connection before the old key was removed
+
+If a server appears in `rotated_servers` but not `verified_servers`, the rotation was rolled back for that server. A fully successful rotation has both lists identical.
+
+For reverse-mode servers, the rotation flow is:
+1. Sends the new controller host key to the agent (agent now trusts both old and new)
+2. Promotes the new key files on the controller
+3. Disconnects the reverse session — agent reconnects under the new key
+4. Verifies reconnect succeeded within 45 s
+5. Removes the old controller host key from the agent's trusted list
+
+## Backup and Recovery
+
+Create a timestamped backup of the entire config directory:
+
+```bash
+fleet backup
+fleet backup --output /backups/fleet-$(date +%Y%m%d).tar.gz
+```
+
+The archive includes server records, keys, audit logs, and database files. Lock files, WAL journals, and in-progress temp files are excluded automatically.
+
+Restore from a backup:
+
+```bash
+fleet config restore /backups/fleet-20260417.tar.gz
+```
+
+After reinstalling the OS or moving to a new machine, re-attach fleet to an existing config directory:
+
+```bash
+fleet recover --from-dir /mnt/old-drive/.cenvero-fleet
+```
+
+`fleet recover` checks database connectivity, verifies the config is readable, and prints the exact `--config-dir` flag and `FLEET_CONFIG_DIR` export for your shell profile. If the config was written by a different fleet version, it tells you which version to match before proceeding. Use `--skip-version-check` only if you know what you are doing.
+
+## Config Migrations
+
+After upgrading fleet, you may see:
+
+```
+⚠  Your fleet config (init_version=1) is behind this version (init_version=2).
+   Run 'fleet adjust-init' to review and apply configuration changes.
+```
+
+Run:
+
+```bash
+fleet adjust-init
+```
+
+This walks through every pending change interactively:
+
+- `[✕] removed field` — shows what was removed and why, cleans up the config entry
+- `[+] added field` — prompts for a value for the new option
+
+The config is saved and stamped with the current `init_version` when done. It is safe to run at any time.
 
 ## Dashboard
 

@@ -22,7 +22,8 @@ Typical layout:
 │   ├── id_ed25519
 │   ├── id_ed25519.pub
 │   ├── known_hosts
-│   └── rotations/
+│   ├── agents/            ← pinned public keys for reverse-mode agents
+│   └── rotations/         ← archived key material from past rotations
 ├── servers/
 ├── templates/
 ├── logs/
@@ -32,16 +33,19 @@ Typical layout:
 ├── data/
 │   ├── state.db
 │   ├── metrics.db
-│   └── events.db
+│   ├── events.db
+│   └── control.token      ← per-session secret for local reverse-hub control socket
 ├── backups/
 └── tmp/
 ```
 
 ## Config File
 
-`config.toml` stores the controller’s persistent settings, including:
+`config.toml` stores the controller's persistent settings, including:
 
 - product and instance metadata
+- `init_version` — tracks which config migrations have been applied; used by `fleet adjust-init`
+- `last_seen_version` — stamped each time a fleet command runs; used by `fleet recover` to detect version mismatches
 - default transport mode
 - crypto configuration
 - update channel and policy
@@ -53,9 +57,20 @@ Helpful commands:
 ```bash
 fleet config show
 fleet config validate
-fleet config backup
 fleet config export
 ```
+
+## Config Migrations
+
+When the fleet init wizard gains or removes options across versions, `config.toml` can drift out of sync. Fleet detects this on every command via the `init_version` field and prints a hint when a migration is pending.
+
+To apply pending migrations interactively:
+
+```bash
+fleet adjust-init
+```
+
+See [Operations Guide — Config Migrations](operations.md#config-migrations) for details.
 
 ## Database Backends
 
@@ -87,7 +102,7 @@ The database shift flow copies workload data first and only updates controller c
 
 ## Aggregated Service Logs
 
-When you read or follow tracked service logs without a search filter, the controller stores an aggregated cached copy under:
+When you read or follow tracked service logs, the controller stores an aggregated cached copy under:
 
 ```text
 logs/_aggregated/
@@ -106,16 +121,40 @@ The current runtime config keys are:
 - `aggregated_log_max_files`
 - `aggregated_log_max_age`
 
-## Backups and Restore
+## Backup and Restore
 
-The controller can back up or restore the config directory:
+Create a full backup of the config directory:
 
 ```bash
-fleet config backup
-fleet config restore /path/to/archive.tar.gz
+fleet backup
+fleet backup --output /path/to/fleet-backup.tar.gz
+```
+
+The archive includes server records, keys, audit logs, and database files. Lock files, WAL journals, and in-progress temp files are excluded.
+
+Restore from a backup:
+
+```bash
+fleet config restore /path/to/fleet-backup.tar.gz
 ```
 
 Use `fleet config export` and `fleet config import` when you want a JSON export/import path instead of a tarball backup.
+
+## Recovery After Reinstall or Migration
+
+If you reinstall the OS or move the controller to a new machine, re-attach fleet to the existing config directory with:
+
+```bash
+fleet recover --from-dir /path/to/old-config
+```
+
+`fleet recover` checks:
+
+- database files exist (SQLite) or that connectivity works (Postgres/MySQL/MariaDB)
+- the config is readable and structurally valid
+- the running fleet binary matches the version that last used this config
+
+If a version mismatch is detected, fleet tells you which version to restore before proceeding. Use `--skip-version-check` only if you know what you are doing.
 
 ## Ownership Model
 

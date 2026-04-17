@@ -492,7 +492,9 @@
       <a href="#dashboard">Dashboard</a>
       <a href="#keys">Keys</a>
       <a href="#updates">Updates</a>
+      <a href="#backup">Backup &amp; Recovery</a>
       <a href="#config">Configuration</a>
+      <a href="#adjust-init">Config Migrations</a>
     </div>
     <div class="sb-group">
       <span class="sb-label">Reference</span>
@@ -693,8 +695,8 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
         <li>SSHes to the server using the provided login credentials</li>
         <li>Detects CPU architecture via <code>uname -m</code></li>
         <li>Downloads the correct <code>fleet-agent</code> binary from GitHub</li>
-        <li>Installs to <code>/usr/local/bin/fleet-agent</code></li>
-        <li>Creates and enables a <code>fleet-agent.service</code> systemd unit</li>
+        <li>Installs to <code>/opt/cenvero-fleet/fleet-agent</code></li>
+        <li>Creates and enables a <code>cenvero-fleet-agent.service</code> systemd unit</li>
         <li>Starts the service and registers the server in the controller</li>
       </ol>
 
@@ -743,9 +745,9 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
         <button class="copy-btn" onclick="copy(this)">copy</button>
         <pre>fleet ssh web-01</pre>
       </div>
-      <p>Invokes the system <code>ssh</code> binary using the fleet controller key, connecting to the agent's SSH port (default 2222) with the fleet host key pinned — no separate SSH setup needed.</p>
+      <p>Connects to the agent's SSH port (default 2222) using the fleet controller key — no separate SSH credential management needed. The host fingerprint is shown only on the first connect; subsequent connects are silent unless the key changes.</p>
       <div class="callout">
-        <strong>Root access</strong> — the agent runs as root and fleet always connects as root. Required for systemd, firewall, and privileged operations.
+        <strong>Persistent sessions</strong> — shell sessions survive network drops. If the connection is lost, fleet prints a reconnect notice and retries automatically (3 attempts, 5 s gap). Typing <code>exit</code> ends the session cleanly with no retry loop.
       </div>
     </section>
 
@@ -885,15 +887,40 @@ fleet alerts suppress &lt;id&gt; <span class="flag">--for</span> 6h</pre>
         <pre><span class="c"># Show controller key fingerprint</span>
 fleet key fingerprint
 
+<span class="c"># Export public key (for manual authorized_keys setups)</span>
+fleet key export-pub
+
+<span class="c"># View key-related audit events</span>
+fleet key audit
+
 <span class="c"># Rotate across the whole fleet</span>
 fleet key rotate</pre>
       </div>
-      <p>Key rotation pushes the new public key to all connected servers' <code>authorized_keys</code> before replacing the local private key. Safe for both direct and reverse fleets.</p>
+      <p>Key rotation supports both <strong>direct</strong> and <strong>reverse</strong> fleets. The result includes <code>rotated_servers</code> (keys updated) and <code>verified_servers</code> (new key confirmed working via live test before old key removed). A failed verification triggers automatic rollback — no server is ever locked out.</p>
+    </section>
+
+    <section id="backup">
+      <h2>Backup &amp; Recovery</h2>
+      <p>Create a timestamped backup of the entire config directory:</p>
+      <div class="cb">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre><span class="c"># Default output: fleet-backup-&lt;timestamp&gt;.tar.gz</span>
+fleet backup
+
+<span class="c"># Custom path</span>
+fleet backup <span class="flag">--output</span> /backups/fleet-20260418.tar.gz</pre>
+      </div>
+      <p>After reinstalling or migrating to a new machine, re-attach fleet to the existing config directory:</p>
+      <div class="cb">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet recover <span class="flag">--from-dir</span> /path/to/old-config</pre>
+      </div>
+      <p><code>fleet recover</code> checks database connectivity, verifies the config is readable, and warns if the running binary version doesn't match what last used this config. Use <code>--skip-version-check</code> only if you know what you are doing.</p>
     </section>
 
     <section id="updates">
       <h2>Updates</h2>
-      <p>Fleet manages its own updates. Agents are <strong>automatically kept in sync</strong> with the controller version whenever they connect — no policy configuration required.</p>
+      <p>Fleet manages its own updates. The default policy is <code>notify-only</code> — the controller checks for updates and reports available versions but does not apply them automatically. Set <code>policy: auto-update</code> in <code>config.toml</code> to apply updates automatically when the daemon is running.</p>
       <div class="cb">
         <button class="copy-btn" onclick="copy(this)">copy</button>
         <pre><span class="c"># Check for available updates</span>
@@ -923,13 +950,13 @@ fleet update channel beta</pre>
 fleet config show
 fleet config validate
 
-<span class="c"># Backup and restore</span>
+<span class="c"># Backup and restore (via config subcommand)</span>
 fleet config backup
-fleet config restore
+fleet config restore &lt;file&gt;
 
-<span class="c"># Export / import (migration)</span>
+<span class="c"># Export / import (JSON migration path)</span>
 fleet config export
-fleet config import</pre>
+fleet config import &lt;file&gt;</pre>
       </div>
 
       <h3>Database backend</h3>
@@ -941,6 +968,21 @@ fleet database shift \
   <span class="flag">--backend</span> postgres \
   <span class="flag">--dsn</span> <span class="str">'postgres://user:pass@host:5432/fleet?sslmode=require'</span></pre>
       </div>
+    </section>
+
+    <section id="adjust-init">
+      <h2>Config Migrations</h2>
+      <p>When fleet adds or removes options from the init wizard across versions, your existing <code>config.toml</code> may be missing new settings or still carry old ones. Fleet detects this on every command and prints a hint:</p>
+      <div class="cb">
+        <pre>⚠  Your fleet config (init_version=1) is behind this version (init_version=2).
+   Run 'fleet adjust-init' to review and apply configuration changes.</pre>
+      </div>
+      <p>Run the interactive migration wizard:</p>
+      <div class="cb">
+        <button class="copy-btn" onclick="copy(this)">copy</button>
+        <pre>fleet adjust-init</pre>
+      </div>
+      <p>Each pending change is shown as <code>[✕] removed</code> or <code>[+] added</code> with an explanation. The config is saved and stamped with the current migration version when done. Safe to run at any time.</p>
     </section>
 
     <section id="commands">
@@ -973,10 +1015,15 @@ fleet database shift \
             <tr><td><code>fleet alerts</code></td><td>List active alerts</td></tr>
             <tr><td><code>fleet alerts ack &lt;id&gt;</code></td><td>Acknowledge an alert</td></tr>
             <tr><td><code>fleet alerts suppress &lt;id&gt;</code></td><td>Suppress an alert</td></tr>
-            <tr><td><code>fleet key fingerprint</code></td><td>Show controller key fingerprint</td></tr>
-            <tr><td><code>fleet key rotate</code></td><td>Rotate key across fleet</td></tr>
+            <tr><td><code>fleet key fingerprint</code></td><td>Show controller key fingerprints</td></tr>
+            <tr><td><code>fleet key export-pub</code></td><td>Export controller public keys</td></tr>
+            <tr><td><code>fleet key audit</code></td><td>Show key-related audit events</td></tr>
+            <tr><td><code>fleet key rotate</code></td><td>Rotate key across all servers (direct + reverse)</td></tr>
             <tr><td><code>fleet update check|apply|rollback</code></td><td>Manage controller updates</td></tr>
-            <tr><td><code>fleet update channel &lt;name&gt;</code></td><td>Set update channel</td></tr>
+            <tr><td><code>fleet update channel &lt;name&gt;</code></td><td>Set update channel (stable, beta, alpha)</td></tr>
+            <tr><td><code>fleet backup</code></td><td>Back up the config directory to a tar.gz archive</td></tr>
+            <tr><td><code>fleet recover --from-dir &lt;path&gt;</code></td><td>Re-attach to existing config after reinstall or migration</td></tr>
+            <tr><td><code>fleet adjust-init</code></td><td>Apply pending config migrations after a fleet upgrade</td></tr>
             <tr><td><code>fleet config show|validate|backup|restore</code></td><td>Manage config</td></tr>
             <tr><td><code>fleet database show|shift</code></td><td>Inspect or migrate database backend</td></tr>
             <tr><td><code>fleet template list|apply</code></td><td>Manage server templates</td></tr>
@@ -996,8 +1043,9 @@ fleet database shift \
 ├── keys/
 │   ├── id_ed25519       <span class="c"># controller private key</span>
 │   ├── id_ed25519.pub
-│   ├── known_hosts      <span class="c"># pinned agent host keys</span>
-│   └── rotations/       <span class="c"># previous key versions</span>
+│   ├── known_hosts      <span class="c"># pinned agent host keys (TOFU)</span>
+│   ├── agents/          <span class="c"># pinned reverse-agent public keys</span>
+│   └── rotations/       <span class="c"># archived key material from past rotations</span>
 ├── servers/             <span class="c"># per-server TOML records</span>
 ├── templates/           <span class="c"># reusable server templates</span>
 ├── logs/
@@ -1007,7 +1055,8 @@ fleet database shift \
 ├── data/
 │   ├── state.db         <span class="c"># server and service state</span>
 │   ├── metrics.db       <span class="c"># metrics history</span>
-│   └── events.db        <span class="c"># event log</span>
+│   ├── events.db        <span class="c"># event log</span>
+│   └── control.token    <span class="c"># per-session secret for local control socket</span>
 ├── backups/             <span class="c"># config backup archives</span>
 └── tmp/</pre>
       </div>

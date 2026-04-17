@@ -16,9 +16,11 @@ The docs are written to match the current repository state and focus on the real
 The documentation currently focuses on:
 
 - how to build and initialize the controller
-- how direct and reverse transport modes behave
+- how to upgrade the config with `fleet adjust-init` after a fleet upgrade
+- how direct and reverse transport modes behave, including SSH reconnect and persistent shell sessions
 - where Cenvero Fleet stores its data and how backend selection works
 - how operators use services, logs, alerts, templates, key rotation, and updates
+- how to back up, restore, and recover a controller installation with `fleet backup` and `fleet recover`
 - how maintainers validate release readiness before pushing a real signed tag
 
 ## Publishing
