@@ -1225,7 +1225,7 @@ func newKeyCommand(configDir *string) *cobra.Command {
 	keyCmd := &cobra.Command{Use: "key", Short: "Manage controller keys"}
 	keyCmd.AddCommand(&cobra.Command{
 		Use:   "rotate",
-		Short: "Rotate controller keys and roll them out to managed direct-mode servers",
+		Short: "Rotate controller keys and roll them out to all managed servers (direct and reverse)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {

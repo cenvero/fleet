@@ -193,7 +193,8 @@ func unsupportedRotationServers(servers []ServerRecord) []string {
 	var unsupported []string
 	for _, server := range servers {
 		switch server.Mode {
-		case "", transport.ModeDirect, transport.ModeReverse:
+		case "", transport.ModeDirect, transport.ModeReverse, transport.ModePerNode:
+			// per-server mode is resolved to direct or reverse in rotationTargets
 		default:
 			unsupported = append(unsupported, server.Name)
 		}
