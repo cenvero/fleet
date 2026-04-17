@@ -1339,40 +1339,31 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		Use:   "apply",
 		Short: "Apply the latest controller update and roll it out across managed agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// For Homebrew installs, tell the user how to update the controller
+			// binary, but DO NOT return early — ApplyFleetUpdate skips the
+			// self-update step internally and still rolls out to agents.
 			if core.RuntimeIsHomebrewInstall() {
-				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — the controller binary cannot be")
-				fmt.Fprintln(cmd.OutOrStdout(), "self-updated. Use Homebrew to update it:")
+				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — to update the controller binary:")
 				fmt.Fprintln(cmd.OutOrStdout())
 				fmt.Fprintln(cmd.OutOrStdout(), "  brew update && brew upgrade cenvero-fleet")
 				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "After upgrading, run 'fleet update apply' again to roll out the")
-				fmt.Fprintln(cmd.OutOrStdout(), "new agent version to your managed servers.")
-				return nil
+				fmt.Fprintln(cmd.OutOrStdout(), "Continuing to roll out the agent update to managed servers...")
+				fmt.Fprintln(cmd.OutOrStdout())
 			}
 			app, err := openApp(*configDir)
 			if err != nil {
-				// Config not available — can still self-update the binary only.
-				// This happens when running as root (sudo) and the config dir is
-				// under a different user's home. Suggest --config-dir.
 				if !core.IsInitialized(*configDir) {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Could not open fleet config at %s.\n\n", *configDir)
-					// When running with sudo, $HOME is root's home but SUDO_USER
-					// and SUDO_HOME (set by some distros) point to the real user.
+					// On Linux, sudo changes $HOME so config is not found.
+					// macOS users use Homebrew (handled above) so this is Linux-only.
 					if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
-						// Try SUDO_HOME first (set by some distros).
 						suggestedDir := core.DefaultConfigDir(os.Getenv("SUDO_HOME"))
 						if suggestedDir == *configDir || os.Getenv("SUDO_HOME") == "" {
-							// Fall back to platform-specific home path.
-							homePrefix := "/home"
-							if runtime.GOOS == "darwin" {
-								homePrefix = "/Users"
-							}
-							suggestedDir = homePrefix + "/" + sudoUser + "/.cenvero-fleet"
+							suggestedDir = "/home/" + sudoUser + "/.cenvero-fleet"
 						}
 						fmt.Fprintf(cmd.ErrOrStderr(), "You appear to be running with sudo. Pass --config-dir:\n\n")
 						fmt.Fprintf(cmd.ErrOrStderr(), "  sudo fleet --config-dir %s update apply\n\n", suggestedDir)
 					}
-					return err
 				}
 				return err
 			}
