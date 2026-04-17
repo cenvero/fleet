@@ -87,7 +87,7 @@ func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store
 	s.mu.Unlock()
 
 	// Resize PTY to the new terminal dimensions.
-	_ = pty.Setsize(s.ptm, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	_ = pty.Setsize(s.ptm, ptyWinsize(rows, cols))
 
 	// Send scrollback so the user can see what happened while disconnected.
 	if len(snapshot) > 0 {

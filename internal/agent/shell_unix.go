@@ -152,7 +152,7 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 		if err != nil {
 			return nil, err
 		}
-		_ = pty.Setsize(ptm, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+		_ = pty.Setsize(ptm, ptyWinsize(rows, cols))
 
 		cmd := exec.Command(shellPath)
 		cmd.Args = []string{"-" + filepath.Base(shellPath)}
@@ -204,10 +204,7 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 			if req.Type == "window-change" {
 				var p windowChangePayload
 				if err := ssh.Unmarshal(req.Payload, &p); err == nil {
-					_ = pty.Setsize(session.ptm, &pty.Winsize{
-						Rows: uint16(p.Rows),
-						Cols: uint16(p.Columns),
-					})
+					_ = pty.Setsize(session.ptm, ptyWinsize(p.Rows, p.Columns))
 				}
 			}
 			if req.WantReply {
@@ -242,7 +239,7 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 		sendExitStatus(channel, 1)
 		return
 	}
-	_ = pty.Setsize(ptm, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	_ = pty.Setsize(ptm, ptyWinsize(rows, cols))
 
 	// SSH_TTY = slave PTY device path (e.g. /dev/pts/3).
 	// bash, zsh, and tools like script(1) use this to detect a real terminal.
@@ -273,10 +270,7 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 			if req.Type == "window-change" {
 				var p windowChangePayload
 				if err := ssh.Unmarshal(req.Payload, &p); err == nil {
-					_ = pty.Setsize(ptm, &pty.Winsize{
-						Rows: uint16(p.Rows),
-						Cols: uint16(p.Columns),
-					})
+					_ = pty.Setsize(ptm, ptyWinsize(p.Rows, p.Columns))
 				}
 			}
 			if req.WantReply {
@@ -341,7 +335,7 @@ func runDirect(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd)
 }
 
 func sendExitStatus(channel ssh.Channel, code int) {
-	payload := ssh.Marshal(exitStatusPayload{Status: uint32(code)})
+	payload := ssh.Marshal(exitStatusPayload{Status: sshExitStatusValue(code)})
 	_, _ = channel.SendRequest("exit-status", false, payload)
 }
 

@@ -182,8 +182,8 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 		w, h, _ := term.GetSize(fd)
 		ptyPayload := ssh.Marshal(ptyRequestPayload{
 			Term:    "xterm-256color",
-			Columns: uint32(w),
-			Rows:    uint32(h),
+			Columns: clampSSHDimension(w),
+			Rows:    clampSSHDimension(h),
 		})
 		ok, err := channel.SendRequest("pty-req", true, ptyPayload)
 		if err != nil {

@@ -33,8 +33,8 @@ func watchWindowResize(channel ssh.Channel, fd int, done <-chan struct{}) {
 			w, h, err := term.GetSize(fd)
 			if err == nil {
 				payload := ssh.Marshal(windowChangePayload{
-					Columns: uint32(w),
-					Rows:    uint32(h),
+					Columns: clampSSHDimension(w),
+					Rows:    clampSSHDimension(h),
 				})
 				_, _ = channel.SendRequest("window-change", false, payload)
 			}
