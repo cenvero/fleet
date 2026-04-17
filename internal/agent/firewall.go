@@ -6,12 +6,28 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/cenvero/fleet/pkg/proto"
+)
+
+// validUFWRule matches the safe subset of ufw rule syntax fleet supports:
+//
+//	allow|deny|limit|reject  PORT[/tcp|/udp]
+//	allow|deny|limit|reject  from IP to any port PORT[/tcp|/udp]
+//
+// This prevents passing subcommands like "disable", "reset", "delete allow ssh"
+// or any shell-special characters via the firewall.add_rule RPC action.
+var validUFWRule = regexp.MustCompile(
+	`^(?i)(allow|deny|limit|reject)\s+` +
+		`(` +
+		`\d{1,5}(/tcp|/udp)?` + // allow 80 / allow 443/tcp
+		`|from\s+[\d./a-fA-F:]+\s+to\s+any(\s+port\s+\d{1,5}(/tcp|/udp)?)` + // allow from IP to any port 22
+		`)$`,
 )
 
 type FirewallManager interface {
@@ -108,13 +124,22 @@ func (m ufwFirewallManager) Enable(ctx context.Context, enabled bool) (proto.Fir
 }
 
 func (m ufwFirewallManager) AddRule(ctx context.Context, rule string) (proto.FirewallInfo, error) {
-	args := strings.Fields(strings.TrimSpace(rule))
-	if len(args) == 0 {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
 		return proto.FirewallInfo{}, &RPCError{
 			Code:    "invalid_rule",
 			Message: "firewall rule must not be empty",
 		}
 	}
+	// Validate against the allowed rule syntax before passing anything to ufw.
+	// This prevents "ufw disable", "ufw reset", "ufw delete allow ssh", etc.
+	if !validUFWRule.MatchString(rule) {
+		return proto.FirewallInfo{}, &RPCError{
+			Code:    "invalid_rule",
+			Message: fmt.Sprintf("firewall rule %q does not match the supported format (e.g. \"allow 80\", \"allow 443/tcp\")", rule),
+		}
+	}
+	args := strings.Fields(rule)
 	output, err := m.Runner.Run(ctx, "ufw", args...)
 	if err != nil {
 		return proto.FirewallInfo{}, &RPCError{

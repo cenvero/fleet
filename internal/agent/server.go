@@ -60,7 +60,8 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 			if _, ok := authorizedKeys[string(key.Marshal())]; ok {
 				return &ssh.Permissions{
 					Extensions: map[string]string{
-						"user": conn.User(),
+						"user":   conn.User(),
+						"key_fp": ssh.FingerprintSHA256(key),
 					},
 				}, nil
 			}
@@ -109,7 +110,8 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 			if _, ok := authorizedKeys[string(key.Marshal())]; ok {
 				return &ssh.Permissions{
 					Extensions: map[string]string{
-						"user": conn.User(),
+						"user":   conn.User(),
+						"key_fp": ssh.FingerprintSHA256(key),
 					},
 				}, nil
 			}
@@ -144,7 +146,8 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 			if err != nil {
 				continue
 			}
-			go serveShell(channel, requests)
+			sessionID := conn.Permissions.Extensions["key_fp"]
+			go serveShell(channel, requests, sessionID)
 		default:
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
 		}

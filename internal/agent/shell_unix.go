@@ -48,7 +48,7 @@ type exitStatusPayload struct {
 //   - "shell"         → start a login shell (argv[0] = "-bash") with SSH_TTY set
 //   - "exec"          → run a command through the user's own shell
 //   - "window-change" → resize the PTY while the shell is running
-func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
+func serveShell(channel ssh.Channel, requests <-chan *ssh.Request, sessionID string) {
 	defer channel.Close()
 
 	var (
@@ -78,11 +78,11 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 			replyReq(req, true)
 
 		case "env":
-			// Accept env vars set by the client before the shell starts.
-			// Real sshd honours AcceptEnv; we accept all since the connection
-			// is already fully authenticated with the controller's key.
+			// Accept env vars from the client — same as AcceptEnv in sshd_config.
+			// Block loader/dynamic-linker and shell-init variables that could be
+			// used for privilege escalation even inside an authenticated session.
 			var p struct{ Name, Value string }
-			if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Name != "" {
+			if err := ssh.Unmarshal(req.Payload, &p); err == nil && p.Name != "" && !isDangerousEnvVar(p.Name) {
 				extraEnv = append(extraEnv, p.Name+"="+p.Value)
 			}
 			replyReq(req, true)
@@ -111,7 +111,7 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
 			// If not, create a new one. The session survives disconnects for up to
 			// sessionIdleTimeout (10 min) before the shell is sent SIGHUP.
 			replyReq(req, true)
-			runPersistentShell(channel, requests, shellPath, env, cols, rows)
+			runPersistentShell(channel, requests, shellPath, env, cols, rows, sessionID)
 			return
 
 		default:
@@ -146,9 +146,7 @@ func buildEnv(termType, shellPath string, extra []string) []string {
 // the current channel to it. On network drops the shell keeps running and the
 // replay buffer accumulates output. On reconnect the buffer is sent first so
 // the user sees what happened while disconnected.
-func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shellPath string, env []string, cols, rows uint32) {
-	const sessionID = "default"
-
+func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shellPath string, env []string, cols, rows uint32, sessionID string) {
 	session, isNew, err := globalStore.getOrCreate(sessionID, func() (*persistentSession, error) {
 		ptm, pts, err := pty.Open()
 		if err != nil {
@@ -367,6 +365,38 @@ func userShell() string {
 		}
 	}
 	return "/bin/sh"
+}
+
+// isDangerousEnvVar returns true for environment variable names that could be
+// exploited to hijack the shell or the dynamic linker even when the connection
+// is fully authenticated. These are blocked regardless of the client request.
+//
+// Blocked categories:
+//   - Dynamic-linker preload/path vars  (LD_*, DYLD_*) → code injection via shared library
+//   - Shell initialisation vars (BASH_ENV, ENV, ZDOTDIR) → arbitrary code on shell start
+//   - Interpreter startup vars → code injection in Python/Ruby/Node/Java/Perl sessions
+//   - HOME / SHELL → would cause wrong .bashrc / wrong shell to load
+func isDangerousEnvVar(name string) bool {
+	upper := strings.ToUpper(name)
+	// Prefix-based blocks
+	for _, prefix := range []string{"LD_", "DYLD_"} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	// Exact-name blocks
+	switch upper {
+	case "BASH_ENV", "ENV", "ZDOTDIR",
+		"PROMPT_COMMAND", "PS1", "PS2", "PS4",
+		"PYTHONSTARTUP", "PYTHONPATH",
+		"RUBYOPT", "RUBYLIB",
+		"PERL5OPT", "PERL5LIB",
+		"NODE_OPTIONS", "NODE_PATH",
+		"JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+		"HOME", "SHELL", "USER", "LOGNAME", "PATH":
+		return true
+	}
+	return false
 }
 
 func shellFromPasswd(username string) string {

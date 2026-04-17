@@ -8,7 +8,7 @@ package agent
 import "golang.org/x/crypto/ssh"
 
 // serveShell is not supported on Windows — the fleet agent targets Linux/Unix.
-func serveShell(channel ssh.Channel, requests <-chan *ssh.Request) {
+func serveShell(channel ssh.Channel, requests <-chan *ssh.Request, _ string) {
 	defer channel.Close()
 	for req := range requests {
 		if req.WantReply {

@@ -6,6 +6,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -244,6 +246,7 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		}
 	}
 
+	token := randomBootstrapToken()
 	return resolvedBootstrapConfig{
 		loginUser:              loginUser,
 		loginPort:              loginPort,
@@ -255,11 +258,22 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		serviceName:            serviceName,
 		useSudo:                opts.UseSudo,
 		acceptNewHostKey:       opts.AcceptNewHostKey,
-		tempBinaryPath:         "/tmp/cenvero-fleet-agent.bin",
-		tempUnitPath:           "/tmp/cenvero-fleet-agent.service",
-		tempScriptPath:         "/tmp/cenvero-fleet-agent-bootstrap.sh",
-		tempAuthorizedKeysPath: "/tmp/cenvero-fleet-authorized_keys",
+		tempBinaryPath:         "/tmp/cenvero-" + token + ".bin",
+		tempUnitPath:           "/tmp/cenvero-" + token + ".service",
+		tempScriptPath:         "/tmp/cenvero-" + token + ".sh",
+		tempAuthorizedKeysPath: "/tmp/cenvero-" + token + ".keys",
 	}, nil
+}
+
+// randomBootstrapToken returns a 16-character hex token for use in temp file
+// paths during bootstrap. This prevents local users on the target server from
+// pre-staging symlinks or scripts at the predictable /tmp paths.
+func randomBootstrapToken() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func resolveAgentBinaryPath(override string) (string, error) {

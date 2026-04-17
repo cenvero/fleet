@@ -309,7 +309,17 @@ func RestoreBackup(inputPath, outputDir string) error {
 		if err != nil {
 			return fmt.Errorf("read backup archive: %w", err)
 		}
-		target := filepath.Join(outputDir, filepath.Clean(header.Name))
+		// Zip-slip guard: reject absolute paths and entries that escape outputDir.
+		// filepath.Join(base, "/etc/passwd") = "/etc/passwd" on all platforms
+		// if the cleaned name is absolute, so we must check explicitly.
+		cleanName := filepath.Clean(header.Name)
+		if filepath.IsAbs(cleanName) || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || cleanName == ".." {
+			return fmt.Errorf("backup archive contains unsafe path %q", header.Name)
+		}
+		target := filepath.Join(outputDir, cleanName)
+		if !strings.HasPrefix(filepath.Clean(target)+string(filepath.Separator), filepath.Clean(outputDir)+string(filepath.Separator)) {
+			return fmt.Errorf("backup archive entry %q escapes the restore directory", header.Name)
+		}
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, os.FileMode(header.Mode&0o7777)); err != nil { //nolint:gosec

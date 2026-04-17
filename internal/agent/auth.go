@@ -92,7 +92,34 @@ func (m fileAuthorizedKeysManager) Update(_ context.Context, payload proto.Autho
 	if mode == 0 {
 		mode = 0o600
 	}
-	if err := os.WriteFile(m.path, []byte(content), mode); err != nil {
+	// Atomic write: write to a temp file in the same directory, then rename.
+	// This prevents a partial write from leaving the authorized_keys file in an
+	// inconsistent state, and eliminates the TOCTOU window between read and write.
+	tmp, err := os.CreateTemp(filepath.Dir(m.path), ".authorized_keys.*")
+	if err != nil {
+		return proto.AuthorizedKeysResult{}, &RPCError{
+			Code:    "authorized_keys_write_failed",
+			Message: err.Error(),
+		}
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op after successful rename
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return proto.AuthorizedKeysResult{}, &RPCError{
+			Code:    "authorized_keys_write_failed",
+			Message: err.Error(),
+		}
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return proto.AuthorizedKeysResult{}, &RPCError{
+			Code:    "authorized_keys_write_failed",
+			Message: err.Error(),
+		}
+	}
+	_ = tmp.Close()
+	if err := os.Rename(tmpPath, m.path); err != nil {
 		return proto.AuthorizedKeysResult{}, &RPCError{
 			Code:    "authorized_keys_write_failed",
 			Message: err.Error(),

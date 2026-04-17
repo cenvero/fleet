@@ -6,12 +6,18 @@ package agent
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/cenvero/fleet/pkg/proto"
 )
+
+// blockedLogPrefixes are OS virtual filesystems that must never be read as log
+// files. Reading from these can expose arbitrary process memory (/proc/N/mem),
+// kernel data structures, or raw device data — even to an authenticated client.
+var blockedLogPrefixes = []string{"/proc/", "/sys/", "/dev/"}
 
 type LogReader interface {
 	Read(context.Context, proto.LogReadPayload) (proto.LogReadResult, error)
@@ -34,6 +40,20 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 		return proto.LogReadResult{}, &RPCError{
 			Code:    "invalid_log_path",
 			Message: "log path must be absolute",
+		}
+	}
+	// Resolve symlinks so a symlink pointing to /proc/1/mem cannot bypass the
+	// block below. Ignore resolution errors — the open below will surface them.
+	realPath := payload.Path
+	if resolved, err := filepath.EvalSymlinks(payload.Path); err == nil {
+		realPath = resolved
+	}
+	for _, blocked := range blockedLogPrefixes {
+		if strings.HasPrefix(realPath, blocked) {
+			return proto.LogReadResult{}, &RPCError{
+				Code:    "invalid_log_path",
+				Message: fmt.Sprintf("reading from %s is not permitted", blocked),
+			}
 		}
 	}
 	if payload.Follow {

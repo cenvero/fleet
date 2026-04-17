@@ -7,12 +7,18 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/cenvero/fleet/pkg/proto"
 )
+
+// validServiceName matches the systemd unit naming rules:
+// letters, digits, underscores, hyphens, dots, colons, at-signs.
+// Max 256 chars (systemd's UNIT_NAME_MAX).
+var validServiceName = regexp.MustCompile(`^[a-zA-Z0-9_@.\-:]{1,256}$`)
 
 type ServiceManager interface {
 	List(context.Context) ([]proto.ServiceInfo, error)
@@ -101,6 +107,12 @@ func (m systemdServiceManager) Control(ctx context.Context, service, action stri
 		return proto.ServiceInfo{}, &RPCError{
 			Code:    "invalid_action",
 			Message: fmt.Sprintf("service action %q is not supported", action),
+		}
+	}
+	if !validServiceName.MatchString(service) {
+		return proto.ServiceInfo{}, &RPCError{
+			Code:    "invalid_service_name",
+			Message: fmt.Sprintf("service name %q contains invalid characters", service),
 		}
 	}
 

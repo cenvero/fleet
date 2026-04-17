@@ -59,9 +59,14 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 		return err
 	}
 
+	token := randomBootstrapToken()
+	tempServicePath := "/tmp/cenvero-" + token + ".service"
+	tempKeysPath := "/tmp/cenvero-" + token + ".keys"
+	tempScriptPath := "/tmp/cenvero-" + token + ".sh"
+
 	uploads := []BootstrapUpload{
-		{Path: "/tmp/cenvero-fleet-agent.service", Mode: 0o600, Content: []byte(serviceUnit)},
-		{Path: "/tmp/cenvero-fleet-authorized_keys", Mode: 0o644, Content: pubKeyData},
+		{Path: tempServicePath, Mode: 0o600, Content: []byte(serviceUnit)},
+		{Path: tempKeysPath, Mode: 0o644, Content: pubKeyData},
 	}
 
 	var installScript string
@@ -75,18 +80,19 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 		if err != nil {
 			return fmt.Errorf("read agent binary: %w", err)
 		}
+		tempBinPath := "/tmp/cenvero-" + token + ".bin"
 		uploads = append(uploads, BootstrapUpload{
-			Path:    "/tmp/cenvero-fleet-agent.bin",
+			Path:    tempBinPath,
 			Mode:    0o700,
 			Content: binaryData,
 		})
-		installScript = buildLocalBinaryInstallScript(server, sudo, serviceName)
+		installScript = buildLocalBinaryInstallScript(server, sudo, serviceName, tempBinPath, tempServicePath, tempKeysPath, tempScriptPath)
 	} else {
-		installScript = buildRemoteDownloadInstallScript(server, sudo, serviceName, version.Version)
+		installScript = buildRemoteDownloadInstallScript(server, sudo, serviceName, version.Version, tempServicePath, tempKeysPath, tempScriptPath)
 	}
 
 	uploads = append(uploads, BootstrapUpload{
-		Path:    "/tmp/cenvero-fleet-agent-install.sh",
+		Path:    tempScriptPath,
 		Mode:    0o700,
 		Content: []byte(installScript),
 	})
@@ -101,7 +107,7 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
 		AcceptNewHostKey: true,
 		Uploads:          uploads,
-		RunCommand:       "/bin/sh /tmp/cenvero-fleet-agent-install.sh",
+		RunCommand:       "/bin/sh " + shellQuote(tempScriptPath),
 	}
 	if err := executor.Bootstrap(context.Background(), req); err != nil {
 		return fmt.Errorf("agent install: %w", err)
@@ -162,7 +168,9 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 		sudo = "sudo "
 	}
 
-	script := buildAgentTeardownScript(server.Agent.ServiceName, sudo)
+	token := randomBootstrapToken()
+	tempTeardownPath := "/tmp/cenvero-" + token + ".sh"
+	script := buildAgentTeardownScript(server.Agent.ServiceName, sudo, tempTeardownPath)
 	executor := sshBootstrapExecutor{networkDialContext: a.NetworkDialContext}
 	req := BootstrapRequest{
 		Address:          server.Address,
@@ -173,9 +181,9 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
 		AcceptNewHostKey: true,
 		Uploads: []BootstrapUpload{
-			{Path: "/tmp/cenvero-fleet-teardown.sh", Mode: 0o700, Content: []byte(script)},
+			{Path: tempTeardownPath, Mode: 0o700, Content: []byte(script)},
 		},
-		RunCommand: "/bin/sh /tmp/cenvero-fleet-teardown.sh",
+		RunCommand: "/bin/sh " + shellQuote(tempTeardownPath),
 	}
 	if err := executor.Bootstrap(context.Background(), req); err != nil {
 		return fmt.Errorf("agent teardown: %w", err)
@@ -214,7 +222,7 @@ func AgentInstallInstructions(server ServerRecord, mode transport.Mode) string {
 	}
 }
 
-func buildRemoteDownloadInstallScript(server ServerRecord, sudo, serviceName, ver string) string {
+func buildRemoteDownloadInstallScript(server ServerRecord, sudo, serviceName, ver, tempServicePath, tempKeysPath, tempScriptPath string) string {
 	lines := []string{
 		"#!/bin/sh",
 		"set -eu",
@@ -251,15 +259,15 @@ func buildRemoteDownloadInstallScript(server ServerRecord, sudo, serviceName, ve
 		"EXTRACTED=\"$DLDIR/fleet-agent\"",
 		"",
 	}
-	lines = append(lines, buildAgentSetupLines(sudo, serviceName, "$EXTRACTED")...)
+	lines = append(lines, buildAgentSetupLines(sudo, serviceName, "$EXTRACTED", tempServicePath, tempKeysPath)...)
 	lines = append(lines,
-		"rm -f /tmp/cenvero-fleet-agent.service /tmp/cenvero-fleet-authorized_keys /tmp/cenvero-fleet-agent-install.sh",
+		"rm -f "+shellQuote(tempServicePath)+" "+shellQuote(tempKeysPath)+" "+shellQuote(tempScriptPath),
 		"echo \""+version.ProductName+" agent installed on "+server.Name+"\"",
 	)
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName string) string {
+func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName, tempBinPath, tempServicePath, tempKeysPath, tempScriptPath string) string {
 	lines := []string{
 		"#!/bin/sh",
 		"set -eu",
@@ -270,26 +278,26 @@ func buildLocalBinaryInstallScript(server ServerRecord, sudo, serviceName string
 		"BIN_PATH=" + shellQuote(defaultAgentBinaryPath),
 		"",
 	}
-	lines = append(lines, buildAgentSetupLines(sudo, serviceName, "/tmp/cenvero-fleet-agent.bin")...)
+	lines = append(lines, buildAgentSetupLines(sudo, serviceName, shellQuote(tempBinPath), tempServicePath, tempKeysPath)...)
 	lines = append(lines,
-		"rm -f /tmp/cenvero-fleet-agent.service /tmp/cenvero-fleet-authorized_keys /tmp/cenvero-fleet-agent.bin /tmp/cenvero-fleet-agent-install.sh",
+		"rm -f "+shellQuote(tempServicePath)+" "+shellQuote(tempKeysPath)+" "+shellQuote(tempBinPath)+" "+shellQuote(tempScriptPath),
 		"echo \""+version.ProductName+" agent installed on "+server.Name+" (dev build)\"",
 	)
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func buildAgentSetupLines(sudo, serviceName, binarySource string) []string {
+func buildAgentSetupLines(sudo, serviceName, binarySource, tempServicePath, tempKeysPath string) []string {
 	return []string{
 		sudo + "mkdir -p \"$BIN_DIR\" \"$STATE_DIR\" \"$CONFIG_DIR\"",
 		sudo + "install -m 0755 " + binarySource + " \"$BIN_PATH\"",
-		sudo + "install -m 0644 /tmp/cenvero-fleet-agent.service /etc/systemd/system/" + shellQuote(serviceName) + ".service",
-		sudo + "install -m 0600 /tmp/cenvero-fleet-authorized_keys \"$STATE_DIR/authorized_keys\"",
+		sudo + "install -m 0644 " + shellQuote(tempServicePath) + " /etc/systemd/system/" + shellQuote(serviceName) + ".service",
+		sudo + "install -m 0600 " + shellQuote(tempKeysPath) + " \"$STATE_DIR/authorized_keys\"",
 		sudo + "systemctl daemon-reload",
 		sudo + "systemctl enable --now " + shellQuote(serviceName) + ".service",
 	}
 }
 
-func buildAgentTeardownScript(serviceName, sudo string) string {
+func buildAgentTeardownScript(serviceName, sudo, selfPath string) string {
 	if serviceName == "" {
 		serviceName = defaultServiceName
 	}
@@ -303,7 +311,7 @@ func buildAgentTeardownScript(serviceName, sudo string) string {
 		sudo + "systemctl daemon-reload",
 		sudo + "rm -rf " + shellQuote(defaultAgentBinDir),
 		sudo + "rm -rf " + shellQuote(defaultStateDir) + " " + shellQuote(defaultConfigDir),
-		"rm -f /tmp/cenvero-fleet-teardown.sh",
+		"rm -f " + shellQuote(selfPath),
 		"echo \"" + version.ProductName + " agent removed\"",
 	}
 	return strings.Join(lines, "\n") + "\n"
