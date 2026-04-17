@@ -80,23 +80,19 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		return strings.ToLower(resp) == "yes"
 	}
 
-	var state transport.HostKeyState
-	hostKeyCallback, err := transport.NewInteractiveHostKeyCallback(knownHostsPath, promptFn, &state)
-	if err != nil {
-		return fmt.Errorf("known_hosts: %w", err)
-	}
-
 	user := server.User
 	if user == "" {
 		user = "root"
 	}
 	addr := fmt.Sprintf("%s:%d", server.Address, server.Port)
 
+	// HostKeyCallback is intentionally NOT set here — it is created fresh
+	// inside each runSSHOnce call so that reconnect attempts re-read the
+	// current known_hosts file and don't re-pin already-known hosts.
 	clientConfig := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         15 * time.Second,
+		User:    user,
+		Auth:    []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		Timeout: 15 * time.Second,
 	}
 
 	for attempt := 0; attempt <= sshMaxRetries; attempt++ {
@@ -105,7 +101,7 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 			time.Sleep(sshReconnectDelay)
 		}
 
-		err = a.runSSHOnce(addr, clientConfig, &state, out)
+		err = a.runSSHOnce(addr, clientConfig, knownHostsPath, promptFn, out)
 		if err == nil {
 			return nil
 		}
@@ -122,7 +118,16 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 	return fmt.Errorf("disconnected — could not reconnect after %d attempts", sshMaxRetries)
 }
 
-func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.HostKeyState, out io.Writer) error {
+func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath string, promptFn func(string, string, string) bool, out io.Writer) error {
+	// Fresh callback on every attempt: re-reads known_hosts from disk so a
+	// host pinned in attempt N is visible to attempt N+1 and won't be re-pinned.
+	var state transport.HostKeyState
+	hostKeyCallback, err := transport.NewInteractiveHostKeyCallback(knownHostsPath, promptFn, &state)
+	if err != nil {
+		return fmt.Errorf("known_hosts: %w", err)
+	}
+	cfg.HostKeyCallback = hostKeyCallback
+
 	client, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
 		return err
@@ -169,10 +174,14 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 	}
 	defer channel.Close()
 
-	// Track clean exit: agent sends "exit-status" before closing channel.
-	// Without this signal, a nil return from io.Copy means connection dropped.
+	// Track clean exit: agent sends "exit-status" before closing the channel
+	// (SSH protocol ordering). reqsDone is closed when the goroutine has
+	// drained all requests — including exit-status — so we wait for it after
+	// io.Copy returns instead of racing against it.
 	cleanExit := make(chan struct{}, 1)
+	reqsDone := make(chan struct{})
 	go func() {
+		defer close(reqsDone)
 		for req := range reqs {
 			if req.Type == "exit-status" {
 				select {
@@ -225,6 +234,11 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, state *transport.Ho
 
 	// Blocks until the shell exits (channel closed by agent) or the connection drops.
 	_, copyErr := io.Copy(os.Stdout, channel)
+
+	// Wait for the reqs goroutine to drain. The agent sends exit-status before
+	// closing the channel, so by the time reqs is closed, exit-status has been
+	// processed and cleanExit will be set if this was a clean shell exit.
+	<-reqsDone
 
 	// If the agent sent exit-status before closing, it was a clean shell exit — no reconnect.
 	select {
