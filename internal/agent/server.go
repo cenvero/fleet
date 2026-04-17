@@ -615,7 +615,14 @@ func loadAuthorizedKeys(path string) (map[string]struct{}, error) {
 	for len(remaining) > 0 {
 		pub, _, _, rest, err := ssh.ParseAuthorizedKey(remaining)
 		if err != nil {
-			break
+			// Skip malformed lines rather than stopping — one bad entry must not
+			// silently block all keys that follow it.
+			remaining = rest
+			if len(rest) == len(remaining) {
+				// ParseAuthorizedKey didn't advance; skip one byte to avoid infinite loop.
+				remaining = remaining[1:]
+			}
+			continue
 		}
 		keys[string(pub.Marshal())] = struct{}{}
 		remaining = rest

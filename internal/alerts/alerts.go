@@ -44,7 +44,27 @@ func NewStore(dir string) *Store {
 	return &Store{dir: dir}
 }
 
+// validateAlertID returns an error if id is unsafe to embed in a file path.
+func validateAlertID(id string) error {
+	if id == "" {
+		return errors.New("alert id is empty")
+	}
+	for _, c := range id {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return fmt.Errorf("alert id %q contains disallowed character %q (use letters, digits, hyphens, underscores)", id, c)
+		}
+	}
+	if len(id) > 128 {
+		return fmt.Errorf("alert id %q exceeds 128 characters", id)
+	}
+	return nil
+}
+
 func (s *Store) Get(id string) (Alert, error) {
+	if err := validateAlertID(id); err != nil {
+		return Alert{}, fmt.Errorf("read alert: %w", err)
+	}
 	data, err := os.ReadFile(filepath.Join(s.dir, id+".json"))
 	if err != nil {
 		return Alert{}, fmt.Errorf("read alert: %w", err)
@@ -57,8 +77,8 @@ func (s *Store) Get(id string) (Alert, error) {
 }
 
 func (s *Store) Save(alert Alert) error {
-	if alert.ID == "" {
-		return fmt.Errorf("alert id is required")
+	if err := validateAlertID(alert.ID); err != nil {
+		return fmt.Errorf("save alert: %w", err)
 	}
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return fmt.Errorf("create alerts directory: %w", err)

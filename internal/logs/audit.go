@@ -70,6 +70,9 @@ func (a *AuditLog) ReadAll() ([]AuditEntry, error) {
 
 	var entries []AuditEntry
 	scanner := bufio.NewScanner(f)
+	// Default 64 KiB limit is too small for audit lines that embed large payloads.
+	// 4 MiB handles any realistic single-line entry without unbounded allocation.
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		var entry AuditEntry

@@ -164,9 +164,10 @@ func Recover(opts RecoverOptions, out io.Writer) error {
 }
 
 // maskDSN hides the password part of a DSN for safe display.
-// e.g. "postgres://user:secret@host/db" → "postgres://user:***@host/db"
+// Handles both URI-style ("postgres://user:secret@host/db") and
+// key=value-style ("host=localhost password=secret dbname=fleet") DSNs.
 func maskDSN(dsn string) string {
-	// Handle postgres://user:pass@host style
+	// Handle scheme://user:pass@host style
 	for _, scheme := range []string{"postgres://", "postgresql://", "mysql://", "mariadb://"} {
 		if strings.HasPrefix(dsn, scheme) {
 			rest := dsn[len(scheme):]
@@ -176,7 +177,25 @@ func maskDSN(dsn string) string {
 					return scheme + userInfo[:colon+1] + "***" + rest[at:]
 				}
 			}
+			return dsn
 		}
 	}
-	return dsn
+	// Handle key=value style: mask password=... and passwd=...
+	masked := dsn
+	for _, key := range []string{"password", "passwd"} {
+		for _, sep := range []string{"=", " = "} {
+			prefix := key + sep
+			if idx := strings.Index(strings.ToLower(masked), prefix); idx >= 0 {
+				start := idx + len(prefix)
+				// Value ends at the next space or end of string
+				end := strings.IndexByte(masked[start:], ' ')
+				if end < 0 {
+					masked = masked[:start] + "***"
+				} else {
+					masked = masked[:start] + "***" + masked[start+end:]
+				}
+			}
+		}
+	}
+	return masked
 }

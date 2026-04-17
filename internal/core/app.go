@@ -71,7 +71,7 @@ func Open(configDir string) (*App, error) {
 		_ = stateDB.Close()
 		return nil, err
 	}
-	return &App{
+	app := &App{
 		ConfigDir: configDir,
 		Config:    cfg,
 		AuditLog:  logs.NewAuditLog(filepath.Join(configDir, "logs", "_audit.log")),
@@ -79,7 +79,14 @@ func Open(configDir string) (*App, error) {
 		Notifier:  notify.NewDesktopNotifier(cfg.Runtime.DesktopNotifications),
 		StateDB:   stateDB,
 		MetricsDB: metricsDB,
-	}, nil
+	}
+	// Passphrase-protected keys are recorded in config but the runtime connector
+	// does not yet pass the passphrase through. Warn early so the operator knows
+	// that connections will fail rather than discovering it at connect time.
+	if cfg.Crypto.PassphraseProtected {
+		fmt.Fprintf(os.Stderr, "warning: passphrase-protected keys are not yet supported at runtime; connections will fail until this is wired\n")
+	}
+	return app, nil
 }
 
 func (a *App) Close() error {
@@ -139,6 +146,9 @@ func (a *App) UpdateChannel(channel string) error {
 func (a *App) AddServer(record ServerRecord) error {
 	if record.Name == "" {
 		return fmt.Errorf("server name is required")
+	}
+	if err := validateSafeName(record.Name); err != nil {
+		return fmt.Errorf("invalid server name: %w", err)
 	}
 	if record.Port == 0 {
 		record.Port = 22
@@ -276,15 +286,33 @@ func (a *App) SaveServer(server ServerRecord) error {
 }
 
 func (a *App) writeServerFile(server ServerRecord) error {
-	path := filepath.Join(a.ConfigDir, "servers", server.Name+".toml")
+	dir := filepath.Join(a.ConfigDir, "servers")
+	path := filepath.Join(dir, server.Name+".toml")
 	a.serverMu.Lock()
 	defer a.serverMu.Unlock()
-	f, err := os.Create(path)
+	// Atomic write: temp file → Chmod 0o600 → encode → close → rename.
+	// This prevents a crash from leaving a half-written server record.
+	tmp, err := os.CreateTemp(dir, ".server-*.toml")
 	if err != nil {
 		return fmt.Errorf("write server %s: %w", server.Name, err)
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(server)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op after successful rename
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := toml.NewEncoder(tmp).Encode(server); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	return nil
 }
 
 // RemoveOptions controls how fleet server remove behaves when an agent is managed.
@@ -887,18 +915,17 @@ func (a *App) ListTemplates() ([]string, error) {
 }
 
 func (a *App) Backup(outputPath string) (string, error) {
-	backupPath, err := BackupDir(a.ConfigDir, outputPath)
+	result, err := Backup(a.ConfigDir, BackupOptions{OutputPath: outputPath})
 	if err != nil {
 		return "", err
 	}
-	if err := a.AuditLog.Append(logs.AuditEntry{
+	// Best-effort: backup is already written; don't fail on audit log error.
+	_ = a.AuditLog.Append(logs.AuditEntry{
 		Action:   "config.backup",
-		Target:   backupPath,
+		Target:   result.OutputPath,
 		Operator: a.operator(),
-	}); err != nil {
-		return "", err
-	}
-	return backupPath, nil
+	})
+	return result.OutputPath, nil
 }
 
 func (a *App) Export() (ConfigExport, error) {
@@ -920,11 +947,13 @@ func (a *App) Import(export ConfigExport) error {
 		}
 	}
 	a.Config = export.Config
-	return a.AuditLog.Append(logs.AuditEntry{
+	// Best-effort: the import is already applied; don't fail on audit log error.
+	_ = a.AuditLog.Append(logs.AuditEntry{
 		Action:   "config.import",
 		Target:   a.ConfigDir,
 		Operator: a.operator(),
 	})
+	return nil
 }
 
 func (a *App) AuditEntries() ([]logs.AuditEntry, error) {
@@ -1074,8 +1103,10 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 	}
 	_ = a.SaveServer(server)
 
-	// Always keep agent version in sync with the controller.
-	if hello.AgentVersion != "" && hello.AgentVersion != version.Version {
+	// Auto-update the agent only when the policy permits it.
+	// notify_only and disabled must not trigger unsolicited binary replacements.
+	if hello.AgentVersion != "" && hello.AgentVersion != version.Version &&
+		a.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() {
 			_ = a.AuditLog.Append(logs.AuditEntry{
 				Action:   "agent.auto-update",

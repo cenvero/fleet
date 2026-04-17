@@ -99,15 +99,14 @@ func shiftDatabaseToTarget(configDir string, cfg Config, target store.DatabaseCo
 		return DatabaseShiftResult{}, fmt.Errorf("save shifted database config: %w", err)
 	}
 
+	// Best-effort: migration is done; don't fail on audit log error.
 	audit := logs.NewAuditLog(filepath.Join(configDir, "logs", "_audit.log"))
-	if err := audit.Append(logs.AuditEntry{
+	_ = audit.Append(logs.AuditEntry{
 		Action:   "database.shift",
 		Target:   string(target.Backend),
 		Operator: cfg.Operator,
 		Details:  fmt.Sprintf("from=%s state=%d metrics=%d events=%d", previous, stateEntries, metricsEntries, eventEntries),
-	}); err != nil {
-		return DatabaseShiftResult{}, err
-	}
+	})
 
 	return DatabaseShiftResult{
 		FromBackend:    previous,

@@ -66,6 +66,9 @@ func (a *App) ApplyTemplate(serverName, templateName string) error {
 		return err
 	}
 
+	if err := validateSafeName(templateName); err != nil {
+		return fmt.Errorf("invalid template name: %w", err)
+	}
 	templatePath := filepath.Join(a.ConfigDir, "templates", templateName)
 	tpl, err := LoadTemplate(templatePath)
 	if err != nil {

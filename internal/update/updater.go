@@ -119,7 +119,15 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if strings.TrimSpace(binary.Signature) != "" {
+	hasSig := strings.TrimSpace(binary.Signature) != ""
+	hasHash := strings.TrimSpace(binary.SHA256) != ""
+	// Require at least a SHA256 checksum for any non-development channel.
+	// Development builds (channel == "dev" or empty) are allowed to omit both
+	// so that ad-hoc binaries can be tested without a full signing pipeline.
+	if !hasSig && !hasHash && opts.Channel != "dev" && opts.Channel != "" {
+		return ApplyResult{}, fmt.Errorf("manifest entry for %s has no SHA256 or signature — refusing to apply unverified binary on channel %q", binary.URL, opts.Channel)
+	}
+	if hasSig {
 		signature, err := opts.DownloadURL(ctx, binary.Signature)
 		if err != nil {
 			return ApplyResult{}, fmt.Errorf("download signature: %w", err)
@@ -129,7 +137,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 		}
 		result.SignatureVerified = true
 	}
-	if strings.TrimSpace(binary.SHA256) != "" {
+	if hasHash {
 		actual := sha256.Sum256(archive)
 		if !strings.EqualFold(hex.EncodeToString(actual[:]), strings.TrimSpace(binary.SHA256)) {
 			return ApplyResult{}, fmt.Errorf("download sha256 mismatch for %s", binary.URL)

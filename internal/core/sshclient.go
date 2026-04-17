@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -61,7 +60,8 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		return err
 	}
 
-	keyPath := filepath.Join(a.ConfigDir, "keys", a.Config.Crypto.PrimaryKey)
+	// Use the per-server key override if set; fall back to the primary controller key.
+	keyPath := a.serverPrivateKeyPath(server)
 	signer, err := crypto.LoadPrivateKeySigner(keyPath, nil)
 	if err != nil {
 		return fmt.Errorf("load private key: %w", err)

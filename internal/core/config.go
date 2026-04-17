@@ -24,6 +24,22 @@ import (
 
 var aliasPattern = regexp.MustCompile(`^[a-zA-Z0-9]{2,8}$`)
 
+// safeNamePattern allows alphanumeric characters, hyphens, underscores, and dots
+// but not sequences that could escape a directory (no "..", no slashes).
+var safeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+
+// validateSafeName returns an error if name could be used for directory traversal
+// or filesystem injection when embedded in a file path.
+func validateSafeName(name string) error {
+	if !safeNamePattern.MatchString(name) {
+		return fmt.Errorf("%q contains characters not allowed in names (use letters, digits, hyphens, underscores, dots; max 63 chars)", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("%q contains '..' which is not allowed", name)
+	}
+	return nil
+}
+
 func DefaultConfigDir(home string) string {
 	if home == "" {
 		home, _ = os.UserHomeDir()
@@ -184,15 +200,33 @@ func SaveConfig(path string, cfg Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	f, err := os.Create(path)
+	// Atomic write: temp file → rename so a crash never leaves a partial config.
+	// Explicit 0o600 regardless of umask — config.toml may contain database DSNs.
+	tmp, err := os.CreateTemp(dir, ".config.*.toml")
 	if err != nil {
-		return fmt.Errorf("create config file: %w", err)
+		return fmt.Errorf("create temp config file: %w", err)
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op after successful rename
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set config permissions: %w", err)
+	}
+	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("flush config file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace config file: %w", err)
+	}
+	return nil
 }
 
 func ConfigPath(configDir string) string {
@@ -346,9 +380,15 @@ func RestoreBackup(inputPath, outputDir string) error {
 				return fmt.Errorf("create restore file: %w", err)
 			}
 			const maxRestoreSize = 512 * 1024 * 1024
-			if _, err := io.Copy(file, io.LimitReader(tr, maxRestoreSize)); err != nil {
+			// Read one byte beyond the limit so we can detect a truncated restore.
+			n, err := io.Copy(file, io.LimitReader(tr, maxRestoreSize+1))
+			if err != nil {
 				_ = file.Close()
 				return fmt.Errorf("restore file contents: %w", err)
+			}
+			if n > maxRestoreSize {
+				_ = file.Close()
+				return fmt.Errorf("backup archive entry %q exceeds 512 MiB restore limit — restore aborted to prevent data corruption", header.Name)
 			}
 			if err := file.Close(); err != nil {
 				return fmt.Errorf("close restore file: %w", err)

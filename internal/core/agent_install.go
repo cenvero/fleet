@@ -105,7 +105,7 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 		PrivateKeyPath:   loginKeyPath,
 		Password:         loginPassword,
 		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
-		AcceptNewHostKey: true,
+		AcceptNewHostKey: server.Observed.HostKeyFingerprint == "",
 		Uploads:          uploads,
 		RunCommand:       "/bin/sh " + shellQuote(tempScriptPath),
 	}
@@ -179,7 +179,7 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 		PrivateKeyPath:   loginKeyPath,
 		Password:         password,
 		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
-		AcceptNewHostKey: true,
+		AcceptNewHostKey: server.Observed.HostKeyFingerprint == "",
 		Uploads: []BootstrapUpload{
 			{Path: tempTeardownPath, Mode: 0o700, Content: []byte(script)},
 		},

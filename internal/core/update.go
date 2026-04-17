@@ -124,6 +124,18 @@ func semverCompare(a, b string) int {
 			return -1
 		}
 	}
+	// Numeric parts are equal. A release (no pre-release suffix) is newer than
+	// any pre-release of the same version: 1.0.0 > 1.0.0-alpha > 1.0.0-beta.
+	aHasPre := len(ap) > 1 && ap[1] != ""
+	bHasPre := len(bp) > 1 && bp[1] != ""
+	switch {
+	case !aHasPre && bHasPre:
+		return 1 // a is a release, b is a pre-release
+	case aHasPre && !bHasPre:
+		return -1 // a is a pre-release, b is a release
+	case aHasPre && bHasPre:
+		return strings.Compare(ap[1], bp[1]) // lexicographic pre-release comparison
+	}
 	return 0
 }
 
@@ -143,14 +155,14 @@ func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 		return update.ApplyResult{}, err
 	}
 	if result.Applied {
-		if err := a.AuditLog.Append(logs.AuditEntry{
+		// Best-effort: the update was already applied; don't fail the call if
+		// the audit log write fails (e.g. disk full after the binary replace).
+		_ = a.AuditLog.Append(logs.AuditEntry{
 			Action:   "update.apply",
 			Target:   result.Version,
 			Operator: a.operator(),
 			Details:  result.BackupPath,
-		}); err != nil {
-			return update.ApplyResult{}, err
-		}
+		})
 	}
 	return result, nil
 }
