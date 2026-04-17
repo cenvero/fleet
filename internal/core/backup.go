@@ -23,11 +23,11 @@ type BackupOptions struct {
 
 // BackupResult describes a completed backup.
 type BackupResult struct {
-	OutputPath  string    `json:"output_path"`
-	ConfigDir   string    `json:"config_dir"`
-	FilesCount  int       `json:"files_count"`
-	SizeBytes   int64     `json:"size_bytes"`
-	CreatedAt   time.Time `json:"created_at"`
+	OutputPath string    `json:"output_path"`
+	ConfigDir  string    `json:"config_dir"`
+	FilesCount int       `json:"files_count"`
+	SizeBytes  int64     `json:"size_bytes"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // skipBackupPattern returns true for files that should never be included in a

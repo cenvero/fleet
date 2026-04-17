@@ -68,9 +68,9 @@ type persistentSession struct {
 	replay *replayBuffer
 	done   chan struct{} // closed when the shell process exits
 
-	mu          sync.Mutex
-	activeConn  ssh.Channel // nil when no client is connected
-	idleTimer   *time.Timer
+	mu         sync.Mutex
+	activeConn ssh.Channel // nil when no client is connected
+	idleTimer  *time.Timer
 }
 
 // attach wires a new SSH channel to this session.

@@ -52,7 +52,7 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request, sessionID str
 	defer channel.Close()
 
 	var (
-		termType = "xterm-256color"
+		termType        = "xterm-256color"
 		cols     uint32 = 80
 		rows     uint32 = 24
 		hasPTY   bool
@@ -287,8 +287,8 @@ func runWithPTY(channel ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(ptm, channel) }()  // controller → shell stdin
-	go func() { defer wg.Done(); _, _ = io.Copy(channel, ptm) }()  // shell stdout/stderr → controller
+	go func() { defer wg.Done(); _, _ = io.Copy(ptm, channel) }() // controller → shell stdin
+	go func() { defer wg.Done(); _, _ = io.Copy(channel, ptm) }() // shell stdout/stderr → controller
 
 	exitCode := 0
 	if err := cmd.Wait(); err != nil {

@@ -1760,10 +1760,10 @@ config, fleet will tell you which version to downgrade to before proceeding.`,
 				return fmt.Errorf("--from-dir is required: specify the existing fleet config directory")
 			}
 			return core.Recover(core.RecoverOptions{
-				TargetConfigDir: *configDir,
-				FromDir:         fromDir,
-				DBBackend:       dbBackend,
-				DBDSN:           dbDSN,
+				TargetConfigDir:  *configDir,
+				FromDir:          fromDir,
+				DBBackend:        dbBackend,
+				DBDSN:            dbDSN,
 				SkipVersionCheck: skipVerify,
 			}, cmd.OutOrStdout())
 		},

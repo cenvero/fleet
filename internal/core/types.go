@@ -15,27 +15,27 @@ import (
 )
 
 type Config struct {
-	SchemaVersion int                  `toml:"schema_version" json:"schema_version"`
+	SchemaVersion int `toml:"schema_version" json:"schema_version"`
 	// InitVersion tracks which version of the init wizard created/last migrated
 	// this config. When the binary's CurrentInitVersion is higher, fleet will
 	// suggest running 'fleet adjust-init' to apply pending config migrations.
-	InitVersion   int                  `toml:"init_version" json:"init_version"`
-	ProductName   string               `toml:"product_name" json:"product_name"`
-	Domain        string               `toml:"domain" json:"domain"`
-	Alias         string               `toml:"alias" json:"alias"`
-	InstanceID    string               `toml:"instance_id" json:"instance_id"`
-	ConfigDir     string               `toml:"config_dir" json:"config_dir"`
-	DefaultMode   transport.Mode       `toml:"default_transport_mode" json:"default_transport_mode"`
-	ManifestURL   string               `toml:"manifest_url" json:"manifest_url"`
-	InitializedAt   time.Time            `toml:"initialized_at" json:"initialized_at"`
+	InitVersion   int            `toml:"init_version" json:"init_version"`
+	ProductName   string         `toml:"product_name" json:"product_name"`
+	Domain        string         `toml:"domain" json:"domain"`
+	Alias         string         `toml:"alias" json:"alias"`
+	InstanceID    string         `toml:"instance_id" json:"instance_id"`
+	ConfigDir     string         `toml:"config_dir" json:"config_dir"`
+	DefaultMode   transport.Mode `toml:"default_transport_mode" json:"default_transport_mode"`
+	ManifestURL   string         `toml:"manifest_url" json:"manifest_url"`
+	InitializedAt time.Time      `toml:"initialized_at" json:"initialized_at"`
 	// LastSeenVersion is the fleet binary version that last successfully ran
 	// with this config. Used by 'fleet recover' to detect version mismatches.
 	LastSeenVersion string               `toml:"last_seen_version" json:"last_seen_version,omitempty"`
 	Operator        string               `toml:"operator" json:"operator"`
-	Crypto        CryptoConfig         `toml:"crypto" json:"crypto"`
-	Updates       UpdateConfig         `toml:"updates" json:"updates"`
-	Database      store.DatabaseConfig `toml:"database" json:"database"`
-	Runtime       RuntimeConfig        `toml:"runtime" json:"runtime"`
+	Crypto          CryptoConfig         `toml:"crypto" json:"crypto"`
+	Updates         UpdateConfig         `toml:"updates" json:"updates"`
+	Database        store.DatabaseConfig `toml:"database" json:"database"`
+	Runtime         RuntimeConfig        `toml:"runtime" json:"runtime"`
 }
 
 type CryptoConfig struct {

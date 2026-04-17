@@ -113,13 +113,13 @@ func Recover(opts RecoverOptions, out io.Writer) error {
 		dsn := opts.DBDSN
 		if dsn == "" {
 			switch backend {
-		case store.BackendPostgres:
-			dsn = oldCfg.Database.Postgres.DSN
-		case store.BackendMySQL:
-			dsn = oldCfg.Database.MySQL.DSN
-		case store.BackendMariaDB:
-			dsn = oldCfg.Database.MariaDB.DSN
-		}
+			case store.BackendPostgres:
+				dsn = oldCfg.Database.Postgres.DSN
+			case store.BackendMySQL:
+				dsn = oldCfg.Database.MySQL.DSN
+			case store.BackendMariaDB:
+				dsn = oldCfg.Database.MariaDB.DSN
+			}
 		}
 		if dsn == "" {
 			return fmt.Errorf(
