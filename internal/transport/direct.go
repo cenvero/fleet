@@ -29,6 +29,9 @@ func (c Connector) DialContext(ctx context.Context, target ServerTarget) (*Sessi
 	if target.Port == 0 {
 		target.Port = 22
 	}
+	if target.Port < 1 || target.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d: must be between 1 and 65535", target.Port)
+	}
 	username := c.Username
 	if target.User != "" {
 		username = target.User
@@ -126,6 +129,10 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 	select {
 	case <-ctx.Done():
 		_ = s.Close()
+		// The decode goroutine is still blocked on the channel read; closing the
+		// session unblocks it. Drain the buffered channel so the goroutine exits
+		// cleanly rather than leaking until the next GC sweep.
+		go func() { <-done }()
 		return proto.Envelope{}, ctx.Err()
 	case out := <-done:
 		if out.err != nil {

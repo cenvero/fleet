@@ -471,17 +471,21 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				_ = proto.Encode(channel, errorEnvelope(request, err))
 				continue
 			}
-			if err := proto.Encode(channel, proto.Envelope{
+			encErr := proto.Encode(channel, proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
 				Action:          request.Action,
 				Payload:         op.Result,
-			}); err != nil {
-				continue
-			}
+			})
+			// Always run Finalize regardless of whether the encode succeeded.
+			// Finalize triggers the service restart; skipping it on a dropped
+			// connection would leave the agent in a broken mid-update state.
 			if op.Finalize != nil {
 				_ = op.Finalize()
+			}
+			if encErr != nil {
+				continue
 			}
 		case "shell.exec":
 			payload, err := proto.DecodePayload[proto.ExecPayload](request.Payload)

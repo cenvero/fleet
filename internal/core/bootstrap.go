@@ -129,7 +129,7 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 	if len(authorizedKeys) > 0 {
 		request.Uploads = append(request.Uploads, BootstrapUpload{
 			Path:    resolved.tempAuthorizedKeysPath,
-			Mode:    0o644,
+			Mode:    0o600, // keep temp file owner-only until the install script moves it
 			Content: authorizedKeys,
 		})
 	}
@@ -395,7 +395,7 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 	if includeAuthorizedKeys {
 		lines = append(lines, "rm -f "+shellQuote(cfg.tempAuthorizedKeysPath))
 	}
-	lines = append(lines, "echo \"Bootstrapped "+version.ProductName+" agent on "+server.Name+"\"")
+	lines = append(lines, "echo "+shellQuote(fmt.Sprintf("Bootstrapped %s agent on %s", version.ProductName, server.Name)))
 	return strings.Join(lines, "\n") + "\n"
 }
 

@@ -44,6 +44,9 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 	}
 	// Resolve symlinks so a symlink pointing to /proc/1/mem cannot bypass the
 	// block below. Ignore resolution errors — the open below will surface them.
+	// We then open realPath (not payload.Path) to eliminate the TOCTOU window
+	// between the EvalSymlinks check and the open: if an attacker swaps the
+	// symlink after we resolve it, we still open the originally resolved target.
 	realPath := payload.Path
 	if resolved, err := filepath.EvalSymlinks(payload.Path); err == nil {
 		realPath = resolved
@@ -63,7 +66,7 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 		}
 	}
 
-	file, err := os.Open(payload.Path)
+	file, err := os.Open(realPath)
 	if err != nil {
 		return proto.LogReadResult{}, &RPCError{
 			Code:    "log_open_failed",

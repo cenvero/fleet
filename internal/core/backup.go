@@ -63,10 +63,10 @@ func Backup(configDir string, opts BackupOptions) (BackupResult, error) {
 	if err != nil {
 		return BackupResult{}, fmt.Errorf("create backup file: %w", err)
 	}
-	defer func() {
-		_ = f.Close()
-		// On error, clean up the partial file.
-	}()
+	// No defer f.Close() here — all exit paths call f.Close() explicitly below
+	// in the correct order (tw → gz → f) so that the gzip/tar trailers are
+	// flushed before the underlying file is closed. A defer would double-close f
+	// on the success path and silently swallow the error on the other paths.
 
 	gz := gzip.NewWriter(f)
 	tw := tar.NewWriter(gz)

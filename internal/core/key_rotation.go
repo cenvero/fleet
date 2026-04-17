@@ -48,9 +48,11 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		return KeyRotationResult{}, err
 	}
 
-	tempDir := filepath.Join(a.ConfigDir, "tmp", "key-rotation-"+time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.MkdirAll(tempDir, 0o700); err != nil {
-		return KeyRotationResult{}, err
+	// os.MkdirTemp appends a random suffix, preventing an attacker who has
+	// access to the tmp directory from pre-staging a path before the rotation.
+	tempDir, err := os.MkdirTemp(filepath.Join(a.ConfigDir, "tmp"), "key-rotation-*")
+	if err != nil {
+		return KeyRotationResult{}, fmt.Errorf("create key rotation temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
 

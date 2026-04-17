@@ -154,6 +154,9 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	}
 
 	stagedPath := opts.ExecutablePath + ".new"
+	// Register cleanup unconditionally so that even a partial write (e.g. disk
+	// full after file creation) never leaves a stray .new file behind.
+	defer os.Remove(stagedPath) //nolint:errcheck
 	if err := os.WriteFile(stagedPath, payload, normalizeMode(mode)); err != nil {
 		if os.IsPermission(err) {
 			userBin := userBinaryInstallPath()
@@ -173,7 +176,6 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 		}
 		return ApplyResult{}, fmt.Errorf("write staged executable: %w", err)
 	}
-	defer os.Remove(stagedPath)
 
 	if err := replaceFile(stagedPath, opts.ExecutablePath); err != nil {
 		return ApplyResult{}, fmt.Errorf("replace executable: %w", err)
@@ -222,10 +224,11 @@ func Rollback(configDir, executablePath string) (RollbackResult, error) {
 	}
 
 	stagedPath := executablePath + ".rollback"
+	// Register cleanup before copyFile so a partial copy is always removed.
+	defer os.Remove(stagedPath) //nolint:errcheck
 	if err := copyFile(state.BackupPath, stagedPath, 0o755); err != nil {
 		return RollbackResult{}, fmt.Errorf("stage rollback executable: %w", err)
 	}
-	defer os.Remove(stagedPath)
 	if err := replaceFile(stagedPath, executablePath); err != nil {
 		return RollbackResult{}, fmt.Errorf("replace executable during rollback: %w", err)
 	}

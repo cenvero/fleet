@@ -35,6 +35,11 @@ func Encode(w io.Writer, env Envelope) error {
 	return nil
 }
 
+// MaxEnvelopeSize is the maximum allowed size of a single protocol envelope.
+// An attacker sending a crafted 4-byte size of 0xFFFFFFFF would otherwise
+// cause the receiver to allocate 4 GiB of memory.
+const MaxEnvelopeSize = 16 * 1024 * 1024 // 16 MiB
+
 func Decode(r io.Reader) (Envelope, error) {
 	var size uint32
 	if err := binary.Read(r, binary.BigEndian, &size); err != nil {
@@ -42,6 +47,9 @@ func Decode(r io.Reader) (Envelope, error) {
 	}
 	if size == 0 {
 		return Envelope{}, fmt.Errorf("envelope length must be greater than zero")
+	}
+	if size > MaxEnvelopeSize {
+		return Envelope{}, fmt.Errorf("envelope length %d exceeds maximum allowed size of %d bytes", size, MaxEnvelopeSize)
 	}
 
 	body := make([]byte, size)
@@ -55,6 +63,12 @@ func Decode(r io.Reader) (Envelope, error) {
 	}
 	if env.ProtocolVersion == 0 {
 		env.ProtocolVersion = CurrentProtocolVersion
+	}
+	// Reject completely empty envelopes — both fields absent is a strong signal
+	// of malformed or garbage data (a valid request always has Action set; a valid
+	// response always has Type set).
+	if env.Action == "" && env.Type == "" {
+		return Envelope{}, fmt.Errorf("malformed envelope: both action and type are empty")
 	}
 	return env, nil
 }
