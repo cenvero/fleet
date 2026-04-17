@@ -24,6 +24,7 @@ type KeyRotationResult struct {
 	Algorithm       string   `json:"algorithm"`
 	PrimaryKey      string   `json:"primary_key"`
 	RotatedServers  []string `json:"rotated_servers,omitempty"`
+	VerifiedServers []string `json:"verified_servers,omitempty"`
 	SkippedServers  []string `json:"skipped_servers,omitempty"`
 	ArchivedFiles   []string `json:"archived_files,omitempty"`
 	VerificationKey string   `json:"verification_key"`
@@ -78,6 +79,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	stagedReverse := make([]ServerRecord, 0, len(reverseTargets))
 	cleanedReverse := make([]ServerRecord, 0, len(reverseTargets))
 	cleanedDirect := make([]ServerRecord, 0, len(directTargets))
+	verifiedNames := make([]string, 0, len(directTargets)+len(reverseTargets))
 
 	rollbackBeforePromote := func(stepErr error) error {
 		for _, server := range stagedReverse {
@@ -127,6 +129,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		if err := a.verifyAuthorizedKey(server, newPrimaryPrivPath); err != nil {
 			return KeyRotationResult{}, rollbackBeforePromote(err)
 		}
+		verifiedNames = append(verifiedNames, server.Name)
 	}
 
 	if err := promoteGeneratedKeys(tempDir, filepath.Join(a.ConfigDir, "keys")); err != nil {
@@ -137,6 +140,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		if err := a.verifyReverseReconnect(server); err != nil {
 			return KeyRotationResult{}, rollbackAfterPromote(err)
 		}
+		verifiedNames = append(verifiedNames, server.Name)
 	}
 
 	for _, server := range reverseTargets {
@@ -161,6 +165,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		rotatedNames = append(rotatedNames, server.Name)
 	}
 	slices.Sort(rotatedNames)
+	slices.Sort(verifiedNames)
 	slices.Sort(skipped)
 
 	if err := a.AuditLog.Append(logs.AuditEntry{
@@ -177,6 +182,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		Algorithm:       a.Config.Crypto.Algorithm,
 		PrimaryKey:      a.Config.Crypto.PrimaryKey,
 		RotatedServers:  rotatedNames,
+		VerifiedServers: verifiedNames,
 		SkippedServers:  skipped,
 		ArchivedFiles:   archivedFiles,
 		VerificationKey: filepath.Join(a.ConfigDir, "keys", a.Config.Crypto.PrimaryKey+".pub"),
