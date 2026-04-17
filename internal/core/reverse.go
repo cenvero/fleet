@@ -5,6 +5,9 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -37,12 +40,14 @@ type reverseSession struct {
 }
 
 type ReverseHub struct {
-	app      *App
-	mu       sync.RWMutex
-	sessions map[string]*reverseSession
+	app          *App
+	mu           sync.RWMutex
+	sessions     map[string]*reverseSession
+	controlToken string
 }
 
 type reverseControlRequest struct {
+	Token    string         `json:"token"`
 	Type     string         `json:"type"`
 	Server   string         `json:"server"`
 	Envelope proto.Envelope `json:"envelope,omitempty"`
@@ -54,10 +59,11 @@ type reverseControlResponse struct {
 	Error    *proto.Error        `json:"error,omitempty"`
 }
 
-func NewReverseHub(app *App) *ReverseHub {
+func NewReverseHub(app *App, controlToken string) *ReverseHub {
 	return &ReverseHub{
-		app:      app,
-		sessions: make(map[string]*reverseSession),
+		app:          app,
+		sessions:     make(map[string]*reverseSession),
+		controlToken: controlToken,
 	}
 }
 
@@ -297,6 +303,13 @@ func (h *ReverseHub) handleControlConn(conn net.Conn) {
 		return
 	}
 
+	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(h.controlToken)) != 1 {
+		_ = json.NewEncoder(conn).Encode(reverseControlResponse{
+			Error: &proto.Error{Code: "unauthorized", Message: "invalid control token"},
+		})
+		return
+	}
+
 	var resp reverseControlResponse
 	switch req.Type {
 	case "call":
@@ -453,7 +466,12 @@ func (a *App) callReverseControl(serverName string, env proto.Envelope) (proto.E
 	}
 	defer conn.Close()
 
+	token, err := a.readControlToken()
+	if err != nil {
+		return proto.Envelope{}, err
+	}
 	if err := json.NewEncoder(conn).Encode(reverseControlRequest{
+		Token:    token,
 		Type:     "call",
 		Server:   serverName,
 		Envelope: env,
@@ -481,7 +499,12 @@ func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {
 	}
 	defer conn.Close()
 
+	token, err := a.readControlToken()
+	if err != nil {
+		return ReverseSessionInfo{}, err
+	}
 	if err := json.NewEncoder(conn).Encode(reverseControlRequest{
+		Token:  token,
 		Type:   "status",
 		Server: serverName,
 	}); err != nil {
@@ -508,7 +531,12 @@ func (a *App) callReverseDisconnect(serverName string) error {
 	}
 	defer conn.Close()
 
+	token, err := a.readControlToken()
+	if err != nil {
+		return err
+	}
 	if err := json.NewEncoder(conn).Encode(reverseControlRequest{
+		Token:  token,
 		Type:   "disconnect",
 		Server: serverName,
 	}); err != nil {
@@ -525,6 +553,34 @@ func (a *App) callReverseDisconnect(serverName string) error {
 	return nil
 }
 
+func (a *App) controlTokenPath() string {
+	return filepath.Join(a.ConfigDir, "data", "control.token")
+}
+
+func (a *App) generateControlToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate control token: %w", err)
+	}
+	token := hex.EncodeToString(raw)
+	tokenPath := a.controlTokenPath()
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o750); err != nil {
+		return "", fmt.Errorf("create data dir for control token: %w", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
+		return "", fmt.Errorf("write control token: %w", err)
+	}
+	return token, nil
+}
+
+func (a *App) readControlToken() (string, error) {
+	data, err := os.ReadFile(a.controlTokenPath())
+	if err != nil {
+		return "", fmt.Errorf("read control token: %w", err)
+	}
+	return string(data), nil
+}
+
 func (a *App) RunDaemon(ctx context.Context) error {
 	reverseListener, err := net.Listen("tcp", a.Config.Runtime.ListenAddress)
 	if err != nil {
@@ -538,7 +594,12 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	}
 	defer controlListener.Close()
 
-	hub := NewReverseHub(a)
+	controlToken, err := a.generateControlToken()
+	if err != nil {
+		return err
+	}
+
+	hub := NewReverseHub(a, controlToken)
 	errCh := make(chan error, 2)
 	go func() { errCh <- hub.Serve(ctx, reverseListener) }()
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()

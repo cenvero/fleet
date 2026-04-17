@@ -53,7 +53,7 @@ func TestScaleSmoke100ReverseAgents(t *testing.T) {
 	}
 	defer app.Close()
 
-	hub := NewReverseHub(app)
+	hub := NewReverseHub(app, "test-token")
 	defer hub.Close()
 	app.ReverseRPC = hub.Call
 	app.ReverseStatusLookup = hub.Status

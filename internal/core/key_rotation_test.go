@@ -260,7 +260,7 @@ func TestRotateKeysUpdatesReverseAgentControllerKnownHosts(t *testing.T) {
 		t.Fatalf("AddServer() error = %v", err)
 	}
 
-	hub := NewReverseHub(app)
+	hub := NewReverseHub(app, "test-token")
 	defer hub.Close()
 	app.ReverseRPC = hub.Call
 	app.ReverseStatusLookup = hub.Status
@@ -376,7 +376,7 @@ func TestRotateKeysRollsBackOnReverseKnownHostsFailure(t *testing.T) {
 		t.Fatalf("AddServer() error = %v", err)
 	}
 
-	hub := NewReverseHub(app)
+	hub := NewReverseHub(app, "test-token")
 	defer hub.Close()
 	app.ReverseRPC = hub.Call
 	app.ReverseStatusLookup = hub.Status
