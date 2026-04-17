@@ -168,9 +168,13 @@ func (a *App) AddServer(record ServerRecord) error {
 }
 
 func (a *App) ListServers() ([]ServerRecord, error) {
+	// Hold the lock for the entire operation — ReadDir + all file reads —
+	// so a concurrent SaveServer/DeleteServer cannot delete or replace a file
+	// between the directory listing and the individual toml.DecodeFile calls.
 	a.serverMu.RLock()
+	defer a.serverMu.RUnlock()
+
 	entries, err := os.ReadDir(filepath.Join(a.ConfigDir, "servers"))
-	a.serverMu.RUnlock()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -183,11 +187,8 @@ func (a *App) ListServers() ([]ServerRecord, error) {
 			continue
 		}
 		path := filepath.Join(a.ConfigDir, "servers", entry.Name())
-		a.serverMu.RLock()
 		var server ServerRecord
-		_, err := toml.DecodeFile(path, &server)
-		a.serverMu.RUnlock()
-		if err != nil {
+		if _, err := toml.DecodeFile(path, &server); err != nil {
 			return nil, fmt.Errorf("decode server %s: %w", entry.Name(), err)
 		}
 		servers = append(servers, server)
