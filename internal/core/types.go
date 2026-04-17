@@ -16,6 +16,10 @@ import (
 
 type Config struct {
 	SchemaVersion int                  `toml:"schema_version" json:"schema_version"`
+	// InitVersion tracks which version of the init wizard created/last migrated
+	// this config. When the binary's CurrentInitVersion is higher, fleet will
+	// suggest running 'fleet adjust-init' to apply pending config migrations.
+	InitVersion   int                  `toml:"init_version" json:"init_version"`
 	ProductName   string               `toml:"product_name" json:"product_name"`
 	Domain        string               `toml:"domain" json:"domain"`
 	Alias         string               `toml:"alias" json:"alias"`

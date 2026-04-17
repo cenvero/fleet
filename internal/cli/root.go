@@ -60,7 +60,7 @@ func NewRootCommand() *cobra.Command {
 			switch cmd.Name() {
 			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
 				"check", "apply", "rollback", "channel",
-				"backup", "recover":
+				"backup", "recover", "adjust-init":
 				return nil
 			}
 			if cmd.HasParent() {
@@ -74,9 +74,13 @@ func NewRootCommand() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Run 'fleet init' first to set up the controller.\n")
 				os.Exit(1)
 			}
-			// Background Homebrew update hint — checks manifest at most once per 10 minutes
-			if core.RuntimeIsHomebrewInstall() {
-				if cfg, err := core.LoadConfig(core.ConfigPath(configDir)); err == nil {
+			// Check for pending config migrations and show a one-line hint.
+			if cfg, err := core.LoadConfig(core.ConfigPath(configDir)); err == nil {
+				if hint := core.AdjustInitHint(cfg); hint != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
+				}
+				// Background Homebrew update hint.
+				if core.RuntimeIsHomebrewInstall() {
 					if hint := core.HomebrewUpdateHint(configDir, cfg.ManifestURL, cfg.Updates.Policy); hint != "" {
 						fmt.Fprintf(cmd.ErrOrStderr(), "\nUpdate available (%s). To upgrade:\n\n  brew update && brew upgrade cenvero-fleet\n\n", hint)
 					}
@@ -112,6 +116,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newSyncAgentCommand(&configDir))
 	root.AddCommand(newBackupCommand(&configDir))
 	root.AddCommand(newRecoverCommand(&configDir))
+	root.AddCommand(newAdjustInitCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
 	return root
@@ -1769,6 +1774,30 @@ config, fleet will tell you which version to downgrade to before proceeding.`,
 	cmd.Flags().StringVar(&dbDSN, "db-dsn", "", "override the database DSN (for postgres/mysql/mariadb)")
 	cmd.Flags().BoolVar(&skipVerify, "skip-version-check", false, "skip the version compatibility check (not recommended)")
 	return cmd
+}
+
+func newAdjustInitCommand(configDir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "adjust-init",
+		Short: "Apply pending config migrations after a fleet upgrade",
+		Long: `When fleet adds or removes options from the init wizard, your existing
+config may be missing new settings or still carry old ones that are no longer used.
+
+adjust-init walks you through every pending change interactively:
+  [✕] removed field  — shows what was removed and why; cleans up the config entry
+  [+] added field    — prompts you to choose a value for the new option
+
+Run this after upgrading fleet whenever you see the "run adjust-init" hint.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if *configDir == "" {
+				*configDir = core.DefaultConfigDir("")
+			}
+			if !core.IsInitialized(*configDir) {
+				return fmt.Errorf("fleet is not initialized at %s — run 'fleet init' first", *configDir)
+			}
+			return core.AdjustInit(*configDir, cmd.InOrStdin(), cmd.OutOrStdout())
+		},
+	}
 }
 
 // formatBytes formats a byte count as a human-readable string.

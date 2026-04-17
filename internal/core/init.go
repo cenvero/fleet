@@ -67,6 +67,7 @@ func Initialize(opts InitOptions) (InitResult, error) {
 
 	cfg := DefaultConfig(opts.ConfigDir)
 	cfg.Alias = opts.Alias
+	cfg.InitVersion = CurrentInitVersion
 	cfg.InstanceID = instanceID
 	cfg.DefaultMode = opts.DefaultMode
 	cfg.Operator = opts.Operator
