@@ -355,7 +355,7 @@ func (a *App) SyncAgent(ctx context.Context, serverNames []string) (FleetSyncAge
 	}
 
 	result := FleetSyncAgentResult{
-		ControllerVersion: version.Version,
+		ControllerVersion: version.Canonical(version.Version),
 		Agents:            make([]SyncAgentResult, 0, len(targets)),
 	}
 
@@ -375,8 +375,8 @@ func (a *App) SyncAgent(ctx context.Context, serverNames []string) (FleetSyncAge
 }
 
 func (a *App) syncAgentOne(ctx context.Context, server ServerRecord) SyncAgentResult {
-	agentVer := strings.TrimSpace(server.Observed.AgentVersion)
-	want := version.Version
+	agentVer := version.Canonical(strings.TrimSpace(server.Observed.AgentVersion))
+	want := version.Canonical(version.Version)
 
 	base := SyncAgentResult{
 		Server:        server.Name,

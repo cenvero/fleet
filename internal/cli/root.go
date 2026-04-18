@@ -1316,9 +1316,9 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			if core.RuntimeIsHomebrewInstall() {
-				fmt.Fprintf(cmd.OutOrStdout(), "Current version : %s\n", version.Version)
-				fmt.Fprintf(cmd.OutOrStdout(), "Latest version  : %s\n", latestVersion)
-				if latestVersion != version.Version {
+				fmt.Fprintf(cmd.OutOrStdout(), "Current version : %s\n", version.Canonical(version.Version))
+				fmt.Fprintf(cmd.OutOrStdout(), "Latest version  : %s\n", version.Canonical(latestVersion))
+				if version.Canonical(latestVersion) != version.Canonical(version.Version) {
 					fmt.Fprintln(cmd.OutOrStdout())
 					fmt.Fprintln(cmd.OutOrStdout(), "A newer version is available. To update, run:")
 					fmt.Fprintln(cmd.OutOrStdout())
