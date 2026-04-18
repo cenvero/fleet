@@ -87,6 +87,21 @@ try {
   Copy-Item $source.FullName (Join-Path $installDir "fleet.exe") -Force
 
   Write-Host "Installed Cenvero Fleet $version to $installDir\fleet.exe"
+
+  $currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+  if ($currentPath -notlike "*$installDir*") {
+    $choice = Read-Host "Add $installDir to PATH? (Y/N)"
+    if ($choice -match "^[Yy]$") {
+      [Environment]::SetEnvironmentVariable("PATH", $currentPath + ";$installDir", "User")
+      $env:PATH += ";$installDir"
+      Write-Host "Added to PATH. Restart your terminal or run: `$env:PATH += ';$installDir'"
+    } else {
+      Write-Host "Skipped. Add manually: `$env:PATH += ';$installDir'"
+    }
+  } else {
+    Write-Host "$installDir is already in PATH."
+  }
+
   Write-Host "Run: fleet init"
 }
 finally {
