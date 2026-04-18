@@ -188,6 +188,16 @@ func RemoveKnownHost(path, address string) error {
 }
 
 func appendKnownHost(path, address string, key ssh.PublicKey) error {
+	// Skip if an entry for this address already exists — prevents duplicates
+	// even if the in-memory callback somehow misses a recently written entry.
+	if data, err := os.ReadFile(path); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[0] == address {
+				return nil
+			}
+		}
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open known_hosts for append: %w", err)
