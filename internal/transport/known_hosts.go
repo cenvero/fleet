@@ -33,7 +33,10 @@ func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyS
 	}
 
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		normalized := knownhosts.Normalize(remote.String())
+		// knownhosts.check() looks up by hostname (the address argument to
+		// ssh.Dial), not by the remote IP. Store and replace using the same
+		// hostname-based key so lookups always match what we wrote.
+		normalized := knownhosts.Normalize(hostname)
 		if state != nil {
 			state.Fingerprint = ssh.FingerprintSHA256(key)
 			state.StoredAs = normalized
@@ -88,7 +91,7 @@ func NewInteractiveHostKeyCallback(path string, promptFn func(hostname, oldFP, n
 		return nil, fmt.Errorf("load known_hosts %s: %w", path, err)
 	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		normalized := knownhosts.Normalize(remote.String())
+		normalized := knownhosts.Normalize(hostname)
 		fp := ssh.FingerprintSHA256(key)
 		if state != nil {
 			state.Fingerprint = fp
