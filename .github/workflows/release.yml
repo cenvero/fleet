@@ -15,7 +15,7 @@ jobs:
     name: Build and publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v6
@@ -69,7 +69,7 @@ jobs:
     outputs:
       sha: ${{ steps.manifest-commit.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
@@ -175,7 +175,7 @@ jobs:
       group: pages-deployment
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.update-manifest.outputs.sha }}
       - uses: actions/configure-pages@v6
