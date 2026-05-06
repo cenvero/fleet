@@ -58,6 +58,10 @@ func Backup(configDir string, opts BackupOptions) (BackupResult, error) {
 	if outputPath == "" {
 		outputPath = fmt.Sprintf("fleet-backup-%s.tar.gz", now.Format("20060102-150405"))
 	}
+	absOutputPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		return BackupResult{}, fmt.Errorf("resolve backup output path: %w", err)
+	}
 
 	f, err := os.Create(outputPath)
 	if err != nil {
@@ -82,6 +86,13 @@ func Backup(configDir string, opts BackupOptions) (BackupResult, error) {
 		rel, err := filepath.Rel(configDir, path)
 		if err != nil {
 			return err
+		}
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(absPath) == filepath.Clean(absOutputPath) {
+			return nil
 		}
 
 		// Always use forward slashes in tar archives (portable).
@@ -163,9 +174,8 @@ func Backup(configDir string, opts BackupOptions) (BackupResult, error) {
 		return BackupResult{}, err
 	}
 
-	absOut, _ := filepath.Abs(outputPath)
 	return BackupResult{
-		OutputPath: absOut,
+		OutputPath: absOutputPath,
 		ConfigDir:  configDir,
 		FilesCount: filesCount,
 		SizeBytes:  stat.Size(),

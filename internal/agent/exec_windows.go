@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Cenvero / Shubhdeep Singh
 
-//go:build !windows
+//go:build windows
 
 package agent
 
@@ -14,7 +14,7 @@ import (
 )
 
 func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecResult, error) {
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", payload.Command) //nolint:gosec
+	cmd := exec.CommandContext(ctx, "cmd.exe", "/C", payload.Command) //nolint:gosec
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

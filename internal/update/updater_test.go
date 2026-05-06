@@ -129,7 +129,7 @@ func TestApplyNoOpWhenVersionMatches(t *testing.T) {
 		Channel:        "stable",
 		ConfigDir:      configDir,
 		ExecutablePath: executablePath,
-		CurrentVersion: "v1.2.3",
+		CurrentVersion: "1.2.3",
 		FetchManifest: func(context.Context, string) (Manifest, error) {
 			return manifest, nil
 		},

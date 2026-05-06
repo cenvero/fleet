@@ -92,6 +92,22 @@ func TestBootstrapServerDirectUploadsAgentAndUpdatesServer(t *testing.T) {
 	if server.Port != 2222 {
 		t.Fatalf("expected direct-mode agent port 2222, got %d", server.Port)
 	}
+	if !server.Agent.Managed {
+		t.Fatalf("expected bootstrapped agent to be marked managed")
+	}
+	if server.Agent.LoginUser != "ubuntu" {
+		t.Fatalf("expected stored login user %q, got %q", "ubuntu", server.Agent.LoginUser)
+	}
+	if server.Agent.LoginPort != 22 {
+		t.Fatalf("expected stored login port 22, got %d", server.Agent.LoginPort)
+	}
+	expectedLoginKey := filepath.Join(configDir, "keys", app.Config.Crypto.PrimaryKey)
+	if server.Agent.LoginKey != expectedLoginKey {
+		t.Fatalf("expected stored login key %q, got %q", expectedLoginKey, server.Agent.LoginKey)
+	}
+	if !server.Agent.UseSudo {
+		t.Fatalf("expected stored sudo setting")
+	}
 }
 
 func TestBootstrapServerReversePrintScript(t *testing.T) {

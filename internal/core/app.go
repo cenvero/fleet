@@ -71,14 +71,16 @@ func Open(configDir string) (*App, error) {
 		_ = stateDB.Close()
 		return nil, err
 	}
+	executablePath, _ := os.Executable()
 	app := &App{
-		ConfigDir: configDir,
-		Config:    cfg,
-		AuditLog:  logs.NewAuditLog(filepath.Join(configDir, "logs", "_audit.log")),
-		Alerts:    alerts.NewStore(filepath.Join(configDir, "alerts")),
-		Notifier:  notify.NewDesktopNotifier(cfg.Runtime.DesktopNotifications),
-		StateDB:   stateDB,
-		MetricsDB: metricsDB,
+		ConfigDir:      configDir,
+		Config:         cfg,
+		ExecutablePath: executablePath,
+		AuditLog:       logs.NewAuditLog(filepath.Join(configDir, "logs", "_audit.log")),
+		Alerts:         alerts.NewStore(filepath.Join(configDir, "alerts")),
+		Notifier:       notify.NewDesktopNotifier(cfg.Runtime.DesktopNotifications),
+		StateDB:        stateDB,
+		MetricsDB:      metricsDB,
 	}
 	// Passphrase-protected keys are recorded in config but the runtime connector
 	// does not yet pass the passphrase through. Warn early so the operator knows
@@ -1114,7 +1116,7 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 
 	// Auto-update the agent only when the policy permits it.
 	// notify_only and disabled must not trigger unsolicited binary replacements.
-	if hello.AgentVersion != "" && hello.AgentVersion != version.Version &&
+	if hello.AgentVersion != "" && version.Canonical(hello.AgentVersion) != version.Canonical(version.Version) &&
 		a.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() {
 			_ = a.AuditLog.Append(logs.AuditEntry{

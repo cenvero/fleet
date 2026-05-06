@@ -151,6 +151,10 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 		Managed:     true,
 		BinaryPath:  defaultAgentBinaryPath,
 		ServiceName: resolved.serviceName,
+		LoginUser:   resolved.loginUser,
+		LoginPort:   resolved.loginPort,
+		LoginKey:    resolved.loginKeyPath,
+		UseSudo:     resolved.useSudo,
 		UpdatedAt:   time.Now().UTC(),
 	}
 	if err := a.SaveServer(server); err != nil {

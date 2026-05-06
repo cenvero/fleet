@@ -158,10 +158,10 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 		}
 		h.setSession(serverName, session, info)
 
-		go func(name string, sshConn *ssh.ServerConn) {
+		go func(name string, session *transport.Session, sshConn *ssh.ServerConn) {
 			_ = sshConn.Wait()
-			h.clearSession(name, "")
-		}(serverName, conn)
+			h.clearSession(name, "", session)
+		}(serverName, session, conn)
 	}
 	return nil
 }
@@ -237,7 +237,7 @@ func (h *ReverseHub) Call(server string, env proto.Envelope) (proto.Envelope, er
 	}
 	response, err := current.session.Call(context.Background(), env)
 	if err != nil {
-		h.clearSession(server, err.Error())
+		h.clearSession(server, err.Error(), current.session)
 		return proto.Envelope{}, err
 	}
 	return response, nil
@@ -413,7 +413,7 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 	})
 
 	// Auto-update the agent only when the policy permits it.
-	if info.Hello.AgentVersion != "" && info.Hello.AgentVersion != version.Version &&
+	if info.Hello.AgentVersion != "" && version.Canonical(info.Hello.AgentVersion) != version.Canonical(version.Version) &&
 		h.app.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() {
 			_ = h.app.AuditLog.Append(logs.AuditEntry{
@@ -427,12 +427,14 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 	}
 }
 
-func (h *ReverseHub) clearSession(serverName, lastError string) {
+func (h *ReverseHub) clearSession(serverName, lastError string, expected *transport.Session) {
 	h.mu.Lock()
 	current := h.sessions[serverName]
-	if current != nil {
-		delete(h.sessions, serverName)
+	if current == nil || current.session != expected {
+		h.mu.Unlock()
+		return
 	}
+	delete(h.sessions, serverName)
 	h.mu.Unlock()
 
 	server, err := h.app.GetServer(serverName)

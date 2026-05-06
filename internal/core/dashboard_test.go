@@ -4,12 +4,14 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cenvero/fleet/internal/alerts"
+	"github.com/cenvero/fleet/internal/logs"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/pkg/proto"
@@ -131,5 +133,53 @@ func TestDashboardSnapshotSummarizesFleetState(t *testing.T) {
 	}
 	if !snapshot.RollbackAvailable {
 		t.Fatalf("expected rollback availability to be true")
+	}
+}
+
+func TestDashboardSnapshotRecentAuditUsesNewestEntries(t *testing.T) {
+	t.Parallel()
+
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir:       configDir,
+		Alias:           "fleet",
+		DefaultMode:     transport.ModeDirect,
+		CryptoAlgorithm: "ed25519",
+		UpdateChannel:   "stable",
+		UpdatePolicy:    update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer app.Close()
+
+	base := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		if err := app.AuditLog.Append(logs.AuditEntry{
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+			Action:    fmt.Sprintf("audit-%02d", i),
+			Target:    "dashboard",
+			Operator:  "test",
+		}); err != nil {
+			t.Fatalf("AuditLog.Append(%d) error = %v", i, err)
+		}
+	}
+
+	snapshot, err := app.DashboardSnapshot()
+	if err != nil {
+		t.Fatalf("DashboardSnapshot() error = %v", err)
+	}
+	if len(snapshot.RecentAudit) != 8 {
+		t.Fatalf("expected 8 recent audit entries, got %d", len(snapshot.RecentAudit))
+	}
+	if snapshot.RecentAudit[0].Action != "audit-09" {
+		t.Fatalf("expected newest audit first, got %q", snapshot.RecentAudit[0].Action)
+	}
+	if snapshot.RecentAudit[7].Action != "audit-02" {
+		t.Fatalf("expected eighth-newest audit last, got %q", snapshot.RecentAudit[7].Action)
 	}
 }

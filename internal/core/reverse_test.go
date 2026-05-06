@@ -235,6 +235,83 @@ func TestRunReverseRetriesAndReplaysQueuedMetrics(t *testing.T) {
 	}
 }
 
+func TestReverseHubClearSessionIgnoresStaleDisconnect(t *testing.T) {
+	t.Parallel()
+
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir:       configDir,
+		Alias:           "fleet",
+		DefaultMode:     transport.ModeReverse,
+		CryptoAlgorithm: "ed25519",
+		UpdateChannel:   "stable",
+		UpdatePolicy:    update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer app.Close()
+
+	if err := app.AddServer(ServerRecord{
+		Name:    "reverse-node",
+		Address: "unknown",
+		Mode:    transport.ModeReverse,
+		User:    "cenvero-agent",
+	}); err != nil {
+		t.Fatalf("AddServer() error = %v", err)
+	}
+
+	hub := NewReverseHub(app, "test-token")
+	defer hub.Close()
+
+	oldSession := &transport.Session{Closer: reverseTestCloser{}}
+	newSession := &transport.Session{Closer: reverseTestCloser{}}
+	hub.setSession("reverse-node", oldSession, ReverseSessionInfo{
+		Server:             "reverse-node",
+		Connected:          true,
+		HostKeyFingerprint: "old",
+		Hello:              proto.HelloPayload{AgentVersion: "v1.2.3"},
+	})
+	hub.setSession("reverse-node", newSession, ReverseSessionInfo{
+		Server:             "reverse-node",
+		Connected:          true,
+		HostKeyFingerprint: "new",
+		Hello:              proto.HelloPayload{AgentVersion: "v1.2.3"},
+	})
+
+	hub.clearSession("reverse-node", "stale disconnect", oldSession)
+
+	info, err := hub.Status("reverse-node")
+	if err != nil {
+		t.Fatalf("expected replacement reverse session to remain connected: %v", err)
+	}
+	if info.HostKeyFingerprint != "new" {
+		t.Fatalf("expected replacement session to remain current, got %#v", info)
+	}
+	record, err := app.GetServer("reverse-node")
+	if err != nil {
+		t.Fatalf("GetServer() error = %v", err)
+	}
+	if !record.Observed.Reachable || record.Observed.LastError == "stale disconnect" {
+		t.Fatalf("stale disconnect mutated live server observation: %#v", record.Observed)
+	}
+
+	hub.clearSession("reverse-node", "fresh disconnect", newSession)
+	if _, err := hub.Status("reverse-node"); err == nil {
+		t.Fatalf("expected current session to be cleared")
+	}
+}
+
+type reverseTestCloser struct{}
+
+func (reverseTestCloser) Close() error {
+	return nil
+}
+
 func waitForReverseSession(t *testing.T, hub *ReverseHub, server string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

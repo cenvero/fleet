@@ -170,7 +170,11 @@ func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string) (FleetUpdateResult, error) {
 	var controllerResult update.ApplyResult
 
-	if IsHomebrewInstall(a.ExecutablePath) {
+	executablePath := a.ExecutablePath
+	if executablePath == "" {
+		executablePath, _ = os.Executable()
+	}
+	if IsHomebrewInstall(executablePath) {
 		// Controller is managed by Homebrew — skip self-update entirely.
 		// Agents are still updated below.
 		controllerResult = update.ApplyResult{

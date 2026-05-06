@@ -140,6 +140,48 @@ func TestApplyFleetUpdateRollsAcrossAgentsAndKeepsFailuresIsolated(t *testing.T)
 	}
 }
 
+func TestApplyFleetUpdateSkipsControllerForHomebrewInstall(t *testing.T) {
+	t.Parallel()
+
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir:       configDir,
+		Alias:           "fleet",
+		DefaultMode:     transport.ModeDirect,
+		CryptoAlgorithm: "ed25519",
+		UpdateChannel:   "stable",
+		UpdatePolicy:    update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer app.Close()
+
+	app.ExecutablePath = "/opt/homebrew/bin/fleet"
+	app.ControllerUpdater = func(context.Context, update.ApplyOptions) (update.ApplyResult, error) {
+		t.Fatalf("ControllerUpdater should not run for Homebrew-managed installs")
+		return update.ApplyResult{}, nil
+	}
+
+	result, err := app.ApplyFleetUpdate(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ApplyFleetUpdate() error = %v", err)
+	}
+	if result.Controller.Applied {
+		t.Fatalf("expected controller update to be skipped for Homebrew install")
+	}
+	if result.Controller.Note == "" {
+		t.Fatalf("expected Homebrew guidance note in controller result")
+	}
+	if result.Attempted != 0 {
+		t.Fatalf("expected no agent updates without servers, got %d", result.Attempted)
+	}
+}
+
 type fakeAgentUpdater struct {
 	result proto.UpdateApplyResult
 	err    error

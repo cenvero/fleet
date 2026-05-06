@@ -6,6 +6,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -35,8 +36,9 @@ func (a *App) DashboardSnapshot() (DashboardSnapshot, error) {
 		return DashboardSnapshot{}, err
 	}
 	if len(recentAudit) > 8 {
-		recentAudit = recentAudit[:8]
+		recentAudit = recentAudit[len(recentAudit)-8:]
 	}
+	slices.Reverse(recentAudit)
 	templates, err := a.ListTemplates()
 	if err != nil {
 		return DashboardSnapshot{}, err

@@ -111,7 +111,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 		ExecutablePath:  opts.ExecutablePath,
 		ReleaseNotesURL: manifest.Channels[opts.Channel].ReleaseNotes,
 	}
-	if version == opts.CurrentVersion && opts.CurrentVersion != "" {
+	if sameVersion(version, opts.CurrentVersion) {
 		return result, nil
 	}
 
@@ -206,6 +206,23 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	result.RollbackState = statePath
 	result.Applied = true
 	return result, nil
+}
+
+func sameVersion(candidate, current string) bool {
+	candidate = strings.TrimSpace(candidate)
+	current = strings.TrimSpace(current)
+	if candidate == "" || current == "" {
+		return false
+	}
+	return trimVersionPrefix(candidate) == trimVersionPrefix(current)
+}
+
+func trimVersionPrefix(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) > 1 && (v[0] == 'v' || v[0] == 'V') {
+		return v[1:]
+	}
+	return v
 }
 
 func Rollback(configDir, executablePath string) (RollbackResult, error) {
