@@ -193,7 +193,9 @@ func skillCoreBody() string {
 		"```bash\nfleet context\n```\n\n" +
 		"That prints the complete, always-current command reference, concepts, and workflows\n" +
 		"(generated from the installed binary). Use `fleet context --json` for a structured\n" +
-		"command tree. Then operate with `fleet <group> <subcommand> ...`.\n\n" +
+		"command tree, and `fleet ai <command>` (e.g. `fleet ai file upload`, add `--json`)\n" +
+		"to get the full help for any single command. Then operate with\n" +
+		"`fleet <group> <subcommand> ...`.\n\n" +
 		"Guidance:\n" +
 		"- Most commands print JSON to stdout — parse it.\n" +
 		"- Check state first: `fleet status` and `fleet server list`.\n" +
