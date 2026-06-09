@@ -398,7 +398,7 @@
   <div class="hero-content">
     <div class="hero-badge">Self-hosted fleet management</div>
     <h1>Manage every server.<br>No cloud required.</h1>
-    <p>Cenvero Fleet connects to your Linux servers over SSH, auto-installs agents, and gives you shell access, service control, logs, and live metrics — all from one binary.</p>
+    <p>Cenvero Fleet connects to your Linux servers over SSH, auto-installs agents, and gives you shell access, service control, logs, live metrics, secure file transfers, and AI-agent control — all from one binary.</p>
     <div class="hero-actions">
       <a href="/docs/" class="btn btn-primary">Read the docs</a>
       <a href="https://github.com/cenvero/fleet/releases" class="btn btn-ghost">Download releases</a>
@@ -466,6 +466,16 @@
   <h2 class="section-title">Everything you need to run a fleet</h2>
   <p class="section-sub">No agents to pre-install, no cloud accounts, no dashboards to subscribe to. Just a binary and SSH.</p>
   <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon"><i data-lucide="folder-sync"></i></div>
+      <h3>File manager <span style="color:var(--accent)">· new in v2</span></h3>
+      <p>Move files with <code>fleet file</code>, a dual-pane terminal manager (<code>fleet files</code>), or a localhost web UI (<code>fleet ui</code>). Chunked, parallel, checksummed, and resumable — over the same SSH channel.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon"><i data-lucide="bot"></i></div>
+      <h3>Agentic control <span style="color:var(--accent)">· new in v2</span></h3>
+      <p>Run <code>fleet skill claude</code> and your AI coding agent learns the whole CLI from <code>fleet context</code> — then it can control any server and guide you, all with your keys.</p>
+    </div>
     <div class="feature-card">
       <div class="feature-icon"><i data-lucide="zap"></i></div>
       <h3>Agent Auto-install</h3>
