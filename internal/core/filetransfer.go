@@ -103,26 +103,9 @@ func (a *App) resolveTransferOptions(server ServerRecord, opts FileTransferOptio
 
 // ---- simple lightweight RPC browsing (one-shot, no channel pool) ----
 
-// ListRemoteDir lists a directory on a managed server.
+// ListRemoteDir lists a directory on a managed server (hidden entries excluded).
 func (a *App) ListRemoteDir(serverName, remotePath string) (proto.FileListResult, error) {
-	server, err := a.GetServer(serverName)
-	if err != nil {
-		return proto.FileListResult{}, err
-	}
-	if remotePath == "" {
-		remotePath = firstNonEmptyString(a.effectiveFileTransferDefaults(server).RemoteDir, "/")
-	}
-	resp, err := a.callRPC(server, proto.Envelope{
-		Action:  proto.ActionFileList,
-		Payload: proto.FileListPayload{Path: remotePath},
-	})
-	if err != nil {
-		return proto.FileListResult{}, err
-	}
-	if resp.Error != nil {
-		return proto.FileListResult{}, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-	}
-	return proto.DecodePayload[proto.FileListResult](resp.Payload)
+	return a.ListRemoteDirHidden(serverName, remotePath, false)
 }
 
 // RemoteMkdir creates a directory on a managed server.

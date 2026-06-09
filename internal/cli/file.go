@@ -36,6 +36,7 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd.AddCommand(newFileTailCommand(configDir))
 	fileCmd.AddCommand(newFileUploadCommand(configDir))
 	fileCmd.AddCommand(newFileDownloadCommand(configDir))
+	fileCmd.AddCommand(newFileCopyCommand(configDir))
 	fileCmd.AddCommand(newFileMkdirCommand(configDir))
 	fileCmd.AddCommand(newFileRemoveCommand(configDir))
 	fileCmd.AddCommand(newFileMoveCommand(configDir))
@@ -246,6 +247,72 @@ func newFileTailCommand(configDir *string) *cobra.Command {
 	}
 	cmd.Flags().IntVarP(&lines, "lines", "n", 200, "number of trailing lines to show")
 	cmd.Flags().StringVar(&search, "search", "", "only show lines containing this substring")
+	return cmd
+}
+
+// parseServerPath splits a "<server>:<path>" argument.
+func parseServerPath(arg string) (server, remotePath string, err error) {
+	i := strings.IndexByte(arg, ':')
+	if i <= 0 || i == len(arg)-1 {
+		return "", "", fmt.Errorf("expected <server>:<path>, got %q", arg)
+	}
+	return arg[:i], arg[i+1:], nil
+}
+
+func newFileCopyCommand(configDir *string) *cobra.Command {
+	var recursive bool
+	var parallel int
+	var chunkSize string
+	cmd := &cobra.Command{
+		Use:   "copy <srcServer:path> <dstServer:path>",
+		Short: "Copy a file (or directory with -r) directly between two servers",
+		Long: "Copy a file or, with -r, a whole directory tree from one managed server to\n" +
+			"another. Bytes are relayed through the controller (download then upload), so it\n" +
+			"works for every server mode and reuses the resumable, checksummed engine.\n\n" +
+			"Examples:\n" +
+			"  fleet file copy web-01:/etc/hosts db-01:/tmp/hosts\n" +
+			"  fleet file copy web-01:/srv/app db-01:/srv/app -r",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			srcServer, srcPath, err := parseServerPath(args[0])
+			if err != nil {
+				return err
+			}
+			dstServer, dstPath, err := parseServerPath(args[1])
+			if err != nil {
+				return err
+			}
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			opts, err := transferOptsFromFlags(parallel, chunkSize)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if recursive {
+				n, err := app.CopyDir(srcServer, srcPath, dstServer, dstPath, opts, nil)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "copied %d files %s -> %s\n", n, args[0], args[1])
+				return nil
+			}
+			progress, finish := newProgressReporter(cmd, "copy")
+			res, err := app.CopyFile(srcServer, srcPath, dstServer, dstPath, opts, progress)
+			finish()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "copied %s -> %s:%s (%s)\n", args[0], dstServer, res.Path, humanizeBytes(res.Size))
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "copy a directory tree")
+	cmd.Flags().IntVar(&parallel, "parallel", 0, "parallel streams per file (0 = server/global default)")
+	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
 	return cmd
 }
 

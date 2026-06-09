@@ -108,6 +108,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/mkdir", s.guard(postOnly(s.handleMkdir)))
 	mux.HandleFunc("/api/rm", s.guard(postOnly(s.handleRemove)))
 	mux.HandleFunc("/api/mv", s.guard(postOnly(s.handleMove)))
+	mux.HandleFunc("/api/copy", s.guard(postOnly(s.handleCopy)))
+	mux.HandleFunc("/api/move", s.guard(postOnly(s.handleMoveTransfer)))
 	return securityHeaders(mux)
 }
 
@@ -221,12 +223,48 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	dir := r.URL.Query().Get("path")
-	result, err := s.app.ListRemoteDir(server, dir)
+	showHidden := r.URL.Query().Get("hidden") == "1" || r.URL.Query().Get("hidden") == "true"
+	result, err := s.app.ListRemoteDirHidden(server, dir, showHidden)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, result)
+}
+
+// handleTransfer drives a server-to-server copy or move, tracked by the progress
+// hub like an upload. move=true deletes the source after a successful copy.
+func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move bool) {
+	q := r.URL.Query()
+	srcServer, srcPath := q.Get("srcServer"), q.Get("srcPath")
+	dstServer, dstPath := q.Get("dstServer"), q.Get("dstPath")
+	recursive := q.Get("recursive") == "1" || q.Get("recursive") == "true"
+	if srcServer == "" || srcPath == "" || dstServer == "" || dstPath == "" {
+		http.Error(w, "srcServer, srcPath, dstServer, dstPath are required", http.StatusBadRequest)
+		return
+	}
+	id := s.hub.start()
+	go func() {
+		prog := func(u core.ProgressUpdate) { s.hub.update(id, u) }
+		var err error
+		switch {
+		case move && recursive:
+			_, err = s.app.MoveDir(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		case move:
+			err = s.app.MoveFile(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		case recursive:
+			_, err = s.app.CopyDir(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		default:
+			_, err = s.app.CopyFile(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		}
+		s.hub.finish(id, err)
+	}()
+	writeJSON(w, map[string]string{"id": id})
+}
+
+func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) { s.handleTransfer(w, r, false) }
+func (s *Server) handleMoveTransfer(w http.ResponseWriter, r *http.Request) {
+	s.handleTransfer(w, r, true)
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
