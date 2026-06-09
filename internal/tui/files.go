@@ -494,9 +494,16 @@ func (m filesModel) startTransfer(side int, item fileItem) (tea.Model, tea.Cmd) 
 			c.done <- transferOutcome{err: err}
 		}()
 	} else {
-		// download remote -> local
+		// download remote -> local. item.name comes from the remote listing, so
+		// vet it before joining it into a local write path (a compromised agent
+		// could return a traversal name).
 		remotePath := joinPath(m.right.cwd, item.name, true)
-		localPath := filepath.Join(m.left.cwd, item.name)
+		localPath, perr := core.SafeLocalJoin(m.left.cwd, item.name)
+		if perr != nil {
+			delete(m.chans, id)
+			m.status = "refused unsafe remote name: " + item.name
+			return m, nil
+		}
 		label = fmt.Sprintf("↓ %s", item.name)
 		go func() {
 			_, err := app.DownloadFile(server, remotePath, localPath, core.FileTransferOptions{}, progress)

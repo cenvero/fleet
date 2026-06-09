@@ -167,11 +167,20 @@ func (a *App) makeSyncPlan(serverName, localDir, remoteDir string, opts SyncOpti
 			scanReplica: func() (map[string]fileMeta, error) { return scanLocalDir(localDir) },
 			copy: func(rel string) (int64, error) {
 				remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-				localPath := filepath.Join(localDir, rel)
+				localPath, err := SafeLocalJoin(localDir, rel)
+				if err != nil {
+					return 0, err
+				}
 				res, err := a.DownloadFile(serverName, remotePath, localPath, xfer, nil)
 				return res.Entry.Size, err
 			},
-			remove:           func(rel string) error { return os.Remove(filepath.Join(localDir, rel)) },
+			remove: func(rel string) error {
+				p, err := SafeLocalJoin(localDir, rel)
+				if err != nil {
+					return err
+				}
+				return os.Remove(p)
+			},
 			ensureReplicaDir: func() { _ = os.MkdirAll(localDir, 0o750) },
 		}
 	}
@@ -324,6 +333,11 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 				continue
 			}
 			rel := strings.TrimPrefix(e.Path, prefix)
+			// A compromised agent could return a path that escapes the sync root;
+			// never let that reach a local write during pull.
+			if !safeRel(rel) {
+				continue
+			}
 			out[rel] = fileMeta{modUnixNano: e.ModTime.UnixNano(), size: e.Size}
 		}
 		return nil
