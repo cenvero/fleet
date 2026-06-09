@@ -21,6 +21,13 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd := &cobra.Command{
 		Use:   "file",
 		Short: "Browse and transfer files to and from managed servers",
+		Long: "Browse and transfer files over the same authenticated, host-key-pinned SSH\n" +
+			"channel the controller already uses — no extra port or daemon. Transfers are\n" +
+			"split into chunks sent over several concurrent channels, every chunk and the\n" +
+			"whole file are SHA-256 verified, and an interrupted upload or download resumes\n" +
+			"from where it stopped when you re-run it. Parallelism and chunk size come from\n" +
+			"per-server then global defaults (see 'file defaults'). Related: 'fleet files'\n" +
+			"(terminal UI), 'fleet ui' (web UI), and 'fleet sync' (live directory sync).",
 	}
 
 	fileCmd.AddCommand(newFileListCommand(configDir))
@@ -64,7 +71,13 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upload <server> <local> [remote]",
 		Short: "Upload a local file to a server (chunked, parallel, resumable)",
-		Args:  cobra.RangeArgs(2, 3),
+		Long: "Upload <local> to <remote> on <server>. If <remote> is omitted (or ends in '/')\n" +
+			"the file lands in the server's default remote directory under its base name.\n" +
+			"The transfer is chunked, run over --parallel concurrent channels, SHA-256\n" +
+			"verified, and resumable: re-running the same command after an interruption\n" +
+			"skips the chunks already on the server. On a terminal it shows a live progress\n" +
+			"bar; otherwise it prints periodic JSON.",
+		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -100,7 +113,11 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "download <server> <remote> [local]",
 		Short: "Download a file from a server (chunked, parallel, resumable)",
-		Args:  cobra.RangeArgs(2, 3),
+		Long: "Download <remote> from <server> into <local> (defaults to the remote base name\n" +
+			"in the current directory; a local directory is allowed and the base name is\n" +
+			"appended). Same engine as upload: chunked, parallel, SHA-256 verified, and\n" +
+			"resumable from a partial local file.",
+		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
