@@ -34,7 +34,8 @@ fleet file tail <server> <path> [-n 200] [--search TEXT]
 # Transfer (chunked, parallel, resumable; -r for whole directories)
 fleet file upload   <server> <local> [remote] [-r] [--parallel N] [--chunk-size 4M]
 fleet file download <server> <remote> [local]  [-r] [--parallel N] [--chunk-size 4M]
-fleet file copy     <srcServer:path> <dstServer:path> [-r]   # server → server (relayed)
+fleet file copy     <srcServer:path> <dstServer:path> [-r]   # server → server copy (relayed)
+fleet file move     <srcServer:path> <dstServer:path> [-r]   # server → server move (copy then delete)
 
 # Manage
 fleet file mkdir <server> <path>

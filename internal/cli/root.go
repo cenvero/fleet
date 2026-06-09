@@ -107,6 +107,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newLifecycleCommand("daemon", &configDir))
 	root.AddCommand(newDashboardCommand(&configDir))
 	root.AddCommand(newFilesCommand(&configDir))
+	root.AddCommand(newFileManagerCommand(&configDir))
 	root.AddCommand(newServerCommand(&configDir))
 	root.AddCommand(newServiceCommand(&configDir))
 	root.AddCommand(newFileCommand(&configDir))
@@ -267,9 +268,8 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 
 func newFilesCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:     "files [source...]",
-		Aliases: []string{"filemanager", "fm"},
-		Short:   "Launch the desktop-grade dual-pane file manager",
+		Use:   "files [source...]",
+		Short: "Launch the desktop-grade dual-pane file manager",
 		Long: "Open a full-screen, desktop-application-grade dual-pane file manager. Each\n" +
 			"pane has a source: the local filesystem (\"Local\") or a managed server, so you\n" +
 			"can browse and transfer local↔server AND server↔server.\n\n" +
@@ -285,6 +285,26 @@ func newFilesCommand(configDir *string) *cobra.Command {
 			return tui.RunFiles(*configDir, args...)
 		},
 	}
+}
+
+// newFileManagerCommand is the friendly-named entry point: `fleet filemanager`
+// (alias `fm`) opens the same terminal file manager as `fleet files`, and
+// `fleet filemanager ui` launches the browser file manager (like `fleet file ui`).
+func newFileManagerCommand(configDir *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "filemanager [source...]",
+		Aliases: []string{"fm"},
+		Short:   "Dual-pane file manager (terminal); 'filemanager ui' opens the web UI",
+		Long: "Friendly alias of `fleet files`: open the desktop-grade dual-pane terminal file\n" +
+			"manager. Run `fleet filemanager ui` to launch the localhost browser file manager\n" +
+			"instead (same as `fleet file ui`).",
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return tui.RunFiles(*configDir, args...)
+		},
+	}
+	cmd.AddCommand(newUICommand(configDir))
+	return cmd
 }
 
 func newUICommand(configDir *string) *cobra.Command {

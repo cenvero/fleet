@@ -228,9 +228,9 @@ File manager and transfers (**new in v2**):
 - `fleet file download <server> <remote> [local] [--parallel N]`
 - `fleet file mkdir|rm|mv <server> ...`
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
-- `fleet files [server...]` (aliases `fleet filemanager`, `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, and Finder-style drag-to-copy/move (local↔server **and** server↔server)
-- `fleet file ui` — premium **dual-pane** localhost browser file manager (same operations, drag between server panes, desktop-drop upload, live progress)
-- `fleet file copy <srcServer:path> <dstServer:path> [-r]` — copy a file or directory **directly between two servers** (relayed through the controller)
+- `fleet files [server...]` (also `fleet filemanager` / `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, List/Icons views, and Finder-style drag-to-copy/move (local↔server **and** server↔server)
+- `fleet file ui` (also `fleet filemanager ui`) — premium **dual-pane** localhost browser file manager (Local + server panes, same operations, drag-to-copy/move, desktop-drop upload, live progress)
+- `fleet file copy <srcServer:path> <dstServer:path> [-r]` / `fleet file move …` — copy or move a file or directory **directly between two servers** (relayed through the controller)
 - `fleet sync <server> <local-dir> <remote-dir> [--from local|remote] [--no-delete]` — live mirror: one side is the writer (source of truth, `--from`), the other a replica; the writer is copied once, then changes overwrite the replica and (by default) its extra files are deleted, until you stop the command
 
 Transfers are chunked, run over multiple concurrent channels, are SHA-256-checksummed end to end, and resume after a drop — all on the same authenticated, host-key-pinned SSH channel.

@@ -37,6 +37,7 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd.AddCommand(newFileUploadCommand(configDir))
 	fileCmd.AddCommand(newFileDownloadCommand(configDir))
 	fileCmd.AddCommand(newFileCopyCommand(configDir))
+	fileCmd.AddCommand(newFileServerMoveCommand(configDir))
 	fileCmd.AddCommand(newFileMkdirCommand(configDir))
 	fileCmd.AddCommand(newFileRemoveCommand(configDir))
 	fileCmd.AddCommand(newFileMoveCommand(configDir))
@@ -311,6 +312,64 @@ func newFileCopyCommand(configDir *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "copy a directory tree")
+	cmd.Flags().IntVar(&parallel, "parallel", 0, "parallel streams per file (0 = server/global default)")
+	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
+	return cmd
+}
+
+func newFileServerMoveCommand(configDir *string) *cobra.Command {
+	var recursive bool
+	var parallel int
+	var chunkSize string
+	cmd := &cobra.Command{
+		Use:   "move <srcServer:path> <dstServer:path>",
+		Short: "Move a file (or directory with -r) between two servers",
+		Long: "Move a file or, with -r, a whole directory tree between managed servers.\n" +
+			"Within one server it's an efficient rename; across servers it copies (relayed\n" +
+			"through the controller) then deletes the source. ('fleet file mv' renames within\n" +
+			"a single server.)\n\n" +
+			"Examples:\n" +
+			"  fleet file move web-01:/tmp/a db-01:/tmp/a\n" +
+			"  fleet file move web-01:/srv/app db-01:/srv/app -r",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			srcServer, srcPath, err := parseServerPath(args[0])
+			if err != nil {
+				return err
+			}
+			dstServer, dstPath, err := parseServerPath(args[1])
+			if err != nil {
+				return err
+			}
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			opts, err := transferOptsFromFlags(parallel, chunkSize)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if recursive {
+				n, err := app.MoveDir(srcServer, srcPath, dstServer, dstPath, opts, nil)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "moved %d files %s -> %s\n", n, args[0], args[1])
+				return nil
+			}
+			progress, finish := newProgressReporter(cmd, "move")
+			err = app.MoveFile(srcServer, srcPath, dstServer, dstPath, opts, progress)
+			finish()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "moved %s -> %s\n", args[0], args[1])
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "move a directory tree")
 	cmd.Flags().IntVar(&parallel, "parallel", 0, "parallel streams per file (0 = server/global default)")
 	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
 	return cmd
