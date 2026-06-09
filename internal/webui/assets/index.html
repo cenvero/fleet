@@ -18,6 +18,10 @@
       <span class="brand-sub">File Manager</span>
     </div>
     <div class="topbar-actions">
+      <button id="add-pane" class="add-pane" type="button" title="Add a pane" aria-label="Add pane">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M12 5v14m-7-7h14" /></svg>
+        <span>Add pane</span>
+      </button>
       <span id="conn" class="conn" title="Connection">localhost</span>
     </div>
   </header>
@@ -58,6 +62,33 @@
 
   <div id="toast" class="toast" hidden></div>
 
+  <!-- Full-screen text editor overlay (syntax-highlighted) -->
+  <div id="editor-overlay" class="editor-overlay" hidden>
+    <div class="editor" role="dialog" aria-modal="true" aria-label="File editor">
+      <div class="editor-head">
+        <div class="editor-title">
+          <span class="ed-icon"></span>
+          <span class="ed-name" id="ed-name"></span>
+          <span class="ed-lang" id="ed-lang"></span>
+          <span class="ed-dirty" id="ed-dirty" hidden>● unsaved</span>
+        </div>
+        <div class="editor-actions">
+          <span class="ed-meta" id="ed-meta"></span>
+          <button id="ed-save" class="mbtn primary" type="button">Save</button>
+          <button id="ed-cancel" class="mbtn" type="button">Close</button>
+        </div>
+      </div>
+      <div class="editor-body">
+        <div class="ed-gutter" id="ed-gutter" aria-hidden="true"></div>
+        <div class="ed-area">
+          <pre class="ed-highlight" id="ed-highlight" aria-hidden="true"><code></code></pre>
+          <textarea class="ed-input" id="ed-input" spellcheck="false" autocomplete="off"
+            autocapitalize="off" autocorrect="off" wrap="off" aria-label="File content"></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <template id="pane-template">
     <section class="pane" tabindex="0">
       <div class="pane-head">
@@ -72,6 +103,9 @@
           <button class="tool mkdir" type="button" title="New folder" aria-label="New folder">
             <svg viewBox="0 0 24 24" class="ico"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /><path d="M12 11v4m-2-2h4" /></svg>
           </button>
+          <button class="tool newfile" type="button" title="New file" aria-label="New file">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" /><path d="M14 3v5h5" /><path d="M12 12v5m-2.5-2.5h5" /></svg>
+          </button>
           <button class="tool upload" type="button" title="Upload files" aria-label="Upload">
             <svg viewBox="0 0 24 24" class="ico"><path d="M12 16V4m0 0L7 9m5-5l5 5" /><path d="M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2" /></svg>
           </button>
@@ -82,13 +116,24 @@
             <svg viewBox="0 0 24 24" class="ico ico-view-icons"><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></svg>
             <svg viewBox="0 0 24 24" class="ico ico-view-list"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
           </button>
+          <button class="tool pane-close" type="button" title="Close pane" aria-label="Close pane">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
         </div>
         <input type="file" class="file-input" multiple hidden />
+      </div>
+      <div class="pane-filter">
+        <svg viewBox="0 0 24 24" class="filter-ico"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+        <input type="text" class="filter-input" placeholder="Filter by name…" spellcheck="false" aria-label="Filter listing" />
+        <button class="filter-clear" type="button" title="Clear filter" aria-label="Clear filter" hidden>
+          <svg viewBox="0 0 24 24" class="ico"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        </button>
       </div>
       <div class="pane-crumbs">
         <div class="crumbs"></div>
       </div>
       <div class="pane-toolbar">
+        <button class="act act-selall" type="button" title="Select all (⌘A)">Select all</button>
         <button class="act act-download" type="button" disabled>Download</button>
         <button class="act act-copy" type="button" disabled>Copy →</button>
         <button class="act act-move" type="button" disabled>Move →</button>
@@ -98,9 +143,9 @@
       </div>
       <div class="pane-body">
         <div class="list-head">
-          <span class="col col-name">Name</span>
-          <span class="col col-size">Size</span>
-          <span class="col col-mod">Modified</span>
+          <button class="col col-name" type="button" data-sort="name">Name<span class="sort-arrow"></span></button>
+          <button class="col col-size" type="button" data-sort="size">Size<span class="sort-arrow"></span></button>
+          <button class="col col-mod" type="button" data-sort="mod">Modified<span class="sort-arrow"></span></button>
         </div>
         <div class="listing" tabindex="-1">
           <div class="entries"></div>

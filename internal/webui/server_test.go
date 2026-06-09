@@ -294,6 +294,97 @@ func TestListLocalDirRejectsRelative(t *testing.T) {
 	}
 }
 
+// TestWebUIReadWrite exercises the editor endpoints against the Local source:
+// touch creates an empty file, write saves content, read returns it.
+func TestWebUIReadWrite(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	client := ts.Client()
+
+	post := func(p string, params url.Values, body string) (int, string) {
+		params.Set("t", s.Token())
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+p+"?"+params.Encode(), strings.NewReader(body))
+		req.Header.Set("Origin", ts.URL)
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("post %s: %v", p, err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+
+	file := filepath.Join(dir, "note.txt")
+	if code, body := post("/api/touch", url.Values{"path": {file}}, ""); code != http.StatusOK {
+		t.Fatalf("touch status %d: %s", code, body)
+	}
+	if fi, err := os.Stat(file); err != nil || fi.Size() != 0 {
+		t.Fatalf("touch did not create empty file: %v", err)
+	}
+
+	want := "hello\nworld\n"
+	if code, body := post("/api/write", url.Values{"path": {file}}, want); code != http.StatusOK {
+		t.Fatalf("write status %d: %s", code, body)
+	}
+	if b, _ := os.ReadFile(file); string(b) != want {
+		t.Fatalf("write content mismatch: %q", b)
+	}
+
+	u := ts.URL + "/api/read?t=" + s.Token() + "&path=" + url.QueryEscape(file)
+	res, err := http.Get(u)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("read status %d: %s", res.StatusCode, body)
+	}
+	var out struct {
+		Content string `json:"content"`
+		Size    int    `json:"size"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatalf("decode read: %v", err)
+	}
+	if out.Content != want {
+		t.Fatalf("read content mismatch: %q", out.Content)
+	}
+}
+
+// TestWebUIReadRejectsBinary confirms a file with NUL bytes is refused.
+func TestWebUIReadRejectsBinary(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "blob.bin")
+	if err := os.WriteFile(bin, []byte{0x00, 0x01, 0x02, 0x03}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.Get(ts.URL + "/api/read?t=" + s.Token() + "&path=" + url.QueryEscape(bin))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusOK {
+		t.Fatalf("expected binary file to be rejected, got 200")
+	}
+}
+
+func TestLooksBinary(t *testing.T) {
+	t.Parallel()
+	if looksBinary([]byte("plain text\nwith newlines\t and tabs")) {
+		t.Fatalf("plain text classified as binary")
+	}
+	if !looksBinary([]byte("has a \x00 nul")) {
+		t.Fatalf("NUL byte should be binary")
+	}
+	if looksBinary([]byte("")) {
+		t.Fatalf("empty should not be binary")
+	}
+}
+
 func TestEnsureLoopbackAddr(t *testing.T) {
 	t.Parallel()
 	ok := []string{"127.0.0.1:9445", "localhost:8080", "[::1]:9445"}

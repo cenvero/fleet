@@ -107,23 +107,48 @@ const ICONS = {
   newfolder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/><path d="M12 11v4m-2-2h4"/></svg>',
   open: '<svg viewBox="0 0 24 24"><path d="M5 12h14m0 0l-6-6m6 6l-6 6"/></svg>',
   info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg>',
+  edit: '<svg viewBox="0 0 24 24"><path d="M11 4H7a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-4"/><path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z"/></svg>',
+  newfile: '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"/><path d="M14 3v5h5"/><path d="M12 12v5m-2.5-2.5h5"/></svg>',
+  path: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h8"/></svg>',
   empty: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>',
 };
 
 // ----------------------------------------------------------------- state
 
+// Panes are dynamic (1..N). Each pane carries its own source, path, selection,
+// view, hidden-toggle, filter text and sort spec. `state.els` holds the matching
+// DOM refs, kept index-aligned with `state.panes` across add/remove/render.
+function newPaneState(server) {
+  return {
+    server: server || "",
+    path: "/",
+    items: [],            // raw listing from the server (already dir-first sorted base)
+    sel: new Set(),
+    hidden: false,
+    loading: false,
+    view: "list",
+    filter: "",           // case-insensitive name filter
+    sort: { key: "name", dir: 1 }, // key: name|size|mod, dir: 1 asc / -1 desc
+  };
+}
+
+const MAX_PANES = 6;
+
 const state = {
   servers: [],
-  panes: [
-    { server: "", path: "/", items: [], sel: new Set(), hidden: false, loading: false, view: "list" },
-    { server: "", path: "/", items: [], sel: new Set(), hidden: false, loading: false, view: "list" },
-  ],
+  panes: [newPaneState(""), newPaneState("")],
   active: 0,
-  els: [null, null], // per-pane DOM refs
+  els: [], // per-pane DOM refs, index-aligned with panes
 };
 
 function pane(i) { return state.panes[i]; }
-function other(i) { return i === 0 ? 1 : 0; }
+// other(i): the "next" pane for the two-button Copy→/Move→ actions. With N panes
+// it targets the pane immediately to the right (wrapping), so the toolbar arrows
+// stay meaningful; drag-and-drop still works between any two panes.
+function other(i) {
+  if (state.panes.length < 2) return i;
+  return (i + 1) % state.panes.length;
+}
 
 // ----------------------------------------------------------------- toast
 
@@ -142,11 +167,15 @@ function toast(message, kind = "") {
 
 // ----------------------------------------------------------------- pane build
 
+// buildPanes renders all panes from scratch. Called on init and whenever the
+// pane set changes (add/remove). It rebuilds DOM + refs index-aligned with
+// state.panes, re-wires events, repopulates each server dropdown, and reloads.
 function buildPanes() {
   const host = $("#panes");
   host.innerHTML = "";
+  state.els = [];
   const tpl = $("#pane-template");
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < state.panes.length; i++) {
     const node = tpl.content.firstElementChild.cloneNode(true);
     host.appendChild(node);
     const refs = {
@@ -155,25 +184,100 @@ function buildPanes() {
       back: $(".tool.back", node),
       refresh: $(".tool.refresh", node),
       mkdir: $(".tool.mkdir", node),
+      newfile: $(".tool.newfile", node),
       upload: $(".tool.upload", node),
       hiddenToggle: $(".tool.hidden-toggle", node),
       viewToggle: $(".tool.view-toggle", node),
+      paneClose: $(".tool.pane-close", node),
+      filterInput: $(".filter-input", node),
+      filterClear: $(".filter-clear", node),
       fileInput: $(".file-input", node),
       crumbs: $(".crumbs", node),
+      listHead: $(".list-head", node),
       entries: $(".entries", node),
       listing: $(".listing", node),
       body: $(".pane-body", node),
       selInfo: $(".sel-info", node),
+      actSelAll: $(".act-selall", node),
       actDownload: $(".act-download", node),
       actCopy: $(".act-copy", node),
       actMove: $(".act-move", node),
       actRename: $(".act-rename", node),
       actDelete: $(".act-delete", node),
     };
-    state.els[i] = refs;
+    state.els.push(refs);
+    populateServerSelect(i);
     wirePane(i);
+    applyViewClass(i);
+    renderSort(i);
   }
-  setActive(0);
+  updatePaneChrome();
+  setActive(Math.min(state.active, state.panes.length - 1));
+  applyPaneCountClass();
+}
+
+// populateServerSelect fills one pane's source dropdown from state.servers,
+// preserving the pane's current selection.
+function populateServerSelect(i) {
+  const sel = state.els[i].server;
+  const current = pane(i).server;
+  sel.innerHTML = "";
+  const localOpt = document.createElement("option");
+  localOpt.value = "";
+  localOpt.textContent = "Local (this machine)";
+  sel.appendChild(localOpt);
+  for (const s of state.servers) {
+    const opt = document.createElement("option");
+    opt.value = s.name;
+    opt.textContent = s.reachable ? s.name : s.name + " (offline)";
+    opt.disabled = !s.reachable;
+    sel.appendChild(opt);
+  }
+  sel.value = current;
+}
+
+// applyPaneCountClass tags #panes with the live count so CSS can pick a layout
+// (and switch to horizontal-scroll once panes get too narrow to fit).
+function applyPaneCountClass() {
+  const host = $("#panes");
+  host.dataset.count = String(state.panes.length);
+}
+
+// updatePaneChrome enables/disables the close button (min 1 pane) and the global
+// Add-pane button (max MAX_PANES), and keeps each pane's title in sync.
+function updatePaneChrome() {
+  const single = state.panes.length <= 1;
+  for (let i = 0; i < state.els.length; i++) {
+    if (state.els[i].paneClose) state.els[i].paneClose.disabled = single;
+  }
+  const addBtn = $("#add-pane");
+  if (addBtn) addBtn.disabled = state.panes.length >= MAX_PANES;
+}
+
+// addPane appends a new pane (default source: first reachable server, else
+// Local), rebuilds, and loads it. Selection/active state of others is preserved.
+function addPane() {
+  if (state.panes.length >= MAX_PANES) {
+    toast("Maximum of " + MAX_PANES + " panes", "error");
+    return;
+  }
+  const reachable = state.servers.filter((s) => s.reachable);
+  const defServer = reachable[0] ? reachable[0].name : "";
+  state.panes.push(newPaneState(defServer));
+  const idx = state.panes.length - 1;
+  buildPanes();
+  setActive(idx);
+  loadListing(idx);
+}
+
+// removePane drops pane i (keeping at least one), rebuilds, and reloads the
+// remaining panes so their refs/listings stay valid.
+function removePane(i) {
+  if (state.panes.length <= 1) return;
+  state.panes.splice(i, 1);
+  if (state.active >= state.panes.length) state.active = state.panes.length - 1;
+  buildPanes();
+  for (let k = 0; k < state.panes.length; k++) loadListing(k);
 }
 
 function wirePane(i) {
@@ -194,7 +298,9 @@ function wirePane(i) {
   r.back.addEventListener("click", () => { setActive(i); navigate(i, parentPath(p.path)); });
   r.refresh.addEventListener("click", () => { setActive(i); loadListing(i); });
   r.mkdir.addEventListener("click", () => { setActive(i); promptMkdir(i); });
+  r.newfile.addEventListener("click", () => { setActive(i); promptNewFile(i); });
   r.upload.addEventListener("click", () => { setActive(i); r.fileInput.click(); });
+  r.paneClose.addEventListener("click", (e) => { e.stopPropagation(); removePane(i); });
   r.fileInput.addEventListener("change", (e) => {
     if (e.target.files.length) uploadFiles(i, e.target.files);
     e.target.value = "";
@@ -209,8 +315,40 @@ function wirePane(i) {
     setActive(i);
     setView(i, p.view === "list" ? "icons" : "list");
   });
-  applyViewClass(i);
 
+  // per-pane filter box
+  r.filterInput.value = p.filter;
+  r.filterClear.hidden = !p.filter;
+  r.filterInput.addEventListener("input", (e) => {
+    setActive(i);
+    p.filter = e.target.value;
+    r.filterClear.hidden = !p.filter;
+    renderEntries(i);
+    renderSelection(i);
+  });
+  r.filterClear.addEventListener("click", () => {
+    p.filter = "";
+    r.filterInput.value = "";
+    r.filterClear.hidden = true;
+    r.filterInput.focus();
+    renderEntries(i);
+    renderSelection(i);
+  });
+
+  // sortable column headers
+  for (const col of $$(".list-head .col", r.root)) {
+    col.addEventListener("click", () => {
+      setActive(i);
+      const key = col.dataset.sort;
+      if (p.sort.key === key) p.sort.dir = -p.sort.dir;
+      else { p.sort.key = key; p.sort.dir = key === "name" ? 1 : -1; }
+      renderSort(i);
+      renderEntries(i);
+      renderSelection(i);
+    });
+  }
+
+  r.actSelAll.addEventListener("click", () => { setActive(i); selectAll(i); });
   r.actDownload.addEventListener("click", () => actDownload(i));
   r.actCopy.addEventListener("click", () => transferSelection(i, "copy"));
   r.actMove.addEventListener("click", () => transferSelection(i, "move"));
@@ -237,10 +375,22 @@ function wirePane(i) {
 }
 
 function setActive(i) {
-  if (state.active === i && state.els[i] && state.els[i].root.classList.contains("active")) return;
   state.active = i;
-  for (let k = 0; k < 2; k++) {
+  for (let k = 0; k < state.els.length; k++) {
     state.els[k].root.classList.toggle("active", k === i);
+  }
+}
+
+// renderSort reflects the pane's current sort onto its column headers (which
+// column is active + the asc/desc arrow direction).
+function renderSort(i) {
+  const p = pane(i);
+  const r = state.els[i];
+  for (const col of $$(".list-head .col", r.root)) {
+    const active = col.dataset.sort === p.sort.key;
+    col.classList.toggle("sort-active", active);
+    col.classList.toggle("sort-desc", active && p.sort.dir < 0);
+    col.classList.toggle("sort-asc", active && p.sort.dir > 0);
   }
 }
 
@@ -255,32 +405,16 @@ async function loadServers() {
     return;
   }
   state.servers = servers;
-  // Build each pane's source dropdown: a "Local" entry (value "" = the
-  // controller's own filesystem) followed by every configured server.
-  for (let i = 0; i < 2; i++) {
-    const sel = state.els[i].server;
-    sel.innerHTML = "";
-    const localOpt = document.createElement("option");
-    localOpt.value = "";
-    localOpt.textContent = "Local (this machine)";
-    sel.appendChild(localOpt);
-    for (const s of servers) {
-      const opt = document.createElement("option");
-      opt.value = s.name;
-      opt.textContent = s.reachable ? s.name : s.name + " (offline)";
-      opt.disabled = !s.reachable;
-      sel.appendChild(opt);
-    }
-  }
   // Default panes: pane 0 = Local, pane 1 = first reachable server (or Local
-  // when no servers are configured / reachable).
+  // when no servers are configured / reachable). Only seed defaults the very
+  // first time; later panes keep whatever the user picked.
   const reachable = servers.filter((s) => s.reachable);
   const firstServer = reachable[0] || servers[0];
   pane(0).server = "";
-  state.els[0].server.value = "";
-  pane(1).server = firstServer ? firstServer.name : "";
-  state.els[1].server.value = pane(1).server;
-  await Promise.all([loadListing(0), loadListing(1)]);
+  if (state.panes.length > 1) pane(1).server = firstServer ? firstServer.name : "";
+  // Build each pane's source dropdown ("Local" + every configured server).
+  for (let i = 0; i < state.panes.length; i++) populateServerSelect(i);
+  await Promise.all(state.panes.map((_, i) => loadListing(i)));
 }
 
 // ----------------------------------------------------------------- listing
@@ -308,14 +442,35 @@ async function loadListing(i) {
   // keep selections that still exist
   const names = new Set((result.entries || []).map((x) => x.name));
   for (const n of Array.from(p.sel)) if (!names.has(n)) p.sel.delete(n);
-  // sort: dirs first, then name (case-insensitive)
-  p.items = (result.entries || []).slice().sort((a, b) => {
-    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-  });
+  p.items = (result.entries || []).slice();
   renderCrumbs(i);
   renderEntries(i);
   renderSelection(i);
+}
+
+// sortItems returns p.items ordered by the pane's sort spec. Directories always
+// sort before files; within each group the chosen key (name/size/mod) applies,
+// reversed for descending. Name is the stable tiebreaker.
+function sortItems(p) {
+  const { key, dir } = p.sort;
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  return p.items.slice().sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    let c = 0;
+    if (key === "size") c = (a.is_dir ? 0 : a.size || 0) - (b.is_dir ? 0 : b.size || 0);
+    else if (key === "mod") c = new Date(a.mod_time || 0) - new Date(b.mod_time || 0);
+    else c = byName(a, b);
+    if (c === 0) c = byName(a, b);
+    return c * dir;
+  });
+}
+
+// visibleItems applies the pane's sort then its case-insensitive name filter.
+function visibleItems(p) {
+  let items = sortItems(p);
+  const f = p.filter.trim().toLowerCase();
+  if (f) items = items.filter((it) => it.name.toLowerCase().includes(f));
+  return items;
 }
 
 function navigate(i, path) {
@@ -392,9 +547,14 @@ function renderEntries(i) {
     showPlaceholder(i, "empty", "Empty folder");
     return;
   }
+  const items = visibleItems(p);
+  if (!items.length) {
+    showPlaceholder(i, "empty", "No matches for “" + p.filter + "”");
+    return;
+  }
   const frag = document.createDocumentFragment();
   const icons = p.view === "icons";
-  for (const item of p.items) {
+  for (const item of items) {
     const row = icons ? buildIconCell(item) : buildListRow(item);
     wireRow(i, row, item);
     frag.appendChild(row);
@@ -494,15 +654,35 @@ function renderSelection(i) {
     row.classList.toggle("selected", p.sel.has(row.dataset.name));
   }
   const n = p.sel.size;
-  const sz = p.items.filter((it) => p.sel.has(it.name)).reduce((a, it) => a + (it.is_dir ? 0 : it.size || 0), 0);
+  const selItems = p.items.filter((it) => p.sel.has(it.name));
+  const sz = selItems.reduce((a, it) => a + (it.is_dir ? 0 : it.size || 0), 0);
   r.selInfo.textContent = n === 0 ? "" : n === 1 ? "1 selected" : `${n} selected · ${humanSize(sz)}`;
 
-  const onlyFiles = n > 0 && p.items.filter((it) => p.sel.has(it.name)).every((it) => !it.is_dir);
+  const onlyFiles = n > 0 && selItems.every((it) => !it.is_dir);
   r.actDownload.disabled = !onlyFiles;
   r.actCopy.disabled = n === 0;
   r.actMove.disabled = n === 0;
   r.actRename.disabled = n !== 1;
   r.actDelete.disabled = n === 0;
+
+  // Select-all label toggles to "Deselect" once everything visible is selected.
+  const vis = visibleItems(p);
+  const allSel = vis.length > 0 && vis.every((it) => p.sel.has(it.name));
+  r.actSelAll.textContent = allSel ? "Deselect all" : "Select all";
+  r.actSelAll.disabled = vis.length === 0;
+}
+
+// selectAll toggles selection over the currently visible (filtered+sorted) set.
+function selectAll(i) {
+  const p = pane(i);
+  const vis = visibleItems(p);
+  const allSel = vis.length > 0 && vis.every((it) => p.sel.has(it.name));
+  if (allSel) {
+    for (const it of vis) p.sel.delete(it.name);
+  } else {
+    for (const it of vis) p.sel.add(it.name);
+  }
+  renderSelection(i);
 }
 
 function selectedItems(i) {
@@ -513,7 +693,7 @@ function selectedItems(i) {
 function toggleSelect(i, name, opts = {}) {
   const p = pane(i);
   if (opts.range && p.sel.size && p._anchor != null) {
-    const names = p.items.map((x) => x.name);
+    const names = visibleItems(p).map((x) => x.name);
     const a = names.indexOf(p._anchor);
     const b = names.indexOf(name);
     if (a >= 0 && b >= 0) {
@@ -549,6 +729,8 @@ function wireRow(i, row, item) {
     setActive(i);
     if (item.is_dir) {
       navigate(i, joinPath(p.path, item.name));
+    } else if (isTextFile(item.name)) {
+      openEditor(i, item);
     } else {
       downloadOne(i, item);
     }
@@ -600,6 +782,27 @@ function promptMkdir(i) {
         loadListing(i);
       } catch (e) {
         toast("New folder failed: " + e.message, "error");
+      }
+    },
+  });
+}
+
+function promptNewFile(i) {
+  openInputModal({
+    title: "New file",
+    desc: "Create an empty file in " + pane(i).path,
+    value: "untitled.txt",
+    okLabel: "Create",
+    onOk: async (name) => {
+      const p = pane(i);
+      try {
+        await postJSON("/api/touch", { server: p.server, path: joinPath(p.path, name) });
+        toast("Created " + name, "success");
+        await loadListing(i);
+        // Open the new file straight in the editor for convenience.
+        openEditor(i, { name, is_dir: false });
+      } catch (e) {
+        toast("New file failed: " + e.message, "error");
       }
     },
   });
@@ -921,17 +1124,23 @@ function openContextMenu(i, item, x, y) {
     if (item.is_dir) {
       add(makeMenuItem("Open", ICONS.open, () => navigate(i, joinPath(p.path, item.name))));
     } else {
+      if (isTextFile(item.name)) {
+        add(makeMenuItem("Edit", ICONS.edit, () => openEditor(i, item), { disabled: multi }));
+      }
       add(makeMenuItem("Download", ICONS.download, () => actDownload(i)));
     }
-    add(makeMenuItem(multi ? "Copy → other pane" : "Copy → other pane", ICONS.copy, () => transferSelection(i, "copy")));
-    add(makeMenuItem("Move → other pane", ICONS.move, () => transferSelection(i, "move")));
+    add(makeMenuItem("Copy → next pane", ICONS.copy, () => transferSelection(i, "copy")));
+    add(makeMenuItem("Move → next pane", ICONS.move, () => transferSelection(i, "move")));
     add(makeMenuItem("Rename", ICONS.rename, () => actRename(i), { disabled: multi }));
+    add(makeMenuItem("Copy path", ICONS.path, () => copyPath(i, item), { disabled: multi }));
     add(menuSep());
     add(makeMenuItem("Delete", ICONS.trash, () => actDelete(i), { danger: true, key: "⌫" }));
     add(menuSep());
   }
   add(makeMenuItem("New folder", ICONS.newfolder, () => promptMkdir(i)));
+  add(makeMenuItem("New file", ICONS.newfile, () => promptNewFile(i)));
   add(makeMenuItem("Upload files…", ICONS.download, () => state.els[i].fileInput.click()));
+  add(makeMenuItem("Select all", null, () => selectAll(i)));
   add(makeMenuItem("Refresh", null, () => loadListing(i)));
   if (item) {
     add(menuSep());
@@ -1365,7 +1574,8 @@ function collectFiles(dt) {
 
 function setupKeyboard() {
   document.addEventListener("keydown", (e) => {
-    // modal handles its own keys
+    // the editor overlay and modal handle their own keys
+    if (editor.open) return;
     if (!$("#modal-overlay").hidden) return;
     if (!$("#ctxmenu").hidden || !$("#dropmenu").hidden) {
       if (e.key === "Escape") closeMenus();
@@ -1373,8 +1583,21 @@ function setupKeyboard() {
     }
     const i = state.active;
     const p = pane(i);
+
+    // Global chords that should work even from the filter box.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      const fi = state.els[i] && state.els[i].filterInput;
+      if (fi) fi.focus();
+      return;
+    }
+
     const tag = (e.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "select" || tag === "textarea") return;
+    if (tag === "input" || tag === "select" || tag === "textarea") {
+      // Allow Escape to blur a focused filter box.
+      if (e.key === "Escape" && e.target.classList.contains("filter-input")) e.target.blur();
+      return;
+    }
 
     if (e.key === "Escape") { p.sel.clear(); renderSelection(i); return; }
     if ((e.key === "v" || e.key === "V") && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -1382,17 +1605,30 @@ function setupKeyboard() {
       setView(i, p.view === "list" ? "icons" : "list");
       return;
     }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "t") {
+      e.preventDefault();
+      addPane();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w" && state.panes.length > 1) {
+      e.preventDefault();
+      removePane(i);
+      return;
+    }
     if ((e.key === "Delete" || e.key === "Backspace") && p.sel.size) { e.preventDefault(); actDelete(i); return; }
     if (e.key === "F2" && p.sel.size === 1) { e.preventDefault(); actRename(i); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
       e.preventDefault();
-      p.sel = new Set(p.items.map((x) => x.name));
-      renderSelection(i);
+      selectAll(i);
       return;
     }
     if (e.key === "Enter" && p.sel.size === 1) {
       const item = p.items.find((x) => p.sel.has(x.name));
-      if (item) { if (item.is_dir) navigate(i, joinPath(p.path, item.name)); else downloadOne(i, item); }
+      if (item) {
+        if (item.is_dir) navigate(i, joinPath(p.path, item.name));
+        else if (isTextFile(item.name)) openEditor(i, item);
+        else downloadOne(i, item);
+      }
       return;
     }
     if (e.key === "Backspace") { navigate(i, parentPath(p.path)); return; }
@@ -1405,7 +1641,8 @@ function setupKeyboard() {
 
 function moveSelectionByArrow(i, dir, extend) {
   const p = pane(i);
-  const names = p.items.map((x) => x.name);
+  const names = visibleItems(p).map((x) => x.name);
+  if (!names.length) return;
   let idx = p._anchor != null ? names.indexOf(p._anchor) : -1;
   idx = idx < 0 ? (dir > 0 ? 0 : names.length - 1) : Math.min(names.length - 1, Math.max(0, idx + dir));
   const name = names[idx];
@@ -1414,6 +1651,536 @@ function moveSelectionByArrow(i, dir, extend) {
   renderSelection(i);
   const row = rowEl(i, name);
   if (row) row.scrollIntoView({ block: "nearest" });
+}
+
+// ----------------------------------------------------------------- copy path
+
+// copyPath puts a file/folder's full path on the clipboard. Falls back to a
+// hidden textarea + execCommand where the async Clipboard API is unavailable
+// (it needs a secure context; http://localhost qualifies in most browsers).
+async function copyPath(i, item) {
+  const full = joinPath(pane(i).path, item.name);
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(full);
+      ok = true;
+    }
+  } catch { /* fall through to legacy path */ }
+  if (!ok) {
+    const ta = document.createElement("textarea");
+    ta.value = full;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+  }
+  toast(ok ? "Copied path" : "Path: " + full, ok ? "success" : "");
+}
+
+// ----------------------------------------------------------------- syntax highlighter
+//
+// A small, self-contained, CSP-clean tokenizer. It classifies common languages
+// into spans we colour via app.css — "good enough" highlighting, no eval, no
+// external deps. Everything is escaped before being wrapped, so file content is
+// never interpreted as HTML.
+
+const EXT_LANG = {
+  go: "go",
+  js: "js", mjs: "js", cjs: "js", jsx: "js", ts: "js", tsx: "js",
+  py: "py", pyw: "py",
+  json: "json",
+  yaml: "yaml", yml: "yaml",
+  toml: "toml", ini: "toml", cfg: "toml", conf: "toml",
+  md: "md", markdown: "md",
+  sh: "sh", bash: "sh", zsh: "sh", fish: "sh",
+  html: "xml", htm: "xml", xml: "xml", svg: "xml", vue: "xml",
+  css: "css", scss: "css", less: "css",
+  c: "c", h: "c", cpp: "c", cc: "c", hpp: "c", cxx: "c",
+  rs: "rust",
+  java: "c", kt: "c", swift: "c", php: "c",
+  rb: "ruby",
+  sql: "sql",
+  dockerfile: "sh", makefile: "sh", env: "toml",
+  txt: "text", log: "text",
+};
+
+// Extensions/known basenames we treat as editable text.
+function extOf(name) {
+  const base = name.toLowerCase();
+  if (base === "dockerfile" || base === "makefile" || base === "rakefile") return base;
+  if (base.startsWith(".") && base.indexOf(".", 1) < 0) return base.slice(1); // .gitignore etc
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1) : "";
+}
+
+const TEXT_EXTS = new Set([
+  ...Object.keys(EXT_LANG),
+  "gitignore", "gitattributes", "editorconfig", "npmrc", "nvmrc", "prettierrc",
+  "eslintrc", "babelrc", "properties", "gradle", "tf", "tfvars", "graphql", "gql",
+  "csv", "tsv", "rst", "tex", "lua", "pl", "r", "scala", "clj", "ex", "exs", "erl",
+  "dart", "groovy", "ps1", "bat", "cmd", "patch", "diff", "lock", "service", "desktop",
+]);
+
+function isTextFile(name) {
+  const e = extOf(name);
+  if (!e) return false;
+  return TEXT_EXTS.has(e) || EXT_LANG[e] !== undefined;
+}
+
+function langFor(name) {
+  return EXT_LANG[extOf(name)] || "text";
+}
+
+function langLabel(name) {
+  const map = {
+    go: "Go", js: "JavaScript", py: "Python", json: "JSON", yaml: "YAML",
+    toml: "TOML", md: "Markdown", sh: "Shell", xml: "HTML/XML", css: "CSS",
+    c: "C-like", rust: "Rust", ruby: "Ruby", sql: "SQL", text: "Text",
+  };
+  return map[langFor(name)] || "Text";
+}
+
+function escHTML(s) {
+  return s.replace(/[&<>]/g, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"));
+}
+
+// Keyword sets per language family.
+const KEYWORDS = {
+  go: "break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var nil true false iota append cap close complex copy delete imag len make new panic print println real recover string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr byte rune float32 float64 bool error any",
+  js: "abstract async await break case catch class const continue debugger default delete do else enum export extends false finally for from function get if implements import in instanceof interface let new null of package private protected public return set static super switch this throw true try typeof var void while with yield undefined NaN Infinity console document window",
+  py: "and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield True False None self print len range str int float dict list set tuple bool",
+  c: "auto break case char const continue default do double else enum extern float for goto if inline int long register return short signed sizeof static struct switch typedef union unsigned void volatile while bool true false class public private protected new delete this namespace using template virtual override final nullptr include define import package",
+  rust: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while async dyn String Vec Option Some None Result Ok Err Box",
+  ruby: "alias and begin break case class def defined do else elsif end ensure false for if in module next nil not or redo rescue retry return self super then true undef unless until when while yield require puts attr_accessor",
+  sql: "select from where insert into values update set delete create table drop alter add column primary key foreign references join inner left right outer on group by order having limit offset as and or not null distinct count sum avg min max union index view database",
+};
+
+// highlightCode → HTML string with <span class="hl-*"> wrappers. The strategy:
+// 1) pull out comments/strings first (so keywords inside them aren't matched),
+// 2) then mark numbers and keywords on the remaining plain text.
+function highlightCode(src, lang) {
+  if (lang === "json") return hlJSON(src);
+  if (lang === "yaml" || lang === "toml") return hlConfig(src, lang);
+  if (lang === "md") return hlMarkdown(src);
+  if (lang === "xml") return hlXML(src);
+  if (lang === "css") return hlCSS(src);
+  if (lang === "text") return escHTML(src);
+  return hlGeneric(src, lang);
+}
+
+// Tokenize by scanning for the earliest "interesting" construct (comment or
+// string) and emitting plain (keyword/number-marked) text between matches.
+function hlGeneric(src, lang) {
+  const kw = (KEYWORDS[lang] || KEYWORDS.c).split(" ");
+  const kwSet = new Set(kw);
+  const lineComment = lang === "py" || lang === "ruby" || lang === "sh" ? "#" : "//";
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const two = src.substr(i, 2);
+    // block comment /* ... */
+    if (two === "/*") {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end < 0 ? n : end + 2;
+      out += span("cm", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    // line comment
+    if (src.startsWith(lineComment, i) || (lang === "sql" && two === "--")) {
+      const marker = lang === "sql" && two === "--" ? "--" : lineComment;
+      const end = src.indexOf("\n", i);
+      const stop = end < 0 ? n : end;
+      out += span("cm", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    // strings: ' " `
+    if (c === '"' || c === "'" || c === "`") {
+      const stop = scanString(src, i, c);
+      out += span("st", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    // identifier / keyword
+    if (/[A-Za-z_$]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_$]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      out += kwSet.has(word) ? span("kw", word) : escHTML(word);
+      i = j;
+      continue;
+    }
+    // number
+    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] || ""))) {
+      let j = i + 1;
+      while (j < n && /[0-9a-fA-FxX._]/.test(src[j])) j++;
+      out += span("nm", src.slice(i, j));
+      i = j;
+      continue;
+    }
+    out += escHTML(c);
+    i++;
+  }
+  return out;
+}
+
+// scanString returns the index just past a string literal that starts at `start`
+// with quote `q`, honouring backslash escapes (and never crossing a newline for
+// ' or ").
+function scanString(src, start, q) {
+  let j = start + 1;
+  const n = src.length;
+  while (j < n) {
+    const ch = src[j];
+    if (ch === "\\") { j += 2; continue; }
+    if (ch === q) return j + 1;
+    if ((q === '"' || q === "'") && ch === "\n") return j; // unterminated
+    j++;
+  }
+  return n;
+}
+
+function span(cls, text) {
+  return '<span class="hl-' + cls + '">' + escHTML(text) + "</span>";
+}
+
+function hlJSON(src) {
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    if (c === '"') {
+      const stop = scanString(src, i, '"');
+      // a string followed by ':' is a key
+      let k = stop;
+      while (k < n && /\s/.test(src[k])) k++;
+      const cls = src[k] === ":" ? "ky" : "st";
+      out += span(cls, src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    if (/[0-9-]/.test(c) && (i === 0 || /[\s,:[]/.test(src[i - 1]))) {
+      let j = i + 1;
+      while (j < n && /[0-9.eE+-]/.test(src[j])) j++;
+      out += span("nm", src.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (/[a-z]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[a-z]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      out += (word === "true" || word === "false" || word === "null") ? span("kw", word) : escHTML(word);
+      i = j;
+      continue;
+    }
+    out += escHTML(c);
+    i++;
+  }
+  return out;
+}
+
+// hlConfig handles YAML/TOML line-by-line: comments, keys, strings, numbers.
+function hlConfig(src, lang) {
+  return src.split("\n").map((line) => {
+    const hash = line.indexOf("#");
+    let code = line, comment = "";
+    if (hash >= 0) { code = line.slice(0, hash); comment = line.slice(hash); }
+    // key: value  /  key = value
+    const m = code.match(/^(\s*[-]?\s*)([A-Za-z0-9_.$-]+|"[^"]*")(\s*[:=]\s*)(.*)$/);
+    let html;
+    if (m) {
+      html = escHTML(m[1]) + span("ky", m[2]) + escHTML(m[3]) + hlConfigVal(m[4]);
+    } else {
+      html = escHTML(code);
+    }
+    return html + (comment ? span("cm", comment) : "");
+  }).join("\n");
+}
+
+function hlConfigVal(v) {
+  const t = v.trim();
+  if (/^(true|false|null|yes|no|on|off|~)$/i.test(t)) return escHTML(v.slice(0, v.indexOf(t))) + span("kw", t) + escHTML(v.slice(v.indexOf(t) + t.length));
+  if (/^-?\d+(\.\d+)?$/.test(t)) return escHTML(v.replace(t, "")) + span("nm", t);
+  if (/^["'].*["']$/.test(t)) return span("st", v);
+  return escHTML(v);
+}
+
+function hlMarkdown(src) {
+  return src.split("\n").map((line) => {
+    if (/^\s*#{1,6}\s/.test(line)) return span("kw", line);
+    if (/^\s*([-*+]|\d+\.)\s/.test(line)) {
+      const m = line.match(/^(\s*)([-*+]|\d+\.)(\s.*)$/);
+      if (m) return escHTML(m[1]) + span("ky", m[2]) + hlInlineMd(m[3]);
+    }
+    if (/^\s*>/.test(line)) return span("cm", line);
+    if (/^\s*```/.test(line)) return span("st", line);
+    return hlInlineMd(line);
+  }).join("\n");
+}
+
+function hlInlineMd(s) {
+  // escape, then re-introduce highlight spans for `code`, **bold**, [links]
+  let out = escHTML(s);
+  out = out.replace(/`[^`]+`/g, (m) => span("st", m.replace(/^`|`$/g, "`")));
+  out = out.replace(/\*\*[^*]+\*\*/g, (m) => '<span class="hl-kw">' + m + "</span>");
+  out = out.replace(/\[[^\]]+\]\([^)]+\)/g, (m) => '<span class="hl-ky">' + m + "</span>");
+  return out;
+}
+
+function hlXML(src) {
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    if (src.startsWith("<!--", i)) {
+      const end = src.indexOf("-->", i);
+      const stop = end < 0 ? n : end + 3;
+      out += span("cm", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    if (src[i] === "<") {
+      const end = src.indexOf(">", i);
+      const stop = end < 0 ? n : end + 1;
+      out += hlTag(src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    const lt = src.indexOf("<", i);
+    const stop = lt < 0 ? n : lt;
+    out += escHTML(src.slice(i, stop));
+    i = stop;
+  }
+  return out;
+}
+
+function hlTag(tag) {
+  // <tag attr="val"> → tag name + attrs + strings
+  let out = "&lt;";
+  let body = tag.slice(1, tag.endsWith(">") ? -1 : undefined);
+  let closing = "";
+  if (tag.endsWith(">")) closing = "&gt;";
+  const nameMatch = body.match(/^\/?[A-Za-z0-9:-]+/);
+  if (nameMatch) {
+    out += span("ky", nameMatch[0]);
+    body = body.slice(nameMatch[0].length);
+  }
+  out += body.replace(/("[^"]*"|'[^']*')/g, (m) => span("st", m))
+             .replace(/([A-Za-z-]+)(=)/g, (m, a, eq) => '<span class="hl-nm">' + escHTML(a) + "</span>" + escHTML(eq));
+  return out + closing;
+}
+
+function hlCSS(src) {
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    if (src.startsWith("/*", i)) {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end < 0 ? n : end + 2;
+      out += span("cm", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      const stop = scanString(src, i, c);
+      out += span("st", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
+    if (c === "#" || c === ".") {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_-]/.test(src[j])) j++;
+      out += span("ky", src.slice(i, j));
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[0-9.a-z%]/.test(src[j])) j++;
+      out += span("nm", src.slice(i, j));
+      i = j;
+      continue;
+    }
+    out += escHTML(c);
+    i++;
+  }
+  return out;
+}
+
+// ----------------------------------------------------------------- editor
+
+const editor = {
+  open: false,
+  paneIdx: -1,
+  item: null,
+  original: "",
+  lang: "text",
+};
+
+async function openEditor(i, item) {
+  const p = pane(i);
+  const full = joinPath(p.path, item.name);
+  const overlay = $("#editor-overlay");
+  const ta = $("#ed-input");
+  const name = $("#ed-name");
+  const lang = $("#ed-lang");
+  const meta = $("#ed-meta");
+  const iconWrap = $(".ed-icon", overlay);
+
+  iconWrap.innerHTML = ICONS.file;
+  name.textContent = item.name;
+  lang.textContent = langLabel(item.name);
+  meta.textContent = "Loading…";
+  ta.value = "";
+  ta.disabled = true;
+  setDirty(false);
+  highlightEditor("", langFor(item.name));
+  overlay.hidden = false;
+  editor.open = true;
+  editor.paneIdx = i;
+  editor.item = item;
+  editor.lang = langFor(item.name);
+
+  let data;
+  try {
+    data = await getJSON("/api/read", { server: p.server, path: full });
+  } catch (e) {
+    meta.textContent = "";
+    toast("Open failed: " + e.message, "error");
+    closeEditor();
+    return;
+  }
+  if (!editor.open || editor.item !== item) return; // closed while loading
+  editor.original = data.content || "";
+  ta.value = editor.original;
+  ta.disabled = false;
+  meta.textContent = humanSize(data.size || editor.original.length);
+  syncEditorView();
+  setDirty(false);
+  ta.focus();
+}
+
+function highlightEditor(text, lang) {
+  const code = $("#ed-highlight code");
+  // A trailing newline keeps the highlight layer's height aligned with the
+  // textarea when the file ends with \n.
+  code.innerHTML = highlightCode(text, lang) + "\n";
+}
+
+// syncEditorView re-highlights and rebuilds the line-number gutter from the
+// textarea's current content, and mirrors scroll between the two layers.
+function syncEditorView() {
+  const ta = $("#ed-input");
+  highlightEditor(ta.value, editor.lang);
+  const lines = ta.value.split("\n").length;
+  const gutter = $("#ed-gutter");
+  let g = "";
+  for (let k = 1; k <= lines; k++) g += k + "\n";
+  gutter.textContent = g;
+  syncEditorScroll();
+}
+
+function syncEditorScroll() {
+  const ta = $("#ed-input");
+  const hl = $("#ed-highlight");
+  const gutter = $("#ed-gutter");
+  hl.scrollTop = ta.scrollTop;
+  hl.scrollLeft = ta.scrollLeft;
+  gutter.scrollTop = ta.scrollTop;
+}
+
+function setDirty(d) {
+  editor.dirty = d;
+  $("#ed-dirty").hidden = !d;
+}
+
+function closeEditor() {
+  $("#editor-overlay").hidden = true;
+  editor.open = false;
+  editor.item = null;
+  editor.paneIdx = -1;
+  $("#ed-input").value = "";
+}
+
+async function saveEditor() {
+  if (!editor.open) return;
+  const i = editor.paneIdx;
+  const p = pane(i);
+  const item = editor.item;
+  const ta = $("#ed-input");
+  const content = ta.value;
+  const full = joinPath(p.path, item.name);
+  const saveBtn = $("#ed-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Saving…";
+  try {
+    const res = await fetch(api("/api/write", { server: p.server, path: full }), {
+      method: "POST",
+      headers: { "X-Fleet-Token": TOKEN, "Content-Type": "text/plain" },
+      body: content,
+    });
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  } catch (e) {
+    toast("Save failed: " + e.message, "error");
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Save";
+    return;
+  }
+  editor.original = content;
+  setDirty(false);
+  saveBtn.disabled = false;
+  saveBtn.textContent = "Save";
+  toast("Saved " + item.name, "success");
+  loadListing(i);
+}
+
+function setupEditor() {
+  const ta = $("#ed-input");
+  ta.addEventListener("input", () => {
+    syncEditorView();
+    setDirty(ta.value !== editor.original);
+  });
+  ta.addEventListener("scroll", syncEditorScroll);
+  // Tab inserts a soft tab instead of leaving the textarea.
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const s = ta.selectionStart, en = ta.selectionEnd;
+      ta.value = ta.value.slice(0, s) + "  " + ta.value.slice(en);
+      ta.selectionStart = ta.selectionEnd = s + 2;
+      syncEditorView();
+      setDirty(ta.value !== editor.original);
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      saveEditor();
+    }
+    if (e.key === "Escape") { e.preventDefault(); tryCloseEditor(); }
+  });
+  $("#ed-save").addEventListener("click", saveEditor);
+  $("#ed-cancel").addEventListener("click", tryCloseEditor);
+}
+
+function tryCloseEditor() {
+  if (editor.dirty) {
+    confirmAsync({
+      title: "Discard changes?",
+      desc: "“" + (editor.item ? editor.item.name : "") + "” has unsaved changes.",
+      okLabel: "Discard",
+    }).then((ok) => { if (ok) closeEditor(); });
+    return;
+  }
+  closeEditor();
 }
 
 // ----------------------------------------------------------------- takeover
@@ -1445,6 +2212,9 @@ function init() {
   buildPanes();
   setupDock();
   setupKeyboard();
+  setupEditor();
+
+  $("#add-pane").addEventListener("click", addPane);
 
   // global dismissers
   document.addEventListener("pointerdown", (e) => {

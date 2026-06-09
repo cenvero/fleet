@@ -8,6 +8,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -104,10 +105,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/list", s.guard(s.handleList))
 	mux.HandleFunc("/api/upload", s.guard(s.handleUpload))
 	mux.HandleFunc("/api/download", s.guard(s.handleDownload))
+	mux.HandleFunc("/api/read", s.guard(s.handleRead))
 	mux.HandleFunc("/api/progress", s.guard(s.handleProgress))
 	// Mutating endpoints are POST-only so the guard's Origin/CSRF check applies
 	// (a state-changing GET would slip past it).
 	mux.HandleFunc("/api/mkdir", s.guard(postOnly(s.handleMkdir)))
+	mux.HandleFunc("/api/touch", s.guard(postOnly(s.handleTouch)))
+	mux.HandleFunc("/api/write", s.guard(postOnly(s.handleWrite)))
 	mux.HandleFunc("/api/rm", s.guard(postOnly(s.handleRemove)))
 	mux.HandleFunc("/api/mv", s.guard(postOnly(s.handleMove)))
 	mux.HandleFunc("/api/copy", s.guard(postOnly(s.handleCopy)))
@@ -119,6 +123,11 @@ func (s *Server) routes() http.Handler {
 // temp dir, so a runaway request can't fill the disk. Large transfers should
 // use the `fleet file upload` CLI instead.
 const maxWebUploadBytes = 64 << 30 // 64 GiB
+
+// maxEditBytes caps the in-browser text editor: files larger than this are
+// rejected for read/write so the editor stays a lightweight text tool, not a
+// way to slurp huge files into memory.
+const maxEditBytes = 2 << 20 // 2 MiB
 
 // securityHeaders sets conservative headers on every response: no caching of the
 // token-bearing page, no framing/clickjacking, no MIME sniffing, and a strict
@@ -571,6 +580,215 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	}
 	_, _ = io.Copy(w, f)
+}
+
+// looksBinary reports whether b appears to be binary (and thus not safe to show
+// in the text editor): a NUL byte is a strong signal, and so is a high ratio of
+// non-printable, non-UTF-8 control bytes.
+func looksBinary(b []byte) bool {
+	if bytes.IndexByte(b, 0) >= 0 {
+		return true
+	}
+	n := len(b)
+	if n > 8000 {
+		n = 8000 // sampling the head is enough to classify
+	}
+	ctrl := 0
+	for i := 0; i < n; i++ {
+		c := b[i]
+		if c < 0x09 || (c > 0x0d && c < 0x20) {
+			ctrl++
+		}
+	}
+	return n > 0 && ctrl*100/n > 10
+}
+
+// handleRead returns a text file's content for the in-browser editor. Files are
+// capped at maxEditBytes and rejected if they look binary. Local files come from
+// the controller's own disk; server files are streamed through the agent.
+func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
+	server := r.URL.Query().Get("server")
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	var data []byte
+	if server == "" { // Local: the controller's own filesystem.
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		info, err := os.Stat(clean)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if info.IsDir() {
+			writeError(w, fmt.Errorf("cannot edit a directory"))
+			return
+		}
+		if info.Size() > maxEditBytes {
+			writeError(w, fmt.Errorf("file too large to edit (%s); limit is 2 MiB", humanBytes(info.Size())))
+			return
+		}
+		data, err = os.ReadFile(clean) // #nosec G304 -- path validated by cleanLocalPath
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	} else {
+		// Stream the remote file into a capped buffer so an oversized file can't
+		// balloon controller memory. The agent caps each chunk; we stop early once
+		// we cross the limit.
+		var buf bytes.Buffer
+		if _, err := s.app.CatRemoteFile(server, p, &capWriter{w: &buf, limit: maxEditBytes + 1}); err != nil {
+			if err == errEditTooLarge {
+				writeError(w, fmt.Errorf("file too large to edit; limit is 2 MiB"))
+				return
+			}
+			writeError(w, err)
+			return
+		}
+		data = buf.Bytes()
+		if int64(len(data)) > maxEditBytes {
+			writeError(w, fmt.Errorf("file too large to edit; limit is 2 MiB"))
+			return
+		}
+	}
+	if looksBinary(data) {
+		writeError(w, fmt.Errorf("file appears to be binary and cannot be edited as text"))
+		return
+	}
+	writeJSON(w, map[string]any{"content": string(data), "size": len(data)})
+}
+
+// errEditTooLarge is the sentinel capWriter uses to abort an oversized remote
+// read once it crosses the editor's size limit.
+var errEditTooLarge = fmt.Errorf("edit limit exceeded")
+
+// capWriter wraps a buffer and aborts the write once limit bytes have been
+// accepted, so a large remote file is rejected without buffering all of it.
+type capWriter struct {
+	w     io.Writer
+	limit int64
+	n     int64
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	if c.n > c.limit {
+		return 0, errEditTooLarge
+	}
+	return c.w.Write(p)
+}
+
+// handleWrite saves edited text back to a file. The request body is the new
+// content (capped at maxEditBytes). Local writes hit the controller's disk at
+// 0o600; server writes spool to a controller temp then upload to the agent.
+func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
+	server := r.URL.Query().Get("server")
+	p := r.URL.Query().Get("path")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxEditBytes))
+	if err != nil {
+		writeError(w, fmt.Errorf("content too large to save; limit is 2 MiB"))
+		return
+	}
+	if server == "" { // Local
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := os.WriteFile(clean, body, 0o600); err != nil { // #nosec G306 -- explicit 0o600
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+	// Spool to a controller temp file, then upload to the target path on the agent.
+	tmp, err := os.CreateTemp("", "fleet-webui-edit-*")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		writeError(w, err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := s.app.UploadFile(server, tmpPath, p, core.FileTransferOptions{}, nil); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleTouch creates a new empty file. Local: O_EXCL so it won't clobber an
+// existing file; server: upload an empty temp to the target path.
+func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
+	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if server == "" { // Local
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path validated
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := f.Close(); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+	tmp, err := os.CreateTemp("", "fleet-webui-touch-*")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := s.app.UploadFile(server, tmpPath, p, core.FileTransferOptions{}, nil); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// humanBytes renders a byte count for an error message (rough, two-figure).
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
