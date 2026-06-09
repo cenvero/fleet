@@ -157,6 +157,12 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 		UseSudo:     resolved.useSudo,
 		UpdatedAt:   time.Now().UTC(),
 	}
+	// Seed per-server file-transfer defaults from the global runtime defaults on
+	// first connection. They start as a copy so the operator can tune any server
+	// later without affecting the rest of the fleet.
+	if server.FileTransfer == (FileTransferDefaults{}) {
+		server.FileTransfer = a.Config.Runtime.FileTransfer
+	}
 	if err := a.SaveServer(server); err != nil {
 		return BootstrapResult{}, err
 	}
