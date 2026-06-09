@@ -64,6 +64,25 @@ type RuntimeConfig struct {
 	AlertNotifyCooldown   string `toml:"alert_notify_cooldown" json:"alert_notify_cooldown"`
 	MetricsPollInterval   string `toml:"metrics_poll_interval" json:"metrics_poll_interval"`
 	DesktopNotifications  bool   `toml:"desktop_notifications" json:"desktop_notifications"`
+	// FileTransfer holds the fleet-wide defaults for file uploads/downloads.
+	// Per-server overrides live on ServerRecord.FileTransfer.
+	FileTransfer FileTransferDefaults `toml:"file_transfer" json:"file_transfer"`
+}
+
+// FileTransferDefaults configures chunked/parallel transfers. A zero field
+// means "inherit": per-server zero fields fall back to the global runtime
+// defaults, and global zero fields fall back to the hard-coded engine defaults
+// (see effectiveFileTransferDefaults).
+type FileTransferDefaults struct {
+	// RemoteDir is the default remote directory used when a transfer target is
+	// given as a bare filename or omitted.
+	RemoteDir string `toml:"remote_dir,omitempty" json:"remote_dir,omitempty"`
+	// ParallelStreams is how many concurrent fleet-rpc channels a single
+	// transfer opens (direct mode only; reverse mode is always 1).
+	ParallelStreams int `toml:"parallel_streams,omitempty" json:"parallel_streams,omitempty"`
+	// ChunkSizeBytes is the raw (pre-base64) size of each transfer chunk. It is
+	// clamped to proto.MaxRawChunkBytes by the engine.
+	ChunkSizeBytes int64 `toml:"chunk_size_bytes,omitempty" json:"chunk_size_bytes,omitempty"`
 }
 
 type Status struct {
@@ -125,6 +144,7 @@ type ServerRecord struct {
 	OpenPorts    []int                 `toml:"open_ports,omitempty" json:"open_ports,omitempty"`
 	Firewall     FirewallState         `toml:"firewall" json:"firewall"`
 	LastTemplate string                `toml:"last_template,omitempty" json:"last_template,omitempty"`
+	FileTransfer FileTransferDefaults  `toml:"file_transfer,omitempty" json:"file_transfer,omitempty"`
 	CreatedAt    time.Time             `toml:"created_at" json:"created_at"`
 	UpdatedAt    time.Time             `toml:"updated_at" json:"updated_at"`
 }

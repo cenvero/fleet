@@ -39,6 +39,7 @@ type Server struct {
 	MetricsCollector         MetricsCollector
 	MetricsQueue             MetricsQueue
 	Updater                  Updater
+	FileManager              FileManager
 }
 
 func (s Server) Serve(ctx context.Context, listener net.Listener) error {
@@ -514,6 +515,26 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Action:          request.Action,
 				Payload:         result,
 			})
+		case proto.ActionFileList:
+			handleFileRPC(channel, request, s.fileManager().List)
+		case proto.ActionFileStat:
+			handleFileRPC(channel, request, s.fileManager().Stat)
+		case proto.ActionFileRead:
+			handleFileRPC(channel, request, s.fileManager().Read)
+		case proto.ActionFileOpenWrite:
+			handleFileRPC(channel, request, s.fileManager().OpenWrite)
+		case proto.ActionFileWrite:
+			handleFileRPC(channel, request, s.fileManager().Write)
+		case proto.ActionFileFinalize:
+			handleFileRPC(channel, request, s.fileManager().Finalize)
+		case proto.ActionFileProbe:
+			handleFileRPC(channel, request, s.fileManager().Probe)
+		case proto.ActionFileMkdir:
+			handleFileRPC(channel, request, s.fileManager().Mkdir)
+		case proto.ActionFileDelete:
+			handleFileRPC(channel, request, s.fileManager().Delete)
+		case proto.ActionFileRename:
+			handleFileRPC(channel, request, s.fileManager().Rename)
 		default:
 			_ = proto.Encode(channel, proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
@@ -571,6 +592,13 @@ func (s Server) updater() Updater {
 	return defaultUpdater()
 }
 
+func (s Server) fileManager() FileManager {
+	if s.FileManager != nil {
+		return s.FileManager
+	}
+	return defaultFileManager()
+}
+
 func errorEnvelope(request proto.Envelope, err error) proto.Envelope {
 	code := "internal_error"
 	message := err.Error()
@@ -588,6 +616,35 @@ func errorEnvelope(request proto.Envelope, err error) proto.Envelope {
 			Message: message,
 		},
 	}
+}
+
+// handleFileRPC decodes the request payload as T, runs the manager method, and
+// encodes the typed response (or an error envelope). It collapses the per-action
+// decode/dispatch/encode boilerplate shared by every file.* handler.
+func handleFileRPC[T any, R any](channel ssh.Channel, request proto.Envelope, fn func(context.Context, T) (R, error)) {
+	payload, err := proto.DecodePayload[T](request.Payload)
+	if err != nil {
+		_ = proto.Encode(channel, proto.Envelope{
+			Type:            proto.EnvelopeTypeResponse,
+			ProtocolVersion: proto.CurrentProtocolVersion,
+			RequestID:       request.RequestID,
+			Action:          request.Action,
+			Error:           &proto.Error{Code: "bad_payload", Message: err.Error()},
+		})
+		return
+	}
+	result, err := fn(context.Background(), payload)
+	if err != nil {
+		_ = proto.Encode(channel, errorEnvelope(request, err))
+		return
+	}
+	_ = proto.Encode(channel, proto.Envelope{
+		Type:            proto.EnvelopeTypeResponse,
+		ProtocolVersion: proto.CurrentProtocolVersion,
+		RequestID:       request.RequestID,
+		Action:          request.Action,
+		Payload:         result,
+	})
 }
 
 func controllerIDFromPayload(payload any) string {

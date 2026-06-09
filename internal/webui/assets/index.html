@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  Copyright (C) 2026 Cenvero / Shubhdeep Singh
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cenvero Fleet — Files</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>Cenvero&nbsp;Fleet</span>
+      <span class="muted">/ files</span>
+    </div>
+    <div class="controls">
+      <label class="muted" for="server">Server</label>
+      <select id="server"></select>
+      <button id="refresh" class="btn ghost" title="Refresh">↻</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card browser">
+      <div class="path-row">
+        <button id="up" class="btn ghost" title="Up">↑</button>
+        <div id="breadcrumb" class="breadcrumb muted">/</div>
+        <div class="path-actions">
+          <button id="mkdir" class="btn ghost" title="New folder">+ folder</button>
+          <button id="pick" class="btn" title="Upload files">Upload</button>
+          <input id="file-input" type="file" multiple hidden />
+        </div>
+      </div>
+
+      <div id="dropzone" class="listing">
+        <div id="entries"></div>
+        <div id="drop-hint" class="drop-hint">Drop files here to upload</div>
+      </div>
+    </section>
+
+    <aside class="card queue">
+      <h2>Transfers</h2>
+      <div id="transfers" class="transfers">
+        <p class="muted empty">No transfers yet.</p>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

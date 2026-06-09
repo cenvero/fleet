@@ -27,6 +27,8 @@ func DetectCapabilities() []string {
 		"metrics.collect",
 		"updates.apply",
 		"inventory.report",
+		"file.transfer",
+		"file.browse",
 	}
 	switch runtime.GOOS {
 	case "linux":

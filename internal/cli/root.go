@@ -28,6 +28,7 @@ import (
 	"github.com/cenvero/fleet/internal/tui"
 	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/internal/version"
+	"github.com/cenvero/fleet/internal/webui"
 	"github.com/cenvero/fleet/pkg/proto"
 	"github.com/spf13/cobra"
 )
@@ -102,8 +103,11 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newLifecycleCommand("stop", &configDir))
 	root.AddCommand(newLifecycleCommand("daemon", &configDir))
 	root.AddCommand(newDashboardCommand(&configDir))
+	root.AddCommand(newFilesCommand(&configDir))
+	root.AddCommand(newUICommand(&configDir))
 	root.AddCommand(newServerCommand(&configDir))
 	root.AddCommand(newServiceCommand(&configDir))
+	root.AddCommand(newFileCommand(&configDir))
 	root.AddCommand(newLogsCommand(&configDir))
 	root.AddCommand(newExecCommand(&configDir))
 	root.AddCommand(newSSHCommand(&configDir))
@@ -121,6 +125,8 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newAdjustInitCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
+	root.AddCommand(newContextCommand())
+	root.AddCommand(newSkillCommand())
 	return root
 }
 
@@ -253,6 +259,90 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 			return tui.RunDashboard(*configDir)
 		},
 	}
+}
+
+func newFilesCommand(configDir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "files <server>",
+		Short: "Launch the dual-pane file manager for a server",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return tui.RunFiles(*configDir, args[0])
+		},
+	}
+}
+
+func newUICommand(configDir *string) *cobra.Command {
+	var addr string
+	var open string
+	cmd := &cobra.Command{
+		Use:   "ui",
+		Short: "Launch the localhost web file manager (browser, drag-and-drop)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			srv, err := webui.New(app)
+			if err != nil {
+				return err
+			}
+			// Decide whether to open the browser BEFORE installing the signal
+			// handler, so Ctrl-C during the prompt still quits normally.
+			shouldOpen := decideOpenBrowser(cmd, open)
+
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stop()
+
+			var onReady func(string)
+			if shouldOpen {
+				out := cmd.OutOrStdout()
+				onReady = func(url string) {
+					if err := openBrowser(url); err != nil {
+						fmt.Fprintf(out, "could not open a browser automatically (%v) — open the link above manually\n", err)
+					}
+				}
+			}
+			return srv.ListenAndServe(ctx, addr, cmd.OutOrStdout(), onReady)
+		},
+	}
+	cmd.Flags().StringVar(&addr, "addr", webui.DefaultAddr, "loopback bind address for the web UI")
+	cmd.Flags().StringVar(&open, "open", "auto", "open the web UI in a browser: auto (prompt when interactive), yes, or no")
+	return cmd
+}
+
+// decideOpenBrowser resolves the --open flag: "yes"/"no" are explicit; "auto"
+// prompts on an interactive terminal and otherwise declines (just show the link).
+func decideOpenBrowser(cmd *cobra.Command, mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "yes", "y", "true":
+		return true
+	case "no", "n", "false":
+		return false
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false
+	}
+	fmt.Fprint(cmd.OutOrStdout(), "Open the web UI in your browser now? [Y/n]: ")
+	answer := strings.ToLower(strings.TrimSpace(transport.ReadLine(bufio.NewReader(os.Stdin))))
+	return answer == "" || answer == "y" || answer == "yes"
+}
+
+// openBrowser opens url in the platform default browser.
+func openBrowser(url string) error {
+	var name string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		name, args = "open", []string{url}
+	case "windows":
+		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
+	default:
+		name, args = "xdg-open", []string{url}
+	}
+	return exec.Command(name, args...).Start()
 }
 
 func newServerCommand(configDir *string) *cobra.Command {

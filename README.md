@@ -17,6 +17,7 @@ Today the repository includes:
 - Direct-mode and reverse-mode session handling with TOFU host-key pinning
 - Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
+- Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet ui`)
 - Metrics polling, alerting, suppression, acknowledgement, and desktop notifications
 - Linux-first service management, firewall control, and remote bootstrap
 - Controller-owned cached service logs with size, count, and age-based retention
@@ -37,7 +38,8 @@ Implemented now:
 
 - `fleet init` creates the config layout, keys, databases, and audit paths
 - `fleet dashboard` provides a multi-panel TUI with mouse and keyboard navigation
-- `fleet server`, `service`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, and `config` command groups are present
+- `fleet files <server>` opens a dual-pane drag-and-drop file manager, and `fleet ui` serves a localhost web file manager
+- `fleet server`, `service`, `file`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, and `config` command groups are present
 - Reverse-mode reconnect resilience and queued metrics replay are implemented
 - Persistent shell sessions survive wifi drops and reconnect transparently
 - A 100-agent scale smoke test and release-readiness command are included locally

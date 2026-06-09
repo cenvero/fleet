@@ -15,7 +15,11 @@ import (
 	"github.com/cenvero/fleet/internal/logs"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 )
+
+func dashTabID(i int) string      { return fmt.Sprintf("dash-tab-%d", i) }
+func dashRowID(tab, i int) string { return fmt.Sprintf("dash-row-%d-%d", tab, i) }
 
 var (
 	pageStyle = lipgloss.NewStyle().
@@ -96,26 +100,6 @@ type serviceRow struct {
 	Reachable bool
 }
 
-type rect struct {
-	x int
-	y int
-	w int
-	h int
-}
-
-func (r rect) contains(x, y int) bool {
-	return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h
-}
-
-type dashboardLayout struct {
-	tabRects    []rect
-	serverList  rect
-	serviceList rect
-	logList     rect
-	alertList   rect
-	auditList   rect
-}
-
 type model struct {
 	configDir    string
 	snapshot     core.DashboardSnapshot
@@ -132,6 +116,10 @@ type model struct {
 }
 
 func RunDashboard(configDir string) error {
+	// bubblezone records clickable zones marked during View and answers
+	// InBounds queries on mouse events — robust hit-testing without manual
+	// coordinate math.
+	zone.NewGlobal()
 	m := model{
 		configDir: configDir,
 		width:     120,
@@ -195,10 +183,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.loading && m.snapshot.GeneratedAt.IsZero() {
-		return pageStyle.Render(panelStyle.Width(max(60, m.width-8)).Render("Fetching fleet status..."))
+		return zone.Scan(pageStyle.Render(panelStyle.Width(max(60, m.width-8)).Render("Fetching fleet status...")))
 	}
 	if m.err != nil && m.snapshot.GeneratedAt.IsZero() {
-		return pageStyle.Render(panelStyle.Width(max(60, m.width-8)).Render("Dashboard error: " + m.err.Error()))
+		return zone.Scan(pageStyle.Render(panelStyle.Width(max(60, m.width-8)).Render("Dashboard error: " + m.err.Error())))
 	}
 
 	sections := []string{
@@ -207,7 +195,8 @@ func (m model) View() string {
 		renderActiveTab(m),
 		subtleStyle.Render("1-6 switch tabs  tab/shift+tab move tabs  j/k or mouse wheel move selection  click tabs/items  r refresh  q quit"),
 	}
-	return pageStyle.Width(max(80, m.width)).Render(strings.Join(sections, "\n\n"))
+	// zone.Scan records marked zones and strips markers; called once at root.
+	return zone.Scan(pageStyle.Width(max(80, m.width)).Render(strings.Join(sections, "\n\n")))
 }
 
 func loadDashboardCmd(configDir string) tea.Cmd {
@@ -254,45 +243,44 @@ func (m *model) handleMouse(msg tea.MouseMsg) bool {
 		m.moveSelection(1)
 		return true
 	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
-		layout := m.layout(loadingStateLine(m.loading, m.err))
-		if tab, ok := hitTab(layout.tabRects, msg.X, msg.Y); ok {
-			m.activeTab = tab
-			m.clampSelections()
-			return true
-		}
-		if m.activeTab == tabServers {
-			if index, ok := hitListIndex(layout.serverList, msg.X, msg.Y); ok {
-				m.serverIndex = clamp(index, 0, max(len(m.snapshot.Servers)-1, 0))
+		// Tabs (zones marked in renderTabs).
+		for i := range dashboardTabs {
+			if zone.Get(dashTabID(i)).InBounds(msg) {
+				m.activeTab = dashboardTab(i)
+				m.clampSelections()
 				return true
 			}
 		}
-		if m.activeTab == tabServices {
-			rows := aggregateServices(m.snapshot.Servers)
-			if index, ok := hitListIndex(layout.serviceList, msg.X, msg.Y); ok {
-				m.serviceIndex = clamp(index, 0, max(len(rows)-1, 0))
-				return true
-			}
-		}
-		if m.activeTab == tabLogs {
-			if index, ok := hitListIndex(layout.logList, msg.X, msg.Y); ok {
-				m.logIndex = clamp(index, 0, max(len(m.snapshot.CachedLogs)-1, 0))
-				return true
-			}
-		}
-		if m.activeTab == tabAlerts {
-			if index, ok := hitListIndex(layout.alertList, msg.X, msg.Y); ok {
-				m.alertIndex = clamp(index, 0, max(len(m.snapshot.RecentAlerts)-1, 0))
-				return true
-			}
-		}
-		if m.activeTab == tabOps {
-			if index, ok := hitListIndex(layout.auditList, msg.X, msg.Y); ok {
-				m.auditIndex = clamp(index, 0, max(len(m.snapshot.RecentAudit)-1, 0))
-				return true
+		// Rows of the active tab (zones marked in each tab renderer). Only the
+		// active tab's rows are marked each frame, so this never cross-hits.
+		if n, set := m.activeListSetter(); set != nil {
+			for i := range n {
+				if zone.Get(dashRowID(int(m.activeTab), i)).InBounds(msg) {
+					set(i)
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// activeListSetter returns the active tab's row count and a setter for its
+// selection index, or (0, nil) if the active tab has no selectable list.
+func (m *model) activeListSetter() (int, func(int)) {
+	switch m.activeTab {
+	case tabServers:
+		return len(m.snapshot.Servers), func(i int) { m.serverIndex = i }
+	case tabServices:
+		return len(aggregateServices(m.snapshot.Servers)), func(i int) { m.serviceIndex = i }
+	case tabLogs:
+		return len(m.snapshot.CachedLogs), func(i int) { m.logIndex = i }
+	case tabAlerts:
+		return len(m.snapshot.RecentAlerts), func(i int) { m.alertIndex = i }
+	case tabOps:
+		return len(m.snapshot.RecentAudit), func(i int) { m.auditIndex = i }
+	}
+	return 0, nil
 }
 
 func (m *model) clampSelections() {
@@ -302,135 +290,6 @@ func (m *model) clampSelections() {
 	m.logIndex = clamp(m.logIndex, 0, max(len(m.snapshot.CachedLogs)-1, 0))
 	m.alertIndex = clamp(m.alertIndex, 0, max(len(m.snapshot.RecentAlerts)-1, 0))
 	m.auditIndex = clamp(m.auditIndex, 0, max(len(m.snapshot.RecentAudit)-1, 0))
-}
-
-func (m model) layout(loading string) dashboardLayout {
-	const (
-		pagePadX    = 2
-		pagePadY    = 1
-		panelInsetX = 3
-		panelInsetY = 2
-		sectionGap  = 1
-		listStartY  = 2
-	)
-
-	headerY := pagePadY
-	tabsY := headerY + panelHeight(headerLineCount(loading)) + sectionGap
-	activeY := tabsY + panelHeight(1) + sectionGap
-
-	layout := dashboardLayout{
-		tabRects: tabHitRects(pagePadX+panelInsetX, tabsY+panelInsetY),
-	}
-
-	switch m.activeTab {
-	case tabServers:
-		leftWidth := panelWidth(m.width, 0.42)
-		layout.serverList = rect{
-			x: pagePadX + panelInsetX,
-			y: activeY + panelInsetY + listStartY,
-			w: listPanelHitWidth(leftWidth, m.width >= 120, m.width),
-			h: len(m.snapshot.Servers),
-		}
-	case tabServices:
-		leftWidth := panelWidth(m.width, 0.48)
-		layout.serviceList = rect{
-			x: pagePadX + panelInsetX,
-			y: activeY + panelInsetY + listStartY,
-			w: listPanelHitWidth(leftWidth, m.width >= 120, m.width),
-			h: len(aggregateServices(m.snapshot.Servers)),
-		}
-	case tabLogs:
-		leftWidth := panelWidth(m.width, 0.48)
-		layout.logList = rect{
-			x: pagePadX + panelInsetX,
-			y: activeY + panelInsetY + listStartY,
-			w: listPanelHitWidth(leftWidth, m.width >= 120, m.width),
-			h: len(m.snapshot.CachedLogs),
-		}
-	case tabAlerts:
-		leftWidth := panelWidth(m.width, 0.48)
-		layout.alertList = rect{
-			x: pagePadX + panelInsetX,
-			y: activeY + panelInsetY + listStartY,
-			w: listPanelHitWidth(leftWidth, m.width >= 120, m.width),
-			h: len(m.snapshot.RecentAlerts),
-		}
-	case tabOps:
-		leftWidth := panelWidth(m.width, 0.42)
-		if m.width >= 120 {
-			layout.auditList = rect{
-				x: pagePadX + leftWidth + 2 + panelInsetX,
-				y: activeY + panelInsetY + listStartY,
-				w: max(36, m.width-leftWidth-12),
-				h: len(m.snapshot.RecentAudit),
-			}
-			break
-		}
-		layout.auditList = rect{
-			x: pagePadX + panelInsetX,
-			y: activeY + panelHeight(opsSummaryLineCount(m.snapshot)) + sectionGap + panelInsetY + listStartY,
-			w: max(70, m.width-8),
-			h: len(m.snapshot.RecentAudit),
-		}
-	}
-
-	return layout
-}
-
-func panelHeight(contentLines int) int {
-	return contentLines + 4
-}
-
-func headerLineCount(loading string) int {
-	lines := 4
-	if loading != "" {
-		lines++
-	}
-	return lines
-}
-
-func opsSummaryLineCount(snapshot core.DashboardSnapshot) int {
-	lines := 6
-	if len(snapshot.Templates) > 0 {
-		lines += 2 + len(snapshot.Templates)
-	}
-	lines += 2 + max(len(snapshot.Status.Fingerprints), 1)
-	return lines
-}
-
-func listPanelHitWidth(leftWidth int, sideBySide bool, totalWidth int) int {
-	if sideBySide {
-		return leftWidth + 6
-	}
-	return max(70, totalWidth-8)
-}
-
-func tabHitRects(originX, y int) []rect {
-	rects := make([]rect, 0, len(dashboardTabs))
-	x := originX
-	for i, label := range dashboardTabs {
-		token := fmt.Sprintf("%d %s", i+1, label)
-		width := lipgloss.Width(token) + 2
-		rects = append(rects, rect{x: x, y: y, w: width, h: 1})
-		x += width + 1
-	}
-	return rects
-}
-
-func hitTab(rects []rect, x, y int) (dashboardTab, bool) {
-	for i, rect := range rects {
-		if rect.contains(x, y) {
-			return dashboardTab(i), true
-		}
-	}
-	return 0, false
-}
-
-func hitListIndex(area rect, x, y int) (int, bool) {
-	if area.h <= 0 || !area.contains(x, y) {
-		return 0, false
-	}
-	return y - area.y, true
 }
 
 func renderHeader(snapshot core.DashboardSnapshot, loading string) string {
@@ -479,11 +338,11 @@ func renderTabs(active dashboardTab, width int) string {
 	items := make([]string, 0, len(dashboardTabs))
 	for i, label := range dashboardTabs {
 		token := fmt.Sprintf("%d %s", i+1, label)
+		styled := tabStyle.Render(token)
 		if dashboardTab(i) == active {
-			items = append(items, activeTabStyle.Render(token))
-			continue
+			styled = activeTabStyle.Render(token)
 		}
-		items = append(items, tabStyle.Render(token))
+		items = append(items, zone.Mark(dashTabID(i), styled))
 	}
 	return panelStyle.Width(max(70, width-8)).Render(strings.Join(items, " "))
 }
@@ -610,7 +469,7 @@ func renderServersTab(snapshot core.DashboardSnapshot, width, selected int) stri
 		if i == selected {
 			row = selectedRowStyle.Render(row)
 		}
-		listLines = append(listLines, row)
+		listLines = append(listLines, zone.Mark(dashRowID(int(tabServers), i), row))
 	}
 
 	detailLines := []string{
@@ -667,7 +526,7 @@ func renderServicesTab(snapshot core.DashboardSnapshot, width, selected int) str
 		if i == selected {
 			entry = selectedRowStyle.Render(entry)
 		}
-		listLines = append(listLines, entry)
+		listLines = append(listLines, zone.Mark(dashRowID(int(tabServices), i), entry))
 	}
 
 	detailLines := []string{
@@ -710,14 +569,14 @@ func renderLogsTab(snapshot core.DashboardSnapshot, width, selected int) string 
 			state = statusBadge(fmt.Sprintf("%d lines", len(item.Lines)), "#16232c", "#74c0fc")
 		}
 		lastLine := "no cached lines yet"
-		if item.Available {
+		if item.Available && len(item.Lines) > 0 {
 			lastLine = truncate(item.Lines[len(item.Lines)-1].Text, 26)
 		}
 		row := fmt.Sprintf("%-12s %-18s %s %s", item.Server, item.Service, state, subtleStyle.Render(lastLine))
 		if i == selected {
 			row = selectedRowStyle.Render(row)
 		}
-		listLines = append(listLines, row)
+		listLines = append(listLines, zone.Mark(dashRowID(int(tabLogs), i), row))
 	}
 
 	detailLines := []string{
@@ -765,7 +624,7 @@ func renderAlertsTab(snapshot core.DashboardSnapshot, width, selected int) strin
 		if i == selected {
 			entry = selectedRowStyle.Render(entry)
 		}
-		listLines = append(listLines, entry)
+		listLines = append(listLines, zone.Mark(dashRowID(int(tabAlerts), i), entry))
 	}
 
 	detailLines := []string{
@@ -823,7 +682,7 @@ func renderOpsTab(snapshot core.DashboardSnapshot, width, selected int) string {
 			if i == selected {
 				row = selectedRowStyle.Render(row)
 			}
-			auditLines = append(auditLines, row)
+			auditLines = append(auditLines, zone.Mark(dashRowID(int(tabOps), i), row))
 		}
 		auditLines = append(auditLines, "", subtleStyle.Render("Selected entry"))
 		entry := audit[selected]

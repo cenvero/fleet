@@ -10,11 +10,33 @@ import (
 	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
 	tea "github.com/charmbracelet/bubbletea"
+	zone "github.com/lrstanley/bubblezone"
 )
 
-func TestHandleMouseSelectsTabAndRows(t *testing.T) {
-	t.Parallel()
+// clickZone renders the model (populating bubblezone positions), then crafts a
+// left-click at the top-left cell of the given zone and feeds it to handleMouse.
+func clickZone(t *testing.T, m *model, id string) bool {
+	t.Helper()
+	_ = m.View() // enqueues zone positions via zone.Scan (processed async by the worker)
+	var z *zone.ZoneInfo
+	for range 250 {
+		if z = zone.Get(id); !z.IsZero() {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if z.IsZero() {
+		t.Fatalf("zone %q not found in rendered view", id)
+	}
+	return m.handleMouse(tea.MouseMsg{
+		X:      z.StartX,
+		Y:      z.StartY,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+}
 
+func TestHandleMouseSelectsTabAndRows(t *testing.T) {
 	m := model{
 		width:     140,
 		height:    40,
@@ -36,14 +58,7 @@ func TestHandleMouseSelectsTabAndRows(t *testing.T) {
 		},
 	}
 
-	layout := m.layout("")
-	tabRect := layout.tabRects[int(tabAlerts)]
-	if !m.handleMouse(tea.MouseMsg{
-		X:      tabRect.x,
-		Y:      tabRect.y,
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-	}) {
+	if !clickZone(t, &m, dashTabID(int(tabAlerts))) {
 		t.Fatalf("expected tab click to be handled")
 	}
 	if m.activeTab != tabAlerts {
@@ -51,13 +66,7 @@ func TestHandleMouseSelectsTabAndRows(t *testing.T) {
 	}
 
 	m.activeTab = tabServers
-	layout = m.layout("")
-	if !m.handleMouse(tea.MouseMsg{
-		X:      layout.serverList.x,
-		Y:      layout.serverList.y + 2,
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-	}) {
+	if !clickZone(t, &m, dashRowID(int(tabServers), 2)) {
 		t.Fatalf("expected server list click to be handled")
 	}
 	if m.serverIndex != 2 {
@@ -65,13 +74,7 @@ func TestHandleMouseSelectsTabAndRows(t *testing.T) {
 	}
 
 	m.activeTab = tabLogs
-	layout = m.layout("")
-	if !m.handleMouse(tea.MouseMsg{
-		X:      layout.logList.x,
-		Y:      layout.logList.y + 1,
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-	}) {
+	if !clickZone(t, &m, dashRowID(int(tabLogs), 1)) {
 		t.Fatalf("expected log list click to be handled")
 	}
 	if m.logIndex != 1 {
