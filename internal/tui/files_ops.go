@@ -240,7 +240,7 @@ func hitToolbar(msg tea.MouseMsg) (string, bool) {
 // toolbarActions are the clickable toolbar buttons (also keyboard shortcuts).
 var toolbarActions = []string{
 	"source", "edit", "newfolder", "newfile", "rename", "delete", "copy", "move",
-	"props", "filter", "sort", "view", "hidden", "refresh", "quit",
+	"compress", "chmod", "props", "filter", "sort", "view", "hidden", "refresh", "quit",
 }
 
 func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
@@ -265,6 +265,10 @@ func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
 		return m.copyToOtherPane(m.focus)
 	case "move":
 		return m.moveToOtherPane(m.focus)
+	case "compress":
+		return m.openCompress(m.focus), nil
+	case "chmod":
+		return m.openChmodPrompt(m.focus), nil
 	case "props":
 		return m.openProperties(m.focus)
 	case "view":
@@ -343,13 +347,19 @@ func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
 	onRow := idx >= 0 && idx < len(pane.entries) && pane.entries[idx].name != ".."
 	isDir := onRow && pane.entries[idx].isDir
 	canEdit := onRow && !isDir
+	isArchive := onRow && !isDir && isArchiveName(pane.entries[idx].name)
 	items := []contextMenuItem{
 		{key: "↵", label: "Open", action: "open", enabled: onRow || (idx >= 0 && idx < len(pane.entries))},
 		{key: "e", label: "Edit", action: "edit", enabled: canEdit},
 		{key: "c", label: "Copy to other pane", action: "copy", enabled: onRow},
 		{key: "m", label: "Move to other pane", action: "move", enabled: onRow},
+		{key: "D", label: "Duplicate", action: "duplicate", enabled: onRow && !isDir},
 		{key: "r", label: "Rename", action: "rename", enabled: onRow},
 		{key: "d", label: "Delete", action: "delete", enabled: onRow},
+		{key: "z", label: "Compress…", action: "compress", enabled: onRow},
+		{key: "x", label: "Extract", action: "extract", enabled: isArchive},
+		{key: "p", label: "Permissions…", action: "chmod", enabled: onRow},
+		{key: "#", label: "Checksum (SHA-256)", action: "checksum", enabled: onRow && !isDir},
 		{key: "n", label: "New folder", action: "newfolder", enabled: true},
 		{key: "N", label: "New file", action: "newfile", enabled: true},
 		{key: "i", label: "Properties", action: "props", enabled: onRow},
@@ -378,6 +388,16 @@ func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
 		return m.copyToOtherPane(side)
 	case "move":
 		return m.moveToOtherPane(side)
+	case "duplicate":
+		return m.duplicateFocused(side)
+	case "compress":
+		return m.openCompress(side), nil
+	case "extract":
+		return m.extractFocused(side)
+	case "chmod":
+		return m.openChmodPrompt(side), nil
+	case "checksum":
+		return m.checksumFocused(side)
 	case "rename":
 		return m.openRenamePrompt(side), nil
 	case "delete":
@@ -515,6 +535,8 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 		}
 		m.status = "renamed to " + name
 		return m, m.reload(side)
+	case promptChmod:
+		return m.runChmod(side, m.promptItem.name, name)
 	}
 	return m, nil
 }
@@ -1328,8 +1350,50 @@ func (m filesModel) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case overlayFilter:
 		return m.handleFilterKey(msg)
+
+	case overlayCompress:
+		return m.handleCompressKey(msg)
 	}
 	return m, nil
+}
+
+// handleCompressKey drives the archive overlay: ←/→ (or Tab) cycle the format,
+// typing edits the archive name, Enter compresses, Esc cancels.
+func (m filesModel) handleCompressKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.overlay = overlayNone
+		m.status = "cancelled"
+		return m, nil
+	case "enter":
+		return m.submitCompress()
+	case "left", "shift+tab":
+		m.cycleCompressFormat(-1)
+		return m, nil
+	case "right", "tab":
+		m.cycleCompressFormat(1)
+		return m, nil
+	case "backspace":
+		if r := []rune(m.compressName); len(r) > 0 {
+			m.compressName = string(r[:len(r)-1])
+			m.compressEditing = true
+		}
+		return m, nil
+	case "ctrl+u":
+		m.compressName = ""
+		m.compressEditing = true
+		return m, nil
+	default:
+		switch {
+		case msg.Type == tea.KeyRunes && len(msg.Runes) > 0:
+			m.compressName += string(msg.Runes)
+			m.compressEditing = true
+		case msg.Type == tea.KeySpace || msg.String() == " ":
+			m.compressName += " "
+			m.compressEditing = true
+		}
+		return m, nil
+	}
 }
 
 func (m filesModel) handleOverlayMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -1381,6 +1445,20 @@ func (m filesModel) handleOverlayMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		m.overlay = overlayNone
 		m.cmDrag = nil
+		return m, nil
+	case overlayCompress:
+		if zone.Get(fmCompressPrefix + "format").InBounds(msg) {
+			m.cycleCompressFormat(1)
+			return m, nil
+		}
+		if zone.Get(fmCompressPrefix + "ok").InBounds(msg) {
+			return m.submitCompress()
+		}
+		if zone.Get(fmCompressPrefix + "cancel").InBounds(msg) {
+			m.overlay = overlayNone
+			m.status = "cancelled"
+			return m, nil
+		}
 		return m, nil
 	case overlayConfirm, overlayProperties, overlayPrompt:
 		// Click outside dismisses (confirm/props); prompt keeps focus.

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cenvero/fleet/internal/core"
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
 )
@@ -172,6 +173,8 @@ func (m filesModel) renderToolbar(innerW int) string {
 		{"delete", "d", "Delete"},
 		{"copy", "c", "Copy →"},
 		{"move", "m", "Move →"},
+		{"compress", "z", "Zip"},
+		{"chmod", "p", "Perms"},
 		{"props", "i", "Info"},
 		{"filter", "/", "Filter"},
 		{"sort", "o", sortLabel(m.paneRefConst(m.focus))},
@@ -740,8 +743,8 @@ func smoothBar(pct, width int) string {
 func (m filesModel) renderFooter() string {
 	hints := [][2]string{
 		{"↑↓", "move"}, {"↵/→", "open"}, {"e", "edit"}, {"space", "select"},
-		{"s", "source"}, {"c/m", "copy/move"}, {"n/N", "folder/file"}, {"d", "del"},
-		{"/", "filter"}, {"o", "sort"}, {"v", "view"}, {"drag", "transfer"}, {"q", "quit"},
+		{"c/m", "copy/move"}, {"D", "dup"}, {"z/x", "zip/unzip"}, {"p", "chmod"},
+		{"#", "sha256"}, {"d", "del"}, {"/", "filter"}, {"drag", "transfer"}, {"q", "quit"},
 	}
 	parts := make([]string, 0, len(hints))
 	for _, h := range hints {
@@ -772,8 +775,65 @@ func (m filesModel) composeOverlay(base string) string {
 		return m.renderEditor()
 	case overlayFilter:
 		return overlayCenter(base, m.width, m.height, m.renderFilter())
+	case overlayCompress:
+		return overlayCenter(base, m.width, m.height, m.renderCompress())
 	}
 	return base
+}
+
+// renderCompress draws the archive overlay: a one-line summary of what's being
+// compressed, a clickable format chip (← → to cycle), the editable archive-name
+// field, and Compress / Cancel actions. The format chip and buttons are
+// zone.Mark'ed so they're clickable.
+func (m filesModel) renderCompress() string {
+	formats := core.ArchiveFormats()
+	format := formats[m.compressFormat]
+
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).
+		Render("Compress " + m.paneRefConst(m.compressSide).label()))
+	b.WriteString("\n\n")
+
+	what := fmt.Sprintf("%d item(s)", len(m.compressNames))
+	if len(m.compressNames) == 1 {
+		what = "'" + m.compressNames[0] + "'"
+	}
+	b.WriteString(fmStatusSty.Render("Archiving " + what))
+	b.WriteString("\n\n")
+
+	// Format chip with arrows hinting it can be cycled.
+	chip := lipgloss.NewStyle().
+		Background(fmBorderC).Foreground(fmAccent2).Bold(true).Padding(0, 1).
+		Render("‹ " + format + " ›")
+	b.WriteString(fmHintLabel.Render("Format  "))
+	b.WriteString(zone.Mark(fmCompressPrefix+"format", chip))
+	b.WriteString("\n\n")
+
+	// Editable name field.
+	b.WriteString(fmHintLabel.Render("Name"))
+	b.WriteString("\n")
+	field := m.compressName + "▏"
+	inputW := 40
+	if lipgloss.Width(field) > inputW {
+		inputW = lipgloss.Width(field)
+	}
+	input := lipgloss.NewStyle().
+		Background(lipgloss.Color("#101822")).
+		Foreground(fmText).
+		Width(inputW).
+		Padding(0, 1).
+		Render(field)
+	b.WriteString(input)
+	b.WriteString("\n\n")
+
+	okBtn := zone.Mark(fmCompressPrefix+"ok",
+		lipgloss.NewStyle().Background(fmAccent).Foreground(fmInk).Bold(true).Padding(0, 1).Render("Compress"))
+	cancelBtn := zone.Mark(fmCompressPrefix+"cancel",
+		lipgloss.NewStyle().Foreground(fmDimC).Padding(0, 1).Render("Cancel"))
+	b.WriteString(okBtn + "  " + cancelBtn)
+	b.WriteString("\n\n")
+	b.WriteString(fmStatusSty.Render("←→ format · type name · ↵ compress · esc cancel"))
+	return fmOverlayBox.Render(b.String())
 }
 
 func (m filesModel) renderFilter() string {

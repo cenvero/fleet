@@ -215,8 +215,9 @@ const (
 	overlayConfirm  // generic confirmation (delete, dir transfer)
 	overlayPrompt   // text input (new folder / rename / new file)
 	overlayProperties
-	overlayEditor // full-screen file viewer/editor with syntax highlighting
-	overlayFilter // per-pane name filter input
+	overlayEditor   // full-screen file viewer/editor with syntax highlighting
+	overlayFilter   // per-pane name filter input
+	overlayCompress // archive: pick a format + name, then compress the selection
 )
 
 // confirmKind distinguishes what a confirm overlay will do on Enter.
@@ -254,6 +255,7 @@ const (
 	promptNewFolder promptKind = iota
 	promptRename
 	promptNewFile
+	promptChmod
 )
 
 // sortKey selects how a pane's entries are ordered (dirs always come first).
@@ -335,6 +337,13 @@ type filesModel struct {
 	promptSide  int
 	promptItem  fileItem
 
+	// compress (archive) overlay
+	compressSide    int
+	compressNames   []string // base names being archived
+	compressFormat  int      // index into core.ArchiveFormats()
+	compressName    string   // editable archive base name
+	compressEditing bool     // true once the user edits the name field
+
 	// properties modal
 	propsText string
 
@@ -375,6 +384,25 @@ type dirScanMsg struct {
 
 // snapTickMsg ends the drop "snap" animation.
 type snapTickMsg struct{}
+
+// fileOpDoneMsg carries the result of an asynchronous file operation (compress,
+// extract, duplicate) so the pane can refresh and report status off the UI loop.
+type fileOpDoneMsg struct {
+	side int
+	verb string // human label for the status line ("compressed", "extracted", …)
+	what string // the affected name
+	err  error
+}
+
+// checksumDoneMsg carries an asynchronous SHA-256 computation result. The hash is
+// surfaced in the properties overlay (copyable) and the status line.
+type checksumDoneMsg struct {
+	side int
+	name string
+	path string
+	sum  string
+	err  error
+}
 
 func (m filesModel) Init() tea.Cmd {
 	return tea.Batch(
@@ -560,6 +588,12 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editorSavedMsg:
 		return m.onEditorSaved(msg)
 
+	case fileOpDoneMsg:
+		return m.onFileOpDone(msg)
+
+	case checksumDoneMsg:
+		return m.onChecksumDone(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
@@ -687,6 +721,16 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		// explicit upload: only meaningful local -> remote
 		return m.explicitTransfer(m.focus)
+	case "z":
+		return m.openCompress(m.focus), nil
+	case "x":
+		return m.extractFocused(m.focus)
+	case "p":
+		return m.openChmodPrompt(m.focus), nil
+	case "#":
+		return m.checksumFocused(m.focus)
+	case "D":
+		return m.duplicateFocused(m.focus)
 	}
 	return m, nil
 }
@@ -1030,3 +1074,4 @@ const fmActPrefix = "fm-act-"
 const fmMenuPrefix = "fm-menu-"
 const fmPickPrefix = "fm-pick-"
 const fmCMPrefix = "fm-cm-"
+const fmCompressPrefix = "fm-compress-"
