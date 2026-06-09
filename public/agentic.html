@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic Fleet — The SSH Control Plane Built for AI Agents | Cenvero Fleet</title>
+  <meta name="description" content="Cenvero Fleet is the best tool for agentic SSH: a self-describing CLI that lets AI coding agents like Claude Code and Codex discover, control, and operate your Linux servers safely over SSH — self-hosted, no cloud, with host-key pinning and JSON output.">
+  <meta name="keywords" content="agentic SSH, AI server management, Claude Code SSH, AI agent DevOps, LLM server control, self-hosted fleet management, AI infrastructure agent, agentic DevOps, MCP alternative, AI SSH automation, Cenvero Fleet">
+  <link rel="canonical" href="https://fleet.cenvero.org/agentic.html">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+
+  <!-- Open Graph / Twitter -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Cenvero Fleet">
+  <meta property="og:title" content="Agentic Fleet — The SSH Control Plane Built for AI Agents">
+  <meta property="og:description" content="Let Claude Code or Codex discover and operate your servers over SSH. Self-describing CLI, structured JSON, safety rails, self-hosted. The best tool for agentic SSH.">
+  <meta property="og:url" content="https://fleet.cenvero.org/agentic.html">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Agentic Fleet — The SSH Control Plane Built for AI Agents">
+  <meta name="twitter:description" content="Let an AI agent run your fleet over SSH — self-describing CLI, structured JSON, safety rails, self-hosted, no cloud.">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/site.css">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+
+  <!-- Structured data for search + generative engines (GEO) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Cenvero Fleet",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Linux, macOS, Windows",
+    "description": "Cenvero Fleet is a self-hosted, SSH-based fleet manager designed to be operated by AI coding agents. Its self-describing CLI lets agents like Claude Code and Codex discover every command, control servers, transfer files, and read logs over an authenticated, host-key-pinned SSH channel — with no cloud dependency.",
+    "url": "https://fleet.cenvero.org/agentic.html",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "featureList": [
+      "Self-describing CLI (fleet context / fleet ai) for AI agents",
+      "One-command skill install for Claude Code and Codex",
+      "Structured JSON output for every command",
+      "Secure chunked, resumable file transfer and live directory sync",
+      "Authenticated, host-key-pinned SSH transport with no cloud"
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "Can an AI agent like Claude control my servers over SSH?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. Run 'fleet skill claude' to install a /fleet slash command. When you type /fleet, the agent runs 'fleet context' to learn the entire CLI, then controls your servers over an authenticated, host-key-pinned SSH channel using your keys on your machine. There is no cloud control plane." }
+      },
+      {
+        "@type": "Question",
+        "name": "Why is Cenvero Fleet better than raw SSH for AI agents?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Raw SSH gives an agent free-form shell with no structure, no discoverability, and no safety rails. Cenvero Fleet exposes a self-describing CLI: 'fleet context' and 'fleet ai <command>' generate the complete, current reference from the binary, every command returns structured JSON, and destructive actions are flagged. The agent learns the tool once and operates reliably." }
+      },
+      {
+        "@type": "Question",
+        "name": "Is letting an AI agent run Cenvero Fleet safe?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Transfers and control ride one authenticated SSH channel with public-key auth and TOFU host-key pinning. The controller never trusts agent-provided paths for local writes, the agent can be confined to allowlisted directories with --file-root, updates require signed binaries, and the agent is guided to confirm destructive or outward-facing actions." }
+      },
+      {
+        "@type": "Question",
+        "name": "Does Cenvero Fleet require a cloud account?",
+        "acceptedAnswer": { "@type": "Answer", "text": "No. Cenvero Fleet is fully self-hosted. A single binary is the controller; it connects to your servers over SSH and auto-installs agents. There is no SaaS, no cloud account, and no telemetry in the core runtime." }
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
+  <div class="nav-links">
+    <a href="/agentic.html">Agentic AI</a>
+    <a href="/whats-new.html">What's new</a>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/cenvero/fleet">GitHub</a>
+    <a href="/docs/#install" class="nav-cta">Get Started</a>
+  </div>
+</nav>
+
+<header class="ph wrap">
+  <div class="eyebrow"><i data-lucide="bot"></i> Agentic Fleet</div>
+  <h1>The SSH control plane<br>built for AI agents.</h1>
+  <p class="lede">Cenvero Fleet is the best tool for <strong>agentic SSH</strong>. It turns a fleet of Linux servers into something an AI coding agent — Claude Code, Codex — can actually <em>understand</em> and operate: a self-describing CLI, structured JSON, and safety rails, all over one authenticated SSH channel. Self-hosted. No cloud.</p>
+  <div class="hero-actions">
+    <a href="/docs/#install" class="btn btn-primary">Install Fleet</a>
+    <a href="#how" class="btn btn-ghost">See how it works</a>
+  </div>
+</header>
+
+<section class="wrap">
+  <div class="section-label">The problem</div>
+  <h2>Raw SSH wasn't built for an AI.</h2>
+  <p class="sub">Hand an agent a bare shell and it improvises: it guesses flags, greps man pages, parses human-formatted output, and has no idea which commands are dangerous. Ansible playbooks are static. Cloud agent platforms want your servers in their control plane. None of them were designed for an LLM to <em>discover</em> and drive a fleet safely.</p>
+  <div class="grid cols-3">
+    <div class="card"><div class="ic"><i data-lucide="search-x"></i></div><h3>Not discoverable</h3><p>An agent can't enumerate what a server can do. It guesses, and guesses break.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="braces"></i></div><h3>Unstructured output</h3><p>Human-formatted text has to be scraped. One format change and the agent is lost.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="shield-alert"></i></div><h3>No safety rails</h3><p>`rm -rf` looks like any other command. Nothing tells the agent what's destructive.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="section-label">The fix</div>
+  <h2>A CLI that explains itself to the agent.</h2>
+  <p class="sub">Fleet is self-describing by design. The agent learns the entire tool from the binary, then operates with structured, predictable commands.</p>
+  <div class="grid cols-2">
+    <div class="card"><div class="ic"><i data-lucide="book-open"></i></div><h3><code>fleet context</code></h3><p>Prints the complete, always-current reference — every command, concept, and safety rule — generated live from the installed binary. The agent reads it once and remembers it for the session.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="sparkles"></i></div><h3><code>fleet ai &lt;command&gt;</code></h3><p>Full machine-readable help for any single command (markdown or <code>--json</code>) — the AI-facing counterpart to <code>--help</code>. Always matches the installed version.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="braces"></i></div><h3>Structured JSON</h3><p>Every command prints JSON to stdout. The agent parses results instead of scraping text — reliable across versions.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="shield-check"></i></div><h3>Safety rails</h3><p>Destructive and outward-facing actions are flagged, and the agent is guided to confirm before <code>server remove</code>, <code>file rm</code>, <code>key rotate</code>, or <code>update apply</code>.</p></div>
+  </div>
+</section>
+
+<section class="wrap" id="how">
+  <div class="section-label">How it works</div>
+  <h2>From zero to agent-operated in one command.</h2>
+  <div class="steps">
+    <div class="step"><div><h3>Install the skill</h3><p>Run <code>fleet skill claude</code> (or <code>codex</code>). It installs a <code>/fleet</code> slash command and a skill into your agent — re-run anytime to refresh.</p></div></div>
+    <div class="step"><div><h3>Type <code>/fleet</code></h3><p>Your agent runs <code>fleet context</code>, learns the whole CLI, and becomes your fleet operator for the rest of the session.</p></div></div>
+    <div class="step"><div><h3>Operate in plain language</h3><p>"Restart nginx on web-01", "tail the API logs", "sync ./site to the server" — the agent maps it to the right commands, with your keys, on your machine.</p></div></div>
+  </div>
+  <div class="code"><pre><span class="tok">$</span> fleet skill claude
+✓ /fleet slash command added — restart Claude, then type /fleet
+
+<span class="tok">›</span> /fleet restart nginx on web-01 and show me the last 50 log lines</pre></div>
+</section>
+
+<section class="wrap">
+  <div class="section-label">Comparison</div>
+  <h2>Traditional SSH tooling vs. Cenvero Fleet</h2>
+  <p class="sub">Why Fleet is the best tool for agentic SSH, point by point.</p>
+  <table class="cmp">
+    <thead>
+      <tr><th>Capability</th><th>Raw SSH</th><th>Ansible</th><th>Cloud agent platform</th><th class="fleet">Cenvero Fleet</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>AI-discoverable command surface</td><td class="no">✗</td><td class="no">✗</td><td class="partial">partial</td><td class="fleet"><span class="yes">✓ fleet context / ai</span></td></tr>
+      <tr><td>Structured JSON for every action</td><td class="no">✗</td><td class="partial">partial</td><td class="partial">partial</td><td class="fleet"><span class="yes">✓</span></td></tr>
+      <tr><td>Self-describing, version-matched help</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="fleet"><span class="yes">✓</span></td></tr>
+      <tr><td>One-command agent install</td><td class="no">✗</td><td class="no">✗</td><td class="partial">SDK</td><td class="fleet"><span class="yes">✓ fleet skill</span></td></tr>
+      <tr><td>Built-in safety rails for agents</td><td class="no">✗</td><td class="no">✗</td><td class="partial">partial</td><td class="fleet"><span class="yes">✓</span></td></tr>
+      <tr><td>Host-key pinning (TOFU)</td><td class="partial">manual</td><td class="partial">manual</td><td class="yes">✓</td><td class="fleet"><span class="yes">✓ automatic</span></td></tr>
+      <tr><td>Secure file transfer + live sync</td><td class="partial">scp/rsync</td><td class="partial">modules</td><td class="partial">varies</td><td class="fleet"><span class="yes">✓ chunked, resumable</span></td></tr>
+      <tr><td>Self-hosted, no cloud account</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td class="fleet"><span class="yes">✓</span></td></tr>
+      <tr><td>Single binary, zero agents to pre-install</td><td class="partial">—</td><td class="no">✗</td><td class="no">✗</td><td class="fleet"><span class="yes">✓</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="wrap">
+  <div class="section-label">Why Fleet</div>
+  <h2>The best tool for agentic SSH.</h2>
+  <div class="grid cols-3">
+    <div class="card"><div class="ic"><i data-lucide="key-round"></i></div><h3>Your keys, your machine</h3><p>The agent acts through your local controller over SSH. No third party ever holds your credentials or your servers.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="refresh-cw"></i></div><h3>Always in sync</h3><p>Because help is generated from the binary, the agent's knowledge can never drift from the installed version.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="package"></i></div><h3>One binary</h3><p>Controller and agent ship as a single self-updating binary. Connect over SSH and it bootstraps itself.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="terminal"></i></div><h3>Humans welcome too</h3><p>Everything the agent does, you can do — TUI dashboard, dual-pane file manager, and a localhost web UI.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="lock"></i></div><h3>Hardened by default</h3><p>Public-key auth, pinned host keys, signed updates, path-traversal-proof transfers, and an optional agent file sandbox.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="globe-lock"></i></div><h3>No cloud, no lock-in</h3><p>AGPL-licensed and fully self-hosted. Your fleet stays yours.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="callout prose">
+    <h2 style="font-size:1.4rem">Let an AI agent run your fleet — today.</h2>
+    <p>Install Fleet, then teach your agent the whole CLI with one command.</p>
+    <div class="code"><pre><span class="tok">$</span> brew install cenvero-fleet
+<span class="tok">$</span> fleet init
+<span class="tok">$</span> fleet skill claude   <span style="color:var(--subtle)"># then type /fleet in Claude</span></pre></div>
+    <div class="hero-actions" style="justify-content:flex-start;margin-top:24px">
+      <a href="/docs/#install" class="btn btn-primary">Read the docs</a>
+      <a href="/whats-new.html" class="btn btn-ghost">What's new in v2</a>
+    </div>
+  </div>
+</section>
+
+<section class="wrap prose">
+  <div class="section-label">FAQ</div>
+  <h2>Agentic SSH, answered.</h2>
+  <div class="grid" style="margin-top:24px">
+    <div class="card"><h3>Can Claude control my servers over SSH?</h3><p>Yes. <code>fleet skill claude</code> installs a <code>/fleet</code> command; typing it makes the agent run <code>fleet context</code> and operate your servers over an authenticated, host-key-pinned SSH channel with your keys, on your machine. No cloud control plane.</p></div>
+    <div class="card"><h3>How does an AI agent learn the CLI?</h3><p>From the binary itself. <code>fleet context</code> prints the full reference and <code>fleet ai &lt;command&gt;</code> gives complete per-command help — both generated live, so they always match your version.</p></div>
+    <div class="card"><h3>Is it safe to let an agent operate it?</h3><p>The controller never trusts agent-provided paths for local writes, the agent can be confined with <code>--file-root</code>, updates require signed binaries, and destructive actions prompt for confirmation.</p></div>
+    <div class="card"><h3>Does it need the cloud?</h3><p>No. Fleet is fully self-hosted — one binary, SSH to your servers, no SaaS and no telemetry in the core runtime.</p></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 Cenvero · AGPL-3.0-or-later</div>
+    <div class="footer-links">
+      <a href="/">Home</a>
+      <a href="/agentic.html">Agentic AI</a>
+      <a href="/whats-new.html">What's new</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/cenvero/fleet">GitHub</a>
+    </div>
+  </div>
+</footer>
+<script>window.addEventListener('DOMContentLoaded',()=>window.lucide&&lucide.createIcons());</script>
+</body>
+</html>

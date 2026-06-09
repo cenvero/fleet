@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What's New in Cenvero Fleet v2 — File Manager, Live Sync & Agentic AI</title>
+  <meta name="description" content="Cenvero Fleet v2 adds a secure file manager (CLI, terminal, and web), live directory sync, and agentic control for AI coding agents — plus security hardening. See everything new.">
+  <meta name="keywords" content="Cenvero Fleet v2, fleet changelog, file manager SSH, live directory sync, agentic AI SSH, fleet release notes">
+  <link rel="canonical" href="https://fleet.cenvero.org/whats-new.html">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Cenvero Fleet">
+  <meta property="og:title" content="What's New in Cenvero Fleet v2">
+  <meta property="og:description" content="A secure file manager, live directory sync, and agentic AI control — the biggest Fleet release yet.">
+  <meta property="og:url" content="https://fleet.cenvero.org/whats-new.html">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/site.css">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
+  <div class="nav-links">
+    <a href="/agentic.html">Agentic AI</a>
+    <a href="/whats-new.html">What's new</a>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/cenvero/fleet">GitHub</a>
+    <a href="/docs/#install" class="nav-cta">Get Started</a>
+  </div>
+</nav>
+
+<header class="ph wrap">
+  <div class="eyebrow"><i data-lucide="sparkles"></i> Major release · v2.0</div>
+  <h1>What's new in v2.</h1>
+  <p class="lede">v2 turns Cenvero Fleet into a file-moving, AI-driven control plane — all over the same authenticated, host-key-pinned SSH channel you already trust.</p>
+  <div class="hero-actions">
+    <a href="/docs/#install" class="btn btn-primary">Upgrade now</a>
+    <a href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md" class="btn btn-ghost">Full changelog</a>
+  </div>
+</header>
+
+<section class="wrap">
+  <div class="section-label">Headline features</div>
+  <h2>Three big additions.</h2>
+  <div class="grid cols-3">
+    <div class="card"><div class="ic"><i data-lucide="folder-sync"></i></div><h3>Secure file manager</h3><p>Move files with <code>fleet file</code>, a dual-pane terminal manager (<code>fleet files</code>), or a localhost web UI (<code>fleet ui</code>). Chunked, parallel, SHA-256-checksummed, and resumable after a drop.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="repeat"></i></div><h3>Live directory sync</h3><p><code>fleet sync</code> keeps a local folder and a server folder mirrored. Pick which side is the writer with <code>--from</code>; the replica overwrites differing files and (by default) deletes extras — live, until you stop it.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="bot"></i></div><h3>Agentic control</h3><p><code>fleet skill claude</code> installs a <code>/fleet</code> command; the agent learns the whole CLI from <code>fleet context</code> and operates your fleet. <a href="/agentic.html" style="color:var(--accent)">Read why it's the best agentic SSH tool →</a></p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="section-label">Also new</div>
+  <h2>More in v2.</h2>
+  <div class="grid cols-2">
+    <div class="card"><div class="ic"><i data-lucide="file-search"></i></div><h3>Inspect remote files</h3><p><code>fleet file stat</code>, <code>cat</code> (checksum-verified to stdout), and <code>tail</code> for quick remote inspection — plus <code>-r</code> recursive upload and download of whole directory trees.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="mouse-pointer-click"></i></div><h3>Real mouse support</h3><p>Content-anchored mouse zones (bubblezone) across the dashboard and the file manager — click tabs and rows, drag files between panes.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="shield-check"></i></div><h3>Security hardening</h3><p>The controller no longer trusts agent-supplied paths for local writes, the agent can be confined with <code>--file-root</code>, updates require signed binaries, and log reads are memory-bounded.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="settings-2"></i></div><h3>Transfer defaults</h3><p>Per-server and global defaults for remote directory, parallel streams, and chunk size — seeded on first connection and tunable any time.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="callout prose">
+    <h2 style="font-size:1.4rem">Upgrade in seconds.</h2>
+    <div class="code"><pre><span class="tok">$</span> brew update &amp;&amp; brew upgrade cenvero-fleet
+<span style="color:var(--subtle)"># or: fleet update apply</span></pre></div>
+    <div class="hero-actions" style="justify-content:flex-start;margin-top:24px">
+      <a href="/docs/" class="btn btn-primary">Read the docs</a>
+      <a href="/agentic.html" class="btn btn-ghost">Explore Agentic Fleet</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 Cenvero · AGPL-3.0-or-later</div>
+    <div class="footer-links">
+      <a href="/">Home</a>
+      <a href="/agentic.html">Agentic AI</a>
+      <a href="/whats-new.html">What's new</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/cenvero/fleet">GitHub</a>
+    </div>
+  </div>
+</footer>
+<script>window.addEventListener('DOMContentLoaded',()=>window.lucide&&lucide.createIcons());</script>
+</body>
+</html>
