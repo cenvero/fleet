@@ -35,6 +35,56 @@ func newContextCommand() *cobra.Command {
 	return cmd
 }
 
+// newAICommand prints the full, machine-readable help for any command — the
+// AI-facing counterpart to --help. It shares the renderer with `context`, so it
+// always reflects the live command tree (description, flags, subcommands).
+func newAICommand() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "ai [command...]",
+		Short: "Print full machine-readable help for a command (for AI agents)",
+		Long: "Print the complete help — usage, full description, flags, and subcommands — for\n" +
+			"any command, in markdown (default) or JSON (--json). It is the AI-facing\n" +
+			"counterpart to --help: humans keep using --help for the normal concise help;\n" +
+			"an agent runs `fleet ai <command>` to get everything about a command in one\n" +
+			"structured block. With no command it prints the full reference (like `context`\n" +
+			"without the concept sections).\n\n" +
+			"Examples:\n" +
+			"  fleet ai                 # full reference for every command\n" +
+			"  fleet ai file upload     # full help for one command\n" +
+			"  fleet ai sync --json     # the same, as JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root := cmd.Root()
+			target := root
+			if len(args) > 0 {
+				found, _, err := root.Find(args)
+				if err != nil || found == nil || found == root {
+					return fmt.Errorf("unknown command %q — run 'fleet ai' to list everything", strings.Join(args, " "))
+				}
+				target = found
+			}
+			if asJSON {
+				if target == root {
+					return writeJSON(cmd, buildContextJSON(root))
+				}
+				return writeJSON(cmd, commandNodeJSON(target))
+			}
+			var b strings.Builder
+			if target == root {
+				for _, c := range visibleSubcommands(root) {
+					renderCommandMarkdown(&b, c, 2)
+				}
+			} else {
+				renderCommandMarkdown(&b, target, 1)
+			}
+			fmt.Fprint(cmd.OutOrStdout(), b.String())
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of markdown")
+	return cmd
+}
+
 func renderContextMarkdown(root *cobra.Command) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s — Agent Context\n\n", version.ProductName)
@@ -44,19 +94,26 @@ func renderContextMarkdown(root *cobra.Command) string {
 	b.WriteString(contextConcepts)
 
 	b.WriteString("## Command reference\n\n")
-	b.WriteString("Global flag (all commands): `--config-dir <path>` selects a non-default controller directory.\n\n")
+	b.WriteString("This reference is generated live from the installed binary by walking the command tree, so it always matches your version — there is nothing to keep in sync by hand, and any new command appears automatically. Each entry is the command's own help. For one command on demand, run `fleet ai <command>` (e.g. `fleet ai file upload`) or `fleet ai <command> --json`. Global flag (all commands): `--config-dir <path>` selects a non-default controller directory.\n\n")
 	for _, c := range visibleSubcommands(root) {
-		renderCommandMarkdown(&b, c)
+		renderCommandMarkdown(&b, c, 3)
 	}
 
 	b.WriteString(contextWorkflows)
 	return b.String()
 }
 
-func renderCommandMarkdown(b *strings.Builder, c *cobra.Command) {
-	fmt.Fprintf(b, "### `%s`\n\n", c.CommandPath())
-	if desc := commandDescription(c); desc != "" {
-		fmt.Fprintf(b, "%s\n\n", desc)
+// renderCommandMarkdown writes a command — its path, usage line, full help
+// (Long, else Short), and flags — then recurses into its subcommands at the next
+// heading level. This is the shared renderer used by both `context` and `ai`.
+func renderCommandMarkdown(b *strings.Builder, c *cobra.Command, depth int) {
+	level := min(depth, 6)
+	fmt.Fprintf(b, "%s `%s`\n\n", strings.Repeat("#", level), c.CommandPath())
+	if use := strings.TrimSpace(c.UseLine()); use != "" {
+		fmt.Fprintf(b, "Usage: `%s`\n\n", use)
+	}
+	if help := fullHelp(c); help != "" {
+		fmt.Fprintf(b, "%s\n\n", help)
 	}
 	if flags := commandFlagLines(c); len(flags) > 0 {
 		b.WriteString("Flags:\n")
@@ -65,22 +122,17 @@ func renderCommandMarkdown(b *strings.Builder, c *cobra.Command) {
 		}
 		b.WriteString("\n")
 	}
-	subs := visibleSubcommands(c)
-	if len(subs) > 0 {
-		b.WriteString("Subcommands:\n")
-		for _, sub := range subs {
-			line := fmt.Sprintf("- `%s` — %s", sub.CommandPath(), commandDescription(sub))
-			if flags := commandFlagLines(sub); len(flags) > 0 {
-				line += "  (flags: " + strings.Join(flagNames(sub), ", ") + ")"
-			}
-			b.WriteString(strings.TrimRight(line, " ") + "\n")
-			// Recurse one extra level for grouped subcommands (e.g. config, file defaults).
-			for _, leaf := range visibleSubcommands(sub) {
-				fmt.Fprintf(b, "  - `%s` — %s\n", leaf.CommandPath(), commandDescription(leaf))
-			}
-		}
-		b.WriteString("\n")
+	for _, sub := range visibleSubcommands(c) {
+		renderCommandMarkdown(b, sub, depth+1)
 	}
+}
+
+// fullHelp returns a command's complete Long help, falling back to its Short.
+func fullHelp(c *cobra.Command) string {
+	if strings.TrimSpace(c.Long) != "" {
+		return strings.TrimSpace(c.Long)
+	}
+	return strings.TrimSpace(c.Short)
 }
 
 func commandDescription(c *cobra.Command) string {
@@ -111,17 +163,6 @@ func commandFlagLines(c *cobra.Command) []string {
 	return lines
 }
 
-func flagNames(c *cobra.Command) []string {
-	var names []string
-	c.LocalFlags().VisitAll(func(f *pflag.Flag) {
-		if f.Hidden || f.Name == "help" {
-			return
-		}
-		names = append(names, "--"+f.Name)
-	})
-	return names
-}
-
 func visibleSubcommands(c *cobra.Command) []*cobra.Command {
 	var out []*cobra.Command
 	for _, sub := range c.Commands() {
@@ -142,8 +183,9 @@ func visibleSubcommands(c *cobra.Command) []*cobra.Command {
 
 type contextCommandJSON struct {
 	Path        string               `json:"path"`
-	Use         string               `json:"use"`
+	Usage       string               `json:"usage,omitempty"`
 	Short       string               `json:"short,omitempty"`
+	Long        string               `json:"long,omitempty"`
 	Flags       []contextFlagJSON    `json:"flags,omitempty"`
 	Subcommands []contextCommandJSON `json:"subcommands,omitempty"`
 }
@@ -168,23 +210,31 @@ func commandsJSON(c *cobra.Command) []contextCommandJSON {
 	subs := visibleSubcommands(c)
 	out := make([]contextCommandJSON, 0, len(subs))
 	for _, sub := range subs {
-		node := contextCommandJSON{
-			Path:        sub.CommandPath(),
-			Use:         sub.Use,
-			Short:       commandDescription(sub),
-			Subcommands: commandsJSON(sub),
-		}
-		sub.LocalFlags().VisitAll(func(f *pflag.Flag) {
-			if f.Hidden || f.Name == "help" {
-				return
-			}
-			node.Flags = append(node.Flags, contextFlagJSON{
-				Name: f.Name, Type: f.Value.Type(), Usage: f.Usage, Default: f.DefValue,
-			})
-		})
-		out = append(out, node)
+		out = append(out, commandNodeJSON(sub))
 	}
 	return out
+}
+
+// commandNodeJSON builds the full JSON node for a single command (its usage,
+// short/long help, flags, and recursive subcommands). Shared by `context` and
+// `ai`.
+func commandNodeJSON(c *cobra.Command) contextCommandJSON {
+	node := contextCommandJSON{
+		Path:        c.CommandPath(),
+		Usage:       strings.TrimSpace(c.UseLine()),
+		Short:       commandDescription(c),
+		Long:        strings.TrimSpace(c.Long),
+		Subcommands: commandsJSON(c),
+	}
+	c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		if f.Hidden || f.Name == "help" {
+			return
+		}
+		node.Flags = append(node.Flags, contextFlagJSON{
+			Name: f.Name, Type: f.Value.Type(), Usage: f.Usage, Default: f.DefValue,
+		})
+	})
+	return node
 }
 
 // ---- static conceptual sections ----
@@ -197,6 +247,7 @@ const contextAbout = "## What this is\n\n" +
 
 const contextForAgents = "## How to use this as an agent\n\n" +
 	"- Run commands with `fleet <group> <subcommand> ...`. Most commands print JSON to stdout — parse it.\n" +
+	"- Need the full details of one command? Run `fleet ai <command>` (e.g. `fleet ai file upload`), or add `--json`. It's the machine-readable counterpart to `--help` and always matches the installed binary.\n" +
 	"- Add `--config-dir <path>` if the user runs a controller outside the default `~/.cenvero-fleet`.\n" +
 	"- Start by checking state: `fleet status` (overall) and `fleet server list` (the fleet).\n" +
 	"- If you see \"not initialized\", the controller needs `fleet init` first — confirm with the user before initializing.\n" +
