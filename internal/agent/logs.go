@@ -19,6 +19,11 @@ import (
 // kernel data structures, or raw device data — even to an authenticated client.
 var blockedLogPrefixes = []string{"/proc/", "/sys/", "/dev/"}
 
+// maxLogTailLines caps how many log lines are buffered/returned for a single
+// read, bounding the agent's memory regardless of the requested tail or file
+// size.
+const maxLogTailLines = 100_000
+
 type LogReader interface {
 	Read(context.Context, proto.LogReadPayload) (proto.LogReadResult, error)
 }
@@ -76,10 +81,19 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 	defer file.Close()
 
 	search := strings.ToLower(strings.TrimSpace(payload.Search))
+	tailLines := payload.TailLines
+	if tailLines <= 0 {
+		tailLines = 200
+	}
+	tailLines = min(tailLines, maxLogTailLines)
+
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	lines := make([]proto.LogLine, 0, 128)
+	// Bounded ring buffer: keep only the last tailLines matching lines so that
+	// reading a multi-gigabyte log cannot balloon the agent's memory.
+	ring := make([]proto.LogLine, tailLines)
+	matched := 0
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
@@ -87,10 +101,8 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 		if search != "" && !strings.Contains(strings.ToLower(line), search) {
 			continue
 		}
-		lines = append(lines, proto.LogLine{
-			Number: lineNumber,
-			Text:   line,
-		})
+		ring[matched%tailLines] = proto.LogLine{Number: lineNumber, Text: line}
+		matched++
 	}
 	if err := scanner.Err(); err != nil {
 		return proto.LogReadResult{}, &RPCError{
@@ -99,18 +111,18 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 		}
 	}
 
-	tailLines := payload.TailLines
-	if tailLines <= 0 {
-		tailLines = 200
+	n := min(matched, tailLines)
+	out := make([]proto.LogLine, n)
+	start := 0
+	if matched > tailLines {
+		start = matched % tailLines
 	}
-
-	result := proto.LogReadResult{
-		Path:  payload.Path,
-		Lines: lines,
+	for i := range n {
+		out[i] = ring[(start+i)%tailLines]
 	}
-	if len(lines) > tailLines {
-		result.Truncated = true
-		result.Lines = append([]proto.LogLine(nil), lines[len(lines)-tailLines:]...)
-	}
-	return result, nil
+	return proto.LogReadResult{
+		Path:      payload.Path,
+		Lines:     out,
+		Truncated: matched > tailLines,
+	}, nil
 }
