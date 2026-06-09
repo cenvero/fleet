@@ -32,6 +32,14 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
+## [v2.0.5] — 2026-06-09 (stable)
+
+### Added
+
+- Web file manager: a **"Local" source** (the controller's own filesystem) — panes now default to **Local ↔ first server**, with server↔server still selectable. Local↔server transfers use the upload/download engine; all local endpoints stay behind the loopback + token + CSRF guard.
+- Web file manager: a Finder-style **List / Icons view toggle** (button + `v`), matching the terminal UI.
+- Terminal file manager: richer, **type-distinct file icons** (dirs, code, docs, data, images, archives, media, executables, dotfiles), consistent across list, icon grid, and the drag ghost.
+
 ## [v2.0.4] — 2026-06-09 (stable)
 
 ### Added
