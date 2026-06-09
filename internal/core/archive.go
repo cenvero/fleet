@@ -85,13 +85,17 @@ func compressCmd(dir string, names []string, archive, format string) (string, er
 	if len(names) == 0 {
 		return "", fmt.Errorf("nothing selected to compress")
 	}
+	// Prefix every operand with "./" so a file literally named like a flag
+	// (e.g. "--checkpoint-action=exec=...") is treated by tar/zip as a path, not
+	// an option. Shell-quoting alone blocks shell injection but not this
+	// argument-level option injection.
 	quoted := make([]string, len(names))
 	for i, n := range names {
-		quoted[i] = shellQuote(path.Base(n))
+		quoted[i] = shellQuote("./" + path.Base(n))
 	}
 	items := strings.Join(quoted, " ")
 	d := shellQuote(dir)
-	out := shellQuote(archive)
+	out := shellQuote("./" + path.Base(archive))
 	switch format {
 	case "zip":
 		return fmt.Sprintf("cd %s && rm -f %s && zip -r -q %s %s", d, out, out, items), nil
