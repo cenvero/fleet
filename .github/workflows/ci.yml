@@ -31,6 +31,13 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      # Ubuntu 24.04 runners set vm.mmap_rnd_bits=32, whose ASLR entropy breaks
+      # the race detector's (ThreadSanitizer) shadow-memory mapping — it aborts
+      # with "unexpected memory mapping" on large test binaries. Lower the
+      # entropy so `go test -race` works. See actions/runner-images#9491,
+      # golang/go#67682.
+      - name: Work around ThreadSanitizer ASLR mapping on Ubuntu 24.04
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
       - name: Test with race detector
         run: go test -race -cover ./...
 
