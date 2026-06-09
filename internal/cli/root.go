@@ -61,12 +61,15 @@ func NewRootCommand() *cobra.Command {
 			switch cmd.Name() {
 			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
 				"check", "apply", "rollback", "channel",
-				"backup", "recover", "adjust-init":
+				"backup", "recover", "adjust-init",
+				// context/skill describe the CLI and install agent integrations;
+				// they never touch controller state, so they must work pre-init.
+				"context", "skill":
 				return nil
 			}
 			if cmd.HasParent() {
 				switch cmd.Parent().Name() {
-				case "help", "completion", "update":
+				case "help", "completion", "update", "skill":
 					return nil
 				}
 			}
