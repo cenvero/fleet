@@ -11,7 +11,9 @@ fleet skill agents      # a portable AGENTS.md in the current directory
 fleet skill list        # show targets and where they install
 ```
 
-Flags: `--dir` (override the install directory), `--force` (overwrite), `--print` (print instead of writing).
+Flags: `--dir` (override the install directory), `--print` (print instead of writing).
+
+Re-running an install just **overwrites** the existing files (no `--force`, no error) and prints where they went and a reminder to restart Claude — so you can refresh the integration any time. After installing the Claude target, **restart Claude (or launch `claude`) and type `/fleet`**: the agent runs `fleet context`, learns the whole CLI, and operates your fleet for the rest of the session (until the context is compacted).
 
 The installed skill is deliberately tiny. It does not hard-code a command list (which would go stale); it tells the agent to run `fleet context` first.
 
