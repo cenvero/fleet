@@ -603,7 +603,7 @@ func looksBinary(b []byte) bool {
 	}
 	n := min(len(b), 8000) // sampling the head is enough to classify
 	ctrl := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		c := b[i]
 		if c < 0x09 || (c > 0x0d && c < 0x20) {
 			ctrl++
@@ -1047,12 +1047,12 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		dst := duplicateName(clean)
 		info, err := os.Lstat(clean)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
+		dst := freeDuplicateName(clean, func(c string) bool { _, e := os.Lstat(c); return e == nil })
 		if info.IsDir() {
 			if err := copyLocalTree(clean, dst); err != nil {
 				writeError(w, err)
@@ -1065,7 +1065,7 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "ok", "path": dst})
 		return
 	}
-	dst := duplicateName(p)
+	dst := freeDuplicateName(p, func(c string) bool { _, e := s.app.StatRemoteFile(server, c); return e == nil })
 	if _, err := s.app.CopyFile(server, p, server, dst, core.FileTransferOptions{}, nil); err != nil {
 		writeError(w, err)
 		return
@@ -1082,6 +1082,24 @@ func duplicateName(p string) string {
 	ext := path.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 	return path.Join(dir, stem+" copy"+ext)
+}
+
+// freeDuplicateName returns the first "<name> copy[ N].<ext>" sibling that does
+// not already exist (per `exists`), so Duplicate never clobbers a sibling.
+func freeDuplicateName(p string, exists func(string) bool) string {
+	dir, base := path.Dir(p), path.Base(p)
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 1; ; i++ {
+		suffix := " copy"
+		if i > 1 {
+			suffix = fmt.Sprintf(" copy %d", i)
+		}
+		cand := path.Join(dir, stem+suffix+ext)
+		if !exists(cand) {
+			return cand
+		}
+	}
 }
 
 // ---- progress hub ----

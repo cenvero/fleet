@@ -70,6 +70,12 @@ with one or more allowed roots — every file operation must then stay inside th
 fleet-agent serve --file-root /srv/incoming --file-root /var/www
 ```
 
+> `--file-root` bounds the file **transfer/manage** operations (list, read, write,
+> mkdir, delete, rename). The archive (`compress`/`extract`), permission (`chmod`),
+> and `checksum` features run via the agent's shell exec and are **not** confined by
+> `--file-root` — they inherit the agent user's normal permissions. Restrict the
+> agent user (or its shell-exec capability) if you need a hard boundary there.
+
 Abandoned upload temp files (`<name>.fleet-<id>.part`) left by interrupted
 transfers are reaped automatically (after 24h) when a new upload to the same
 directory begins.

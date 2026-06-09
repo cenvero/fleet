@@ -61,10 +61,11 @@ func runParallelTransfers(rels []string, totalBytes int64, progress ProgressFunc
 		go func(rel string) {
 			defer wg.Done()
 			defer func() { atomic.AddInt64(&active, -1); <-sem }()
-			var last int64
+			// UploadFile/DownloadFile invoke fp concurrently from each per-file
+			// sender goroutine, so the running total must be tracked atomically.
+			var fileLast atomic.Int64
 			fp := func(u ProgressUpdate) {
-				atomic.AddInt64(&doneBytes, u.BytesDone-last)
-				last = u.BytesDone
+				atomic.AddInt64(&doneBytes, u.BytesDone-fileLast.Swap(u.BytesDone))
 				emit()
 			}
 			if err := xfer(rel, fp); err != nil {
