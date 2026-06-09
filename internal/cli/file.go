@@ -31,6 +31,9 @@ func newFileCommand(configDir *string) *cobra.Command {
 	}
 
 	fileCmd.AddCommand(newFileListCommand(configDir))
+	fileCmd.AddCommand(newFileStatCommand(configDir))
+	fileCmd.AddCommand(newFileCatCommand(configDir))
+	fileCmd.AddCommand(newFileTailCommand(configDir))
 	fileCmd.AddCommand(newFileUploadCommand(configDir))
 	fileCmd.AddCommand(newFileDownloadCommand(configDir))
 	fileCmd.AddCommand(newFileMkdirCommand(configDir))
@@ -68,15 +71,18 @@ func newFileListCommand(configDir *string) *cobra.Command {
 func newFileUploadCommand(configDir *string) *cobra.Command {
 	var parallel int
 	var chunkSize string
+	var recursive bool
 	cmd := &cobra.Command{
 		Use:   "upload <server> <local> [remote]",
-		Short: "Upload a local file to a server (chunked, parallel, resumable)",
+		Short: "Upload a local file (or directory with -r) to a server (chunked, parallel, resumable)",
 		Long: "Upload <local> to <remote> on <server>. If <remote> is omitted (or ends in '/')\n" +
 			"the file lands in the server's default remote directory under its base name.\n" +
 			"The transfer is chunked, run over --parallel concurrent channels, SHA-256\n" +
 			"verified, and resumable: re-running the same command after an interruption\n" +
 			"skips the chunks already on the server. On a terminal it shows a live progress\n" +
-			"bar; otherwise it prints periodic JSON.",
+			"bar; otherwise it prints periodic JSON.\n\n" +
+			"With -r/--recursive, <local> is a directory and <remote> (required) is the\n" +
+			"destination directory; the whole tree is uploaded, preserving structure.",
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
@@ -92,6 +98,17 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 			if len(args) == 3 {
 				remote = args[2]
 			}
+			if recursive {
+				if remote == "" {
+					return fmt.Errorf("recursive upload requires a <remote> directory")
+				}
+				n, err := app.UploadDir(args[0], args[1], remote, opts, nil)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "uploaded %d files to %s\n", n, remote)
+				return nil
+			}
 			progress, finish := newProgressReporter(cmd, "upload")
 			result, err := app.UploadFile(args[0], args[1], remote, opts, progress)
 			finish()
@@ -104,19 +121,24 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&parallel, "parallel", 0, "number of parallel streams (0 = use server/global default)")
 	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "upload a directory tree")
 	return cmd
 }
 
 func newFileDownloadCommand(configDir *string) *cobra.Command {
 	var parallel int
 	var chunkSize string
+	var recursive bool
 	cmd := &cobra.Command{
 		Use:   "download <server> <remote> [local]",
-		Short: "Download a file from a server (chunked, parallel, resumable)",
+		Short: "Download a file (or directory with -r) from a server (chunked, parallel, resumable)",
 		Long: "Download <remote> from <server> into <local> (defaults to the remote base name\n" +
 			"in the current directory; a local directory is allowed and the base name is\n" +
 			"appended). Same engine as upload: chunked, parallel, SHA-256 verified, and\n" +
-			"resumable from a partial local file.",
+			"resumable from a partial local file.\n\n" +
+			"With -r/--recursive, <remote> is a directory and the whole tree is downloaded\n" +
+			"into <local> (default: current directory). Remote names are vetted so a\n" +
+			"compromised server cannot write outside <local>.",
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
@@ -132,6 +154,18 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 			if len(args) == 3 {
 				local = args[2]
 			}
+			if recursive {
+				dest := local
+				if dest == "" {
+					dest = "."
+				}
+				n, err := app.DownloadDir(args[0], args[1], dest, opts, nil)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "downloaded %d files into %s\n", n, dest)
+				return nil
+			}
 			progress, finish := newProgressReporter(cmd, "download")
 			result, err := app.DownloadFile(args[0], args[1], local, opts, progress)
 			finish()
@@ -144,6 +178,73 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&parallel, "parallel", 0, "number of parallel streams (0 = use server/global default)")
 	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "download a directory tree")
+	return cmd
+}
+
+func newFileStatCommand(configDir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "stat <server> <path>",
+		Short: "Show metadata (size, mode, mtime, type) for a remote path",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			res, err := app.StatRemoteFile(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			return writeJSON(cmd, res.Entry)
+		},
+	}
+}
+
+func newFileCatCommand(configDir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "cat <server> <path>",
+		Short: "Stream a remote file to stdout (each chunk checksum-verified)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			_, err = app.CatRemoteFile(args[0], args[1], cmd.OutOrStdout())
+			return err
+		},
+	}
+}
+
+func newFileTailCommand(configDir *string) *cobra.Command {
+	var lines int
+	var search string
+	cmd := &cobra.Command{
+		Use:   "tail <server> <path>",
+		Short: "Show the last lines of a remote text file",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			res, err := app.TailRemoteFile(args[0], args[1], lines, search)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			for _, line := range res.Lines {
+				fmt.Fprintln(out, line.Text)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVarP(&lines, "lines", "n", 200, "number of trailing lines to show")
+	cmd.Flags().StringVar(&search, "search", "", "only show lines containing this substring")
 	return cmd
 }
 
