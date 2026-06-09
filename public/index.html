@@ -3,9 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cenvero Fleet — Self-hosted fleet management</title>
-  <meta name="description" content="Cenvero Fleet is a self-hosted, decentralized fleet management platform. Manage Linux servers over SSH with no cloud required.">
-  <link rel="icon" href="https://cdn.cenvero.com/favicon.png" type="image/png">
+  <title>Cenvero Fleet — Self-hosted SSH Fleet Management for Humans and AI Agents</title>
+  <meta name="description" content="Cenvero Fleet is a self-hosted fleet manager for Linux, macOS, and Windows servers over SSH. Shell, services, logs, metrics, secure file transfer, live sync — and a self-describing CLI that lets AI agents like Claude Code operate your fleet. No cloud required.">
+  <meta name="keywords" content="fleet management, self-hosted, SSH server management, agentic SSH, AI server management, Claude Code SSH, file transfer over SSH, live directory sync, Ansible alternative, no cloud DevOps, Cenvero Fleet">
+  <link rel="canonical" href="https://fleet.cenvero.org/">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Cenvero Fleet">
+  <meta property="og:title" content="Cenvero Fleet — Self-hosted SSH Fleet Management for Humans and AI Agents">
+  <meta property="og:description" content="Manage every server over SSH — shell, services, logs, metrics, file transfer, live sync — and let an AI agent operate your fleet. Self-hosted, no cloud.">
+  <meta property="og:url" content="https://fleet.cenvero.org/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Cenvero Fleet — SSH Fleet Management for Humans and AI Agents">
+  <meta name="twitter:description" content="Self-hosted fleet management over SSH, with a self-describing CLI built for AI agents. No cloud required.">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Cenvero Fleet",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Linux, macOS, Windows",
+    "url": "https://fleet.cenvero.org/",
+    "description": "Cenvero Fleet is a self-hosted, SSH-based fleet manager for Linux, macOS, and Windows servers. It provides shell access, service control, logs, live metrics, secure resumable file transfer, live directory sync, and a self-describing CLI that AI coding agents such as Claude Code and Codex can use to operate the fleet — with no cloud dependency.",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html"
+  }
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -378,8 +403,8 @@
 <nav class="nav">
   <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
   <div class="nav-links">
-    <a href="#v2">What's new</a>
-    <a href="#agentic">AI</a>
+    <a href="/agentic.html">Agentic AI</a>
+    <a href="/whats-new.html">What's new</a>
     <a href="/docs/">Docs</a>
     <a href="https://github.com/cenvero/fleet">GitHub</a>
     <a href="https://github.com/cenvero/fleet/releases">Releases</a>
@@ -390,8 +415,8 @@
   </button>
 </nav>
 <div class="nav-mobile" id="nav-mobile">
-  <a href="#v2">What's new</a>
-  <a href="#agentic">AI</a>
+  <a href="/agentic.html">Agentic AI</a>
+  <a href="/whats-new.html">What's new</a>
   <a href="/docs/">Docs</a>
   <a href="https://github.com/cenvero/fleet">GitHub</a>
   <a href="https://github.com/cenvero/fleet/releases">Releases</a>
@@ -499,6 +524,9 @@
     <button onclick="copyCmd(this,'fleet skill claude')">copy</button>
   </div>
   <p class="section-sub" style="margin-top:18px">Self-describing by design: <code>fleet context</code> and <code>fleet ai &lt;command&gt;</code> generate full, machine-readable help straight from the command tree — always in sync with the installed version, nothing to maintain by hand.</p>
+  <div class="hero-actions" style="margin-top:26px">
+    <a href="/agentic.html" class="btn btn-primary">Why Fleet is the best agentic SSH tool →</a>
+  </div>
 </div>
 
 <hr class="divider">
