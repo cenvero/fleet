@@ -73,6 +73,41 @@ func TestContextJSONIsValidAndHasFileGroup(t *testing.T) {
 	}
 }
 
+func TestAICommandPerCommandHelp(t *testing.T) {
+	// Markdown for a single command includes its usage, full Long help, and flags.
+	out, err := runFleet(t, "ai", "file", "upload")
+	if err != nil {
+		t.Fatalf("ai file upload: %v", err)
+	}
+	for _, want := range []string{"`fleet file upload`", "Usage:", "resumable", "--parallel"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("ai file upload missing %q", want)
+		}
+	}
+
+	// JSON for a single command node.
+	jout, err := runFleet(t, "ai", "sync", "--json")
+	if err != nil {
+		t.Fatalf("ai sync --json: %v", err)
+	}
+	var node struct {
+		Path  string `json:"path"`
+		Usage string `json:"usage"`
+		Long  string `json:"long"`
+	}
+	if err := json.Unmarshal([]byte(jout), &node); err != nil {
+		t.Fatalf("ai sync --json invalid: %v", err)
+	}
+	if node.Path != "fleet sync" || node.Long == "" {
+		t.Fatalf("unexpected ai node: %+v", node)
+	}
+
+	// Unknown command errors.
+	if _, err := runFleet(t, "ai", "definitely-not-a-command"); err == nil {
+		t.Fatalf("expected error for unknown command")
+	}
+}
+
 func TestSkillClaudeInstall(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := runFleet(t, "skill", "claude", "--dir", dir); err != nil {
