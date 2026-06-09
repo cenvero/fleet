@@ -9,6 +9,7 @@ The docs are written to match the current repository state and focus on the real
 - [Transport Modes](transport-modes.md)
 - [Configuration and Storage](configuration-and-storage.md)
 - [File Manager and Transfers](file-manager.md)
+- [Agentic Fleet (AI control)](agentic.md)
 - [Operations Guide](operations.md)
 - [Releases and Updates](releases-and-updates.md)
 
@@ -21,6 +22,8 @@ The documentation currently focuses on:
 - how direct and reverse transport modes behave, including SSH reconnect and persistent shell sessions
 - where Cenvero Fleet stores its data and how backend selection works
 - how operators use services, logs, alerts, templates, key rotation, and updates
+- how to move files with the v2 file manager — `fleet file`, the `fleet files` TUI, and the `fleet ui` web app
+- how AI coding agents drive the fleet via `fleet context` and `fleet skill`
 - how to back up, restore, and recover a controller installation with `fleet backup` and `fleet recover`
 - how maintainers validate release readiness before pushing a real signed tag
 
