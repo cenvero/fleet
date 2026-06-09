@@ -115,8 +115,8 @@ const ICONS = {
 const state = {
   servers: [],
   panes: [
-    { server: "", path: "/", items: [], sel: new Set(), hidden: false, loading: false },
-    { server: "", path: "/", items: [], sel: new Set(), hidden: false, loading: false },
+    { server: "", path: "/", items: [], sel: new Set(), hidden: false, loading: false, view: "list" },
+    { server: "", path: "/", items: [], sel: new Set(), hidden: false, loading: false, view: "list" },
   ],
   active: 0,
   els: [null, null], // per-pane DOM refs
@@ -157,6 +157,7 @@ function buildPanes() {
       mkdir: $(".tool.mkdir", node),
       upload: $(".tool.upload", node),
       hiddenToggle: $(".tool.hidden-toggle", node),
+      viewToggle: $(".tool.view-toggle", node),
       fileInput: $(".file-input", node),
       crumbs: $(".crumbs", node),
       entries: $(".entries", node),
@@ -204,6 +205,11 @@ function wirePane(i) {
     r.hiddenToggle.setAttribute("aria-pressed", String(p.hidden));
     loadListing(i);
   });
+  r.viewToggle.addEventListener("click", () => {
+    setActive(i);
+    setView(i, p.view === "list" ? "icons" : "list");
+  });
+  applyViewClass(i);
 
   r.actDownload.addEventListener("click", () => actDownload(i));
   r.actCopy.addEventListener("click", () => transferSelection(i, "copy"));
@@ -249,16 +255,15 @@ async function loadServers() {
     return;
   }
   state.servers = servers;
-  if (!servers.length) {
-    showTakeover(
-      "No servers configured",
-      'Add a server with <code>fleet server add</code>, then reopen the file manager.'
-    );
-    return;
-  }
+  // Build each pane's source dropdown: a "Local" entry (value "" = the
+  // controller's own filesystem) followed by every configured server.
   for (let i = 0; i < 2; i++) {
     const sel = state.els[i].server;
     sel.innerHTML = "";
+    const localOpt = document.createElement("option");
+    localOpt.value = "";
+    localOpt.textContent = "Local (this machine)";
+    sel.appendChild(localOpt);
     for (const s of servers) {
       const opt = document.createElement("option");
       opt.value = s.name;
@@ -266,13 +271,15 @@ async function loadServers() {
       opt.disabled = !s.reachable;
       sel.appendChild(opt);
     }
-    // pane 0 → first reachable; pane 1 → second reachable (or first)
-    const reachable = servers.filter((s) => s.reachable);
-    let pick = reachable[0] || servers[0];
-    if (i === 1 && reachable.length > 1) pick = reachable[1];
-    pane(i).server = pick.name;
-    sel.value = pick.name;
   }
+  // Default panes: pane 0 = Local, pane 1 = first reachable server (or Local
+  // when no servers are configured / reachable).
+  const reachable = servers.filter((s) => s.reachable);
+  const firstServer = reachable[0] || servers[0];
+  pane(0).server = "";
+  state.els[0].server.value = "";
+  pane(1).server = firstServer ? firstServer.name : "";
+  state.els[1].server.value = pane(1).server;
   await Promise.all([loadListing(0), loadListing(1)]);
 }
 
@@ -281,11 +288,12 @@ async function loadServers() {
 async function loadListing(i) {
   const p = pane(i);
   const r = state.els[i];
-  if (!p.server) return;
   p.loading = true;
   showPlaceholder(i, "spinner", "Loading…");
   let result;
   try {
+    // server "" means the Local (controller) filesystem; it's still sent so the
+    // backend can route, and our api() helper just drops the empty value.
     const params = { server: p.server, path: p.path };
     if (p.hidden) params.hidden = "1";
     result = await getJSON("/api/list", params);
@@ -385,34 +393,87 @@ function renderEntries(i) {
     return;
   }
   const frag = document.createDocumentFragment();
+  const icons = p.view === "icons";
   for (const item of p.items) {
-    const row = document.createElement("div");
-    row.className = "row " + (item.is_dir ? "dir" : item.is_symlink ? "link" : "file");
-    row.dataset.name = item.name;
-
-    const nameCell = document.createElement("div");
-    nameCell.className = "row-name";
-    const icon = document.createElement("span");
-    icon.className = "row-icon";
-    icon.innerHTML = iconFor(item);
-    const label = document.createElement("span");
-    label.className = "row-label";
-    label.textContent = item.name;
-    nameCell.append(icon, label);
-
-    const size = document.createElement("span");
-    size.className = "row-size";
-    size.textContent = item.is_dir ? "—" : humanSize(item.size);
-
-    const mod = document.createElement("span");
-    mod.className = "row-mod";
-    mod.textContent = fmtTime(item.mod_time);
-
-    row.append(nameCell, size, mod);
+    const row = icons ? buildIconCell(item) : buildListRow(item);
     wireRow(i, row, item);
     frag.appendChild(row);
   }
   r.entries.appendChild(frag);
+}
+
+// buildListRow builds a Finder-style "List" row: icon + name, size, modified.
+function buildListRow(item) {
+  const row = document.createElement("div");
+  row.className = "row " + (item.is_dir ? "dir" : item.is_symlink ? "link" : "file");
+  row.dataset.name = item.name;
+
+  const nameCell = document.createElement("div");
+  nameCell.className = "row-name";
+  const icon = document.createElement("span");
+  icon.className = "row-icon";
+  icon.innerHTML = iconFor(item);
+  const label = document.createElement("span");
+  label.className = "row-label";
+  label.textContent = item.name;
+  nameCell.append(icon, label);
+
+  const size = document.createElement("span");
+  size.className = "row-size";
+  size.textContent = item.is_dir ? "—" : humanSize(item.size);
+
+  const mod = document.createElement("span");
+  mod.className = "row-mod";
+  mod.textContent = fmtTime(item.mod_time);
+
+  row.append(nameCell, size, mod);
+  return row;
+}
+
+// buildIconCell builds an "Icons" grid cell: a large icon over the name. It
+// keeps the same `.row` + `.dir/.file/.link` classes and `data-name` as a list
+// row so selection, drag-and-drop, and the context menu work identically.
+function buildIconCell(item) {
+  const cell = document.createElement("div");
+  cell.className = "row cell " + (item.is_dir ? "dir" : item.is_symlink ? "link" : "file");
+  cell.dataset.name = item.name;
+
+  const icon = document.createElement("span");
+  icon.className = "cell-icon";
+  icon.innerHTML = iconFor(item);
+
+  const label = document.createElement("span");
+  label.className = "cell-label";
+  label.textContent = item.name;
+  label.title = item.name;
+
+  cell.append(icon, label);
+  return cell;
+}
+
+// setView switches a pane between "list" and "icons" and re-renders in place.
+// Nothing is persisted — the view resets to List on reload.
+function setView(i, view) {
+  const p = pane(i);
+  if (p.view === view) return;
+  p.view = view;
+  applyViewClass(i);
+  renderEntries(i);
+  renderSelection(i);
+}
+
+// applyViewClass reflects the pane's view onto its DOM and updates the toggle
+// button's title/state so the icon swap (grid vs list glyph) is meaningful.
+function applyViewClass(i) {
+  const p = pane(i);
+  const r = state.els[i];
+  const icons = p.view === "icons";
+  r.root.classList.toggle("view-icons", icons);
+  r.root.classList.toggle("view-list", !icons);
+  if (r.viewToggle) {
+    r.viewToggle.setAttribute("aria-pressed", String(icons));
+    r.viewToggle.title = icons ? "Switch to list view" : "Switch to icon view";
+  }
 }
 
 function rowEl(i, name) {
@@ -687,7 +748,6 @@ async function moveIntoFolder(i, items, destName) {
 
 async function uploadFiles(i, fileList) {
   const p = pane(i);
-  if (!p.server) return;
   for (const file of fileList) {
     let resp;
     try {
@@ -702,7 +762,14 @@ async function uploadFiles(i, fileList) {
       toast("Upload failed (" + file.name + "): " + e.message, "error");
       continue;
     }
-    watchTransfer(resp.id, "Upload " + file.name, "upload", () => loadListing(i));
+    // A server upload returns a progress id to track; a Local upload writes the
+    // bytes straight to disk and finishes synchronously (no id, no progress).
+    if (resp.id) {
+      watchTransfer(resp.id, "Upload " + file.name, "upload", () => loadListing(i));
+    } else {
+      toast("Uploaded " + file.name, "success");
+      loadListing(i);
+    }
   }
 }
 
@@ -899,7 +966,7 @@ function showProperties(i, item) {
     ["Size", item.is_dir ? "—" : humanSize(item.size) + " (" + (item.size || 0).toLocaleString() + " bytes)"],
     ["Modified", fmtTime(item.mod_time) || "—"],
     ["Mode", item.mode != null ? "0" + (item.mode & 0o777).toString(8) : "—"],
-    ["Server", p.server],
+    ["Source", p.server || "Local (this machine)"],
   ];
   const modal = openModalShell();
   const h = document.createElement("h3");
@@ -1310,6 +1377,11 @@ function setupKeyboard() {
     if (tag === "input" || tag === "select" || tag === "textarea") return;
 
     if (e.key === "Escape") { p.sel.clear(); renderSelection(i); return; }
+    if ((e.key === "v" || e.key === "V") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      setView(i, p.view === "list" ? "icons" : "list");
+      return;
+    }
     if ((e.key === "Delete" || e.key === "Backspace") && p.sel.size) { e.preventDefault(); actDelete(i); return; }
     if (e.key === "F2" && p.sel.size === 1) { e.preventDefault(); actRename(i); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {

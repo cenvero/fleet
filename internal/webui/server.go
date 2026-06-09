@@ -19,12 +19,14 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/pkg/proto"
 )
 
 // DefaultAddr is the default bind address for the web UI. Loopback only.
@@ -224,6 +226,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	dir := r.URL.Query().Get("path")
 	showHidden := r.URL.Query().Get("hidden") == "1" || r.URL.Query().Get("hidden") == "true"
+	if server == "" { // Local: the controller's own filesystem.
+		result, err := listLocalDir(dir, showHidden)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, result)
+		return
+	}
 	result, err := s.app.ListRemoteDirHidden(server, dir, showHidden)
 	if err != nil {
 		writeError(w, err)
@@ -232,34 +243,205 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-// handleTransfer drives a server-to-server copy or move, tracked by the progress
-// hub like an upload. move=true deletes the source after a successful copy.
+// cleanLocalPath validates a controller-side path: it must be absolute, and is
+// returned in cleaned form. An empty path defaults to "/" so the Local pane has
+// a sensible root. Relative paths are rejected so a `dir` from the browser can't
+// be resolved against the controller's working directory.
+func cleanLocalPath(p string) (string, error) {
+	if p == "" {
+		p = "/"
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	return filepath.Clean(p), nil
+}
+
+// listLocalDir reads a directory on the controller and returns it in the same
+// JSON shape as a remote listing, so the frontend renders Local and server panes
+// identically. Dotfiles are hidden unless showHidden is set.
+func listLocalDir(dir string, showHidden bool) (proto.FileListResult, error) {
+	clean, err := cleanLocalPath(dir)
+	if err != nil {
+		return proto.FileListResult{}, err
+	}
+	ents, err := os.ReadDir(clean)
+	if err != nil {
+		return proto.FileListResult{}, err
+	}
+	out := proto.FileListResult{Path: clean, Entries: make([]proto.FileEntry, 0, len(ents))}
+	for _, de := range ents {
+		name := de.Name()
+		if !showHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil {
+			continue // entry vanished between ReadDir and Info; skip it
+		}
+		out.Entries = append(out.Entries, proto.FileEntry{
+			Name:      name,
+			Path:      filepath.Join(clean, name),
+			Size:      info.Size(),
+			Mode:      uint32(info.Mode().Perm()),
+			IsDir:     de.IsDir(),
+			IsSymlink: info.Mode()&os.ModeSymlink != 0,
+			ModTime:   info.ModTime(),
+		})
+	}
+	return out, nil
+}
+
+// handleTransfer drives a copy or move between any two sources, tracked by the
+// progress hub like an upload. A source is Local (the controller filesystem)
+// when its server name is empty, else a managed server. move=true deletes the
+// source after a successful copy. Routing covers all four combinations:
+//
+//	server→server : CopyFile/CopyDir   (move → MoveFile/MoveDir)
+//	local →server : UploadFile/UploadDir (move → upload, then remove local src)
+//	server→local  : DownloadFile/DownloadDir (move → download, then RemoteDelete)
+//	local →local  : os copy of file/tree (move → os.Rename)
 func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move bool) {
 	q := r.URL.Query()
 	srcServer, srcPath := q.Get("srcServer"), q.Get("srcPath")
 	dstServer, dstPath := q.Get("dstServer"), q.Get("dstPath")
 	recursive := q.Get("recursive") == "1" || q.Get("recursive") == "true"
-	if srcServer == "" || srcPath == "" || dstServer == "" || dstPath == "" {
-		http.Error(w, "srcServer, srcPath, dstServer, dstPath are required", http.StatusBadRequest)
+	if srcPath == "" || dstPath == "" {
+		http.Error(w, "srcPath and dstPath are required", http.StatusBadRequest)
 		return
 	}
+	srcLocal := srcServer == ""
+	dstLocal := dstServer == ""
+	// Validate local endpoints up front so a bad path fails fast (and cleanly).
+	if srcLocal {
+		clean, err := cleanLocalPath(srcPath)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		srcPath = clean
+	}
+	if dstLocal {
+		clean, err := cleanLocalPath(dstPath)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dstPath = clean
+	}
+
 	id := s.hub.start()
 	go func() {
 		prog := func(u core.ProgressUpdate) { s.hub.update(id, u) }
 		var err error
 		switch {
-		case move && recursive:
-			_, err = s.app.MoveDir(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
-		case move:
-			err = s.app.MoveFile(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
-		case recursive:
-			_, err = s.app.CopyDir(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
-		default:
-			_, err = s.app.CopyFile(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		case !srcLocal && !dstLocal: // server → server
+			err = s.transferServerToServer(srcServer, srcPath, dstServer, dstPath, recursive, move, prog)
+		case srcLocal && !dstLocal: // local → server (upload)
+			err = s.transferLocalToServer(srcPath, dstServer, dstPath, recursive, move, prog)
+		case !srcLocal && dstLocal: // server → local (download)
+			err = s.transferServerToLocal(srcServer, srcPath, dstPath, recursive, move, prog)
+		default: // local → local
+			err = transferLocalToLocal(srcPath, dstPath, move)
 		}
 		s.hub.finish(id, err)
 	}()
 	writeJSON(w, map[string]string{"id": id})
+}
+
+func (s *Server) transferServerToServer(srcServer, srcPath, dstServer, dstPath string, recursive, move bool, prog core.ProgressFunc) error {
+	switch {
+	case move && recursive:
+		_, err := s.app.MoveDir(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		return err
+	case move:
+		return s.app.MoveFile(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+	case recursive:
+		_, err := s.app.CopyDir(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		return err
+	default:
+		_, err := s.app.CopyFile(srcServer, srcPath, dstServer, dstPath, core.FileTransferOptions{}, prog)
+		return err
+	}
+}
+
+func (s *Server) transferLocalToServer(srcPath, dstServer, dstPath string, recursive, move bool, prog core.ProgressFunc) error {
+	var err error
+	if recursive {
+		_, err = s.app.UploadDir(dstServer, srcPath, dstPath, core.FileTransferOptions{}, prog)
+	} else {
+		_, err = s.app.UploadFile(dstServer, srcPath, dstPath, core.FileTransferOptions{}, prog)
+	}
+	if err != nil || !move {
+		return err
+	}
+	if recursive {
+		return os.RemoveAll(srcPath)
+	}
+	return os.Remove(srcPath)
+}
+
+func (s *Server) transferServerToLocal(srcServer, srcPath, dstPath string, recursive, move bool, prog core.ProgressFunc) error {
+	var err error
+	if recursive {
+		_, err = s.app.DownloadDir(srcServer, srcPath, dstPath, core.FileTransferOptions{}, prog)
+	} else {
+		_, err = s.app.DownloadFile(srcServer, srcPath, dstPath, core.FileTransferOptions{}, prog)
+	}
+	if err != nil || !move {
+		return err
+	}
+	return s.app.RemoteDelete(srcServer, srcPath, recursive)
+}
+
+func transferLocalToLocal(srcPath, dstPath string, move bool) error {
+	if move {
+		return os.Rename(srcPath, dstPath)
+	}
+	info, err := os.Lstat(srcPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return copyLocalTree(srcPath, dstPath)
+	}
+	return copyLocalFile(srcPath, dstPath, info.Mode())
+}
+
+// copyLocalFile copies a single regular file, preserving permission bits.
+func copyLocalFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src) // #nosec G304 -- path validated by cleanLocalPath
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm()) // #nosec G304
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// copyLocalTree recursively copies a directory tree on the controller.
+func copyLocalTree(src, dst string) error {
+	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		return copyLocalFile(p, target, info.Mode())
+	})
 }
 
 func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) { s.handleTransfer(w, r, false) }
@@ -275,14 +457,36 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	dir := path.Clean(r.URL.Query().Get("dir"))
 	name := path.Base(r.URL.Query().Get("name"))
-	if server == "" || name == "" || name == "." || name == "/" {
-		http.Error(w, "server and name are required", http.StatusBadRequest)
+	if name == "" || name == "." || name == "/" {
+		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
 	// The agent re-validates every path, but reject a non-absolute target here
 	// too so a relative `dir` can't produce a surprising join.
 	if !path.IsAbs(dir) {
 		http.Error(w, "dir must be an absolute path", http.StatusBadRequest)
+		return
+	}
+
+	// A Local destination pane writes the uploaded bytes straight to disk on the
+	// controller — no spooling or agent round-trip needed.
+	if server == "" {
+		localPath := filepath.Join(filepath.Clean(dir), name)
+		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) // #nosec G304 -- dir validated absolute above
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if _, err := io.Copy(out, http.MaxBytesReader(w, r.Body, maxWebUploadBytes)); err != nil {
+			_ = out.Close()
+			writeError(w, err)
+			return
+		}
+		if err := out.Close(); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"local_path": localPath})
 		return
 	}
 
@@ -317,8 +521,28 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	remotePath := r.URL.Query().Get("path")
-	if server == "" || remotePath == "" {
-		http.Error(w, "server and path are required", http.StatusBadRequest)
+	if remotePath == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if server == "" { // Local: stream the controller's file directly.
+		clean, err := cleanLocalPath(remotePath)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		info, err := os.Stat(clean)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if info.IsDir() {
+			writeError(w, fmt.Errorf("cannot download a directory"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(clean)))
+		http.ServeFile(w, r, clean)
 		return
 	}
 	tmp, err := os.CreateTemp("", "fleet-webui-download-*")
@@ -387,6 +611,19 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
+	if server == "" { // Local
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := os.Mkdir(clean, 0o750); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
 	if err := s.app.RemoteMkdir(server, p); err != nil {
 		writeError(w, err)
 		return
@@ -397,6 +634,31 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
 	recursive := r.URL.Query().Get("recursive") == "true"
+	if server == "" { // Local
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if clean == "/" {
+			writeError(w, fmt.Errorf("refusing to remove root"))
+			return
+		}
+		// RemoveAll handles both files and non-empty trees; the frontend only
+		// passes recursive=true for directories but RemoveAll is safe either way.
+		var rmErr error
+		if recursive {
+			rmErr = os.RemoveAll(clean)
+		} else {
+			rmErr = os.Remove(clean)
+		}
+		if rmErr != nil {
+			writeError(w, rmErr)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
 	if err := s.app.RemoteDelete(server, p, recursive); err != nil {
 		writeError(w, err)
 		return
@@ -407,6 +669,24 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	if server == "" { // Local rename
+		cf, err := cleanLocalPath(from)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		ct, err := cleanLocalPath(to)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := os.Rename(cf, ct); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
 	if err := s.app.RemoteRename(server, from, to); err != nil {
 		writeError(w, err)
 		return

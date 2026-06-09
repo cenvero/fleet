@@ -209,6 +209,18 @@ button { font-family: inherit; }
 }
 .ico { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
+/* View toggle: show the glyph for the view you'd switch TO. In List view that's
+   the grid (icons) glyph; in Icons view that's the list glyph. */
+.tool.view-toggle .ico-view-list { display: none; }
+.tool.view-toggle .ico-view-icons { display: block; }
+.pane.view-icons .tool.view-toggle .ico-view-icons { display: none; }
+.pane.view-icons .tool.view-toggle .ico-view-list { display: block; }
+.pane.view-icons .tool.view-toggle {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
 /* breadcrumbs */
 .pane-crumbs {
   flex: none;
@@ -344,6 +356,53 @@ button { font-family: inherit; }
   font-family: var(--mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* ----------------------------------------------------------------- icons view */
+
+/* In Icons view the column header is meaningless and the entries become a
+   responsive grid of icon-over-name cells. All the list-mode wiring (selection,
+   drag-and-drop, context menu) still applies because cells keep `.row` +
+   `.dir/.file/.link` classes and `data-name`. */
+.pane.view-icons .list-head { display: none; }
+
+.pane.view-icons .entries {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 4px;
+  align-content: start;
+  padding: 4px;
+}
+
+.pane.view-icons .row.cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 14px 8px 12px;
+  grid-template-columns: none; /* override the list-mode grid */
+}
+.cell-icon { width: 48px; height: 48px; display: grid; place-items: center; }
+.cell-icon svg { width: 46px; height: 46px; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.row.cell.dir .cell-icon svg { stroke: var(--accent); fill: rgba(0, 235, 184, 0.08); }
+.row.cell.file .cell-icon svg { stroke: var(--muted); }
+.row.cell.link .cell-icon svg { stroke: var(--blue); }
+.cell-label {
+  width: 100%;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.3;
+  /* clamp long names to two lines */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.row.cell.dir .cell-label { color: #d6fff5; font-weight: 600; }
+.row.cell.link .cell-label { color: #cfe0ff; }
 
 .listing .placeholder {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
