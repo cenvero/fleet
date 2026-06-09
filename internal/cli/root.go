@@ -111,6 +111,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newServerCommand(&configDir))
 	root.AddCommand(newServiceCommand(&configDir))
 	root.AddCommand(newFileCommand(&configDir))
+	root.AddCommand(newSyncCommand(&configDir))
 	root.AddCommand(newLogsCommand(&configDir))
 	root.AddCommand(newExecCommand(&configDir))
 	root.AddCommand(newSSHCommand(&configDir))
