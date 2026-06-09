@@ -32,7 +32,7 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
-## [v2.1.0] — 2026-06-09 (stable)
+## [v2.0.3] — 2026-06-09 (stable)
 
 ### Added
 
