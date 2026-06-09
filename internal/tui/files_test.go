@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
 )
 
@@ -118,6 +119,63 @@ func TestResolveSources(t *testing.T) {
 	// No servers, no args: Local | Local (only acceptable same-source case).
 	if l, r := resolveSources(nil, none); l != "" || r != "" {
 		t.Fatalf("no-servers = %q|%q, want \"\"|\"\"", l, r)
+	}
+}
+
+func TestValidateServerArgs(t *testing.T) {
+	t.Parallel()
+	available := []core.ServerRecord{{Name: "web-01"}, {Name: "db-01"}}
+
+	// Local ("") is always valid, as are known server names.
+	for _, args := range [][]string{
+		nil,
+		{""},
+		{"web-01"},
+		{"", "db-01"},
+		{"web-01", "db-01"},
+	} {
+		if err := validateServerArgs(args, available); err != nil {
+			t.Fatalf("validateServerArgs(%v) unexpected error: %v", args, err)
+		}
+	}
+
+	// An unknown server must error and must not be matched case-insensitively.
+	for _, args := range [][]string{
+		{"nope"},
+		{"WEB-01"},          // case-sensitive: not the same as web-01
+		{"web-01", "ghost"}, // second arg unknown
+	} {
+		err := validateServerArgs(args, available)
+		if err == nil {
+			t.Fatalf("validateServerArgs(%v) expected error, got nil", args)
+		}
+		if !strings.Contains(err.Error(), "unknown server") {
+			t.Fatalf("error %q should mention 'unknown server'", err)
+		}
+		// Error lists the known servers to help the user.
+		if !strings.Contains(err.Error(), "web-01") || !strings.Contains(err.Error(), "db-01") {
+			t.Fatalf("error %q should list known servers", err)
+		}
+	}
+}
+
+// TestListRowsAreSingleLine guards the spacing regression: each list row must
+// render as exactly one terminal line, exactly the pane content width wide, so
+// rows stay contiguous and never soft-wrap into blank-gap pairs inside the box.
+func TestListRowsAreSingleLine(t *testing.T) {
+	t.Parallel()
+	m := sampleFilesModel(120, 40)
+	// Cover several content widths, including the cramped clamp path.
+	for _, cw := range []int{26, 40, 50, 56} {
+		for i := range m.left.entries {
+			row := m.renderRow(0, i, cw, false)
+			if h := lipgloss.Height(row); h != 1 {
+				t.Fatalf("cw=%d row %d height=%d, want 1 (would wrap/pair)", cw, i, h)
+			}
+			if w := lipgloss.Width(row); w != cw {
+				t.Fatalf("cw=%d row %d width=%d, want exactly cw", cw, i, w)
+			}
+		}
 	}
 }
 

@@ -165,12 +165,16 @@ type toolButton struct {
 func (m filesModel) renderToolbar(innerW int) string {
 	btns := []toolButton{
 		{"source", "s", "Source"},
-		{"newfolder", "n", "New"},
+		{"edit", "e", "Edit"},
+		{"newfolder", "n", "Folder"},
+		{"newfile", "N", "File"},
 		{"rename", "r", "Rename"},
 		{"delete", "d", "Delete"},
 		{"copy", "c", "Copy →"},
 		{"move", "m", "Move →"},
 		{"props", "i", "Info"},
+		{"filter", "/", "Filter"},
+		{"sort", "o", sortLabel(m.paneRefConst(m.focus))},
 		{"view", "v", viewLabel(m.paneRefConst(m.focus).view)},
 		{"hidden", ".", hiddenLabel(m.showHidden)},
 		{"refresh", "g", "Refresh"},
@@ -191,6 +195,12 @@ func hiddenLabel(on bool) string {
 		return "Hidden ✓"
 	}
 	return "Hidden"
+}
+
+// sortLabel names the toolbar/menu sort button for a pane's current sort key and
+// direction (e.g. "Sort: Size ↓").
+func sortLabel(p paneState) string {
+	return "Sort: " + p.sortBy.label() + " " + sortArrow(p.sortDesc)
 }
 
 // viewLabel names the toolbar/menu button for the focused pane's current layout
@@ -407,6 +417,9 @@ func (m filesModel) renderPaneHeader(side, cw int, focused bool) string {
 	if n := len(pane.selected); n > 0 {
 		sel = lipgloss.NewStyle().Foreground(fmAccent2).Render(fmt.Sprintf(" • %d sel", n))
 	}
+	if pane.filter != "" {
+		sel += lipgloss.NewStyle().Foreground(fmWarnC).Render(" • /" + truncate(pane.filter, 12))
+	}
 
 	crumbW := cw - lipgloss.Width(src) - lipgloss.Width(count) - lipgloss.Width(sel) - 2
 	if crumbW < 6 {
@@ -500,8 +513,13 @@ func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
 	}
 	sizeW := 9
 	timeW := 12
-	// leading space + mark(1) + sp + icon(1) + sp + ... + sizeW + sp + timeW + trailing sp
-	nameW := cw - sizeW - timeW - 9
+	// Fixed chrome around the name column, in display columns:
+	//   " "(1) + mark(1) + " "(1) + icon(1) + "  "(2) + size + " "(1) + "  "(2)
+	//   + time + " "(1) trailing = name + size + time + 10.
+	// nameW is whatever is left after that chrome so the whole row is exactly cw
+	// wide — one terminal line, no soft-wrap inside the pane box.
+	const rowChrome = 10
+	nameW := cw - sizeW - timeW - rowChrome
 	if nameW < 6 {
 		nameW = 6
 		timeW = 0
@@ -546,9 +564,16 @@ func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
 		// Compose the row as three width-stable segments joined horizontally so
 		// the icon can carry its own category color without disturbing column
 		// alignment: lead+mark (3 cols), the styled icon (1 col), then the rest.
+		// The rest segment is pinned to the remaining width (cw-4) so the joined
+		// line is always exactly cw columns — never cw+1, which would soft-wrap
+		// inside the pane box and split each item across two lines.
 		lead := base.Render(fmt.Sprintf(" %s ", mark))
 		iconCell := iconStyle.Render(icon)
-		rest := base.Render(fmt.Sprintf("  %-*s %*s  %-*s ",
+		restW := cw - 4
+		if restW < 0 {
+			restW = 0
+		}
+		rest := base.Width(restW).Render(fmt.Sprintf("  %-*s %*s  %-*s ",
 			nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr))
 		return lipgloss.JoinHorizontal(lipgloss.Top, lead, iconCell, rest)
 	}
@@ -714,9 +739,9 @@ func smoothBar(pct, width int) string {
 
 func (m filesModel) renderFooter() string {
 	hints := [][2]string{
-		{"↑↓", "move"}, {"↵/→", "open"}, {"←", "up"}, {"space", "select"},
-		{"s", "source"}, {"c/m", "copy/move"}, {"n", "new"}, {"d", "del"},
-		{"i", "info"}, {"v", "view"}, {".", "hidden"}, {"drag", "transfer"}, {"q", "quit"},
+		{"↑↓", "move"}, {"↵/→", "open"}, {"e", "edit"}, {"space", "select"},
+		{"s", "source"}, {"c/m", "copy/move"}, {"n/N", "folder/file"}, {"d", "del"},
+		{"/", "filter"}, {"o", "sort"}, {"v", "view"}, {"drag", "transfer"}, {"q", "quit"},
 	}
 	parts := make([]string, 0, len(hints))
 	for _, h := range hints {
@@ -743,8 +768,38 @@ func (m filesModel) composeOverlay(base string) string {
 		return overlayCenter(base, m.width, m.height, m.renderPrompt())
 	case overlayProperties:
 		return overlayCenter(base, m.width, m.height, m.renderProperties())
+	case overlayEditor:
+		return m.renderEditor()
+	case overlayFilter:
+		return overlayCenter(base, m.width, m.height, m.renderFilter())
 	}
 	return base
+}
+
+func (m filesModel) renderFilter() string {
+	side := m.filterSide
+	pane := m.paneRefConst(side)
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).
+		Render("Filter " + pane.label() + " by name"))
+	b.WriteString("\n\n")
+	field := pane.filter + "▏"
+	inputW := 40
+	if lipgloss.Width(field) > inputW {
+		inputW = lipgloss.Width(field)
+	}
+	input := lipgloss.NewStyle().
+		Background(lipgloss.Color("#101822")).
+		Foreground(fmText).
+		Width(inputW).
+		Padding(0, 1).
+		Render(field)
+	b.WriteString(input)
+	b.WriteString("\n")
+	b.WriteString(fmStatusSty.Render(fmt.Sprintf("  %d match(es)", countReal(pane.entries))))
+	b.WriteString("\n\n")
+	b.WriteString(fmStatusSty.Render("type to narrow · ↵ apply · esc clear"))
+	return fmOverlayBox.Render(b.String())
 }
 
 func (m filesModel) renderSourcePicker() string {
@@ -880,6 +935,130 @@ func (m filesModel) renderProperties() string {
 	b.WriteString("\n\n")
 	b.WriteString(fmStatusSty.Render("esc / ↵ close"))
 	return fmOverlayBox.Render(b.String())
+}
+
+// ============================================================================
+// Editor overlay (full-screen viewer + editor)
+// ============================================================================
+
+// renderEditor draws the full-screen editor: a titled, bordered box containing
+// either the syntax-highlighted read-only viewer or the plain editable textarea,
+// with a footer of key hints and inline status. It returns a complete frame
+// (it deliberately covers the whole screen, not a small popup).
+func (m filesModel) renderEditor() string {
+	ed := m.editor
+	bw, bh := m.editorAreaSize()
+
+	// Header: file name + source + mode + dirty marker.
+	srcIcon := "🖥"
+	if ed.source != "" {
+		srcIcon = "☁"
+	}
+	srcLabel := "Local"
+	if ed.source != "" {
+		srcLabel = ed.source
+	}
+	modeTag := lipgloss.NewStyle().Foreground(fmDimC).Render("VIEW")
+	if ed.mode == editorEdit {
+		modeTag = lipgloss.NewStyle().Foreground(fmInk).Background(fmAccent).Bold(true).Padding(0, 1).Render("EDIT")
+	}
+	dirty := ""
+	if ed.dirty {
+		dirty = lipgloss.NewStyle().Foreground(fmWarnC).Bold(true).Render(" ●")
+	}
+	title := lipgloss.NewStyle().Foreground(fmAccent).Bold(true).Render("✎ "+ed.name) + dirty
+	src := fmServerTag.Render("  " + srcIcon + " " + srcLabel)
+	headLeft := title + src
+	gap := bw - lipgloss.Width(headLeft) - lipgloss.Width(modeTag)
+	if gap < 1 {
+		gap = 1
+	}
+	header := headLeft + strings.Repeat(" ", gap) + modeTag
+
+	// Body.
+	var body string
+	if ed.mode == editorEdit {
+		body = ed.area.View()
+	} else {
+		body = m.renderEditorViewer(bw, bh)
+	}
+
+	// Footer hints + inline status.
+	hints := []struct{ k, v string }{
+		{"tab", "view/edit"}, {"^s", "save"}, {"esc", "close"},
+		{"↑↓", "scroll"},
+	}
+	parts := make([]string, 0, len(hints))
+	for _, h := range hints {
+		parts = append(parts, fmKeyChip.Render(h.k)+" "+fmHintLabel.Render(h.v))
+	}
+	footLeft := strings.Join(parts, "  ")
+	statusTxt := ed.status
+	statusSty := fmStatusSty
+	switch {
+	case strings.HasPrefix(statusTxt, "save failed"), strings.HasPrefix(statusTxt, "open failed"):
+		statusSty = fmErrSty
+	case strings.HasPrefix(statusTxt, "saved"):
+		statusSty = fmDoneSty
+	}
+	footRight := statusSty.Render(statusTxt)
+	fgap := bw - lipgloss.Width(footLeft) - lipgloss.Width(footRight)
+	if fgap < 1 {
+		fgap = 1
+	}
+	footer := footLeft + strings.Repeat(" ", fgap) + footRight
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(fmAccent).
+		Background(fmPanelBg).
+		Padding(0, 1).
+		Width(bw)
+	inner := header + "\n" + fmRule.Render(strings.Repeat("─", bw)) + "\n" + body + "\n" +
+		fmRule.Render(strings.Repeat("─", bw)) + "\n" + footer
+	return pageStyle.Render(box.Render(inner))
+}
+
+// renderEditorViewer renders the highlighted read-only content windowed to the
+// visible body height, with a thin scrollbar-style position indicator.
+func (m filesModel) renderEditorViewer(bw, bh int) string {
+	ed := m.editor
+	lines := highlightLines(ed.name, ed.area.Value())
+	total := len(lines)
+
+	top := ed.viewScrl
+	if top > total-bh {
+		top = total - bh
+	}
+	if top < 0 {
+		top = 0
+	}
+	end := top + bh
+	if end > total {
+		end = total
+	}
+
+	gutterW := len(fmt.Sprintf("%d", total))
+	if gutterW < 2 {
+		gutterW = 2
+	}
+	numSty := lipgloss.NewStyle().Foreground(fmDimC)
+	contentW := bw - gutterW - 1
+	if contentW < 1 {
+		contentW = 1
+	}
+
+	out := make([]string, 0, bh)
+	for i := top; i < end; i++ {
+		num := numSty.Render(fmt.Sprintf("%*d", gutterW, i+1))
+		line := truncateANSI(lines[i], contentW)
+		out = append(out, num+" "+line)
+	}
+	// Pad to full height so the box stays stable.
+	for len(out) < bh {
+		out = append(out, "")
+	}
+	return strings.Join(out, "\n")
 }
 
 // ============================================================================

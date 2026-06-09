@@ -40,6 +40,12 @@ func RunFiles(configDir string, servers ...string) error {
 
 	available, _ := app.ListServers()
 
+	// Reject unknown server names up front so we never launch the TUI against a
+	// source that doesn't exist. Local ("") is always valid.
+	if err := validateServerArgs(servers, available); err != nil {
+		return err
+	}
+
 	leftSrc, rightSrc := resolveSources(servers, available)
 	left := newPaneSource(app, leftSrc)
 	right := newPaneSource(app, rightSrc)
@@ -59,6 +65,30 @@ func RunFiles(configDir string, servers ...string) error {
 	}
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion()).Run()
 	return err
+}
+
+// validateServerArgs verifies every non-Local server argument names a server
+// that actually exists (case-sensitive). It returns a clear error listing the
+// known servers when an argument is unknown, so the caller can abort before
+// launching the Bubble Tea program. Local ("") is always valid.
+func validateServerArgs(args []string, available []core.ServerRecord) error {
+	known := make(map[string]bool, len(available))
+	for _, s := range available {
+		known[s.Name] = true
+	}
+	for _, a := range args {
+		if a == "" {
+			continue // Local pane
+		}
+		if !known[a] {
+			names := make([]string, 0, len(available))
+			for _, s := range available {
+				names = append(names, s.Name)
+			}
+			return fmt.Errorf("unknown server %q; known servers: %s", a, strings.Join(names, ", "))
+		}
+	}
+	return nil
 }
 
 // resolveSources picks the left/right pane sources ("" = Local) so the default
@@ -120,13 +150,19 @@ type paneState struct {
 	source   string // "" = local, else server name
 	remote   bool
 	cwd      string
-	entries  []fileItem
+	entries  []fileItem // the visible (filtered + sorted) listing
+	allItems []fileItem // the full directory listing before filtering
 	index    int
 	scroll   int
 	loading  bool
 	err      error
 	selected map[int]bool // multi-selection (excludes "..")
 	view     viewMode     // list (default) or grid/icons
+
+	// sort + filter
+	sortBy   sortKey
+	sortDesc bool
+	filter   string // case-insensitive name substring; "" = no filter
 }
 
 // label is the human source name for headers/menus.
@@ -177,8 +213,10 @@ const (
 	overlayContextMenu
 	overlayCopyMove // Finder-style "Copy here · Move here · Cancel"
 	overlayConfirm  // generic confirmation (delete, dir transfer)
-	overlayPrompt   // text input (new folder / rename)
+	overlayPrompt   // text input (new folder / rename / new file)
 	overlayProperties
+	overlayEditor // full-screen file viewer/editor with syntax highlighting
+	overlayFilter // per-pane name filter input
 )
 
 // confirmKind distinguishes what a confirm overlay will do on Enter.
@@ -215,7 +253,28 @@ type promptKind int
 const (
 	promptNewFolder promptKind = iota
 	promptRename
+	promptNewFile
 )
+
+// sortKey selects how a pane's entries are ordered (dirs always come first).
+type sortKey int
+
+const (
+	sortName sortKey = iota
+	sortSize
+	sortModified
+)
+
+func (s sortKey) label() string {
+	switch s {
+	case sortSize:
+		return "Size"
+	case sortModified:
+		return "Modified"
+	default:
+		return "Name"
+	}
+}
 
 type filesModel struct {
 	app           *core.App
@@ -278,6 +337,12 @@ type filesModel struct {
 
 	// properties modal
 	propsText string
+
+	// editor overlay
+	editor editorState
+
+	// filter input
+	filterSide int
 }
 
 // ---- messages ----
@@ -349,7 +414,7 @@ func loadLocalCmd(side int, cwd string, showHidden bool) tea.Cmd {
 			}
 			items = append(items, fi)
 		}
-		return paneLoadedMsg{side: side, source: "", cwd: cwd, items: withParent(cwd, items, false)}
+		return paneLoadedMsg{side: side, source: "", cwd: cwd, items: items}
 	}
 }
 
@@ -370,24 +435,69 @@ func loadRemoteCmd(side int, app *core.App, server, cwd string, showHidden bool)
 				mode: e.Mode, modTime: e.ModTime, symlink: e.IsSymlink,
 			})
 		}
-		return paneLoadedMsg{side: side, source: server, cwd: resolved, items: withParent(resolved, items, true)}
+		return paneLoadedMsg{side: side, source: server, cwd: resolved, items: items}
 	}
 }
 
-// withParent sorts (dirs first, case-insensitive) and prepends ".." unless at
-// the filesystem root.
-func withParent(cwd string, items []fileItem, remote bool) []fileItem {
+// reapplyPane rebuilds a pane's visible `entries` from its raw `allItems` by
+// applying the current sort key/direction (dirs always first) and the
+// case-insensitive name filter, then prepending ".." unless at the filesystem
+// root. It is called after a load and whenever the sort or filter changes so the
+// listing stays consistent without re-fetching from disk/network.
+func (m *filesModel) reapplyPane(side int) {
+	pane := m.paneRef(side)
+
+	filtered := make([]fileItem, 0, len(pane.allItems))
+	needle := strings.ToLower(strings.TrimSpace(pane.filter))
+	for _, it := range pane.allItems {
+		if needle != "" && !strings.Contains(strings.ToLower(it.name), needle) {
+			continue
+		}
+		filtered = append(filtered, it)
+	}
+
+	sortItems(filtered, pane.sortBy, pane.sortDesc)
+
+	atRoot := pane.cwd == "/" || (!pane.remote && filepath.Dir(pane.cwd) == pane.cwd)
+	if atRoot {
+		pane.entries = filtered
+	} else {
+		pane.entries = append([]fileItem{{name: "..", isDir: true}}, filtered...)
+	}
+
+	if pane.index >= len(pane.entries) {
+		pane.index = len(pane.entries) - 1
+	}
+	if pane.index < 0 {
+		pane.index = 0
+	}
+}
+
+// sortItems orders items in place: directories always come first, then by the
+// chosen key. Name is the stable tiebreaker so the order is deterministic.
+func sortItems(items []fileItem, key sortKey, desc bool) {
+	less := func(a, b fileItem) bool {
+		switch key {
+		case sortSize:
+			if a.size != b.size {
+				return a.size < b.size
+			}
+		case sortModified:
+			if !a.modTime.Equal(b.modTime) {
+				return a.modTime.Before(b.modTime)
+			}
+		}
+		return strings.ToLower(a.name) < strings.ToLower(b.name)
+	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].isDir != items[j].isDir {
-			return items[i].isDir
+			return items[i].isDir // dirs first regardless of direction
 		}
-		return strings.ToLower(items[i].name) < strings.ToLower(items[j].name)
+		if desc {
+			return less(items[j], items[i])
+		}
+		return less(items[i], items[j])
 	})
-	atRoot := cwd == "/" || (!remote && filepath.Dir(cwd) == cwd)
-	if atRoot {
-		return items
-	}
-	return append([]fileItem{{name: "..", isDir: true}}, items...)
 }
 
 func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -405,10 +515,13 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pane.cwd = msg.cwd
-		pane.entries = msg.items
+		pane.allItems = msg.items
 		pane.err = msg.err
 		pane.loading = false
 		pane.selected = map[int]bool{}
+		// A fresh listing replaces the filter (Esc-clear semantics on navigation).
+		pane.filter = ""
+		m.reapplyPane(msg.side)
 		if pane.index >= len(pane.entries) {
 			pane.index = 0
 		}
@@ -440,6 +553,12 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.drag = nil
 		}
 		return m, nil
+
+	case editorLoadedMsg:
+		return m.onEditorLoaded(msg)
+
+	case editorSavedMsg:
+		return m.onEditorSaved(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -547,6 +666,14 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openSourcePicker(m.focus), nil
 	case "n":
 		return m.openNewFolderPrompt(m.focus), nil
+	case "N":
+		return m.openNewFilePrompt(m.focus), nil
+	case "e":
+		return m.openEditor(m.focus)
+	case "/":
+		return m.openFilter(m.focus), nil
+	case "o":
+		return m.cycleSort(m.focus), nil
 	case "r":
 		return m.openRenamePrompt(m.focus), nil
 	case "d", "delete":

@@ -239,15 +239,24 @@ func hitToolbar(msg tea.MouseMsg) (string, bool) {
 
 // toolbarActions are the clickable toolbar buttons (also keyboard shortcuts).
 var toolbarActions = []string{
-	"source", "newfolder", "rename", "delete", "copy", "move", "props", "view", "hidden", "refresh", "quit",
+	"source", "edit", "newfolder", "newfile", "rename", "delete", "copy", "move",
+	"props", "filter", "sort", "view", "hidden", "refresh", "quit",
 }
 
 func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
 	switch name {
 	case "source":
 		return m.openSourcePicker(m.focus), nil
+	case "edit":
+		return m.openEditor(m.focus)
 	case "newfolder":
 		return m.openNewFolderPrompt(m.focus), nil
+	case "newfile":
+		return m.openNewFilePrompt(m.focus), nil
+	case "filter":
+		return m.openFilter(m.focus), nil
+	case "sort":
+		return m.cycleSort(m.focus), nil
 	case "rename":
 		return m.openRenamePrompt(m.focus), nil
 	case "delete":
@@ -333,18 +342,22 @@ func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
 	pane := m.paneRefConst(side)
 	onRow := idx >= 0 && idx < len(pane.entries) && pane.entries[idx].name != ".."
 	isDir := onRow && pane.entries[idx].isDir
+	canEdit := onRow && !isDir
 	items := []contextMenuItem{
 		{key: "↵", label: "Open", action: "open", enabled: onRow || (idx >= 0 && idx < len(pane.entries))},
+		{key: "e", label: "Edit", action: "edit", enabled: canEdit},
 		{key: "c", label: "Copy to other pane", action: "copy", enabled: onRow},
 		{key: "m", label: "Move to other pane", action: "move", enabled: onRow},
 		{key: "r", label: "Rename", action: "rename", enabled: onRow},
 		{key: "d", label: "Delete", action: "delete", enabled: onRow},
 		{key: "n", label: "New folder", action: "newfolder", enabled: true},
+		{key: "N", label: "New file", action: "newfile", enabled: true},
 		{key: "i", label: "Properties", action: "props", enabled: onRow},
+		{key: "/", label: "Filter…", action: "filter", enabled: true},
+		{key: "o", label: "Sort: " + m.paneRefConst(side).sortBy.label(), action: "sort", enabled: true},
 		{key: "v", label: viewLabel(m.paneRefConst(side).view), action: "view", enabled: true},
 		{key: "g", label: "Refresh", action: "refresh", enabled: true},
 	}
-	_ = isDir
 	m.overlay = overlayContextMenu
 	m.menuItems = items
 	m.menuIndex = 0
@@ -359,6 +372,8 @@ func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
 	switch action {
 	case "open":
 		return m.activate(side)
+	case "edit":
+		return m.openEditor(side)
 	case "copy":
 		return m.copyToOtherPane(side)
 	case "move":
@@ -369,6 +384,12 @@ func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
 		return m.openDeleteConfirm(side), nil
 	case "newfolder":
 		return m.openNewFolderPrompt(side), nil
+	case "newfile":
+		return m.openNewFilePrompt(side), nil
+	case "filter":
+		return m.openFilter(side), nil
+	case "sort":
+		return m.cycleSort(side), nil
 	case "props":
 		return m.openProperties(side)
 	case "view":
@@ -389,6 +410,15 @@ func (m filesModel) openNewFolderPrompt(side int) filesModel {
 	m.prompt = promptNewFolder
 	m.promptSide = side
 	m.promptLabel = "New folder in " + m.paneRefConst(side).label()
+	m.promptValue = ""
+	return m
+}
+
+func (m filesModel) openNewFilePrompt(side int) filesModel {
+	m.overlay = overlayPrompt
+	m.prompt = promptNewFile
+	m.promptSide = side
+	m.promptLabel = "New file in " + m.paneRefConst(side).label()
 	m.promptValue = ""
 	return m
 }
@@ -436,6 +466,34 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.status = "created folder " + name
+		return m, m.reload(side)
+	case promptNewFile:
+		if strings.ContainsAny(name, "/\\") {
+			m.status = "invalid file name"
+			return m, nil
+		}
+		target := joinPath(pane.cwd, name, pane.remote)
+		if pane.remote {
+			// Stage an empty controller temp and upload it to the exact path.
+			tmp, err := os.CreateTemp("", "fleet-new-*")
+			if err != nil {
+				m.status = "create failed: " + err.Error()
+				return m, nil
+			}
+			tmpName := tmp.Name()
+			_ = tmp.Close()
+			defer os.Remove(tmpName)
+			if _, err := m.app.UploadFile(pane.source, tmpName, target, core.FileTransferOptions{}, nil); err != nil {
+				m.status = "create failed: " + err.Error()
+				return m, nil
+			}
+		} else {
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				m.status = "create failed: " + err.Error()
+				return m, nil
+			}
+		}
+		m.status = "created file " + name
 		return m, m.reload(side)
 	case promptRename:
 		if strings.ContainsAny(name, "/\\") {
@@ -551,6 +609,106 @@ func (m filesModel) openProperties(side int) (tea.Model, tea.Cmd) {
 	m.overlay = overlayProperties
 	m.propsText = strings.Join(lines, "\n")
 	return m, nil
+}
+
+// ============================================================================
+// Filter / search overlay (per-pane name filter)
+// ============================================================================
+
+func (m filesModel) openFilter(side int) filesModel {
+	m.overlay = overlayFilter
+	m.filterSide = side
+	m.promptValue = m.paneRefConst(side).filter
+	return m
+}
+
+func (m filesModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	side := m.filterSide
+	switch msg.String() {
+	case "esc":
+		// Esc clears the filter and closes.
+		pane := m.paneRef(side)
+		pane.filter = ""
+		m.reapplyPane(side)
+		m.clampScroll(side)
+		m.overlay = overlayNone
+		m.status = "filter cleared"
+		return m, nil
+	case "enter":
+		m.overlay = overlayNone
+		pane := m.paneRefConst(side)
+		if pane.filter == "" {
+			m.status = "filter cleared"
+		} else {
+			m.status = fmt.Sprintf("filter: %q (%d shown)", pane.filter, countReal(pane.entries))
+		}
+		return m, nil
+	case "backspace":
+		pane := m.paneRef(side)
+		if r := []rune(pane.filter); len(r) > 0 {
+			pane.filter = string(r[:len(r)-1])
+		}
+		m.applyFilterLive(side)
+		return m, nil
+	case "ctrl+u":
+		m.paneRef(side).filter = ""
+		m.applyFilterLive(side)
+		return m, nil
+	default:
+		switch {
+		case msg.Type == tea.KeyRunes && len(msg.Runes) > 0:
+			m.paneRef(side).filter += string(msg.Runes)
+		case msg.Type == tea.KeySpace || msg.String() == " ":
+			m.paneRef(side).filter += " "
+		default:
+			return m, nil
+		}
+		m.applyFilterLive(side)
+		return m, nil
+	}
+}
+
+// applyFilterLive re-narrows a pane as the filter text changes, keeping the
+// selection valid and the scroll in range.
+func (m *filesModel) applyFilterLive(side int) {
+	pane := m.paneRef(side)
+	pane.index = 0
+	pane.scroll = 0
+	pane.selected = map[int]bool{}
+	m.reapplyPane(side)
+	m.clampScroll(side)
+}
+
+// ============================================================================
+// Sort picker overlay
+// ============================================================================
+
+// cycleSort advances the focused pane's sort key (Name → Size → Modified →
+// Name), flipping to descending on the wrap so a quick repeated press walks
+// every (key, direction) combination.
+func (m filesModel) cycleSort(side int) filesModel {
+	pane := m.paneRef(side)
+	switch pane.sortBy {
+	case sortName:
+		pane.sortBy = sortSize
+	case sortSize:
+		pane.sortBy = sortModified
+	default:
+		pane.sortBy = sortName
+		pane.sortDesc = !pane.sortDesc // flip direction each full cycle
+	}
+	m.reapplyPane(side)
+	m.clampScroll(side)
+	m.status = fmt.Sprintf("%s pane: sort by %s %s",
+		pane.label(), pane.sortBy.label(), sortArrow(pane.sortDesc))
+	return m
+}
+
+func sortArrow(desc bool) string {
+	if desc {
+		return "↓"
+	}
+	return "↑"
 }
 
 // ============================================================================
@@ -1164,6 +1322,12 @@ func (m filesModel) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
+
+	case overlayEditor:
+		return m.handleEditorKey(msg)
+
+	case overlayFilter:
+		return m.handleFilterKey(msg)
 	}
 	return m, nil
 }
