@@ -146,7 +146,7 @@ func loadLocalCmd(side int, cwd string) tea.Cmd {
 		if err != nil {
 			return paneLoadedMsg{side: side, cwd: cwd, err: err}
 		}
-		items := make([]fileItem, 0, len(entries)+1)
+		items := make([]fileItem, 0, len(entries))
 		for _, e := range entries {
 			fi := fileItem{name: e.Name(), isDir: e.IsDir()}
 			if info, err := e.Info(); err == nil {
@@ -168,7 +168,7 @@ func loadRemoteCmd(side int, app *core.App, server, cwd string) tea.Cmd {
 		if resolved == "" {
 			resolved = cwd
 		}
-		items := make([]fileItem, 0, len(result.Entries)+1)
+		items := make([]fileItem, 0, len(result.Entries))
 		for _, e := range result.Entries {
 			items = append(items, fileItem{name: e.Name, isDir: e.IsDir, size: e.Size})
 		}
