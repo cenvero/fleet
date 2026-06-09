@@ -32,6 +32,17 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
+## [v2.0.4] — 2026-06-09 (stable)
+
+### Added
+
+- TUI file manager: a Finder-style **view toggle** (`v`) to switch a pane between List view and an Icons/Grid view; selection, open, and drag-and-drop work the same in both.
+
+### Fixed
+
+- Web file manager: the access token now persists in `sessionStorage`, so **refreshing the page no longer drops it** ("need token").
+- Web file manager: much higher **text contrast** (file/dir names and metadata are clearly legible on the dark theme), and a stray empty modal box that appeared in the center is now hidden until opened.
+
 ## [v2.0.3] — 2026-06-09 (stable)
 
 ### Added
