@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cenvero/fleet/internal/core"
 	zone "github.com/lrstanley/bubblezone"
 )
 
@@ -97,13 +98,26 @@ func TestPaneLabel(t *testing.T) {
 	}
 }
 
-func TestSourceForArg(t *testing.T) {
+func TestResolveSources(t *testing.T) {
 	t.Parallel()
-	if got := sourceForArg(nil, 0, nil); got != "" {
-		t.Fatalf("pane 0 default should be local, got %q", got)
+	one := []core.ServerRecord{{Name: "a"}}
+	none := []core.ServerRecord(nil)
+
+	// No args: Local | first server.
+	if l, r := resolveSources(nil, one); l != "" || r != "a" {
+		t.Fatalf("no-args = %q|%q, want \"\"|\"a\"", l, r)
 	}
-	if got := sourceForArg([]string{"a", "b"}, 1, nil); got != "b" {
-		t.Fatalf("explicit arg should win, got %q", got)
+	// One server arg must NOT duplicate onto both panes: Local | a.
+	if l, r := resolveSources([]string{"a"}, one); l != "" || r != "a" {
+		t.Fatalf("one-arg = %q|%q, want \"\"|\"a\"", l, r)
+	}
+	// Two args: a | b.
+	if l, r := resolveSources([]string{"a", "b"}, one); l != "a" || r != "b" {
+		t.Fatalf("two-args = %q|%q, want \"a\"|\"b\"", l, r)
+	}
+	// No servers, no args: Local | Local (only acceptable same-source case).
+	if l, r := resolveSources(nil, none); l != "" || r != "" {
+		t.Fatalf("no-servers = %q|%q, want \"\"|\"\"", l, r)
 	}
 }
 

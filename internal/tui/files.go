@@ -24,7 +24,7 @@ import (
 // local↔server and server↔server browsing and transfers.
 //
 //	fleet files            -> Local | <first server>
-//	fleet files a          -> <a>   | Local
+//	fleet files a          -> Local | <a>
 //	fleet files a b        -> <a>   | <b>
 func RunFiles(configDir string, servers ...string) error {
 	app, err := core.Open(configDir)
@@ -40,12 +40,9 @@ func RunFiles(configDir string, servers ...string) error {
 
 	available, _ := app.ListServers()
 
-	left := newPaneSource(app, sourceForArg(servers, 0, available))
-	right := newPaneSource(app, sourceForArg(servers, 1, available))
-	// Avoid pointing both panes at the same thing on a bare `fleet files`.
-	if len(servers) == 0 && left.source == right.source {
-		right = newPaneSource(app, "")
-	}
+	leftSrc, rightSrc := resolveSources(servers, available)
+	left := newPaneSource(app, leftSrc)
+	right := newPaneSource(app, rightSrc)
 
 	m := filesModel{
 		app:        app,
@@ -64,20 +61,23 @@ func RunFiles(configDir string, servers ...string) error {
 	return err
 }
 
-// sourceForArg resolves the source for pane index i from the args, falling back
-// to a sensible default (Local, then the first server).
-func sourceForArg(args []string, i int, available []core.ServerRecord) string {
-	if i < len(args) {
-		return args[i]
-	}
-	switch i {
+// resolveSources picks the left/right pane sources ("" = Local) so the default
+// is always useful and never duplicates a source:
+//
+//	fleet files          -> Local | <first server>   (or Local | Local if none)
+//	fleet files a         -> Local | a                 (one server, Local on the left)
+//	fleet files a b       -> a     | b
+func resolveSources(args []string, available []core.ServerRecord) (left, right string) {
+	switch len(args) {
 	case 0:
-		return "" // local
-	default:
 		if len(available) > 0 {
-			return available[0].Name
+			return "", available[0].Name
 		}
-		return ""
+		return "", ""
+	case 1:
+		return "", args[0]
+	default:
+		return args[0], args[1]
 	}
 }
 
