@@ -4,14 +4,58 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cenvero/fleet/internal/logs"
 )
+
+// ChmodPath sets octal permissions (e.g. "755") on a path. server=="" → local.
+func (a *App) ChmodPath(server, p, octalMode string) error {
+	m, err := strconv.ParseUint(strings.TrimSpace(octalMode), 8, 32)
+	if err != nil {
+		return fmt.Errorf("invalid mode %q", octalMode)
+	}
+	if server == "" {
+		return os.Chmod(p, os.FileMode(m)) // #nosec G302 -- operator-chosen mode
+	}
+	return a.runShell(server, fmt.Sprintf("chmod %s %s", shellQuote(octalMode), shellQuote(p)))
+}
+
+// ChecksumPath returns the SHA-256 of a file. server=="" → local.
+func (a *App) ChecksumPath(server, p string) (string, error) {
+	if server == "" {
+		f, err := os.Open(p) // #nosec G304 -- operator-chosen path
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+	res, err := a.ExecCommand(server, "sha256sum "+shellQuote(p))
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	if fields := strings.Fields(res.Stdout); len(fields) > 0 {
+		return fields[0], nil
+	}
+	return "", fmt.Errorf("empty checksum output")
+}
 
 // ArchiveFormats are the compression formats offered by the file managers.
 func ArchiveFormats() []string { return []string{"zip", "tar.gz", "tar.bz2", "tar.xz", "tar"} }
