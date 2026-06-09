@@ -18,7 +18,10 @@ func runFleet(t *testing.T, args ...string) (string, error) {
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
-	root.SetArgs(args)
+	// Pin an isolated, uninitialized config dir so these tests never depend on
+	// (or pollute) the machine's real ~/.cenvero-fleet — and so they verify that
+	// context/skill work pre-init.
+	root.SetArgs(append([]string{"--config-dir", t.TempDir()}, args...))
 	err := root.Execute()
 	return buf.String(), err
 }
