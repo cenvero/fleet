@@ -230,6 +230,10 @@ func (a *App) openTransferConn(server ServerRecord, parallel int) (*transferConn
 			return sess.Call(context.Background(), env)
 		})
 	}
+	// Channels minted on retry are tracked so they are closed with the rest;
+	// otherwise they leaked until the whole SSH client was torn down.
+	var extraMu sync.Mutex
+	var extra []*transport.Session
 	return &transferConn{
 		senders: senders,
 		reopen: func() (senderFunc, error) {
@@ -237,6 +241,9 @@ func (a *App) openTransferConn(server ServerRecord, parallel int) (*transferConn
 			if err != nil {
 				return nil, err
 			}
+			extraMu.Lock()
+			extra = append(extra, child)
+			extraMu.Unlock()
 			return func(env proto.Envelope) (proto.Envelope, error) {
 				return child.Call(context.Background(), env)
 			}, nil
@@ -245,6 +252,11 @@ func (a *App) openTransferConn(server ServerRecord, parallel int) (*transferConn
 			for i := 1; i < len(pool); i++ {
 				_ = pool[i].Close()
 			}
+			extraMu.Lock()
+			for _, c := range extra {
+				_ = c.Close()
+			}
+			extraMu.Unlock()
 			_ = root.Close()
 		},
 	}, nil
