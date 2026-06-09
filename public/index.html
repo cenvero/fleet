@@ -378,6 +378,8 @@
 <nav class="nav">
   <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
   <div class="nav-links">
+    <a href="#v2">What's new</a>
+    <a href="#agentic">AI</a>
     <a href="/docs/">Docs</a>
     <a href="https://github.com/cenvero/fleet">GitHub</a>
     <a href="https://github.com/cenvero/fleet/releases">Releases</a>
@@ -388,6 +390,8 @@
   </button>
 </nav>
 <div class="nav-mobile" id="nav-mobile">
+  <a href="#v2">What's new</a>
+  <a href="#agentic">AI</a>
   <a href="/docs/">Docs</a>
   <a href="https://github.com/cenvero/fleet">GitHub</a>
   <a href="https://github.com/cenvero/fleet/releases">Releases</a>
@@ -398,7 +402,7 @@
   <div class="hero-content">
     <div class="hero-badge">Self-hosted fleet management</div>
     <h1>Manage every server.<br>No cloud required.</h1>
-    <p>Cenvero Fleet connects to your Linux servers over SSH, auto-installs agents, and gives you shell access, service control, logs, live metrics, secure file transfers, and AI-agent control — all from one binary.</p>
+    <p>Cenvero Fleet connects to your Linux servers over SSH, auto-installs agents, and gives you shell access, service control, logs, live metrics, secure file transfers, live directory sync, and AI-agent control — all from one binary.</p>
     <div class="hero-actions">
       <a href="/docs/" class="btn btn-primary">Read the docs</a>
       <a href="https://github.com/cenvero/fleet/releases" class="btn btn-ghost">Download releases</a>
@@ -461,21 +465,48 @@
 
 <hr class="divider">
 
+<div class="section" id="v2">
+  <div class="section-label">Major release · v2</div>
+  <h2 class="section-title">What's new in v2</h2>
+  <p class="section-sub">v2 turns Fleet into a file-moving, AI-driven control plane — all over the same authenticated SSH channel you already use.</p>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon"><i data-lucide="folder-sync"></i></div>
+      <h3>Secure file manager</h3>
+      <p>Move files with <code>fleet file</code>, a dual-pane terminal manager (<code>fleet files</code>), or a localhost web UI (<code>fleet ui</code>). Chunked, parallel, checksummed, and resumable.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon"><i data-lucide="repeat"></i></div>
+      <h3>Live directory sync</h3>
+      <p>Pick a local folder and a server folder with <code>fleet sync</code>. Fleet pushes it once, then keeps it mirrored as you edit — live, until you stop the command.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon"><i data-lucide="bot"></i></div>
+      <h3>Agentic control</h3>
+      <p>Run <code>fleet skill claude</code> and your AI coding agent learns the whole CLI from <code>fleet context</code> — then it can control any server and guide you, with your keys.</p>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<div class="section" id="agentic">
+  <div class="section-label">AI</div>
+  <h2 class="section-title">Let an AI agent run your fleet</h2>
+  <p class="section-sub">Fleet is built to be driven by Claude Code or Codex, not just humans. One command installs a tiny skill; the agent learns the rest from the binary and operates your servers — with your keys, on your machine, over SSH. No hosted control plane.</p>
+  <div class="install-cmd-row" style="max-width:680px">
+    <code>fleet skill claude&nbsp;&nbsp;# then your agent runs `fleet context` and takes it from there</code>
+    <button onclick="copyCmd(this,'fleet skill claude')">copy</button>
+  </div>
+</div>
+
+<hr class="divider">
+
 <div class="section">
   <div class="section-label">What it does</div>
   <h2 class="section-title">Everything you need to run a fleet</h2>
   <p class="section-sub">No agents to pre-install, no cloud accounts, no dashboards to subscribe to. Just a binary and SSH.</p>
   <div class="features-grid">
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="folder-sync"></i></div>
-      <h3>File manager <span style="color:var(--accent)">· new in v2</span></h3>
-      <p>Move files with <code>fleet file</code>, a dual-pane terminal manager (<code>fleet files</code>), or a localhost web UI (<code>fleet ui</code>). Chunked, parallel, checksummed, and resumable — over the same SSH channel.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="bot"></i></div>
-      <h3>Agentic control <span style="color:var(--accent)">· new in v2</span></h3>
-      <p>Run <code>fleet skill claude</code> and your AI coding agent learns the whole CLI from <code>fleet context</code> — then it can control any server and guide you, all with your keys.</p>
-    </div>
     <div class="feature-card">
       <div class="feature-icon"><i data-lucide="zap"></i></div>
       <h3>Agent Auto-install</h3>
