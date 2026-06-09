@@ -32,6 +32,37 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
+## [v2.1.0] — 2026-06-09 (stable)
+
+A major file-manager release: an in-app editor, archives, more operations, and
+faster directory transfers — across the CLI, the terminal UI, and the web UI.
+
+### Added
+
+- **File editor with syntax highlighting** in both the terminal (`e`) and web file
+  managers — open a text file, edit, save (local and server); size-capped, binary-safe.
+- **Compress / extract** in many formats (zip, tar.gz, tar.bz2, tar.xz, tar) — core
+  engine plus `fleet file compress` / `fleet file extract` and context-menu actions in
+  both UIs (runs the host's tar/zip on the target).
+- **More file-manager operations** everywhere: permissions (chmod), SHA-256 checksum,
+  duplicate, new file, filter/search, sortable columns, select-all, copy-path.
+- **Web UI: up to 6 panes** — add/close panes and drag copy/move between any of them.
+- **`fleet file move`** — move a file or directory directly between two servers.
+- **`fleet filemanager` / `fleet filemanager ui`** — friendly aliases for the terminal
+  and browser file managers.
+
+### Changed
+
+- **Parallel directory transfers** — recursive copy/move/upload/download now moves
+  several files concurrently with aggregated progress (on top of per-file chunking).
+
+### Security
+
+- Local archive operations use a fixed tool with argv (no shell) and `./`-prefixed
+  operands, eliminating command- and option-injection; remote paths stay shell-quoted.
+- Fixed a data race in the parallel-transfer progress accounting; made web Duplicate
+  collision-safe. Full adversarial review: no exploitable vulnerability.
+
 ## [v2.0.5] — 2026-06-09 (stable)
 
 ### Added
