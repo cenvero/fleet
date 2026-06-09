@@ -38,6 +38,8 @@ jobs:
       # golang/go#67682.
       - name: Work around ThreadSanitizer ASLR mapping on Ubuntu 24.04
         run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Diagnose cli race failure (verbose, non-fatal)
+        run: go test -race -v ./internal/cli/ 2>&1 || echo "cli-debug-exit=$?"
       - name: Test with race detector
         run: go test -race -cover ./...
 
