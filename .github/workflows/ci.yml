@@ -38,19 +38,13 @@ jobs:
       # golang/go#67682.
       - name: Work around ThreadSanitizer ASLR mapping on Ubuntu 24.04
         run: sudo sysctl -w vm.mmap_rnd_bits=28
-      - name: Diagnose cli crash (exit code + OOM check)
+      - name: Diagnose fleet context on linux
         run: |
           set +e
-          echo "--- meminfo ---"; grep -E "MemTotal|MemAvailable" /proc/meminfo
-          echo "--- build race binary ---"; go test -race -c -o /tmp/cli.race ./internal/cli/; ls -la /tmp/cli.race
-          echo "--- run first test under -race ---"
-          GOTRACEBACK=all /tmp/cli.race -test.v -test.run TestContextMarkdownIncludesCommandsAndConcepts 2>&1 | head -60
-          echo "race-bin-exit=${PIPESTATUS[0]}"
-          echo "--- run same test WITHOUT -race ---"
-          go test -c -o /tmp/cli.norace ./internal/cli/
-          /tmp/cli.norace -test.v -test.run TestContextMarkdownIncludesCommandsAndConcepts 2>&1 | head -20
-          echo "norace-bin-exit=${PIPESTATUS[0]}"
-          echo "--- dmesg OOM? ---"; sudo dmesg 2>/dev/null | tail -25 | grep -iE "oom|killed process|out of memory" || echo "no-oom-in-dmesg"
+          go build -o /tmp/fleet ./cmd/fleet
+          echo "=== fleet --help ==="; /tmp/fleet --help >/tmp/h.out 2>&1; echo "help-exit=$?"; tail -2 /tmp/h.out
+          echo "=== fleet context ==="; /tmp/fleet context >/tmp/c.out 2>&1; echo "context-exit=$? bytes=$(wc -c </tmp/c.out)"; head -2 /tmp/c.out; echo "...tail..."; tail -6 /tmp/c.out
+          echo "=== fleet context --json ==="; /tmp/fleet context --json >/tmp/cj.out 2>&1; echo "context-json-exit=$? bytes=$(wc -c </tmp/cj.out)"; tail -6 /tmp/cj.out
       - name: Test with race detector
         run: go test -race -cover ./...
 
