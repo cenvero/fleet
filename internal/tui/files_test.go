@@ -19,27 +19,33 @@ func TestMain(m *testing.M) {
 
 func sampleFilesModel(w, h int) filesModel {
 	return filesModel{
-		server: "web-01",
-		width:  w,
-		height: h,
-		focus:  0,
+		width:      w,
+		height:     h,
+		focus:      0,
+		hoverSide:  -1,
+		hoverIndex: -1,
+		chans:      map[int]*transferChans{},
 		left: paneState{
-			cwd: "/home/op/project",
+			source: "",
+			cwd:    "/home/op/project",
 			entries: []fileItem{
 				{name: "..", isDir: true},
 				{name: "build", isDir: true},
 				{name: "app.tar.gz", size: 12 << 20},
 				{name: "notes.txt", size: 2048},
 			},
-			index: 2,
+			index:    2,
+			selected: map[int]bool{},
 		},
 		right: paneState{
-			cwd:    "/var",
+			source: "web-01",
 			remote: true,
+			cwd:    "/var",
 			entries: []fileItem{
 				{name: "log", isDir: true},
 				{name: "backup.sql", size: 88 << 20},
 			},
+			selected: map[int]bool{},
 		},
 		transfers: []*transferRow{
 			{id: 1, label: "↑ app.tar.gz", bytesDone: 8 << 20, total: 12 << 20, rate: 9.6e6, streams: 4},
@@ -52,14 +58,13 @@ func TestFilesViewRenders(t *testing.T) {
 	out := sampleFilesModel(120, 40).View()
 	for _, want := range []string{
 		"Cenvero Fleet", // header brand
-		"web-01",        // server tag
-		"LOCAL",
-		"REMOTE",
-		"app.tar.gz", // a file row
-		"build",      // a dir row
-		"Transfers",  // progress panel
-		"switch",     // footer hint label
-		"%",          // progress percentage
+		"Local",         // local pane source label
+		"web-01",        // remote pane source label
+		"app.tar.gz",    // a file row
+		"build",         // a dir row
+		"Transfers",     // progress dock
+		"copy/move",     // footer hint label
+		"%",             // progress percentage
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("rendered view missing %q", want)
@@ -79,5 +84,56 @@ func TestSmoothBarBounds(t *testing.T) {
 	t.Parallel()
 	for _, pct := range []int{-10, 0, 1, 37, 50, 99, 100, 150} {
 		_ = smoothBar(pct, 22) // must not panic for any input
+	}
+}
+
+func TestPaneLabel(t *testing.T) {
+	t.Parallel()
+	if (paneState{source: ""}).label() != "Local" {
+		t.Fatal("empty source should label as Local")
+	}
+	if (paneState{source: "web-01"}).label() != "web-01" {
+		t.Fatal("server source should label as its name")
+	}
+}
+
+func TestSourceForArg(t *testing.T) {
+	t.Parallel()
+	if got := sourceForArg(nil, 0, nil); got != "" {
+		t.Fatalf("pane 0 default should be local, got %q", got)
+	}
+	if got := sourceForArg([]string{"a", "b"}, 1, nil); got != "b" {
+		t.Fatalf("explicit arg should win, got %q", got)
+	}
+}
+
+func TestTransferGlyph(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		srcRemote, dstRemote bool
+		kind                 dirTransferKind
+		want                 string
+	}{
+		{false, true, dtCopy, "↑"},
+		{true, false, dtCopy, "↓"},
+		{true, true, dtMove, "↦"},
+		{true, true, dtCopy, "⇒"},
+	}
+	for _, c := range cases {
+		if got := transferGlyph(c.srcRemote, c.dstRemote, c.kind); got != c.want {
+			t.Fatalf("transferGlyph(%v,%v,%v)=%q want %q", c.srcRemote, c.dstRemote, c.kind, got, c.want)
+		}
+	}
+}
+
+func TestOverlayRendersCentered(t *testing.T) {
+	t.Parallel()
+	m := sampleFilesModel(120, 40)
+	m.overlay = overlaySourcePicker
+	m.pickerSide = 0
+	m.pickerItems = []string{"Local", "web-01"}
+	out := m.View()
+	if !strings.Contains(out, "Open source") {
+		t.Fatal("source picker overlay should render its title")
 	}
 }

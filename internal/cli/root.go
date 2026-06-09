@@ -267,15 +267,21 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 
 func newFilesCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "files <server>",
-		Short: "Launch the dual-pane file manager for a server",
-		Long: "Open a full-screen dual-pane file manager: the local filesystem on the left,\n" +
-			"the server on the right. Navigate with the keyboard or mouse, click a folder\n" +
-			"to open it, drag a file from one pane to the other to transfer it, and watch\n" +
-			"live progress. Uses the same chunked, resumable transfer engine as 'fleet file'.",
-		Args: cobra.ExactArgs(1),
+		Use:   "files [source...]",
+		Short: "Launch the desktop-grade dual-pane file manager",
+		Long: "Open a full-screen, desktop-application-grade dual-pane file manager. Each\n" +
+			"pane has a source: the local filesystem (\"Local\") or a managed server, so you\n" +
+			"can browse and transfer local↔server AND server↔server.\n\n" +
+			"  fleet files          Local on the left, the first server on the right\n" +
+			"  fleet files a        server 'a' on the left, Local on the right\n" +
+			"  fleet files a b      server 'a' on the left, server 'b' on the right\n\n" +
+			"Single-click selects, double-click / Enter / → opens a folder, ← goes up.\n" +
+			"Drag between panes to copy or move (Finder-style menu), right-click for a\n" +
+			"context menu, and use the toolbar or keyboard for every operation. Transfers\n" +
+			"use the same chunked, resumable engine as 'fleet file'.",
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return tui.RunFiles(*configDir, args[0])
+			return tui.RunFiles(*configDir, args...)
 		},
 	}
 }
