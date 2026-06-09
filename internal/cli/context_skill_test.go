@@ -24,7 +24,6 @@ func runFleet(t *testing.T, args ...string) (string, error) {
 }
 
 func TestContextMarkdownIncludesCommandsAndConcepts(t *testing.T) {
-	t.Parallel()
 	out, err := runFleet(t, "context")
 	if err != nil {
 		t.Fatalf("context: %v", err)
@@ -44,7 +43,6 @@ func TestContextMarkdownIncludesCommandsAndConcepts(t *testing.T) {
 }
 
 func TestContextJSONIsValidAndHasFileGroup(t *testing.T) {
-	t.Parallel()
 	out, err := runFleet(t, "context", "--json")
 	if err != nil {
 		t.Fatalf("context --json: %v", err)
@@ -73,7 +71,6 @@ func TestContextJSONIsValidAndHasFileGroup(t *testing.T) {
 }
 
 func TestSkillClaudeInstall(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	if _, err := runFleet(t, "skill", "claude", "--dir", dir); err != nil {
 		t.Fatalf("skill claude: %v", err)
@@ -103,7 +100,6 @@ func TestSkillClaudeInstall(t *testing.T) {
 }
 
 func TestSkillAgentsAppendIdempotent(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "AGENTS.md")
 	if err := os.WriteFile(target, []byte("# Existing\n\nnotes\n"), 0o644); err != nil {

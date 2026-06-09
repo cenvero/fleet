@@ -6,7 +6,6 @@ package cli
 import "testing"
 
 func TestParseSize(t *testing.T) {
-	t.Parallel()
 	ok := map[string]int64{
 		"":     0,
 		"1024": 1024,
