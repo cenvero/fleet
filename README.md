@@ -32,14 +32,15 @@ Today the repository includes:
 
 ## Current Status
 
-The codebase is feature-complete enough to behave like a serious late-stage pre-release build, not just a scaffold. The repository already includes the controller, agent, transport modes, TUI, release tooling, scale validation, and most of the operator workflows described in the project requirements.
+**v2** is a major upgrade: it adds a secure, integrated **file manager** across CLI, a dual-pane terminal UI, and a localhost browser UI, plus **agentic control** so AI coding agents can drive the fleet. The codebase already includes the controller, agent, transport modes, TUI, release tooling, scale validation, and most of the operator workflows described in the project requirements.
 
 Implemented now:
 
 - `fleet init` creates the config layout, keys, databases, and audit paths
 - `fleet dashboard` provides a multi-panel TUI with mouse and keyboard navigation
-- `fleet files <server>` opens a dual-pane drag-and-drop file manager, and `fleet ui` serves a localhost web file manager
-- `fleet server`, `service`, `file`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, and `config` command groups are present
+- **Secure file manager (new in v2):** `fleet file` (CLI), `fleet files <server>` (dual-pane drag-and-drop TUI), and `fleet ui` (localhost web file manager) — chunked, parallel, checksummed, resumable transfers
+- **Agentic control (new in v2):** `fleet context` and `fleet skill` let Claude Code / Codex learn and operate the whole fleet
+- `fleet server`, `service`, `file`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, `config`, `ui`, `context`, and `skill` command groups are present
 - Reverse-mode reconnect resilience and queued metrics replay are implemented
 - Persistent shell sessions survive wifi drops and reconnect transparently
 - A 100-agent scale smoke test and release-readiness command are included locally
@@ -219,6 +220,23 @@ Updates:
 - `fleet update rollback`
 - `fleet update channel stable|beta`
 
+File manager and transfers (**new in v2**):
+
+- `fleet file list <server> [path]` — browse a remote directory
+- `fleet file upload <server> <local> [remote] [--parallel N] [--chunk-size 8M]`
+- `fleet file download <server> <remote> [local] [--parallel N]`
+- `fleet file mkdir|rm|mv <server> ...`
+- `fleet file defaults show|set [server]` — per-server and global transfer defaults
+- `fleet files <server>` — dual-pane terminal file manager (mouse drag-and-drop, live progress)
+- `fleet ui` — localhost browser file manager (desktop drag-and-drop, live progress)
+
+Transfers are chunked, run over multiple concurrent channels, are SHA-256-checksummed end to end, and resume after a drop — all on the same authenticated, host-key-pinned SSH channel.
+
+Agentic control (**new in v2**):
+
+- `fleet context` — print the full, self-describing command reference for an AI agent (add `--json`)
+- `fleet skill claude|codex|agents` — install a global skill so your AI coding agent can drive Fleet
+
 ## Configuration Layout
 
 By default the controller stores its working state under `~/.cenvero-fleet`, with a layout like this:
@@ -314,6 +332,27 @@ make release-ready
 - release tooling smoke tests
 - scale validation
 
+## Agentic Fleet
+
+Cenvero Fleet is built to be driven by AI coding agents (Claude Code, OpenAI Codex), not just humans. Because every command is a single `fleet` binary with JSON output and an SSH transport you control, an agent can operate your whole fleet safely from your terminal.
+
+Install the integration once:
+
+```bash
+fleet skill claude      # ~/.claude/skills/cenvero-fleet/SKILL.md + a /fleet slash command
+fleet skill codex       # ~/.codex/prompts/fleet.md
+fleet skill agents      # a portable AGENTS.md
+```
+
+The installed skill is intentionally tiny — it tells the agent to run `fleet context` first, which prints the complete, always-current command reference, concepts, and safety guidance generated live from the installed binary (`fleet context --json` for a structured tree). After that, the agent can:
+
+- inspect the fleet — `fleet status`, `fleet server list/show/metrics`, `fleet service list`, `fleet logs`
+- **control any managed server** — start/stop services, manage the firewall and ports, run commands, rotate keys
+- move files — `fleet file upload/download`, browse with `fleet file list`
+- and guide you through it, asking before anything destructive
+
+Everything the agent does rides the same authenticated, host-key-pinned SSH channel as the rest of the controller — there is no separate API surface or cloud dependency. You stay in control: the agent runs the `fleet` CLI on your machine, with your keys, against the servers you added.
+
 ## Documentation
 
 Full documentation is available at **[fleet.cenvero.org/docs/](https://fleet.cenvero.org/docs/)**.
@@ -323,6 +362,8 @@ Markdown source lives under [`docs/`](docs/index.md):
 - [Getting Started](docs/getting-started.md)
 - [Transport Modes](docs/transport-modes.md)
 - [Configuration and Storage](docs/configuration-and-storage.md)
+- [File Manager and Transfers](docs/file-manager.md)
+- [Agentic Fleet (AI control)](docs/agentic.md)
 - [Operations Guide](docs/operations.md)
 - [Releases and Updates](docs/releases-and-updates.md)
 
@@ -332,7 +373,7 @@ A few boundaries are intentional in the current codebase:
 
 - Linux is the primary operational target for service management, firewall control, and remote bootstrap
 - macOS and Windows agents support transport, metrics, inventory, and update flows, but some ops commands return typed unsupported-capability errors
-- There is no web UI in v1
+- The file-manager web UI (`fleet ui`) was introduced in **v2** — it is localhost-only by design; there is still no remote/hosted web console, and the fleet dashboard remains terminal-based (`fleet dashboard`)
 
 ## Contributing
 
