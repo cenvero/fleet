@@ -170,7 +170,10 @@ jobs:
   deploy-pages:
     name: Deploy Pages
     runs-on: ubuntu-latest
-    needs: [update-manifest]
+    # Deploy Pages LAST — only after the manifest is committed (update-manifest)
+    # AND the release smoke test passes — so the published site always reflects a
+    # verified release with its committed manifest.
+    needs: [update-manifest, smoke-test]
     concurrency:
       group: pages-deployment
       cancel-in-progress: false
