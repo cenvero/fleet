@@ -121,11 +121,15 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	}
 	hasSig := strings.TrimSpace(binary.Signature) != ""
 	hasHash := strings.TrimSpace(binary.SHA256) != ""
-	// Require at least a SHA256 checksum for any non-development channel.
-	// Development builds (channel == "dev" or empty) are allowed to omit both
-	// so that ad-hoc binaries can be tested without a full signing pipeline.
-	if !hasSig && !hasHash && opts.Channel != "dev" && opts.Channel != "" {
-		return ApplyResult{}, fmt.Errorf("manifest entry for %s has no SHA256 or signature — refusing to apply unverified binary on channel %q", binary.URL, opts.Channel)
+	// Require a minisign SIGNATURE for any non-development channel. A SHA-256
+	// checksum alone is not sufficient: the manifest is the only thing binding
+	// the binary to that checksum, so an attacker who tampers with the manifest
+	// can swap both the binary and its hash. The signature is verified against a
+	// pinned public key and cannot be forged that way. Development builds
+	// (channel == "dev" or empty) may omit both for ad-hoc testing.
+	isDev := opts.Channel == "dev" || opts.Channel == ""
+	if !hasSig && !isDev {
+		return ApplyResult{}, fmt.Errorf("manifest entry for %s has no minisign signature — refusing to apply on channel %q", binary.URL, opts.Channel)
 	}
 	if hasSig {
 		signature, err := opts.DownloadURL(ctx, binary.Signature)

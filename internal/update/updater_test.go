@@ -34,6 +34,16 @@ func TestApplyAndRollback(t *testing.T) {
 	newBinary := []byte("new-fleet-binary")
 	archive := tarGzArchive(t, runtimeExecutableName(), newBinary, 0o755)
 	sum := sha256.Sum256(archive)
+	pub, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error = %v", err)
+	}
+	signature := minisign.Sign(priv, archive)
+	pubText, err := pub.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText error = %v", err)
+	}
+	const sigURL = "https://example.invalid/fleet.tar.gz.minisig"
 	manifest := Manifest{
 		Channels: map[string]ChannelInfo{
 			"stable": {Version: "v1.2.3", ReleaseNotes: "https://example.invalid/release"},
@@ -41,8 +51,9 @@ func TestApplyAndRollback(t *testing.T) {
 		Binaries: map[string]map[string]BinaryInfo{
 			"v1.2.3": {
 				runtime.GOOS + "-" + runtime.GOARCH: {
-					URL:    "https://example.invalid/fleet.tar.gz",
-					SHA256: hex.EncodeToString(sum[:]),
+					URL:       "https://example.invalid/fleet.tar.gz",
+					SHA256:    hex.EncodeToString(sum[:]),
+					Signature: sigURL,
 				},
 			},
 		},
@@ -57,10 +68,14 @@ func TestApplyAndRollback(t *testing.T) {
 		FetchManifest: func(context.Context, string) (Manifest, error) {
 			return manifest, nil
 		},
-		DownloadURL: func(context.Context, string) ([]byte, error) {
+		DownloadURL: func(_ context.Context, url string) ([]byte, error) {
+			if url == sigURL {
+				return signature, nil
+			}
 			return archive, nil
 		},
-		Now: func() time.Time { return now },
+		SigningPublicKey: string(pubText),
+		Now:              func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -68,8 +83,8 @@ func TestApplyAndRollback(t *testing.T) {
 	if !result.Applied {
 		t.Fatalf("expected update to be applied")
 	}
-	if result.SignatureVerified {
-		t.Fatalf("expected signature verification to be skipped without a signature URL")
+	if !result.SignatureVerified {
+		t.Fatalf("expected signature to be verified")
 	}
 	current, err := os.ReadFile(executablePath)
 	if err != nil {

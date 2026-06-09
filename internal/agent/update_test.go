@@ -32,7 +32,9 @@ func TestManagedUpdaterAppliesAgentBinaryAndSchedulesRestart(t *testing.T) {
 	sum := sha256.Sum256(archive)
 	manifest := update.Manifest{
 		Channels: map[string]update.ChannelInfo{
-			"stable": {Version: "v1.2.3"},
+			// dev channel: this test covers the agent apply/restart mechanics;
+			// signature-policy enforcement is covered by the updater package tests.
+			"dev": {Version: "v1.2.3"},
 		},
 		AgentBinaries: map[string]map[string]update.BinaryInfo{
 			"v1.2.3": {
@@ -59,7 +61,7 @@ func TestManagedUpdaterAppliesAgentBinaryAndSchedulesRestart(t *testing.T) {
 
 	op, err := updater.Apply(context.Background(), proto.UpdateApplyPayload{
 		ManifestURL: "https://example.invalid/manifest.json",
-		Channel:     "stable",
+		Channel:     "dev",
 		ServiceName: "cenvero-fleet-agent",
 	})
 	if err != nil {
