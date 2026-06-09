@@ -9,7 +9,15 @@
 
 // ----------------------------------------------------------------- token / api
 
-const TOKEN = new URLSearchParams(location.search).get("t") || "";
+// The per-process token arrives in the URL as ?t=<token>. Read it once at load,
+// preferring the URL but falling back to sessionStorage so a browser refresh
+// (which strips ?t= from the address bar, below) keeps working. Persist it so
+// every later request — and every reload of this tab — reuses the same value.
+const TOKEN =
+  new URLSearchParams(location.search).get("t") ||
+  sessionStorage.getItem("fleet_token") ||
+  "";
+if (TOKEN) sessionStorage.setItem("fleet_token", TOKEN);
 
 // Drop the token from the address bar so it doesn't linger in history.
 if (TOKEN && window.history && window.history.replaceState) {

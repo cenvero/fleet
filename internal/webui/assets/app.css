@@ -15,9 +15,9 @@
   --panel: rgba(13, 18, 28, 0.7);
   --row-hover: rgba(255, 255, 255, 0.035);
   --text: #f0f4f8;
-  --muted: #94a3b8;
-  --subtle: #475569;
-  --dim: #5f6b7a;
+  --muted: #b6c2d4;
+  --subtle: #8190a6;
+  --dim: #93a1b4;
   --accent: #00ebb8;
   --accent-hover: #00ffd0;
   --accent-soft: rgba(0, 235, 184, 0.1);
@@ -38,6 +38,12 @@
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* The `hidden` attribute must always win. Several hosts below (modal overlay,
+   menus, toast) set an explicit `display`, which would otherwise override the
+   UA `[hidden] { display:none }` rule and leave an empty box floating on screen
+   when nothing is open. Keep them removed from layout until JS unsets `hidden`. */
+[hidden] { display: none !important; }
 
 html, body {
   height: 100%;
@@ -312,10 +318,11 @@ button { font-family: inherit; }
 }
 .row:hover { background: var(--row-hover); }
 .row.selected {
-  background: var(--accent-soft);
+  background: rgba(0, 235, 184, 0.16);
   box-shadow: inset 0 0 0 1px var(--accent-border);
 }
-.row.selected:hover { background: rgba(0, 235, 184, 0.14); }
+.row.selected .row-label { color: #eafff9; }
+.row.selected:hover { background: rgba(0, 235, 184, 0.22); }
 .row.cut { opacity: 0.45; }
 .row.drop-into { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); }
 .row.dragging { opacity: 0.4; }
@@ -326,9 +333,9 @@ button { font-family: inherit; }
 .row.dir .row-icon svg { stroke: var(--accent); fill: rgba(0, 235, 184, 0.08); }
 .row.file .row-icon svg { stroke: var(--muted); }
 .row.link .row-icon svg { stroke: var(--blue); }
-.row-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
-.row.dir .row-label { color: #d6fff5; font-weight: 550; }
-.row.link .row-label { color: #bcd4ff; }
+.row-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text); font-weight: 500; }
+.row.dir .row-label { color: #d6fff5; font-weight: 600; }
+.row.link .row-label { color: #cfe0ff; }
 .row-size, .row-mod {
   text-align: right;
   font-size: 12px;
