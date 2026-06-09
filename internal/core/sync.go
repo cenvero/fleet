@@ -305,8 +305,17 @@ func scanLocalDir(root string) (map[string]fileMeta, error) {
 	return out, nil
 }
 
+// maxRemoteScanDepth and maxRemoteScanFiles bound a recursive remote listing so
+// a malicious or malformed agent cannot exhaust the controller's stack/memory
+// with a self-referential or enormous directory tree.
+const (
+	maxRemoteScanDepth = 64
+	maxRemoteScanFiles = 1_000_000
+)
+
 // scanRemoteDir recursively lists a remote directory tree as relpath ->
-// {mtime,size}. A missing/empty root yields an empty map.
+// {mtime,size}. A missing/empty root yields an empty map. Bounded in depth and
+// total files; the agent is not trusted to be honest about its tree.
 func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error) {
 	out := map[string]fileMeta{}
 	rootRes, err := a.ListRemoteDir(serverName, root)
@@ -319,15 +328,21 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 	}
 	prefix := strings.TrimSuffix(resolvedRoot, "/") + "/"
 
-	var visit func(entries []proto.FileEntry) error
-	visit = func(entries []proto.FileEntry) error {
+	var visit func(entries []proto.FileEntry, depth int) error
+	visit = func(entries []proto.FileEntry, depth int) error {
+		if depth > maxRemoteScanDepth {
+			return fmt.Errorf("remote directory tree exceeds maximum depth %d", maxRemoteScanDepth)
+		}
 		for _, e := range entries {
+			if len(out) >= maxRemoteScanFiles {
+				return fmt.Errorf("remote directory tree exceeds maximum of %d files", maxRemoteScanFiles)
+			}
 			if e.IsDir {
 				sub, err := a.ListRemoteDir(serverName, e.Path)
 				if err != nil {
 					continue // skip unreadable subdir
 				}
-				if err := visit(sub.Entries); err != nil {
+				if err := visit(sub.Entries, depth+1); err != nil {
 					return err
 				}
 				continue
@@ -342,7 +357,7 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 		}
 		return nil
 	}
-	if err := visit(rootRes.Entries); err != nil {
+	if err := visit(rootRes.Entries, 0); err != nil {
 		return nil, err
 	}
 	return out, nil
