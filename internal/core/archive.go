@@ -125,12 +125,13 @@ func extractCmd(archivePath string) string {
 	return fmt.Sprintf("tar -xf %s -C %s", a, dir)
 }
 
-// compressArgv builds the argv (no shell) that creates `archive` from base
-// `names` in the working directory. Operands are "./"-prefixed and tar gets a
-// "--" terminator so a flag-shaped file name is always treated as a path.
-func compressArgv(names []string, archive, format string) ([]string, error) {
+// compressArgv builds the (tool, args) for creating `archive` from base `names`
+// in the working directory. tool is always a constant ("tar"/"zip"); operands are
+// "./"-prefixed and tar gets a "--" terminator so a flag-shaped file name is
+// always treated as a path, never an option.
+func compressArgv(names []string, archive, format string) (tool string, args []string, err error) {
 	if len(names) == 0 {
-		return nil, fmt.Errorf("nothing selected to compress")
+		return "", nil, fmt.Errorf("nothing selected to compress")
 	}
 	ops := make([]string, 0, len(names))
 	for _, n := range names {
@@ -139,26 +140,27 @@ func compressArgv(names []string, archive, format string) ([]string, error) {
 	out := "./" + path.Base(archive)
 	switch format {
 	case "zip":
-		return append([]string{"zip", "-r", "-q", out}, ops...), nil
+		return "zip", append([]string{"-r", "-q", out}, ops...), nil
 	case "tar.gz", "tgz":
-		return append([]string{"tar", "-czf", out, "--"}, ops...), nil
+		return "tar", append([]string{"-czf", out, "--"}, ops...), nil
 	case "tar.bz2":
-		return append([]string{"tar", "-cjf", out, "--"}, ops...), nil
+		return "tar", append([]string{"-cjf", out, "--"}, ops...), nil
 	case "tar.xz":
-		return append([]string{"tar", "-cJf", out, "--"}, ops...), nil
+		return "tar", append([]string{"-cJf", out, "--"}, ops...), nil
 	case "tar":
-		return append([]string{"tar", "-cf", out, "--"}, ops...), nil
+		return "tar", append([]string{"-cf", out, "--"}, ops...), nil
 	default:
-		return nil, fmt.Errorf("unsupported archive format %q", format)
+		return "", nil, fmt.Errorf("unsupported archive format %q", format)
 	}
 }
 
-// extractArgv builds the argv (no shell) that extracts archivePath into dir.
-func extractArgv(archivePath, dir string) []string {
+// extractArgv builds the (tool, args) for extracting archivePath into dir. tool
+// is always a constant ("tar"/"unzip").
+func extractArgv(archivePath, dir string) (tool string, args []string) {
 	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
-		return []string{"unzip", "-o", "-q", archivePath, "-d", dir}
+		return "unzip", []string{"-o", "-q", archivePath, "-d", dir}
 	}
-	return []string{"tar", "-xf", archivePath, "-C", dir}
+	return "tar", []string{"-xf", archivePath, "-C", dir}
 }
 
 // CompressPaths creates an archive of `names` inside `dir`. server=="" runs on the
@@ -170,11 +172,11 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 		if format == "zip" {
 			_ = os.Remove(filepath.Join(dir, path.Base(archiveName))) // zip appends; start fresh
 		}
-		argv, err := compressArgv(names, archiveName, format)
+		tool, args, err := compressArgv(names, archiveName, format)
 		if err != nil {
 			return err
 		}
-		if err := runLocalTool(dir, argv); err != nil {
+		if err := runLocalTool(dir, tool, args); err != nil {
 			return err
 		}
 	} else {
@@ -193,7 +195,8 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 // ExtractArchive extracts an archive (full path) into its containing directory.
 func (a *App) ExtractArchive(server, archivePath string) error {
 	if server == "" {
-		if err := runLocalTool("", extractArgv(archivePath, path.Dir(archivePath))); err != nil {
+		tool, args := extractArgv(archivePath, path.Dir(archivePath))
+		if err := runLocalTool("", tool, args); err != nil {
 			return err
 		}
 	} else if err := a.runRemoteShell(server, extractCmd(archivePath)); err != nil {
@@ -203,11 +206,11 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 	return nil
 }
 
-// runLocalTool runs a FIXED tool (argv[0] is a constant tar/zip/unzip) with its
-// arguments passed directly to exec — there is no shell, so neither command nor
-// option injection is possible. Runs in dir when non-empty.
-func runLocalTool(dir string, argv []string) error {
-	cmd := exec.Command(argv[0], argv[1:]...) // #nosec G204 -- argv[0] is a constant tool; args are not shell-interpreted
+// runLocalTool runs a FIXED tool (a constant tar/zip/unzip) with its arguments
+// passed directly to exec — there is no shell, so neither command nor option
+// injection is possible. Runs in dir when non-empty.
+func runLocalTool(dir, tool string, args []string) error {
+	cmd := exec.Command(tool, args...) // #nosec G204 -- tool is a constant selected by format; no shell, args not interpreted
 	if dir != "" {
 		cmd.Dir = dir
 	}
