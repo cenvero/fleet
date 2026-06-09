@@ -42,6 +42,7 @@ Omit sections that have no entries for that release.
   - `fleet ui` — localhost-only browser file manager with desktop drag-and-drop, an upload queue, and live progress
 - Transfers are chunked, run over multiple concurrent `fleet-rpc` channels, are SHA-256-checksummed per chunk and whole-file, and resume after a drop or restart.
 - Per-server and global file-transfer defaults (remote dir, parallel streams, chunk size), seeded on first connection.
+- `fleet sync <server> <local-dir> <remote-dir>` — live one-way directory sync that pushes a folder once, then mirrors local changes (and, with `--delete`, removals) to the server until the command is stopped.
 - Agentic control for AI coding agents:
   - `fleet context` — a complete, self-describing command reference generated live from the binary (`--json` for a structured tree)
   - `fleet skill claude|codex|agents` — install a global skill / slash command so Claude Code or Codex can operate the fleet

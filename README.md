@@ -39,6 +39,7 @@ Implemented now:
 - `fleet init` creates the config layout, keys, databases, and audit paths
 - `fleet dashboard` provides a multi-panel TUI with mouse and keyboard navigation
 - **Secure file manager (new in v2):** `fleet file` (CLI), `fleet files <server>` (dual-pane drag-and-drop TUI), and `fleet ui` (localhost web file manager) — chunked, parallel, checksummed, resumable transfers
+- **Live directory sync (new in v2):** `fleet sync` mirrors a local folder to a server and keeps it in sync as you edit, until you stop the command
 - **Agentic control (new in v2):** `fleet context` and `fleet skill` let Claude Code / Codex learn and operate the whole fleet
 - `fleet server`, `service`, `file`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, `config`, `ui`, `context`, and `skill` command groups are present
 - Reverse-mode reconnect resilience and queued metrics replay are implemented
@@ -229,6 +230,7 @@ File manager and transfers (**new in v2**):
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
 - `fleet files <server>` — dual-pane terminal file manager (mouse drag-and-drop, live progress)
 - `fleet ui` — localhost browser file manager (desktop drag-and-drop, live progress)
+- `fleet sync <server> <local-dir> <remote-dir> [--delete] [--interval 1s]` — live one-way sync: push a folder once, then mirror changes as you edit until you stop the command
 
 Transfers are chunked, run over multiple concurrent channels, are SHA-256-checksummed end to end, and resume after a drop — all on the same authenticated, host-key-pinned SSH channel.
 

@@ -61,6 +61,38 @@ fleet file defaults set --parallel 8 --chunk-size 8M --remote-dir /srv/incoming
 fleet file defaults set <server> --parallel 2 --remote-dir /data
 ```
 
+## Live directory sync
+
+```bash
+fleet sync <server> <local-dir> <remote-dir> [--interval 1s] [--delete] [--parallel N]
+```
+
+`fleet sync` keeps a local directory mirrored to a directory on a server. It
+pushes the whole tree once, then re-scans the local directory on an interval and
+uploads any new or changed files as you edit them. The sync is **live and
+one-way (local → remote)** and runs until you stop it with **Ctrl-C** — when the
+command exits, syncing stops.
+
+- `--interval` — how often to re-scan for changes (default `1s`).
+- `--delete` — also remove remote files that were deleted locally (off by
+  default for safety).
+- `--parallel` — parallel streams per file upload.
+
+It skips `.git` metadata and does not follow symlinks. Each changed file is sent
+through the same chunked, checksummed transfer engine as `fleet file upload`.
+
+```text
+$ fleet sync web-01 ./site /var/www/site
+Live sync  ./site → web-01:/var/www/site
+scan every 1s · press Ctrl-C to stop
+
+✓ initial sync complete — watching for changes…
+↑ index.html
+↑ assets/app.css
+^C
+sync stopped — 2 uploaded, 0 deleted
+```
+
 ## Terminal file manager (TUI)
 
 ```bash
