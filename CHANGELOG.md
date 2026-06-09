@@ -31,3 +31,31 @@ Each release block follows this structure:
 Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
+
+## [v2.0.0] — 2026-06-09 (stable)
+
+### Added
+
+- Secure, integrated file manager across three surfaces, all on the existing authenticated, host-key-pinned SSH channel:
+  - `fleet file list|upload|download|mkdir|rm|mv` and `fleet file defaults show|set` (global and per-server)
+  - `fleet files <server>` — dual-pane terminal file manager with mouse drag-and-drop and live progress
+  - `fleet ui` — localhost-only browser file manager with desktop drag-and-drop, an upload queue, and live progress
+- Transfers are chunked, run over multiple concurrent `fleet-rpc` channels, are SHA-256-checksummed per chunk and whole-file, and resume after a drop or restart.
+- Per-server and global file-transfer defaults (remote dir, parallel streams, chunk size), seeded on first connection.
+- Agentic control for AI coding agents:
+  - `fleet context` — a complete, self-describing command reference generated live from the binary (`--json` for a structured tree)
+  - `fleet skill claude|codex|agents` — install a global skill / slash command so Claude Code or Codex can operate the fleet
+- Robust terminal mouse support via bubblezone (content-anchored zones) in both the dashboard and the file manager.
+
+### Changed
+
+- The dashboard's mouse hit-testing was migrated from manual coordinate math to bubblezone.
+
+### Security
+
+- File transfers reuse the agent's path validation (absolute-only, symlink-resolved, `/proc`/`/sys`/`/dev` blocked) and add per-upload write/finalize locking, declared-size bounds (anti sparse-file abuse), transfer-id-keyed temp files, and overflow-safe range math.
+- The web UI binds loopback only, requires a per-process token (constant-time compare), restricts mutations to POST with an Origin/CSRF check, caps upload body size, and sets a strict CSP and security headers.
+
+### Fixed
+
+- Guard against an `index out of range` panic in the dashboard log view when a cached log is marked available but has no lines.
