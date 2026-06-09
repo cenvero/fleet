@@ -549,10 +549,10 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 	}
 	totalSize := stat.Entry.Size
 
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
 		return proto.FileStatResult{}, err
 	}
-	dest, err := os.OpenFile(localPath, os.O_RDWR|os.O_CREATE, 0o644) // #nosec G304 -- operator-supplied local path
+	dest, err := os.OpenFile(localPath, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- operator-supplied local path
 	if err != nil {
 		return proto.FileStatResult{}, fmt.Errorf("open local destination: %w", err)
 	}
