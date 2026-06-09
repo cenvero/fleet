@@ -14,26 +14,41 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/logs"
+	"github.com/cenvero/fleet/pkg/proto"
 )
 
-// DefaultSyncInterval is how often the local directory is re-scanned for changes.
+// DefaultSyncInterval is how often the writer side is re-scanned for changes.
 const DefaultSyncInterval = time.Second
 
-// SyncOptions configures a live directory sync.
+// SyncDirection selects which side is the authoritative writer (source of truth).
+// The other side becomes a read-only replica that mirrors the writer.
+type SyncDirection string
+
+const (
+	// SyncFromLocal makes the local directory the writer and the server the
+	// replica (push).
+	SyncFromLocal SyncDirection = "local"
+	// SyncFromRemote makes the server directory the writer and the local
+	// directory the replica (pull).
+	SyncFromRemote SyncDirection = "remote"
+)
+
+// SyncOptions configures a live mirror.
 type SyncOptions struct {
 	Interval time.Duration // re-scan interval (default 1s)
-	Delete   bool          // remove remote files that were deleted locally
-	Parallel int           // parallel streams per file upload
+	NoDelete bool          // keep replica files that don't exist on the writer (default: delete them)
+	Parallel int           // parallel streams per file copy
+	From     SyncDirection // which side is the writer; default local
 }
 
 // SyncEventKind classifies a sync event.
 type SyncEventKind string
 
 const (
-	SyncUpload SyncEventKind = "upload"
-	SyncDelete SyncEventKind = "delete"
+	SyncCopy   SyncEventKind = "copy"   // a file was propagated writer -> replica
+	SyncDelete SyncEventKind = "delete" // a replica file absent on the writer was removed
+	SyncReady  SyncEventKind = "ready"  // initial mirror complete, now watching
 	SyncError  SyncEventKind = "error"
-	SyncReady  SyncEventKind = "ready" // initial scan complete, now watching
 )
 
 // SyncEvent is reported to the caller as the sync runs.
@@ -49,20 +64,27 @@ type fileMeta struct {
 	size        int64
 }
 
-// SyncDir keeps localDir mirrored to remoteDir on serverName: it pushes the full
-// directory once, then re-scans every Interval and uploads new/changed files
-// (and deletes remote files removed locally when Delete is set). It is one-way
-// (local → remote) and runs until ctx is cancelled, returning ctx.Err().
+// syncPlan abstracts the writer/replica sides so one loop drives both push and
+// pull.
+type syncPlan struct {
+	scanWriter       func() (map[string]fileMeta, error)
+	scanReplica      func() (map[string]fileMeta, error)
+	copy             func(rel string) (int64, error) // writer -> replica
+	remove           func(rel string) error          // delete on replica
+	ensureReplicaDir func()
+}
+
+// SyncDir keeps two directories mirrored, live, until ctx is cancelled.
+//
+// One side is the writer (source of truth, chosen by opts.From) and the other is
+// a read-only replica. The writer is pushed to the replica once, then re-scanned
+// every Interval: files that are new or differ are copied to the replica
+// (overriding it), and — unless NoDelete is set — replica files that do not exist
+// on the writer are removed, so the replica becomes an exact mirror. It returns
+// ctx.Err() when stopped.
 func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir string, opts SyncOptions, events func(SyncEvent)) error {
 	if events == nil {
 		events = func(SyncEvent) {}
-	}
-	info, err := os.Stat(localDir)
-	if err != nil {
-		return fmt.Errorf("local directory: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", localDir)
 	}
 	if _, err := a.GetServer(serverName); err != nil {
 		return err
@@ -73,30 +95,51 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 	if interval <= 0 {
 		interval = DefaultSyncInterval
 	}
+	pull := opts.From == SyncFromRemote
 
-	// Ensure the remote base directory exists (best effort; created per-file too).
-	_ = a.RemoteMkdir(serverName, remoteDir)
-	createdDirs := map[string]bool{remoteDir: true}
-
-	snapshot := map[string]fileMeta{}
-	first := true
+	if pull {
+		// Writer is remote; the local replica directory must exist.
+		if err := os.MkdirAll(localDir, 0o750); err != nil {
+			return fmt.Errorf("local directory: %w", err)
+		}
+	} else {
+		// Writer is local; it must exist.
+		info, err := os.Stat(localDir)
+		if err != nil {
+			return fmt.Errorf("local directory: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", localDir)
+		}
+	}
 
 	_ = a.AuditLog.Append(logs.AuditEntry{
 		Action:   "file.sync.start",
 		Target:   serverName,
 		Operator: a.operator(),
-		Details:  fmt.Sprintf("%s -> %s", localDir, remoteDir),
+		Details:  syncAuditDetails(serverName, localDir, remoteDir, opts),
 	})
 
+	plan := a.makeSyncPlan(serverName, localDir, remoteDir, opts, pull)
+	plan.ensureReplicaDir()
+
+	prev := map[string]fileMeta{}
+	first := true
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		current, scanErr := scanLocalDir(localDir)
-		if scanErr != nil {
-			events(SyncEvent{Kind: SyncError, Err: scanErr})
+		writer, err := plan.scanWriter()
+		if err != nil {
+			events(SyncEvent{Kind: SyncError, Err: err})
 		} else {
-			a.syncReconcile(serverName, localDir, remoteDir, opts, snapshot, current, createdDirs, events)
-			snapshot = current
+			var replica map[string]fileMeta
+			if first {
+				// One full listing of the replica so pre-existing extras can be
+				// removed and same-size files skipped.
+				replica, _ = plan.scanReplica()
+			}
+			syncReconcile(writer, replica, prev, first, opts, plan, events)
+			prev = writer
 			if first {
 				events(SyncEvent{Kind: SyncReady})
 				first = false
@@ -108,7 +151,7 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 				Action:   "file.sync.stop",
 				Target:   serverName,
 				Operator: a.operator(),
-				Details:  fmt.Sprintf("%s -> %s", localDir, remoteDir),
+				Details:  syncAuditDetails(serverName, localDir, remoteDir, opts),
 			})
 			return ctx.Err()
 		case <-ticker.C:
@@ -116,47 +159,95 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 	}
 }
 
-// syncReconcile uploads files that are new or changed since the previous scan,
-// and (optionally) deletes remote files that disappeared locally.
-func (a *App) syncReconcile(serverName, localDir, remoteDir string, opts SyncOptions, prev, current map[string]fileMeta, createdDirs map[string]bool, events func(SyncEvent)) {
-	// Deterministic order makes output and tests stable.
-	rels := make([]string, 0, len(current))
-	for rel := range current {
+func (a *App) makeSyncPlan(serverName, localDir, remoteDir string, opts SyncOptions, pull bool) syncPlan {
+	xfer := FileTransferOptions{Parallel: opts.Parallel}
+	if pull {
+		return syncPlan{
+			scanWriter:  func() (map[string]fileMeta, error) { return a.scanRemoteDir(serverName, remoteDir) },
+			scanReplica: func() (map[string]fileMeta, error) { return scanLocalDir(localDir) },
+			copy: func(rel string) (int64, error) {
+				remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
+				localPath := filepath.Join(localDir, rel)
+				res, err := a.DownloadFile(serverName, remotePath, localPath, xfer, nil)
+				return res.Entry.Size, err
+			},
+			remove:           func(rel string) error { return os.Remove(filepath.Join(localDir, rel)) },
+			ensureReplicaDir: func() { _ = os.MkdirAll(localDir, 0o750) },
+		}
+	}
+	createdRemoteDirs := map[string]bool{}
+	return syncPlan{
+		scanWriter:  func() (map[string]fileMeta, error) { return scanLocalDir(localDir) },
+		scanReplica: func() (map[string]fileMeta, error) { return a.scanRemoteDir(serverName, remoteDir) },
+		copy: func(rel string) (int64, error) {
+			remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
+			a.ensureRemoteParent(serverName, remotePath, createdRemoteDirs)
+			res, err := a.UploadFile(serverName, filepath.Join(localDir, rel), remotePath, xfer, nil)
+			return res.Size, err
+		},
+		remove: func(rel string) error {
+			return a.RemoteDelete(serverName, path.Join(remoteDir, filepath.ToSlash(rel)), false)
+		},
+		ensureReplicaDir: func() { _ = a.RemoteMkdir(serverName, remoteDir) },
+	}
+}
+
+// syncReconcile copies new/changed writer files to the replica and (unless
+// NoDelete) removes replica files that the writer no longer has.
+func syncReconcile(writer, replica, prev map[string]fileMeta, first bool, opts SyncOptions, plan syncPlan, events func(SyncEvent)) {
+	rels := make([]string, 0, len(writer))
+	for rel := range writer {
 		rels = append(rels, rel)
 	}
 	sort.Strings(rels)
 
 	for _, rel := range rels {
-		meta := current[rel]
-		if old, ok := prev[rel]; ok && old == meta {
-			continue // unchanged
+		meta := writer[rel]
+		var needCopy bool
+		if first {
+			// Override the replica where it is missing the file or its size
+			// differs (rsync-style quick check).
+			r, ok := replica[rel]
+			needCopy = !ok || r.size != meta.size
+		} else {
+			old, ok := prev[rel]
+			needCopy = !ok || old != meta
 		}
-		remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-		a.ensureRemoteParent(serverName, remotePath, createdDirs)
-		res, err := a.UploadFile(serverName, filepath.Join(localDir, rel), remotePath, FileTransferOptions{Parallel: opts.Parallel}, nil)
+		if !needCopy {
+			continue
+		}
+		bytes, err := plan.copy(rel)
 		if err != nil {
 			events(SyncEvent{Kind: SyncError, Path: rel, Err: err})
 			continue
 		}
-		events(SyncEvent{Kind: SyncUpload, Path: rel, Bytes: res.Size})
+		events(SyncEvent{Kind: SyncCopy, Path: rel, Bytes: bytes})
 	}
 
-	if opts.Delete {
-		gone := make([]string, 0)
-		for rel := range prev {
-			if _, ok := current[rel]; !ok {
-				gone = append(gone, rel)
-			}
+	if opts.NoDelete {
+		return
+	}
+	// Delete replica files absent on the writer. On the first pass compare
+	// against the replica's actual contents (removes pre-existing extras);
+	// afterwards compare against the previous writer snapshot (removes files the
+	// writer deleted).
+	base := prev
+	if first {
+		base = replica
+	}
+	gone := make([]string, 0)
+	for rel := range base {
+		if _, ok := writer[rel]; !ok {
+			gone = append(gone, rel)
 		}
-		sort.Strings(gone)
-		for _, rel := range gone {
-			remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-			if err := a.RemoteDelete(serverName, remotePath, false); err != nil {
-				events(SyncEvent{Kind: SyncError, Path: rel, Err: err})
-				continue
-			}
-			events(SyncEvent{Kind: SyncDelete, Path: rel})
+	}
+	sort.Strings(gone)
+	for _, rel := range gone {
+		if err := plan.remove(rel); err != nil {
+			events(SyncEvent{Kind: SyncError, Path: rel, Err: err})
+			continue
 		}
+		events(SyncEvent{Kind: SyncDelete, Path: rel})
 	}
 }
 
@@ -172,8 +263,7 @@ func (a *App) ensureRemoteParent(serverName, remotePath string, createdDirs map[
 }
 
 // scanLocalDir returns every regular file under root as relpath -> {mtime,size}.
-// Directories and symlinks are skipped (symlinks are not followed). Hidden files
-// are included; VCS metadata (.git) is skipped to avoid syncing repo internals.
+// Directories and symlinks are skipped; .git metadata is excluded.
 func scanLocalDir(root string) (map[string]fileMeta, error) {
 	out := map[string]fileMeta{}
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
@@ -206,7 +296,58 @@ func scanLocalDir(root string) (map[string]fileMeta, error) {
 	return out, nil
 }
 
-// SyncTargetSummary is a small helper for the CLI banner.
-func SyncTargetSummary(server, localDir, remoteDir string) string {
-	return fmt.Sprintf("%s → %s:%s", localDir, server, strings.TrimRight(remoteDir, "/"))
+// scanRemoteDir recursively lists a remote directory tree as relpath ->
+// {mtime,size}. A missing/empty root yields an empty map.
+func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error) {
+	out := map[string]fileMeta{}
+	rootRes, err := a.ListRemoteDir(serverName, root)
+	if err != nil {
+		return out, nil // not readable yet (e.g. just-created replica) — treat as empty
+	}
+	resolvedRoot := rootRes.Path
+	if resolvedRoot == "" {
+		resolvedRoot = root
+	}
+	prefix := strings.TrimSuffix(resolvedRoot, "/") + "/"
+
+	var visit func(entries []proto.FileEntry) error
+	visit = func(entries []proto.FileEntry) error {
+		for _, e := range entries {
+			if e.IsDir {
+				sub, err := a.ListRemoteDir(serverName, e.Path)
+				if err != nil {
+					continue // skip unreadable subdir
+				}
+				if err := visit(sub.Entries); err != nil {
+					return err
+				}
+				continue
+			}
+			rel := strings.TrimPrefix(e.Path, prefix)
+			out[rel] = fileMeta{modUnixNano: e.ModTime.UnixNano(), size: e.Size}
+		}
+		return nil
+	}
+	if err := visit(rootRes.Entries); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func syncAuditDetails(server, localDir, remoteDir string, opts SyncOptions) string {
+	dir := "local->remote"
+	if opts.From == SyncFromRemote {
+		dir = "remote->local"
+	}
+	return fmt.Sprintf("%s (%s) %s:%s", localDir, dir, server, remoteDir)
+}
+
+// SyncSummary returns a one-line "writer → replica" banner for the CLI.
+func SyncSummary(server, localDir, remoteDir string, from SyncDirection) string {
+	local := localDir
+	remote := server + ":" + strings.TrimRight(remoteDir, "/")
+	if from == SyncFromRemote {
+		return remote + "  →  " + local + "   (server is the writer)"
+	}
+	return local + "  →  " + remote + "   (local is the writer)"
 }
