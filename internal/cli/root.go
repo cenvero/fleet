@@ -107,7 +107,6 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newLifecycleCommand("daemon", &configDir))
 	root.AddCommand(newDashboardCommand(&configDir))
 	root.AddCommand(newFilesCommand(&configDir))
-	root.AddCommand(newUICommand(&configDir))
 	root.AddCommand(newServerCommand(&configDir))
 	root.AddCommand(newServiceCommand(&configDir))
 	root.AddCommand(newFileCommand(&configDir))

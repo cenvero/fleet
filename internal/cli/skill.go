@@ -215,7 +215,7 @@ func skillCoreBody() string {
 		"- Confirm before destructive actions: `server remove`, `file rm`, `key rotate`,\n" +
 		"  `update apply`, `self-uninstall`, `config restore`.\n" +
 		"- Move files with `fleet file upload|download|list`; interactive UIs are\n" +
-		"  `fleet files <server>` (terminal) and `fleet ui` (browser).\n"
+		"  `fleet files <server>` (terminal) and `fleet file ui` (browser).\n"
 }
 
 func claudeSkillMarkdown() string {

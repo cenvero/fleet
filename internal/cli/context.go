@@ -262,7 +262,7 @@ const contextConcepts = "## Concepts\n\n" +
 	"- Security: all RPCs ride one authenticated `fleet-rpc` SSH channel — public-key auth only, strong " +
 	"ciphers, no separate unauthenticated port.\n" +
 	"- Files: secure file transfers are chunked, parallel (direct mode), checksummed, and resumable. " +
-	"Surfaces are the `fleet file` CLI, the `fleet files` dual-pane TUI, and the `fleet ui` localhost web app.\n" +
+	"Surfaces are the `fleet file` CLI, the `fleet files` dual-pane TUI, and the `fleet file ui` localhost web app.\n" +
 	"- Storage: config + per-server records live as TOML under the config dir; workload/metrics state in a " +
 	"SQLite/Postgres/MySQL/MariaDB backend. Everything is operator-controlled.\n\n"
 
@@ -274,5 +274,5 @@ const contextWorkflows = "## Common workflows\n\n" +
 	"Move files (chunked, parallel, resumable):\n" +
 	"```\nfleet file upload web-01 ./app.tar.gz /srv/app.tar.gz --parallel 4\nfleet file download web-01 /var/log/syslog ./syslog\n```\n\n" +
 	"Open the interactive UIs:\n" +
-	"```\nfleet dashboard        # fleet-wide TUI\nfleet files web-01     # dual-pane file manager\nfleet ui               # localhost web file manager\n```\n\n" +
+	"```\nfleet dashboard        # fleet-wide TUI\nfleet files web-01     # dual-pane file manager\nfleet file ui          # localhost web file manager\n```\n\n" +
 	"Re-print this reference at any time with `fleet context` (add `--json` for a structured command tree).\n"

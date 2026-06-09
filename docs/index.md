@@ -22,7 +22,7 @@ The documentation currently focuses on:
 - how direct and reverse transport modes behave, including SSH reconnect and persistent shell sessions
 - where Cenvero Fleet stores its data and how backend selection works
 - how operators use services, logs, alerts, templates, key rotation, and updates
-- how to move files with the v2 file manager — `fleet file`, the `fleet files` TUI, and the `fleet ui` web app
+- how to move files with the v2 file manager — `fleet file`, the `fleet files` TUI, and the `fleet file ui` web app
 - how AI coding agents drive the fleet via `fleet context` and `fleet skill`
 - how to back up, restore, and recover a controller installation with `fleet backup` and `fleet recover`
 - how maintainers validate release readiness before pushing a real signed tag

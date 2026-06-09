@@ -17,7 +17,7 @@ Today the repository includes:
 - Direct-mode and reverse-mode session handling with TOFU host-key pinning
 - Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
-- Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet ui`)
+- Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet file ui`)
 - Metrics polling, alerting, suppression, acknowledgement, and desktop notifications
 - Linux-first service management, firewall control, and remote bootstrap
 - Controller-owned cached service logs with size, count, and age-based retention
@@ -38,7 +38,7 @@ Implemented now:
 
 - `fleet init` creates the config layout, keys, databases, and audit paths
 - `fleet dashboard` provides a multi-panel TUI with mouse and keyboard navigation
-- **Secure file manager (new in v2):** `fleet file` (CLI), `fleet files <server>` (dual-pane drag-and-drop TUI), and `fleet ui` (localhost web file manager) — chunked, parallel, checksummed, resumable transfers
+- **Secure file manager (new in v2):** `fleet file` (CLI), `fleet files <server>` (dual-pane drag-and-drop TUI), and `fleet file ui` (localhost web file manager) — chunked, parallel, checksummed, resumable transfers
 - **Live directory sync (new in v2):** `fleet sync` keeps a folder and a server directory mirrored — pick which side is the writer (`--from`); the replica is kept an exact copy (overwrite differing, delete extras) or `--no-delete` to keep extras — until you stop the command
 - **Agentic control (new in v2):** `fleet context` and `fleet skill` let Claude Code / Codex learn and operate the whole fleet
 - `fleet server`, `service`, `file`, `logs`, `firewall`, `port`, `alerts`, `database`, `template`, `key`, `update`, `backup`, `recover`, `adjust-init`, `config`, `ui`, `context`, and `skill` command groups are present
@@ -229,7 +229,7 @@ File manager and transfers (**new in v2**):
 - `fleet file mkdir|rm|mv <server> ...`
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
 - `fleet files <server>` — dual-pane terminal file manager (mouse drag-and-drop, live progress)
-- `fleet ui` — localhost browser file manager (desktop drag-and-drop, live progress)
+- `fleet file ui` — localhost browser file manager (desktop drag-and-drop, live progress)
 - `fleet sync <server> <local-dir> <remote-dir> [--from local|remote] [--no-delete]` — live mirror: one side is the writer (source of truth, `--from`), the other a replica; the writer is copied once, then changes overwrite the replica and (by default) its extra files are deleted, until you stop the command
 
 Transfers are chunked, run over multiple concurrent channels, are SHA-256-checksummed end to end, and resume after a drop — all on the same authenticated, host-key-pinned SSH channel.
@@ -378,7 +378,7 @@ A few boundaries are intentional in the current codebase:
 
 - Linux is the primary operational target for service management, firewall control, and remote bootstrap
 - macOS and Windows agents support transport, metrics, inventory, and update flows, but some ops commands return typed unsupported-capability errors
-- The file-manager web UI (`fleet ui`) was introduced in **v2** — it is localhost-only by design; there is still no remote/hosted web console, and the fleet dashboard remains terminal-based (`fleet dashboard`)
+- The file-manager web UI (`fleet file ui`) was introduced in **v2** — it is localhost-only by design; there is still no remote/hosted web console, and the fleet dashboard remains terminal-based (`fleet dashboard`)
 
 ## Contributing
 

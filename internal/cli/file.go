@@ -27,7 +27,7 @@ func newFileCommand(configDir *string) *cobra.Command {
 			"whole file are SHA-256 verified, and an interrupted upload or download resumes\n" +
 			"from where it stopped when you re-run it. Parallelism and chunk size come from\n" +
 			"per-server then global defaults (see 'file defaults'). Related: 'fleet files'\n" +
-			"(terminal UI), 'fleet ui' (web UI), and 'fleet sync' (live directory sync).",
+			"(terminal UI), 'fleet file ui' (web UI), and 'fleet sync' (live directory sync).",
 	}
 
 	fileCmd.AddCommand(newFileListCommand(configDir))
@@ -39,6 +39,7 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd.AddCommand(newFileMkdirCommand(configDir))
 	fileCmd.AddCommand(newFileRemoveCommand(configDir))
 	fileCmd.AddCommand(newFileMoveCommand(configDir))
+	fileCmd.AddCommand(newUICommand(configDir))
 	fileCmd.AddCommand(newFileDefaultsCommand(configDir))
 
 	return fileCmd

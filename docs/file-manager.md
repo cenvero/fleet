@@ -142,8 +142,8 @@ Transfers panel.
 ## Web GUI
 
 ```bash
-fleet ui            # prints http://127.0.0.1:9445/?t=<token>
-fleet ui --addr 127.0.0.1:9000
+fleet file ui            # prints http://127.0.0.1:9445/?t=<token>
+fleet file ui --addr 127.0.0.1:9000
 ```
 
 A browser file manager served by the controller. It binds **loopback only**,

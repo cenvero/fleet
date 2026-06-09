@@ -37,7 +37,7 @@ func TestContextMarkdownIncludesCommandsAndConcepts(t *testing.T) {
 		"### `fleet file`",
 		"### `fleet server`",
 		"`fleet context`",
-		"fleet ui",
+		"fleet file ui",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("context output missing %q", want)
