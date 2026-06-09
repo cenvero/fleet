@@ -41,7 +41,15 @@ fleet file move     <srcServer:path> <dstServer:path> [-r]   # server → server
 fleet file mkdir <server> <path>
 fleet file rm    <server> <path> [--recursive]
 fleet file mv    <server> <from> <to>
+
+# Archive (runs the host's tar/zip on the target)
+fleet file compress <server> <archive> <item>...   # zip · tar.gz · tar.bz2 · tar.xz · tar
+fleet file extract  <server> <archivePath>          # into the archive's directory
 ```
+
+Recursive transfers (`upload`/`download`/`copy`/`move -r`) move **several files in
+parallel** (a bounded worker pool) with aggregated progress, on top of each file's
+own chunk parallelism.
 
 `fleet file copy` moves bytes **directly between two servers**, relayed through the
 controller (download then upload) so it works for every server mode; with `-r`
@@ -147,8 +155,11 @@ header) to change a pane's source.
 
 - **Single-click selects** (it never downloads); **double-click / Enter / →**
   opens a folder, **←** goes up, `space` multi-selects, `Tab` switches panes.
-- **Every operation** — new folder (`n`), rename (`r`), delete (`d`), copy (`c`),
-  move (`m`), properties (`i`), refresh (`g`) — via a **right-click context menu**,
+- **Every operation** — new folder (`n`), new file (`N`), rename (`r`), delete
+  (`d`), copy (`c`), move (`m`), **edit with syntax highlighting** (`e`),
+  **compress** (`z`) / **extract** (`x`), **permissions/chmod** (`p`), **checksum**
+  (`#`), **duplicate** (`D`), properties (`i`), filter/search (`/`), sort (`o`),
+  **List/Icons view** (`v`), refresh (`g`) — via a **right-click context menu**,
   the toolbar, or keys. Hidden files are off by default; `.` toggles them live.
 - **Drag a file/folder between panes**: a cursor-following ghost shows what you're
   moving, the target pane glows, and on drop a **Copy here · Move here · Cancel**
@@ -162,12 +173,16 @@ fleet file ui            # prints http://127.0.0.1:9445/?t=<token>
 fleet file ui --addr 127.0.0.1:9000
 ```
 
-A premium **dual-pane** browser file manager served by the controller. It binds
-**loopback only**, requires the per-process token on every request, rejects
-non-loopback origins, and keeps a strict CSP. Each pane picks any server (two
-servers = **server↔server**). Single-click selects, double-click opens/downloads,
-**right-click** gives a context menu, and a per-pane toolbar covers every op
-(new folder, rename, delete, copy/move, upload, download, hidden toggle). **Drag
-between panes** for a Copy/Move popup (directories confirm), **drag files from
-your desktop** onto a pane to upload, and watch live progress in the transfers
-dock. The same secure transfer engine runs underneath.
+A premium browser file manager served by the controller. It binds **loopback
+only**, requires the per-process token on every request, rejects non-loopback
+origins, and keeps a strict CSP. It opens **two panes** by default (Local + first
+server) and you can **Add more panes (up to 6)** — each picks **Local** (the
+controller's filesystem) or any server, so local↔server and server↔server both
+work. Single-click selects, double-click opens/downloads, **double-click a text
+file to edit it** (syntax-highlighted editor), **right-click** gives a context
+menu, and a per-pane toolbar covers every op: new folder/file, rename, delete,
+copy/move, **compress / extract**, **permissions**, **checksum**, **duplicate**,
+upload, download, **List/Icons view**, filter/search, sortable columns, and a
+hidden toggle. **Drag between any panes** for a Copy/Move popup (directories
+confirm), **drag files from your desktop** to upload, and watch live progress in
+the transfers dock. The same secure transfer engine runs underneath.
