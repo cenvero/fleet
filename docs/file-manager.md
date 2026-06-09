@@ -64,33 +64,44 @@ fleet file defaults set <server> --parallel 2 --remote-dir /data
 ## Live directory sync
 
 ```bash
-fleet sync <server> <local-dir> <remote-dir> [--interval 1s] [--delete] [--parallel N]
+fleet sync <server> <local-dir> <remote-dir> [--from local|remote] [--no-delete] [--interval 1s] [--parallel N]
 ```
 
-`fleet sync` keeps a local directory mirrored to a directory on a server. It
-pushes the whole tree once, then re-scans the local directory on an interval and
-uploads any new or changed files as you edit them. The sync is **live and
-one-way (local → remote)** and runs until you stop it with **Ctrl-C** — when the
-command exits, syncing stops.
+`fleet sync` keeps a local directory and a server directory mirrored, live, until
+you stop it with **Ctrl-C**.
 
-- `--interval` — how often to re-scan for changes (default `1s`).
-- `--delete` — also remove remote files that were deleted locally (off by
-  default for safety).
-- `--parallel` — parallel streams per file upload.
+**Writer and replica.** One side is the *writer* (the source of truth); the other
+is a read-only *replica* that mirrors it. Choose the writer with `--from`:
 
-It skips `.git` metadata and does not follow symlinks. Each changed file is sent
-through the same chunked, checksummed transfer engine as `fleet file upload`.
+- `--from local` (default) — the local directory is the writer; it is **pushed**
+  to the server, which becomes the replica.
+- `--from remote` — the server directory is the writer; it is **pulled** down and
+  the local directory becomes the replica.
+
+**Mirror semantics.** The writer is copied to the replica once, then re-scanned on
+an interval:
+
+- files that are **new or differ** overwrite the replica;
+- by **default**, replica files that **don't exist on the writer are deleted**, so
+  the replica becomes an exact copy;
+- `--no-delete` keeps the replica's extra files (it still overwrites the ones that
+  differ).
+
+Other flags: `--interval` (re-scan rate, default `1s`) and `--parallel` (streams
+per file). It skips `.git` metadata, does not follow symlinks, and copies each
+file through the same chunked, checksummed transfer engine as `fleet file`.
 
 ```text
 $ fleet sync web-01 ./site /var/www/site
-Live sync  ./site → web-01:/var/www/site
-scan every 1s · press Ctrl-C to stop
+Live sync  ./site  →  web-01:/var/www/site   (local is the writer)
+mirror (replica extras are deleted) · scan every 1s · press Ctrl-C to stop
 
-✓ initial sync complete — watching for changes…
+✓ initial mirror complete — watching for changes…
 ↑ index.html
 ↑ assets/app.css
+✗ old-page.html
 ^C
-sync stopped — 2 uploaded, 0 deleted
+sync stopped — 2 copied, 1 deleted
 ```
 
 ## Terminal file manager (TUI)

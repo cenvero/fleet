@@ -42,7 +42,7 @@ Omit sections that have no entries for that release.
   - `fleet ui` — localhost-only browser file manager with desktop drag-and-drop, an upload queue, and live progress
 - Transfers are chunked, run over multiple concurrent `fleet-rpc` channels, are SHA-256-checksummed per chunk and whole-file, and resume after a drop or restart.
 - Per-server and global file-transfer defaults (remote dir, parallel streams, chunk size), seeded on first connection.
-- `fleet sync <server> <local-dir> <remote-dir>` — live one-way directory sync that pushes a folder once, then mirrors local changes (and, with `--delete`, removals) to the server until the command is stopped.
+- `fleet sync <server> <local-dir> <remote-dir>` — live directory mirror. One side is the writer (source of truth, chosen with `--from local|remote`) and the other a read-only replica: the writer is copied once, then new/changed files overwrite the replica and, by default, replica files absent on the writer are deleted (`--no-delete` keeps them). Runs until stopped.
 - Agentic control for AI coding agents:
   - `fleet context` — a complete, self-describing command reference generated live from the binary (`--json` for a structured tree)
   - `fleet ai <command>` — full machine-readable help (markdown or `--json`) for any single command; the AI-facing counterpart to `--help`. Both `context` and `ai` render from the live command tree, so they never need manual updating.
