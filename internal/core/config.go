@@ -83,6 +83,10 @@ func DefaultConfig(configDir string) Config {
 			AlertNotifyCooldown:   "6h",
 			MetricsPollInterval:   "1m",
 			DesktopNotifications:  true,
+			FileTransfer: FileTransferDefaults{
+				ParallelStreams: DefaultParallelStreams,
+				ChunkSizeBytes:  DefaultChunkSizeBytes,
+			},
 		},
 	}
 }
