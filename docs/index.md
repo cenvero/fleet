@@ -8,6 +8,7 @@ The docs are written to match the current repository state and focus on the real
 - [Getting Started](getting-started.md)
 - [Transport Modes](transport-modes.md)
 - [Configuration and Storage](configuration-and-storage.md)
+- [File Manager and Transfers](file-manager.md)
 - [Operations Guide](operations.md)
 - [Releases and Updates](releases-and-updates.md)
 
