@@ -13,44 +13,104 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="dot"></span>
-      <span>Cenvero&nbsp;Fleet</span>
-      <span class="muted">/ files</span>
+      <span class="logo" aria-hidden="true"></span>
+      <span class="brand-name">Cenvero<span class="accent">Fleet</span></span>
+      <span class="brand-sub">File Manager</span>
     </div>
-    <div class="controls">
-      <label class="muted" for="server">Server</label>
-      <select id="server"></select>
-      <button id="refresh" class="btn ghost" title="Refresh">↻</button>
+    <div class="topbar-actions">
+      <span id="conn" class="conn" title="Connection">localhost</span>
     </div>
   </header>
 
-  <main>
-    <section class="card browser">
-      <div class="path-row">
-        <button id="up" class="btn ghost" title="Up">↑</button>
-        <div id="breadcrumb" class="breadcrumb muted">/</div>
-        <div class="path-actions">
-          <button id="mkdir" class="btn ghost" title="New folder">+ folder</button>
-          <button id="pick" class="btn" title="Upload files">Upload</button>
-          <input id="file-input" type="file" multiple hidden />
-        </div>
-      </div>
-
-      <div id="dropzone" class="listing">
-        <div id="entries"></div>
-        <div id="drop-hint" class="drop-hint">Drop files here to upload</div>
-      </div>
-    </section>
-
-    <aside class="card queue">
-      <h2>Transfers</h2>
-      <div id="transfers" class="transfers">
-        <p class="muted empty">No transfers yet.</p>
-      </div>
-    </aside>
+  <main id="panes" class="panes">
+    <!-- panes injected by app.js -->
   </main>
 
+  <!-- Transfers dock -->
+  <section id="dock" class="dock collapsed" aria-live="polite">
+    <button id="dock-toggle" class="dock-toggle" type="button">
+      <span class="dock-title">Transfers</span>
+      <span id="dock-count" class="dock-count">0</span>
+      <span class="dock-chevron" aria-hidden="true"></span>
+    </button>
+    <div id="transfers" class="transfers">
+      <p class="empty">No transfers yet.</p>
+    </div>
+  </section>
+
+  <!-- Drag ghost (pointer-driven, follows cursor) -->
+  <div id="ghost" class="ghost" aria-hidden="true">
+    <span class="ghost-icon"></span>
+    <span class="ghost-name"></span>
+    <span class="ghost-badge"></span>
+  </div>
+
+  <!-- Context menu -->
+  <div id="ctxmenu" class="ctxmenu" hidden></div>
+
+  <!-- Drop-action popup (Copy here / Move here / Cancel) -->
+  <div id="dropmenu" class="dropmenu" hidden></div>
+
+  <!-- Modal host (rename / mkdir / properties / confirm) -->
+  <div id="modal-overlay" class="modal-overlay" hidden>
+    <div id="modal" class="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
+
+  <template id="pane-template">
+    <section class="pane" tabindex="0">
+      <div class="pane-head">
+        <select class="pane-server" aria-label="Server"></select>
+        <div class="pane-tools">
+          <button class="tool back" type="button" title="Up one level" aria-label="Up">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M12 19V7m0 0l-6 6m6-6l6 6" /></svg>
+          </button>
+          <button class="tool refresh" type="button" title="Refresh" aria-label="Refresh">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M20 11a8 8 0 10-2.34 5.66M20 5v6h-6" /></svg>
+          </button>
+          <button class="tool mkdir" type="button" title="New folder" aria-label="New folder">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /><path d="M12 11v4m-2-2h4" /></svg>
+          </button>
+          <button class="tool upload" type="button" title="Upload files" aria-label="Upload">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M12 16V4m0 0L7 9m5-5l5 5" /><path d="M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2" /></svg>
+          </button>
+          <button class="tool hidden-toggle" type="button" title="Show hidden files" aria-pressed="false" aria-label="Toggle hidden files">
+            <svg viewBox="0 0 24 24" class="ico"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+          </button>
+        </div>
+        <input type="file" class="file-input" multiple hidden />
+      </div>
+      <div class="pane-crumbs">
+        <div class="crumbs"></div>
+      </div>
+      <div class="pane-toolbar">
+        <button class="act act-download" type="button" disabled>Download</button>
+        <button class="act act-copy" type="button" disabled>Copy →</button>
+        <button class="act act-move" type="button" disabled>Move →</button>
+        <button class="act act-rename" type="button" disabled>Rename</button>
+        <button class="act act-delete danger" type="button" disabled>Delete</button>
+        <span class="sel-info"></span>
+      </div>
+      <div class="pane-body">
+        <div class="list-head">
+          <span class="col col-name">Name</span>
+          <span class="col col-size">Size</span>
+          <span class="col col-mod">Modified</span>
+        </div>
+        <div class="listing" tabindex="-1">
+          <div class="entries"></div>
+        </div>
+        <div class="drop-overlay">
+          <div class="drop-card">
+            <svg viewBox="0 0 24 24" class="drop-ico"><path d="M12 16V4m0 0L7 9m5-5l5 5" /><path d="M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2" /></svg>
+            <span class="drop-text">Drop to upload</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </template>
+
   <script src="/app.js"></script>
 </body>
 </html>
