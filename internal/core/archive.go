@@ -27,7 +27,7 @@ func (a *App) ChmodPath(server, p, octalMode string) error {
 	if server == "" {
 		return os.Chmod(p, os.FileMode(m)) // #nosec G302 -- operator-chosen mode
 	}
-	return a.runShell(server, fmt.Sprintf("chmod %s %s", shellQuote(octalMode), shellQuote(p)))
+	return a.runRemoteShell(server, fmt.Sprintf("chmod %s %s", shellQuote(octalMode), shellQuote(p)))
 }
 
 // ChecksumPath returns the SHA-256 of a file. server=="" → local.
@@ -125,16 +125,66 @@ func extractCmd(archivePath string) string {
 	return fmt.Sprintf("tar -xf %s -C %s", a, dir)
 }
 
-// CompressPaths creates an archive of `names` inside `dir`. server=="" runs on the
-// controller's local filesystem; otherwise it runs on that server's agent. Uses
-// the host's tar/zip; names are shell-quoted so they cannot inject.
-func (a *App) CompressPaths(server, dir string, names []string, archiveName, format string) error {
-	cmd, err := compressCmd(dir, names, archiveName, format)
-	if err != nil {
-		return err
+// compressArgv builds the argv (no shell) that creates `archive` from base
+// `names` in the working directory. Operands are "./"-prefixed and tar gets a
+// "--" terminator so a flag-shaped file name is always treated as a path.
+func compressArgv(names []string, archive, format string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, fmt.Errorf("nothing selected to compress")
 	}
-	if err := a.runShell(server, cmd); err != nil {
-		return err
+	ops := make([]string, 0, len(names))
+	for _, n := range names {
+		ops = append(ops, "./"+path.Base(n))
+	}
+	out := "./" + path.Base(archive)
+	switch format {
+	case "zip":
+		return append([]string{"zip", "-r", "-q", out}, ops...), nil
+	case "tar.gz", "tgz":
+		return append([]string{"tar", "-czf", out, "--"}, ops...), nil
+	case "tar.bz2":
+		return append([]string{"tar", "-cjf", out, "--"}, ops...), nil
+	case "tar.xz":
+		return append([]string{"tar", "-cJf", out, "--"}, ops...), nil
+	case "tar":
+		return append([]string{"tar", "-cf", out, "--"}, ops...), nil
+	default:
+		return nil, fmt.Errorf("unsupported archive format %q", format)
+	}
+}
+
+// extractArgv builds the argv (no shell) that extracts archivePath into dir.
+func extractArgv(archivePath, dir string) []string {
+	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
+		return []string{"unzip", "-o", "-q", archivePath, "-d", dir}
+	}
+	return []string{"tar", "-xf", archivePath, "-C", dir}
+}
+
+// CompressPaths creates an archive of `names` inside `dir`. server=="" runs on the
+// controller locally via a direct tool exec (no shell); otherwise it runs on that
+// server's agent. Operands are "./"-prefixed so a flag-shaped file name can't be
+// read as an option.
+func (a *App) CompressPaths(server, dir string, names []string, archiveName, format string) error {
+	if server == "" {
+		if format == "zip" {
+			_ = os.Remove(filepath.Join(dir, path.Base(archiveName))) // zip appends; start fresh
+		}
+		argv, err := compressArgv(names, archiveName, format)
+		if err != nil {
+			return err
+		}
+		if err := runLocalTool(dir, argv); err != nil {
+			return err
+		}
+	} else {
+		cmd, err := compressCmd(dir, names, archiveName, format)
+		if err != nil {
+			return err
+		}
+		if err := a.runRemoteShell(server, cmd); err != nil {
+			return err
+		}
 	}
 	a.auditArchive("file.compress", server, path.Join(dir, archiveName))
 	return nil
@@ -142,22 +192,34 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 
 // ExtractArchive extracts an archive (full path) into its containing directory.
 func (a *App) ExtractArchive(server, archivePath string) error {
-	if err := a.runShell(server, extractCmd(archivePath)); err != nil {
+	if server == "" {
+		if err := runLocalTool("", extractArgv(archivePath, path.Dir(archivePath))); err != nil {
+			return err
+		}
+	} else if err := a.runRemoteShell(server, extractCmd(archivePath)); err != nil {
 		return err
 	}
 	a.auditArchive("file.extract", server, archivePath)
 	return nil
 }
 
-// runShell runs a /bin/sh command locally (server=="") or on a server's agent.
-func (a *App) runShell(server, command string) error {
-	if server == "" {
-		out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput() // #nosec G204 -- operator-driven, paths shell-quoted
-		if err != nil {
-			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
+// runLocalTool runs a FIXED tool (argv[0] is a constant tar/zip/unzip) with its
+// arguments passed directly to exec — there is no shell, so neither command nor
+// option injection is possible. Runs in dir when non-empty.
+func runLocalTool(dir string, argv []string) error {
+	cmd := exec.Command(argv[0], argv[1:]...) // #nosec G204 -- argv[0] is a constant tool; args are not shell-interpreted
+	if dir != "" {
+		cmd.Dir = dir
 	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runRemoteShell runs a /bin/sh command on a server's agent (paths shell-quoted).
+func (a *App) runRemoteShell(server, command string) error {
 	res, err := a.ExecCommand(server, command)
 	if err != nil {
 		return err
