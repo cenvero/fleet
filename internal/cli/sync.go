@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
@@ -17,17 +18,36 @@ import (
 
 func newSyncCommand(configDir *string) *cobra.Command {
 	var interval time.Duration
-	var del bool
+	var noDelete bool
 	var parallel int
+	var from string
 	cmd := &cobra.Command{
 		Use:   "sync <server> <local-dir> <remote-dir>",
-		Short: "Live one-way sync of a local directory to a server (until stopped)",
-		Long: "Continuously mirror a local directory to a directory on a server. The full\n" +
-			"directory is pushed once, then changes are uploaded as they happen. The sync\n" +
-			"runs until you stop it with Ctrl-C.",
+		Short: "Live mirror a directory between local and a server (writer → replica)",
+		Long: "Keep a local directory and a server directory mirrored, live, until you stop\n" +
+			"it with Ctrl-C.\n\n" +
+			"One side is the writer (the source of truth) and the other is a read-only\n" +
+			"replica. Choose the writer with --from:\n" +
+			"  --from local   (default) the local directory is the writer; it is pushed to\n" +
+			"                 the server, which becomes the replica.\n" +
+			"  --from remote  the server directory is the writer; it is pulled down and the\n" +
+			"                 local directory becomes the replica.\n\n" +
+			"The writer is copied to the replica once, then re-scanned on an interval:\n" +
+			"files that are new or differ overwrite the replica, and — by default — replica\n" +
+			"files that do not exist on the writer are deleted, so the replica becomes an\n" +
+			"exact mirror. Pass --no-delete to keep the replica's extra files (still\n" +
+			"overwriting the ones that differ).\n\n" +
+			"Examples:\n" +
+			"  fleet sync web-01 ./site /var/www/site\n" +
+			"  fleet sync web-01 ./site /var/www/site --no-delete\n" +
+			"  fleet sync web-01 ./backup /srv/data --from remote",
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
+			direction, err := parseSyncDirection(from)
+			if err != nil {
+				return err
+			}
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
@@ -40,25 +60,30 @@ func newSyncCommand(configDir *string) *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer stop()
 
-			fmt.Fprintf(out, "Live sync  %s\n", core.SyncTargetSummary(server, localDir, remoteDir))
-			mode := "scan every " + interval.String()
-			if del {
-				mode += " · delete enabled"
+			fmt.Fprintf(out, "Live sync  %s\n", core.SyncSummary(server, localDir, remoteDir, direction))
+			mode := "mirror (replica extras are deleted)"
+			if noDelete {
+				mode = "no-delete (replica extras are kept)"
 			}
-			fmt.Fprintf(out, "%s · press Ctrl-C to stop\n\n", mode)
+			fmt.Fprintf(out, "%s · scan every %s · press Ctrl-C to stop\n\n", mode, interval)
 
-			var uploaded, deleted int
+			arrow := "↑"
+			if direction == core.SyncFromRemote {
+				arrow = "↓"
+			}
+			var copied, deleted int
 			err = app.SyncDir(ctx, server, localDir, remoteDir, core.SyncOptions{
 				Interval: interval,
-				Delete:   del,
+				NoDelete: noDelete,
 				Parallel: parallel,
+				From:     direction,
 			}, func(e core.SyncEvent) {
 				switch e.Kind {
 				case core.SyncReady:
-					fmt.Fprintln(out, "✓ initial sync complete — watching for changes…")
-				case core.SyncUpload:
-					uploaded++
-					fmt.Fprintf(out, "↑ %s\n", e.Path)
+					fmt.Fprintln(out, "✓ initial mirror complete — watching for changes…")
+				case core.SyncCopy:
+					copied++
+					fmt.Fprintf(out, "%s %s\n", arrow, e.Path)
 				case core.SyncDelete:
 					deleted++
 					fmt.Fprintf(out, "✗ %s\n", e.Path)
@@ -71,14 +96,26 @@ func newSyncCommand(configDir *string) *cobra.Command {
 				}
 			})
 			if errors.Is(err, context.Canceled) {
-				fmt.Fprintf(out, "\nsync stopped — %d uploaded, %d deleted\n", uploaded, deleted)
+				fmt.Fprintf(out, "\nsync stopped — %d copied, %d deleted\n", copied, deleted)
 				return nil
 			}
 			return err
 		},
 	}
-	cmd.Flags().DurationVar(&interval, "interval", core.DefaultSyncInterval, "how often to re-scan the local directory for changes")
-	cmd.Flags().BoolVar(&del, "delete", false, "delete remote files that were removed locally")
+	cmd.Flags().StringVar(&from, "from", "local", "which side is the writer: local (push) or remote (pull)")
+	cmd.Flags().DurationVar(&interval, "interval", core.DefaultSyncInterval, "how often to re-scan the writer for changes")
+	cmd.Flags().BoolVar(&noDelete, "no-delete", false, "keep replica files that don't exist on the writer (default mirrors exactly)")
 	cmd.Flags().IntVar(&parallel, "parallel", 0, "parallel streams per file (0 = server/global default)")
 	return cmd
+}
+
+func parseSyncDirection(v string) (core.SyncDirection, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "local", "push", "up":
+		return core.SyncFromLocal, nil
+	case "remote", "pull", "down", "server":
+		return core.SyncFromRemote, nil
+	default:
+		return "", fmt.Errorf("invalid --from %q: use 'local' or 'remote'", v)
+	}
 }
