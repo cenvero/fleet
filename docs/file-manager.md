@@ -34,12 +34,17 @@ fleet file tail <server> <path> [-n 200] [--search TEXT]
 # Transfer (chunked, parallel, resumable; -r for whole directories)
 fleet file upload   <server> <local> [remote] [-r] [--parallel N] [--chunk-size 4M]
 fleet file download <server> <remote> [local]  [-r] [--parallel N] [--chunk-size 4M]
+fleet file copy     <srcServer:path> <dstServer:path> [-r]   # server → server (relayed)
 
 # Manage
 fleet file mkdir <server> <path>
 fleet file rm    <server> <path> [--recursive]
 fleet file mv    <server> <from> <to>
 ```
+
+`fleet file copy` moves bytes **directly between two servers**, relayed through the
+controller (download then upload) so it works for every server mode; with `-r`
+it copies a whole directory tree.
 
 With `-r/--recursive`, `upload` takes a local directory and a remote destination
 directory and ships the whole tree; `download` pulls a remote directory into a
@@ -129,15 +134,25 @@ sync stopped — 2 copied, 1 deleted
 ## Terminal file manager (TUI)
 
 ```bash
-fleet files <server>
+fleet files [source...]        # aliases: fleet filemanager · fleet fm
+fleet files web-01             # single server (Local on the left, web-01 on the right)
+fleet files web-01 db-01       # two servers side by side (server → server)
 ```
 
-A dual-pane browser: local filesystem on the left, the remote server on the
-right. Navigate with the arrow keys (`→`/`Enter` to open a directory, `←` to go
-up), switch panes with `Tab`, and transfer with `u` (upload the focused local
-file) / `d` (download the focused remote file). With a mouse, **drag a file from
-one pane and drop it on the other** to transfer it. Live progress is shown in the
-Transfers panel.
+A full, desktop-application-grade **dual-pane** file manager. Each pane is a
+*source* — the local filesystem (`Local`) or any managed server — so you can
+browse and transfer **local↔server and server↔server**. Press `s` (or click the
+header) to change a pane's source.
+
+- **Single-click selects** (it never downloads); **double-click / Enter / →**
+  opens a folder, **←** goes up, `space` multi-selects, `Tab` switches panes.
+- **Every operation** — new folder (`n`), rename (`r`), delete (`d`), copy (`c`),
+  move (`m`), properties (`i`), refresh (`g`) — via a **right-click context menu**,
+  the toolbar, or keys. Hidden files are off by default; `.` toggles them live.
+- **Drag a file/folder between panes**: a cursor-following ghost shows what you're
+  moving, the target pane glows, and on drop a **Copy here · Move here · Cancel**
+  menu appears (a same-pane drag onto a folder is a rename). Directory transfers
+  confirm first and copy the whole tree. Live progress shows in the transfers dock.
 
 ## Web GUI
 
@@ -146,8 +161,12 @@ fleet file ui            # prints http://127.0.0.1:9445/?t=<token>
 fleet file ui --addr 127.0.0.1:9000
 ```
 
-A browser file manager served by the controller. It binds **loopback only**,
-requires the per-process token printed at startup on every request, and rejects
-non-loopback origins. Browse the remote server, **drag files from your desktop
-onto the page to upload them** (with live progress bars), and click a file to
-download it. The same secure transfer engine runs underneath.
+A premium **dual-pane** browser file manager served by the controller. It binds
+**loopback only**, requires the per-process token on every request, rejects
+non-loopback origins, and keeps a strict CSP. Each pane picks any server (two
+servers = **server↔server**). Single-click selects, double-click opens/downloads,
+**right-click** gives a context menu, and a per-pane toolbar covers every op
+(new folder, rename, delete, copy/move, upload, download, hidden toggle). **Drag
+between panes** for a Copy/Move popup (directories confirm), **drag files from
+your desktop** onto a pane to upload, and watch live progress in the transfers
+dock. The same secure transfer engine runs underneath.

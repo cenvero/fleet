@@ -267,8 +267,9 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 
 func newFilesCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "files [source...]",
-		Short: "Launch the desktop-grade dual-pane file manager",
+		Use:     "files [source...]",
+		Aliases: []string{"filemanager", "fm"},
+		Short:   "Launch the desktop-grade dual-pane file manager",
 		Long: "Open a full-screen, desktop-application-grade dual-pane file manager. Each\n" +
 			"pane has a source: the local filesystem (\"Local\") or a managed server, so you\n" +
 			"can browse and transfer local↔server AND server↔server.\n\n" +

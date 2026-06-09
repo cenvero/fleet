@@ -32,6 +32,14 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
+## [v2.1.0] — 2026-06-09 (stable)
+
+### Added
+
+- **Desktop-grade dual-pane file managers.** Both `fleet files` (terminal, aliases `fleet filemanager` / `fleet fm`) and `fleet file ui` (browser) are now full file managers: each pane is the local filesystem or any server (browse local↔server **and** server↔server), with single-click select, double-click open, a right-click context menu and toolbar for every operation (new folder, rename, delete, copy, move, properties), a real-time hidden-files toggle, and Finder-style drag-and-drop — a cursor-following ghost, a glowing drop target, and a **Copy here · Move here · Cancel** menu on drop (same-pane drag = rename). Directory transfers confirm and copy the whole tree.
+- **Server-to-server transfers.** `fleet file copy <srcServer:path> <dstServer:path> [-r]` copies a file or directory directly between two servers, relayed through the controller (reused by the UIs' drag Copy/Move). New `MoveFile`/`MoveDir` (rename within a server, copy-then-delete across).
+- `fleet files` accepts **multiple servers** (`fleet files a b`) to open two at once; single-server (`fleet files a`) still works.
+
 ## [v2.0.1] — 2026-06-09 (stable)
 
 ### Changed
