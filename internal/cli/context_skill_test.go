@@ -124,16 +124,21 @@ func TestSkillClaudeInstall(t *testing.T) {
 	if !strings.Contains(s, "fleet context") {
 		t.Fatalf("SKILL.md should tell the agent to run fleet context")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "commands", "fleet.md")); err != nil {
+	cmdMD, err := os.ReadFile(filepath.Join(dir, "commands", "fleet.md"))
+	if err != nil {
 		t.Fatalf("slash command not written: %v", err)
 	}
-
-	// Re-install without --force must fail; with --force must succeed.
-	if _, err := runFleet(t, "skill", "claude", "--dir", dir); err == nil {
-		t.Fatalf("expected error re-installing without --force")
+	if !strings.Contains(string(cmdMD), "fleet context") || !strings.Contains(string(cmdMD), "$ARGUMENTS") {
+		t.Fatalf("/fleet command should run fleet context and accept arguments")
 	}
-	if _, err := runFleet(t, "skill", "claude", "--dir", dir, "--force"); err != nil {
-		t.Fatalf("force reinstall failed: %v", err)
+
+	// Re-installing just overrides the existing files (idempotent, no --force).
+	out, err := runFleet(t, "skill", "claude", "--dir", dir)
+	if err != nil {
+		t.Fatalf("re-install should succeed by overriding: %v", err)
+	}
+	if !strings.Contains(out, "/fleet") {
+		t.Fatalf("re-install should print the /fleet install message, got: %q", out)
 	}
 }
 

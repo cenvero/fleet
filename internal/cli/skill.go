@@ -57,9 +57,8 @@ func newSkillCommand() *cobra.Command {
 	return skillCmd
 }
 
-func newSkillTargetCommand(name string, aliases []string, short string, install func(opts skillInstallOptions) ([]string, error)) *cobra.Command {
+func newSkillTargetCommand(name string, aliases []string, short string, install func(opts skillInstallOptions) (skillResult, error)) *cobra.Command {
 	var dir string
-	var force bool
 	var printOnly bool
 	cmd := &cobra.Command{
 		Use:     name,
@@ -67,39 +66,49 @@ func newSkillTargetCommand(name string, aliases []string, short string, install 
 		Short:   short,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
-			written, err := install(skillInstallOptions{dir: dir, force: force, printOnly: printOnly, out: cmd.OutOrStdout()})
+			res, err := install(skillInstallOptions{dir: dir, printOnly: printOnly, out: cmd.OutOrStdout()})
 			if err != nil {
 				return err
 			}
 			if printOnly {
 				return nil
 			}
-			for _, p := range written {
-				fmt.Fprintf(cmd.OutOrStdout(), "installed %s\n", p)
+			out := cmd.OutOrStdout()
+			if res.message != "" {
+				fmt.Fprintln(out, res.message)
+				return nil
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "\nThe agent can now run `fleet context` to load the full reference.")
+			for _, p := range res.paths {
+				fmt.Fprintf(out, "installed %s\n", p)
+			}
+			fmt.Fprintln(out, "\nThe agent can now run `fleet context` to load the full reference.")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "override the install base directory")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
 	cmd.Flags().BoolVar(&printOnly, "print", false, "print the content instead of writing files")
 	return cmd
 }
 
 type skillInstallOptions struct {
 	dir       string
-	force     bool
 	printOnly bool
 	out       interface{ Write([]byte) (int, error) }
 }
 
-func installClaudeSkill(opts skillInstallOptions) ([]string, error) {
+// skillResult is what an installer returns: the files written and an optional
+// tailored completion message (used instead of the default per-path output).
+type skillResult struct {
+	paths   []string
+	message string
+}
+
+func installClaudeSkill(opts skillInstallOptions) (skillResult, error) {
 	base := opts.dir
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, err
+			return skillResult{}, err
 		}
 		base = filepath.Join(home, ".claude")
 	}
@@ -108,38 +117,45 @@ func installClaudeSkill(opts skillInstallOptions) ([]string, error) {
 
 	if opts.printOnly {
 		fmt.Fprintf(opts.out, "# %s\n\n%s\n# %s\n\n%s", skillPath, claudeSkillMarkdown(), cmdPath, claudeSlashCommandMarkdown())
-		return nil, nil
+		return skillResult{}, nil
 	}
-	if err := writeSkillFile(skillPath, claudeSkillMarkdown(), opts.force); err != nil {
-		return nil, err
+	// Re-running just overwrites the existing files (no --force, no error).
+	if err := writeSkillFile(cmdPath, claudeSlashCommandMarkdown()); err != nil {
+		return skillResult{}, err
 	}
-	if err := writeSkillFile(cmdPath, claudeSlashCommandMarkdown(), opts.force); err != nil {
-		return nil, err
+	if err := writeSkillFile(skillPath, claudeSkillMarkdown()); err != nil {
+		return skillResult{}, err
 	}
-	return []string{skillPath, cmdPath}, nil
+	msg := "✓ /fleet slash command added:\n    " + cmdPath +
+		"\n  Cenvero Fleet skill added:\n    " + skillPath +
+		"\n\nRestart Claude — or launch `claude` — then type /fleet to load the full" +
+		"\nCenvero Fleet CLI and manage your servers for the rest of the session."
+	return skillResult{paths: []string{cmdPath, skillPath}, message: msg}, nil
 }
 
-func installCodexSkill(opts skillInstallOptions) ([]string, error) {
+func installCodexSkill(opts skillInstallOptions) (skillResult, error) {
 	base := opts.dir
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, err
+			return skillResult{}, err
 		}
 		base = filepath.Join(home, ".codex")
 	}
 	promptPath := filepath.Join(base, "prompts", "fleet.md")
 	if opts.printOnly {
 		fmt.Fprintf(opts.out, "# %s\n\n%s", promptPath, codexPromptMarkdown())
-		return nil, nil
+		return skillResult{}, nil
 	}
-	if err := writeSkillFile(promptPath, codexPromptMarkdown(), opts.force); err != nil {
-		return nil, err
+	if err := writeSkillFile(promptPath, codexPromptMarkdown()); err != nil {
+		return skillResult{}, err
 	}
-	return []string{promptPath}, nil
+	msg := "✓ /fleet prompt added:\n    " + promptPath +
+		"\n\nRestart Codex, then run /fleet to load the Cenvero Fleet CLI for the session."
+	return skillResult{paths: []string{promptPath}, message: msg}, nil
 }
 
-func installAgentsFile(opts skillInstallOptions) ([]string, error) {
+func installAgentsFile(opts skillInstallOptions) (skillResult, error) {
 	dir := opts.dir
 	if dir == "" {
 		dir = "."
@@ -148,33 +164,29 @@ func installAgentsFile(opts skillInstallOptions) ([]string, error) {
 	content := agentsMarkdown()
 	if opts.printOnly {
 		fmt.Fprintf(opts.out, "# %s\n\n%s", target, content)
-		return nil, nil
+		return skillResult{}, nil
 	}
 	// AGENTS.md is commonly shared — append our section idempotently rather than
 	// clobbering an existing file.
 	if existing, err := os.ReadFile(target); err == nil {
 		if strings.Contains(string(existing), agentsMarker) {
-			fmt.Fprintf(opts.out, "%s already contains the Cenvero Fleet section; nothing to do\n", target)
-			return nil, nil
+			return skillResult{message: fmt.Sprintf("%s already contains the Cenvero Fleet section; nothing to do", target)}, nil
 		}
 		merged := strings.TrimRight(string(existing), "\n") + "\n\n" + content
 		if err := os.WriteFile(target, []byte(merged), 0o600); err != nil {
-			return nil, err
+			return skillResult{}, err
 		}
-		return []string{target}, nil
+		return skillResult{paths: []string{target}}, nil
 	}
-	if err := writeSkillFile(target, content, opts.force); err != nil {
-		return nil, err
+	if err := writeSkillFile(target, content); err != nil {
+		return skillResult{}, err
 	}
-	return []string{target}, nil
+	return skillResult{paths: []string{target}}, nil
 }
 
-func writeSkillFile(path, content string, force bool) error {
-	if !force {
-		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf("%s already exists; re-run with --force to overwrite", path)
-		}
-	}
+// writeSkillFile writes content to path, creating parents and overwriting any
+// existing file (skill installs are idempotent — re-running just refreshes).
+func writeSkillFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
@@ -217,10 +229,22 @@ func claudeSkillMarkdown() string {
 
 func claudeSlashCommandMarkdown() string {
 	return "---\n" +
-		"description: Load Cenvero Fleet context, then help manage the fleet\n" +
+		"description: Load the Cenvero Fleet CLI and operate the user's fleet for this session\n" +
 		"---\n\n" +
-		"Run `fleet context` to load the full Cenvero Fleet command reference and concepts.\n" +
-		"Then help me with the following (ask for clarification if needed):\n\n" +
+		"Run `fleet context` now (with the Bash tool) and read its full output. It is the\n" +
+		"complete, self-describing reference for the Cenvero Fleet CLI — every command,\n" +
+		"concept, and safety rule — generated live from the installed binary. Keep it in\n" +
+		"mind for the rest of this session; you do not need to reload it unless the context\n" +
+		"is compacted.\n\n" +
+		"You are now the user's fleet operator:\n\n" +
+		"- Inspect and control their servers with `fleet <group> <subcommand> ...`; most\n" +
+		"  commands print JSON to stdout — parse it.\n" +
+		"- For the full help of any one command, run `fleet ai <command>` (add `--json`).\n" +
+		"- Check state first (`fleet status`, `fleet server list`). Confirm before\n" +
+		"  destructive or outward-facing actions (`server remove`, `file rm`, `key rotate`,\n" +
+		"  `update apply`, `self-uninstall`).\n\n" +
+		"Then help with this request — if it is empty, summarize the fleet's current state\n" +
+		"and suggest next steps:\n\n" +
 		"$ARGUMENTS\n"
 }
 
