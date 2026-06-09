@@ -33,6 +33,18 @@ var (
 	fmPanelBg  = lipgloss.Color("#0d131b")
 	fmDropC    = lipgloss.Color("#36f0c0")
 
+	// Category colors for file-type icons (palette-consistent: teal/blue accents,
+	// soft warm tones). Used by iconFor for both list and grid views.
+	fmCodeC    = lipgloss.Color("#7ee787") // code: soft green
+	fmDocC     = lipgloss.Color("#a8c7e0") // docs/text: soft blue
+	fmDataC    = lipgloss.Color("#c8a8ff") // structured data: lavender
+	fmImageC   = lipgloss.Color("#f0a8d0") // images: pink
+	fmArchiveC = lipgloss.Color("#e0b87a") // archives: amber/tan
+	fmMediaC   = lipgloss.Color("#8fd0c8") // audio/video: muted teal
+	fmExecC    = lipgloss.Color("#ff9d6b") // executables/binaries: warm orange
+	fmConfigC  = lipgloss.Color("#9fb0bd") // config/dotfiles: cool grey
+	fmDocsRedC = lipgloss.Color("#ff8c8c") // pdf/rich docs: soft red
+
 	fmHeaderBar = lipgloss.NewStyle().Background(fmHeaderBg)
 	fmBrand     = lipgloss.NewStyle().Foreground(fmAccent).Bold(true)
 	fmTag       = lipgloss.NewStyle().Foreground(fmDimC)
@@ -329,24 +341,13 @@ func (m filesModel) renderGridCell(side, i, cellW int, dropTargetPane bool) stri
 	hovered := side == m.hoverSide && i == m.hoverIndex
 	dropHover := dropTargetPane && i == m.hoverIndex && item.isDir
 
-	icon := gridGlyphFor(item)
+	icon, iconStyle := iconFor(item)
 	name := item.name
 	if item.isDir && item.name != ".." {
 		name += "/"
 	}
 	if marked {
 		name = "✓ " + name
-	}
-
-	// Color the icon by kind; selection/drop styling repaints the whole cell.
-	iconFg := fmText
-	switch {
-	case item.name == "..":
-		iconFg = fmMutedC
-	case item.isDir:
-		iconFg = fmDirC
-	case item.symlink:
-		iconFg = fmAccent2
 	}
 
 	nameLine := centerCell(truncate(name, cellW), cellW)
@@ -362,7 +363,9 @@ func (m filesModel) renderGridCell(side, i, cellW int, dropTargetPane bool) stri
 	case hovered:
 		return fmHoverRow.Width(cellW).Render(iconLine) + "\n" + fmHoverRow.Width(cellW).Render(nameLine)
 	default:
-		iconStyled := lipgloss.NewStyle().Foreground(iconFg).Bold(true).Width(cellW).Render(iconLine)
+		// Grid icons get the category color (already bold for many kinds);
+		// force bold for a touch larger feel while staying single-width.
+		iconStyled := iconStyle.Bold(true).Width(cellW).Render(iconLine)
 		nameFg := fmText
 		if item.isDir {
 			nameFg = fmDirC
@@ -381,40 +384,6 @@ func centerCell(s string, w int) string {
 	left := (w - sw) / 2
 	right := w - sw - left
 	return strings.Repeat(" ", left) + s + strings.Repeat(" ", right)
-}
-
-// gridGlyphFor returns a larger, Finder-like glyph for the icon cell, color
-// distinct by kind. It uses bold single-width geometric glyphs (kept single-width
-// on purpose so cell alignment never tears) bucketed like glyphFor.
-func gridGlyphFor(item fileItem) string {
-	if item.name == ".." {
-		return "⤴"
-	}
-	if item.isDir {
-		return "▰"
-	}
-	if item.symlink {
-		return "↪"
-	}
-	ext := strings.ToLower(filepath.Ext(item.name))
-	switch ext {
-	case ".go", ".rs", ".c", ".h", ".cpp", ".py", ".js", ".ts", ".java", ".rb", ".sh":
-		return "ƒ"
-	case ".md", ".txt", ".rst", ".log":
-		return "≣"
-	case ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml":
-		return "⚙"
-	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp":
-		return "▦"
-	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar":
-		return "▤"
-	case ".pdf":
-		return "▥"
-	case ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".mov", ".avi":
-		return "♪"
-	default:
-		return "▢"
-	}
 }
 
 func (m filesModel) renderPaneHeader(side, cw int, focused bool) string {
@@ -510,7 +479,7 @@ func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
 	hovered := side == m.hoverSide && i == m.hoverIndex
 	dropHover := dropTargetPane && i == m.hoverIndex && item.isDir
 
-	icon := glyphFor(item)
+	icon, iconStyle := iconFor(item)
 	name := item.name
 	if item.isDir && item.name != ".." {
 		name += "/"
@@ -539,18 +508,26 @@ func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
 		timeStr = ""
 	}
 
-	plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
-		mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
-
-	// Style precedence: selected > drop-hover > marked > hover > zebra.
+	// Style precedence: selected > drop-hover > marked > hover > zebra. The
+	// strongly-highlighted states paint a full-row background, so the icon stays
+	// plain there to keep the background contiguous; the default (zebra) state
+	// colors the icon by its file-type category for at-a-glance recognition.
 	switch {
 	case selected:
+		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
+			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
 		return fmSelRow.Width(cw).Render(plain)
 	case dropHover:
+		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
+			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
 		return fmDropRow.Width(cw).Render(plain)
 	case marked:
+		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
+			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
 		return fmMarkRow.Width(cw).Render(plain)
 	case hovered:
+		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
+			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
 		style := fmHoverRow
 		if item.isDir {
 			style = style.Foreground(fmDirC)
@@ -561,43 +538,97 @@ func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
 		if item.isDir {
 			base = fmDirRow
 		}
-		if i%2 == 1 {
+		zebra := i%2 == 1
+		if zebra {
 			base = base.Background(fmZebraC)
+			iconStyle = iconStyle.Background(fmZebraC)
 		}
-		return base.Width(cw).Render(plain)
+		// Compose the row as three width-stable segments joined horizontally so
+		// the icon can carry its own category color without disturbing column
+		// alignment: lead+mark (3 cols), the styled icon (1 col), then the rest.
+		lead := base.Render(fmt.Sprintf(" %s ", mark))
+		iconCell := iconStyle.Render(icon)
+		rest := base.Render(fmt.Sprintf("  %-*s %*s  %-*s ",
+			nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr))
+		return lipgloss.JoinHorizontal(lipgloss.Top, lead, iconCell, rest)
 	}
 }
 
-// glyphFor returns a prominent left glyph by kind/extension.
-func glyphFor(item fileItem) string {
-	if item.name == ".." {
-		return "↩"
+// iconFor is the single source of truth for a file item's icon: it returns a
+// crisp, single-terminal-cell-wide glyph and a palette-consistent lipgloss style
+// (color, weight) describing its file-type category. Both the list view
+// (renderRow) and the grid/icon view (renderGridCell) call this so the two stay
+// perfectly in sync. Every glyph is deliberately a single display column wide so
+// column alignment and the icon grid never tear.
+func iconFor(item fileItem) (glyph string, style lipgloss.Style) {
+	switch {
+	case item.name == "..":
+		// Parent directory: distinct up/back glyph.
+		return "⬑", lipgloss.NewStyle().Foreground(fmMutedC).Bold(true)
+	case item.isDir:
+		// Directory: folder-like glyph in the bold dir accent.
+		return "▣", lipgloss.NewStyle().Foreground(fmDirC).Bold(true)
+	case item.symlink:
+		// Symlink: dim link/arrow glyph.
+		return "↳", lipgloss.NewStyle().Foreground(fmDimC)
 	}
-	if item.isDir {
-		return "▸"
-	}
-	if item.symlink {
-		return "↪"
-	}
+
 	ext := strings.ToLower(filepath.Ext(item.name))
-	switch ext {
-	case ".go", ".rs", ".c", ".h", ".cpp", ".py", ".js", ".ts", ".java", ".rb", ".sh":
-		return "ƒ"
-	case ".md", ".txt", ".rst", ".log":
-		return "≣"
-	case ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml":
-		return "⚙"
-	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp":
-		return "▦"
-	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar":
-		return "▤"
-	case ".pdf":
-		return "▥"
-	case ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".mov", ".avi":
-		return "♪"
-	default:
-		return "·"
+	name := strings.ToLower(item.name)
+
+	// Dotfiles / config without a meaningful extension (e.g. .gitignore, .env).
+	if strings.HasPrefix(item.name, ".") && (ext == "" || ext == name) {
+		return "✦", lipgloss.NewStyle().Foreground(fmConfigC)
 	}
+
+	switch ext {
+	// Code & scripts.
+	case ".go", ".rs", ".c", ".h", ".hpp", ".cpp", ".cc", ".py", ".js", ".jsx",
+		".ts", ".tsx", ".java", ".rb", ".sh", ".bash", ".zsh", ".php", ".lua",
+		".swift", ".kt", ".scala", ".pl", ".sql", ".html", ".css", ".scss", ".vue":
+		return "λ", lipgloss.NewStyle().Foreground(fmCodeC).Bold(true)
+
+	// Docs & plain text.
+	case ".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".tsv", ".rtf", ".tex":
+		return "≡", lipgloss.NewStyle().Foreground(fmDocC)
+
+	// Structured data / config.
+	case ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml",
+		".env", ".properties", ".lock":
+		return "◈", lipgloss.NewStyle().Foreground(fmDataC)
+
+	// Images.
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
+		".tiff", ".heic":
+		return "❖", lipgloss.NewStyle().Foreground(fmImageC)
+
+	// Archives & compressed.
+	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".zst",
+		".lz", ".lzma", ".deb", ".rpm":
+		return "▤", lipgloss.NewStyle().Foreground(fmArchiveC)
+
+	// Rich documents.
+	case ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".epub":
+		return "▥", lipgloss.NewStyle().Foreground(fmDocsRedC)
+
+	// Audio & video.
+	case ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac",
+		".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv":
+		return "♪", lipgloss.NewStyle().Foreground(fmMediaC)
+
+	// Known executables / binaries.
+	case ".exe", ".bin", ".so", ".dylib", ".dll", ".o", ".a", ".app", ".out":
+		return "⚙", lipgloss.NewStyle().Foreground(fmExecC).Bold(true)
+	}
+
+	// Executable bit set (and not already categorized): treat as a runnable
+	// program. Covers the "no extension + exec" case too.
+	if item.mode&0o111 != 0 {
+		return "⚙", lipgloss.NewStyle().Foreground(fmExecC).Bold(true)
+	}
+
+	// Sensible default for everything else.
+	return "•", lipgloss.NewStyle().Foreground(fmMutedC)
 }
 
 // ============================================================================
@@ -860,7 +891,7 @@ func (m filesModel) composeGhost(base string) string {
 		return base
 	}
 	d := m.drag
-	icon := glyphFor(d.primary)
+	icon, _ := iconFor(d.primary)
 	name := truncate(d.primary.name, 18)
 	label := fmt.Sprintf(" %s %s ", icon, name)
 	if len(d.items) > 1 {
