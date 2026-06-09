@@ -32,6 +32,16 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
+## [v2.0.1] — 2026-06-09 (stable)
+
+### Changed
+
+- The localhost web file manager now lives at `fleet file ui` (under the `file` command group). It previously had its own top-level command; that top-level name is reserved for a broader UI later.
+
+### Fixed
+
+- Release pipeline: GitHub Pages now deploys only after the manifest is committed and the release smoke test passes, and the `main` CI Pages deploy skips the release manifest commit — eliminating a race where the published site could deploy before/independently of the updated manifest.
+
 ## [v2.0.0] — 2026-06-09 (stable)
 
 ### Added
@@ -39,7 +49,7 @@ Omit sections that have no entries for that release.
 - Secure, integrated file manager across three surfaces, all on the existing authenticated, host-key-pinned SSH channel:
   - `fleet file list|upload|download|mkdir|rm|mv` and `fleet file defaults show|set` (global and per-server)
   - `fleet files <server>` — dual-pane terminal file manager with mouse drag-and-drop and live progress
-  - `fleet ui` — localhost-only browser file manager with desktop drag-and-drop, an upload queue, and live progress
+  - `fleet file ui` — localhost-only browser file manager with desktop drag-and-drop, an upload queue, and live progress
 - Transfers are chunked, run over multiple concurrent `fleet-rpc` channels, are SHA-256-checksummed per chunk and whole-file, and resume after a drop or restart.
 - Per-server and global file-transfer defaults (remote dir, parallel streams, chunk size), seeded on first connection.
 - `fleet sync <server> <local-dir> <remote-dir>` — live directory mirror. One side is the writer (source of truth, chosen with `--from local|remote`) and the other a read-only replica: the writer is copied once, then new/changed files overwrite the replica and, by default, replica files absent on the writer are deleted (`--no-delete` keeps them). Runs until stopped.
