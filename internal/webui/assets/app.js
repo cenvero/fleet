@@ -93,6 +93,25 @@ function baseName(p) {
   return idx < 0 ? t : t.slice(idx + 1);
 }
 
+// isArchiveFile reports whether a name looks like a supported archive, so the
+// context menu can offer Extract on it.
+function isArchiveFile(name) {
+  const n = name.toLowerCase();
+  return [".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz"].some((e) => n.endsWith(e));
+}
+
+// Default archive base name from a selection: the single item's stem, else
+// "archive". The format suffix is appended by the dialog.
+function defaultArchiveBase(items) {
+  if (items.length === 1) {
+    const b = items[0].name;
+    const dot = b.lastIndexOf(".");
+    const stem = dot > 0 ? b.slice(0, dot) : b;
+    return stem || "archive";
+  }
+  return "archive";
+}
+
 // ----------------------------------------------------------------- icons (inline SVG)
 
 const ICONS = {
@@ -111,6 +130,11 @@ const ICONS = {
   newfile: '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"/><path d="M14 3v5h5"/><path d="M12 12v5m-2.5-2.5h5"/></svg>',
   path: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h8"/></svg>',
   empty: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>',
+  archive: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M10 4v5m4-5v5"/><path d="M11 13h2"/></svg>',
+  extract: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M12 12v6m0 0l-2.5-2.5M12 18l2.5-2.5"/></svg>',
+  perms: '<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>',
+  checksum: '<svg viewBox="0 0 24 24"><path d="M9 9l6 6m0-6l-6 6"/><circle cx="12" cy="12" r="9"/></svg>',
+  duplicate: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h8"/><path d="M14.5 12v5m-2.5-2.5h5"/></svg>',
 };
 
 // ----------------------------------------------------------------- state
@@ -202,6 +226,7 @@ function buildPanes() {
       actDownload: $(".act-download", node),
       actCopy: $(".act-copy", node),
       actMove: $(".act-move", node),
+      actCompress: $(".act-compress", node),
       actRename: $(".act-rename", node),
       actDelete: $(".act-delete", node),
     };
@@ -352,6 +377,7 @@ function wirePane(i) {
   r.actDownload.addEventListener("click", () => actDownload(i));
   r.actCopy.addEventListener("click", () => transferSelection(i, "copy"));
   r.actMove.addEventListener("click", () => transferSelection(i, "move"));
+  r.actCompress.addEventListener("click", () => actCompress(i));
   r.actRename.addEventListener("click", () => actRename(i));
   r.actDelete.addEventListener("click", () => actDelete(i));
 
@@ -662,6 +688,7 @@ function renderSelection(i) {
   r.actDownload.disabled = !onlyFiles;
   r.actCopy.disabled = n === 0;
   r.actMove.disabled = n === 0;
+  r.actCompress.disabled = n === 0;
   r.actRename.disabled = n !== 1;
   r.actDelete.disabled = n === 0;
 
@@ -1131,8 +1158,18 @@ function openContextMenu(i, item, x, y) {
     }
     add(makeMenuItem("Copy → next pane", ICONS.copy, () => transferSelection(i, "copy")));
     add(makeMenuItem("Move → next pane", ICONS.move, () => transferSelection(i, "move")));
+    add(makeMenuItem("Duplicate", ICONS.duplicate, () => actDuplicate(i, item), { disabled: multi }));
     add(makeMenuItem("Rename", ICONS.rename, () => actRename(i), { disabled: multi }));
     add(makeMenuItem("Copy path", ICONS.path, () => copyPath(i, item), { disabled: multi }));
+    add(menuSep());
+    add(makeMenuItem("Compress…", ICONS.archive, () => actCompress(i)));
+    if (oneFile && isArchiveFile(item.name)) {
+      add(makeMenuItem("Extract here", ICONS.extract, () => actExtract(i, item), { disabled: multi }));
+    }
+    add(makeMenuItem("Permissions…", ICONS.perms, () => actChmod(i, item), { disabled: multi }));
+    if (oneFile) {
+      add(makeMenuItem("Checksum (SHA-256)", ICONS.checksum, () => actChecksum(i, item), { disabled: multi }));
+    }
     add(menuSep());
     add(makeMenuItem("Delete", ICONS.trash, () => actDelete(i), { danger: true, key: "⌫" }));
     add(menuSep());
@@ -1678,6 +1715,223 @@ async function copyPath(i, item) {
     ta.remove();
   }
   toast(ok ? "Copied path" : "Path: " + full, ok ? "success" : "");
+}
+
+// ----------------------------------------------------------------- archive / permissions / checksum / duplicate
+
+// Cache the controller's supported archive formats (fetched lazily on first use).
+let archiveFormats = null;
+async function loadArchiveFormats() {
+  if (archiveFormats) return archiveFormats;
+  try {
+    archiveFormats = await getJSON("/api/formats");
+  } catch {
+    archiveFormats = ["zip", "tar.gz", "tar.bz2", "tar.xz", "tar"];
+  }
+  return archiveFormats;
+}
+
+// actCompress opens a dialog (format + archive name) for the current selection,
+// then POSTs /api/compress with the selected base names and the pane's dir.
+async function actCompress(i) {
+  const items = selectedItems(i);
+  if (!items.length) { toast("Select items to compress", "error"); return; }
+  const formats = await loadArchiveFormats();
+  openCompressModal({
+    items,
+    formats,
+    onOk: async (archive, format, names) => {
+      const p = pane(i);
+      const params = new URLSearchParams();
+      params.set("server", p.server);
+      params.set("dir", p.path);
+      params.set("archive", archive);
+      params.set("format", format);
+      for (const n of names) params.append("name", n);
+      try {
+        await postForm("/api/compress", params);
+        toast("Created " + archive, "success");
+        loadListing(i);
+      } catch (e) {
+        toast("Compress failed: " + e.message, "error");
+      }
+    },
+  });
+}
+
+// actExtract unpacks an archive file into its containing directory.
+async function actExtract(i, item) {
+  const p = pane(i);
+  try {
+    await postJSON("/api/extract", { server: p.server, path: joinPath(p.path, item.name) });
+    toast("Extracted " + item.name, "success");
+    loadListing(i);
+  } catch (e) {
+    toast("Extract failed: " + e.message, "error");
+  }
+}
+
+// actChmod prompts for an octal mode and applies it to the selected item.
+function actChmod(i, item) {
+  const p = pane(i);
+  const cur = item.mode != null ? (item.mode & 0o777).toString(8).padStart(3, "0") : "644";
+  openInputModal({
+    title: "Permissions",
+    desc: "Octal mode for “" + item.name + "” (e.g. 644, 755)",
+    value: cur,
+    okLabel: "Apply",
+    onOk: async (mode) => {
+      if (!/^[0-7]{3,4}$/.test(mode.trim())) { toast("Mode must be octal (e.g. 644)", "error"); return; }
+      try {
+        await postJSON("/api/chmod", { server: p.server, path: joinPath(p.path, item.name), mode: mode.trim() });
+        toast("Set mode " + mode.trim(), "success");
+        loadListing(i);
+      } catch (e) {
+        toast("Permissions failed: " + e.message, "error");
+      }
+    },
+  });
+}
+
+// actChecksum fetches the SHA-256 of a file and shows it in a modal with a copy
+// button.
+async function actChecksum(i, item) {
+  const p = pane(i);
+  toast("Computing SHA-256…");
+  let out;
+  try {
+    out = await getJSON("/api/checksum", { server: p.server, path: joinPath(p.path, item.name) });
+  } catch (e) {
+    toast("Checksum failed: " + e.message, "error");
+    return;
+  }
+  showChecksumModal(item.name, out.sha256 || "");
+}
+
+// actDuplicate copies the selected item to a "<name> copy.<ext>" sibling.
+async function actDuplicate(i, item) {
+  const p = pane(i);
+  try {
+    await postJSON("/api/duplicate", { server: p.server, path: joinPath(p.path, item.name) });
+    toast("Duplicated " + item.name, "success");
+    loadListing(i);
+  } catch (e) {
+    toast("Duplicate failed: " + e.message, "error");
+  }
+}
+
+// postForm sends an application/x-www-form-urlencoded POST (used by /api/compress
+// so repeated `name` params travel in the body). Token rides the header + query.
+async function postForm(pathname, params) {
+  const res = await fetch(api(pathname, {}), {
+    method: "POST",
+    headers: { "X-Fleet-Token": TOKEN, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  return res.json();
+}
+
+// openCompressModal — a small dialog with a format <select> and an archive-name
+// input. The name's extension auto-tracks the chosen format until the user edits
+// the base manually.
+function openCompressModal({ items, formats, onOk }) {
+  const names = items.map((it) => it.name);
+  const base = defaultArchiveBase(items);
+  const modal = openModalShell();
+  const h = document.createElement("h3"); h.textContent = "Compress"; modal.appendChild(h);
+  const d = document.createElement("p"); d.className = "modal-desc";
+  d.textContent = items.length === 1 ? "Archive “" + items[0].name + "”" : "Archive " + items.length + " items";
+  modal.appendChild(d);
+
+  const fieldFmt = document.createElement("label");
+  fieldFmt.className = "modal-field";
+  const fmtLabel = document.createElement("span"); fmtLabel.className = "mf-label"; fmtLabel.textContent = "Format";
+  const select = document.createElement("select");
+  select.className = "modal-select";
+  for (const f of formats) {
+    const opt = document.createElement("option");
+    opt.value = f; opt.textContent = f;
+    select.appendChild(opt);
+  }
+  fieldFmt.append(fmtLabel, select);
+
+  const fieldName = document.createElement("label");
+  fieldName.className = "modal-field";
+  const nameLabel = document.createElement("span"); nameLabel.className = "mf-label"; nameLabel.textContent = "Archive name";
+  const input = document.createElement("input");
+  input.type = "text"; input.spellcheck = false;
+  fieldName.append(nameLabel, input);
+
+  modal.append(fieldFmt, fieldName);
+
+  let nameEdited = false;
+  const apply = () => { input.value = base + "." + select.value; };
+  apply();
+  select.addEventListener("change", () => { if (!nameEdited) apply(); });
+  input.addEventListener("input", () => { nameEdited = true; });
+
+  const actions = document.createElement("div"); actions.className = "modal-actions";
+  const cancel = mkBtn("Cancel", "", closeModal);
+  const ok = mkBtn("Compress", "primary", submit);
+  actions.append(cancel, ok);
+  modal.appendChild(actions);
+
+  function submit() {
+    const archive = input.value.trim();
+    if (!archive) { input.focus(); return; }
+    closeModal();
+    onOk(archive, select.value, names);
+  }
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submit(); }
+    if (e.key === "Escape") { e.preventDefault(); closeModal(); }
+  });
+  showModal();
+  select.focus();
+}
+
+// showChecksumModal renders a SHA-256 hash with a one-click copy button.
+function showChecksumModal(name, hash) {
+  const modal = openModalShell();
+  const h = document.createElement("h3"); h.textContent = "SHA-256"; modal.appendChild(h);
+  const d = document.createElement("p"); d.className = "modal-desc"; d.textContent = name; modal.appendChild(d);
+  const box = document.createElement("div");
+  box.className = "checksum-box";
+  box.textContent = hash;
+  modal.appendChild(box);
+  const actions = document.createElement("div"); actions.className = "modal-actions";
+  const copyBtn = mkBtn("Copy", "", async () => {
+    const okCopy = await copyText(hash);
+    copyBtn.textContent = okCopy ? "Copied" : "Copy";
+    if (okCopy) setTimeout(() => { copyBtn.textContent = "Copy"; }, 1400);
+  });
+  const close = mkBtn("Close", "primary", closeModal);
+  actions.append(copyBtn, close);
+  modal.appendChild(actions);
+  showModal();
+  close.focus();
+}
+
+// copyText copies a string to the clipboard, falling back to a hidden textarea
+// where the async Clipboard API is unavailable.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
 }
 
 // ----------------------------------------------------------------- syntax highlighter

@@ -102,10 +102,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/app.css", s.staticAsset("app.css", "text/css"))
 
 	mux.HandleFunc("/api/servers", s.guard(s.handleServers))
+	mux.HandleFunc("/api/formats", s.guard(s.handleFormats))
 	mux.HandleFunc("/api/list", s.guard(s.handleList))
 	mux.HandleFunc("/api/upload", s.guard(s.handleUpload))
 	mux.HandleFunc("/api/download", s.guard(s.handleDownload))
 	mux.HandleFunc("/api/read", s.guard(s.handleRead))
+	mux.HandleFunc("/api/checksum", s.guard(s.handleChecksum))
 	mux.HandleFunc("/api/progress", s.guard(s.handleProgress))
 	// Mutating endpoints are POST-only so the guard's Origin/CSRF check applies
 	// (a state-changing GET would slip past it).
@@ -116,6 +118,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/mv", s.guard(postOnly(s.handleMove)))
 	mux.HandleFunc("/api/copy", s.guard(postOnly(s.handleCopy)))
 	mux.HandleFunc("/api/move", s.guard(postOnly(s.handleMoveTransfer)))
+	mux.HandleFunc("/api/compress", s.guard(postOnly(s.handleCompress)))
+	mux.HandleFunc("/api/extract", s.guard(postOnly(s.handleExtract)))
+	mux.HandleFunc("/api/chmod", s.guard(postOnly(s.handleChmod)))
+	mux.HandleFunc("/api/duplicate", s.guard(postOnly(s.handleDuplicate)))
 	return securityHeaders(mux)
 }
 
@@ -229,6 +235,12 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		out = append(out, serverInfo{Name: srv.Name, Reachable: srv.Observed.Reachable, Mode: string(srv.Mode)})
 	}
 	writeJSON(w, out)
+}
+
+// handleFormats lists the archive formats the controller supports, so the
+// Compress dialog can offer them without hard-coding the set in the frontend.
+func (s *Server) handleFormats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, core.ArchiveFormats())
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -589,10 +601,7 @@ func looksBinary(b []byte) bool {
 	if bytes.IndexByte(b, 0) >= 0 {
 		return true
 	}
-	n := len(b)
-	if n > 8000 {
-		n = 8000 // sampling the head is enough to classify
-	}
+	n := min(len(b), 8000) // sampling the head is enough to classify
 	ctrl := 0
 	for i := 0; i < n; i++ {
 		c := b[i]
@@ -910,6 +919,169 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleCompress archives the selected base names inside `dir` into a single
+// archive. server=="" runs on the controller's local filesystem. The repeated
+// `name` params are the base names of the selection (the agent re-quotes them);
+// `dir` is validated absolute for the Local case.
+func (s *Server) handleCompress(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, err)
+		return
+	}
+	server := r.Form.Get("server")
+	dir := r.Form.Get("dir")
+	archive := path.Base(r.Form.Get("archive"))
+	format := r.Form.Get("format")
+	names := r.Form["name"]
+	if archive == "" || archive == "." || archive == "/" {
+		http.Error(w, "archive name is required", http.StatusBadRequest)
+		return
+	}
+	if len(names) == 0 {
+		http.Error(w, "at least one name is required", http.StatusBadRequest)
+		return
+	}
+	if format == "" {
+		format = core.FormatFromName(archive)
+	}
+	if server == "" {
+		clean, err := cleanLocalPath(dir)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dir = clean
+	}
+	if err := s.app.CompressPaths(server, dir, names, archive, format); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleExtract unpacks an archive into its containing directory.
+func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
+	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if server == "" {
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		p = clean
+	}
+	if err := s.app.ExtractArchive(server, p); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleChmod sets octal permissions (e.g. 644/755) on a path.
+func (s *Server) handleChmod(w http.ResponseWriter, r *http.Request) {
+	server, p, mode := r.URL.Query().Get("server"), r.URL.Query().Get("path"), r.URL.Query().Get("mode")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if mode == "" {
+		http.Error(w, "mode is required", http.StatusBadRequest)
+		return
+	}
+	if server == "" {
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		p = clean
+	}
+	if err := s.app.ChmodPath(server, p, mode); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleChecksum returns the SHA-256 of a file as {"sha256": "..."}.
+func (s *Server) handleChecksum(w http.ResponseWriter, r *http.Request) {
+	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if server == "" {
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		p = clean
+	}
+	sum, err := s.app.ChecksumPath(server, p)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"sha256": sum})
+}
+
+// handleDuplicate copies a file/dir to a sibling named "<name> copy.<ext>".
+// server=="" copies on the controller's local filesystem; otherwise it does a
+// same-server agent copy.
+func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
+	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
+	if p == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if server == "" {
+		clean, err := cleanLocalPath(p)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dst := duplicateName(clean)
+		info, err := os.Lstat(clean)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if info.IsDir() {
+			if err := copyLocalTree(clean, dst); err != nil {
+				writeError(w, err)
+				return
+			}
+		} else if err := copyLocalFile(clean, dst, info.Mode()); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok", "path": dst})
+		return
+	}
+	dst := duplicateName(p)
+	if _, err := s.app.CopyFile(server, p, server, dst, core.FileTransferOptions{}, nil); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok", "path": dst})
+}
+
+// duplicateName derives a "<name> copy.<ext>" sibling path. It inserts " copy"
+// before the final extension (preserving compound suffixes like ".tar.gz" only
+// for the single trailing extension, matching Finder/Explorer behaviour).
+func duplicateName(p string) string {
+	dir := path.Dir(p)
+	base := path.Base(p)
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return path.Join(dir, stem+" copy"+ext)
 }
 
 // ---- progress hub ----

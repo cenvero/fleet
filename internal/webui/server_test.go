@@ -385,6 +385,150 @@ func TestLooksBinary(t *testing.T) {
 	}
 }
 
+// TestWebUIChecksum confirms /api/checksum returns the SHA-256 of a local file.
+func TestWebUIChecksum(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "data.bin")
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sha256("hello")
+	const want = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+	res, err := http.Get(ts.URL + "/api/checksum?t=" + s.Token() + "&path=" + url.QueryEscape(file))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("checksum status %d: %s", res.StatusCode, body)
+	}
+	var out struct {
+		SHA256 string `json:"sha256"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.SHA256 != want {
+		t.Fatalf("checksum mismatch: got %q want %q", out.SHA256, want)
+	}
+}
+
+// TestWebUIChmodAndDuplicate exercises /api/chmod and /api/duplicate against the
+// Local source via the POST-gated endpoints.
+func TestWebUIChmodAndDuplicate(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	client := ts.Client()
+
+	post := func(p string, params url.Values) (int, string) {
+		params.Set("t", s.Token())
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+p+"?"+params.Encode(), nil)
+		req.Header.Set("Origin", ts.URL)
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("post %s: %v", p, err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+
+	file := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(file, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, body := post("/api/chmod", url.Values{"path": {file}, "mode": {"600"}}); code != http.StatusOK {
+		t.Fatalf("chmod status %d: %s", code, body)
+	}
+	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("chmod did not apply 0600: mode=%v err=%v", fi.Mode().Perm(), err)
+	}
+
+	if code, body := post("/api/duplicate", url.Values{"path": {file}}); code != http.StatusOK {
+		t.Fatalf("duplicate status %d: %s", code, body)
+	}
+	dup := filepath.Join(dir, "note copy.txt")
+	if b, err := os.ReadFile(dup); err != nil || string(b) != "payload" {
+		t.Fatalf("duplicate did not create sibling copy: %q err=%v", b, err)
+	}
+}
+
+// TestWebUICompressExtract round-trips /api/compress then /api/extract against the
+// Local source, confirming the archive is created and unpacks back to the file.
+func TestWebUICompressExtract(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	client := ts.Client()
+
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compress sends repeated `name` params in the form body; the token rides the
+	// header (as the frontend's postForm does), not the body.
+	form := url.Values{"server": {""}, "dir": {dir}, "archive": {"bundle.tar.gz"}, "format": {"tar.gz"}, "name": {"a.txt"}}
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/compress", strings.NewReader(form.Encode()))
+	req.Header.Set("X-Fleet-Token", s.Token())
+	req.Header.Set("Origin", ts.URL)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("compress status %d: %s", res.StatusCode, body)
+	}
+	archive := filepath.Join(dir, "bundle.tar.gz")
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("archive not created: %v", err)
+	}
+
+	// Remove the original, then extract and confirm it reappears.
+	if err := os.Remove(filepath.Join(dir, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	ep := url.Values{"path": {archive}}
+	ep.Set("t", s.Token())
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/extract?"+ep.Encode(), nil)
+	req2.Header.Set("Origin", ts.URL)
+	res2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	b2, _ := io.ReadAll(res2.Body)
+	res2.Body.Close()
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("extract status %d: %s", res2.StatusCode, b2)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(b) != "alpha" {
+		t.Fatalf("extract did not restore file: %q err=%v", b, err)
+	}
+}
+
+// TestDuplicateName checks the "<name> copy.<ext>" derivation.
+func TestDuplicateName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"/a/b/note.txt": "/a/b/note copy.txt",
+		"/a/b/folder":   "/a/b/folder copy",
+		"/x/archive.gz": "/x/archive copy.gz",
+	}
+	for in, want := range cases {
+		if got := duplicateName(in); got != want {
+			t.Fatalf("duplicateName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestEnsureLoopbackAddr(t *testing.T) {
 	t.Parallel()
 	ok := []string{"127.0.0.1:9445", "localhost:8080", "[::1]:9445"}

@@ -753,6 +753,48 @@ button { font-family: inherit; }
   margin-bottom: 18px;
 }
 .modal input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* labelled field rows (Compress dialog) */
+.modal-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.modal-field .mf-label {
+  font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--subtle); font-weight: 600;
+}
+.modal-field input[type="text"] { margin-bottom: 0; }
+.modal-select {
+  width: 100%;
+  appearance: none;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 36px 10px 13px;
+  font-size: 14px;
+  font-family: var(--mono);
+  outline: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 14px;
+}
+.modal-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* checksum hash box */
+.checksum-box {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  word-break: break-all;
+  user-select: all;
+  line-height: 1.55;
+}
+
 .modal-props { margin-bottom: 18px; display: flex; flex-direction: column; gap: 9px; }
 .modal-props .pr { display: flex; justify-content: space-between; gap: 16px; font-size: 13px; }
 .modal-props .pr .k { color: var(--muted); }
