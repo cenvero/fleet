@@ -62,7 +62,12 @@ type Session struct {
 	Client             *ssh.Client
 	Channel            ssh.Channel
 	Closer             io.Closer
-	mu                 sync.Mutex
+	// childOfClient marks a session that borrows a parent's *ssh.Client (created
+	// via OpenChannelSession for parallel transfers). Its Close() must release
+	// only its own channel — closing the shared client would kill every sibling
+	// channel. The parent session owns the client lifecycle.
+	childOfClient bool
+	mu            sync.Mutex
 }
 
 type Connector struct {
@@ -91,6 +96,10 @@ func (s *Session) Close() error {
 	if s.Channel != nil {
 		_ = s.Channel.Close()
 	}
+	// A child session shares its parent's client — never close it here.
+	if s.childOfClient {
+		return nil
+	}
 	if s.Client != nil {
 		return s.Client.Close()
 	}
@@ -98,4 +107,33 @@ func (s *Session) Close() error {
 		return s.Closer.Close()
 	}
 	return nil
+}
+
+// OpenChannelSession opens an additional fleet-rpc channel on this session's
+// existing SSH client and wraps it in its own Session. The agent accepts many
+// channels per connection (each served by its own goroutine), so N channels on
+// one client give N parallel in-flight RPCs without a fresh SSH handshake.
+//
+// The returned child has its own Call mutex (so calls run concurrently with the
+// parent and other children) and closes only its channel — the caller must keep
+// the parent session alive for the lifetime of every child and close the parent
+// last.
+func (s *Session) OpenChannelSession() (*Session, error) {
+	if s == nil || s.Client == nil {
+		return nil, fmt.Errorf("transport session has no ssh client")
+	}
+	channel, requests, err := s.Client.OpenChannel(RPCChannelType, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open extra %s channel: %w", RPCChannelType, err)
+	}
+	go ssh.DiscardRequests(requests)
+	return &Session{
+		Mode:               s.Mode,
+		LocalAddr:          s.LocalAddr,
+		RemoteAddr:         s.RemoteAddr,
+		HostKeyFingerprint: s.HostKeyFingerprint,
+		Client:             s.Client,
+		Channel:            channel,
+		childOfClient:      true,
+	}, nil
 }
