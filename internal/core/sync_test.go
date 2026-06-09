@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-func TestSyncDirLifecycle(t *testing.T) {
+// TestSyncDirPush: local is the writer; the server mirrors it.
+func TestSyncDirPush(t *testing.T) {
 	t.Parallel()
 	rig := newTransferRig(t)
-	// Drain the agent-serve results so the many per-file connections don't block.
 	go func() {
 		for range rig.errCh {
 		}
@@ -32,26 +32,22 @@ func TestSyncDirLifecycle(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- rig.app.SyncDir(ctx, "loopback", localDir, remoteDir,
-			SyncOptions{Interval: 20 * time.Millisecond, Delete: true},
+			SyncOptions{Interval: 20 * time.Millisecond}, // mirror (delete) by default, push
 			func(e SyncEvent) { evs <- e })
 	}()
 
-	// Initial sync pushes the whole tree.
 	syncWaitKind(t, evs, SyncReady, "")
 	syncAssertFile(t, filepath.Join(remoteDir, "a.txt"), "alpha")
 	syncAssertFile(t, filepath.Join(remoteDir, "sub", "b.txt"), "beta")
 
-	// Modify a file → re-uploaded.
 	syncWrite(t, filepath.Join(localDir, "a.txt"), "ALPHA-v2")
-	syncWaitKind(t, evs, SyncUpload, "a.txt")
+	syncWaitKind(t, evs, SyncCopy, "a.txt")
 	syncAssertFile(t, filepath.Join(remoteDir, "a.txt"), "ALPHA-v2")
 
-	// Add a new file → uploaded.
 	syncWrite(t, filepath.Join(localDir, "c.txt"), "gamma")
-	syncWaitKind(t, evs, SyncUpload, "c.txt")
+	syncWaitKind(t, evs, SyncCopy, "c.txt")
 	syncAssertFile(t, filepath.Join(remoteDir, "c.txt"), "gamma")
 
-	// Delete locally → removed remotely (Delete: true).
 	if err := os.Remove(filepath.Join(localDir, "a.txt")); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
@@ -60,7 +56,49 @@ func TestSyncDirLifecycle(t *testing.T) {
 		t.Fatalf("expected remote a.txt to be deleted")
 	}
 
-	// Stopping the command stops the sync.
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("SyncDir returned %v, want context.Canceled", err)
+	}
+}
+
+// TestSyncDirPull: the server is the writer; the local directory mirrors it,
+// and a pre-existing local extra is removed.
+func TestSyncDirPull(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+
+	remoteDir := t.TempDir() // server writer (real fs served by the in-memory agent)
+	localDir := t.TempDir()  // local replica
+	syncWrite(t, filepath.Join(remoteDir, "x.txt"), "X")
+	syncWrite(t, filepath.Join(remoteDir, "d", "y.txt"), "Y")
+	syncWrite(t, filepath.Join(localDir, "stale.txt"), "old") // extra → should be deleted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	evs := make(chan SyncEvent, 512)
+	done := make(chan error, 1)
+	go func() {
+		done <- rig.app.SyncDir(ctx, "loopback", localDir, remoteDir,
+			SyncOptions{Interval: 20 * time.Millisecond, From: SyncFromRemote},
+			func(e SyncEvent) { evs <- e })
+	}()
+
+	syncWaitKind(t, evs, SyncReady, "")
+	syncAssertFile(t, filepath.Join(localDir, "x.txt"), "X")
+	syncAssertFile(t, filepath.Join(localDir, "d", "y.txt"), "Y")
+	if _, err := os.Stat(filepath.Join(localDir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected local stale.txt to be deleted")
+	}
+
+	syncWrite(t, filepath.Join(remoteDir, "x.txt"), "X-v2")
+	syncWaitKind(t, evs, SyncCopy, "x.txt")
+	syncAssertFile(t, filepath.Join(localDir, "x.txt"), "X-v2")
+
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("SyncDir returned %v, want context.Canceled", err)
