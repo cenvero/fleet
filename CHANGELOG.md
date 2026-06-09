@@ -48,6 +48,7 @@ Omit sections that have no entries for that release.
   - `fleet ai <command>` — full machine-readable help (markdown or `--json`) for any single command; the AI-facing counterpart to `--help`. Both `context` and `ai` render from the live command tree, so they never need manual updating.
   - `fleet skill claude|codex|agents` — install a global skill / slash command so Claude Code or Codex can operate the fleet
 - Robust terminal mouse support via bubblezone (content-anchored zones) in both the dashboard and the file manager.
+- `fleet file stat|cat|tail` for inspecting remote files, and `-r/--recursive` on `fleet file upload|download` for whole directory trees.
 
 ### Changed
 
@@ -55,6 +56,10 @@ Omit sections that have no entries for that release.
 
 ### Security
 
+- Controller no longer trusts agent-provided file names/paths when building local write paths (`sync --from remote` and TUI download): a compromised server cannot cause writes outside the target directory.
+- `fleet-agent --file-root <dir>` confines all file operations to allowlisted directories (defense-in-depth against a stolen controller key).
+- Update apply now requires a minisign **signature** on non-dev channels (a checksum alone is manifest-integrity-dependent).
+- Agent log reads are memory-bounded (ring-buffered tail) so a huge log cannot OOM the agent; abandoned upload temp files are reaped.
 - File transfers reuse the agent's path validation (absolute-only, symlink-resolved, `/proc`/`/sys`/`/dev` blocked) and add per-upload write/finalize locking, declared-size bounds (anti sparse-file abuse), transfer-id-keyed temp files, and overflow-safe range math.
 - The web UI binds loopback only, requires a per-process token (constant-time compare), restricts mutations to POST with an Origin/CSRF check, caps upload body size, and sets a strict CSP and security headers.
 

@@ -25,18 +25,40 @@ Transfers are:
 ## CLI
 
 ```bash
-# Browse
+# Browse / inspect
 fleet file list <server> [path]
+fleet file stat <server> <path>                 # size, mode, mtime, type (JSON)
+fleet file cat  <server> <path>                  # stream a file to stdout (checksum-verified)
+fleet file tail <server> <path> [-n 200] [--search TEXT]
 
-# Transfer (chunked, parallel, resumable)
-fleet file upload   <server> <local> [remote] [--parallel N] [--chunk-size 4M]
-fleet file download <server> <remote> [local]  [--parallel N] [--chunk-size 4M]
+# Transfer (chunked, parallel, resumable; -r for whole directories)
+fleet file upload   <server> <local> [remote] [-r] [--parallel N] [--chunk-size 4M]
+fleet file download <server> <remote> [local]  [-r] [--parallel N] [--chunk-size 4M]
 
 # Manage
 fleet file mkdir <server> <path>
 fleet file rm    <server> <path> [--recursive]
 fleet file mv    <server> <from> <to>
 ```
+
+With `-r/--recursive`, `upload` takes a local directory and a remote destination
+directory and ships the whole tree; `download` pulls a remote directory into a
+local one. Remote-provided names are validated so a compromised server cannot
+write outside the chosen local directory.
+
+### Confining the agent (sandbox)
+
+By default an authenticated controller can read or write any path the agent user
+can (minus `/proc`, `/sys`, `/dev`). To limit the blast radius, start the agent
+with one or more allowed roots — every file operation must then stay inside them:
+
+```bash
+fleet-agent serve --file-root /srv/incoming --file-root /var/www
+```
+
+Abandoned upload temp files (`<name>.fleet-<id>.part`) left by interrupted
+transfers are reaped automatically (after 24h) when a new upload to the same
+directory begins.
 
 If `[remote]` is omitted (or ends in `/`), the file lands in the server's default
 remote directory under its local base name. Re-running an interrupted `upload`
