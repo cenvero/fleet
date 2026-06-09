@@ -237,7 +237,10 @@ Transfers are chunked, run over multiple concurrent channels, are SHA-256-checks
 Agentic control (**new in v2**):
 
 - `fleet context` — print the full, self-describing command reference for an AI agent (add `--json`)
+- `fleet ai <command>` — full machine-readable help for any one command (md or `--json`); the AI counterpart to `--help`
 - `fleet skill claude|codex|agents` — install a global skill so your AI coding agent can drive Fleet
+
+`context` and `ai` are generated live from the binary by walking the command tree, so they always match the installed version — there is nothing to keep in sync by hand, and any new command (with its help text) shows up automatically.
 
 ## Configuration Layout
 

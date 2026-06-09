@@ -26,8 +26,23 @@ fleet context --json    # the same as a structured command tree
 
 - what Fleet is and how an agent should use it (parse JSON, check state first, confirm destructive actions);
 - the concepts (transport modes, the single authenticated channel, file transfers, storage);
-- every command, subcommand, and flag;
+- every command, subcommand, and flag, with its own help text;
 - common workflows.
+
+## `fleet ai <command>` — full help for one command
+
+```bash
+fleet ai                  # full reference for every command (no concept sections)
+fleet ai file upload      # complete help for one command: usage, full description, flags
+fleet ai sync --json      # the same, as a JSON node
+```
+
+`fleet ai` is the **AI-facing counterpart to `--help`**. Humans keep using
+`--help` for the normal concise help; an agent runs `fleet ai <command>` to get
+everything about a command — usage line, full description, and every flag — in one
+markdown or JSON block. Because both `context` and `ai` render straight from the
+command tree, you never have to update them by hand: give a command good help
+text and it appears in both automatically.
 
 ## What the agent can do
 

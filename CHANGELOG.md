@@ -45,6 +45,7 @@ Omit sections that have no entries for that release.
 - `fleet sync <server> <local-dir> <remote-dir>` — live one-way directory sync that pushes a folder once, then mirrors local changes (and, with `--delete`, removals) to the server until the command is stopped.
 - Agentic control for AI coding agents:
   - `fleet context` — a complete, self-describing command reference generated live from the binary (`--json` for a structured tree)
+  - `fleet ai <command>` — full machine-readable help (markdown or `--json`) for any single command; the AI-facing counterpart to `--help`. Both `context` and `ai` render from the live command tree, so they never need manual updating.
   - `fleet skill claude|codex|agents` — install a global skill / slash command so Claude Code or Codex can operate the fleet
 - Robust terminal mouse support via bubblezone (content-anchored zones) in both the dashboard and the file manager.
 
