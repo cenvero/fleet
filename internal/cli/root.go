@@ -62,9 +62,9 @@ func NewRootCommand() *cobra.Command {
 			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
 				"check", "apply", "rollback", "channel",
 				"backup", "recover", "adjust-init",
-				// context/skill describe the CLI and install agent integrations;
+				// context/ai/skill describe the CLI and install agent integrations;
 				// they never touch controller state, so they must work pre-init.
-				"context", "skill":
+				"context", "ai", "skill":
 				return nil
 			}
 			if cmd.HasParent() {
@@ -130,6 +130,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
 	root.AddCommand(newContextCommand())
+	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
 	return root
 }
@@ -269,7 +270,11 @@ func newFilesCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "files <server>",
 		Short: "Launch the dual-pane file manager for a server",
-		Args:  cobra.ExactArgs(1),
+		Long: "Open a full-screen dual-pane file manager: the local filesystem on the left,\n" +
+			"the server on the right. Navigate with the keyboard or mouse, click a folder\n" +
+			"to open it, drag a file from one pane to the other to transfer it, and watch\n" +
+			"live progress. Uses the same chunked, resumable transfer engine as 'fleet file'.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return tui.RunFiles(*configDir, args[0])
 		},
@@ -282,6 +287,12 @@ func newUICommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ui",
 		Short: "Launch the localhost web file manager (browser, drag-and-drop)",
+		Long: "Serve a browser-based file manager from the controller. It binds loopback only,\n" +
+			"requires a per-process token printed at startup, restricts mutations to POST\n" +
+			"with an Origin/CSRF check, and sets a strict CSP — there is no remote-reachable\n" +
+			"surface. Browse a server, drag files from your desktop onto the page to upload\n" +
+			"them (with live progress), and click to download. Prompts to open your browser\n" +
+			"when interactive; use --open=yes/no to skip the prompt.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 			app, err := openApp(*configDir)
