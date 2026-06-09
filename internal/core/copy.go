@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 
 	"github.com/cenvero/fleet/internal/logs"
 	"github.com/cenvero/fleet/pkg/proto"
@@ -103,17 +104,16 @@ func (a *App) CopyDir(srcServer, srcPath, dstServer, dstPath string, opts FileTr
 	}
 	_ = a.RemoteMkdir(dstServer, dstPath)
 	created := map[string]bool{dstPath: true}
-	count := 0
-	for _, rel := range sortedRelKeys(files) {
+	var cmu sync.Mutex
+	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
 		srcF := path.Join(srcPath, filepath.ToSlash(rel))
 		dstF := path.Join(dstPath, filepath.ToSlash(rel))
+		cmu.Lock()
 		a.ensureRemoteParent(dstServer, dstF, created)
-		if _, err := a.CopyFile(srcServer, srcF, dstServer, dstF, opts, progress); err != nil {
-			return count, fmt.Errorf("%s: %w", rel, err)
-		}
-		count++
-	}
-	return count, nil
+		cmu.Unlock()
+		_, err := a.CopyFile(srcServer, srcF, dstServer, dstF, opts, fp)
+		return err
+	})
 }
 
 // MoveFile moves a file between servers. Within one server it is an efficient

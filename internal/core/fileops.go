@@ -12,9 +12,79 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"sync"
+	"sync/atomic"
 
 	"github.com/cenvero/fleet/pkg/proto"
 )
+
+// dirTransferConcurrency bounds how many files a recursive directory transfer
+// moves at once (each file still uses its own per-chunk parallelism).
+const dirTransferConcurrency = 4
+
+func sumSizes(m map[string]fileMeta) int64 {
+	var t int64
+	for _, meta := range m {
+		t += meta.size
+	}
+	return t
+}
+
+// runParallelTransfers transfers rels with bounded concurrency, aggregating byte
+// progress across the in-flight files. xfer(rel, fileProgress) moves one file.
+// Returns the count transferred and the first error (stops scheduling on error).
+func runParallelTransfers(rels []string, totalBytes int64, progress ProgressFunc, xfer func(rel string, fp ProgressFunc) error) (int, error) {
+	sem := make(chan struct{}, dirTransferConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	var doneBytes, doneCount, active int64
+	emit := func() {
+		if progress != nil {
+			progress(ProgressUpdate{
+				BytesDone:     atomic.LoadInt64(&doneBytes),
+				TotalBytes:    totalBytes,
+				ActiveStreams: int(atomic.LoadInt64(&active)),
+			})
+		}
+	}
+	for _, rel := range rels {
+		mu.Lock()
+		stop := firstErr != nil
+		mu.Unlock()
+		if stop {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		atomic.AddInt64(&active, 1)
+		go func(rel string) {
+			defer wg.Done()
+			defer func() { atomic.AddInt64(&active, -1); <-sem }()
+			var last int64
+			fp := func(u ProgressUpdate) {
+				atomic.AddInt64(&doneBytes, u.BytesDone-last)
+				last = u.BytesDone
+				emit()
+			}
+			if err := xfer(rel, fp); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%s: %w", rel, err)
+				}
+				mu.Unlock()
+				return
+			}
+			atomic.AddInt64(&doneCount, 1)
+			emit()
+		}(rel)
+	}
+	wg.Wait()
+	if progress != nil {
+		progress(ProgressUpdate{BytesDone: atomic.LoadInt64(&doneBytes), TotalBytes: totalBytes, Done: firstErr == nil})
+	}
+	return int(atomic.LoadInt64(&doneCount)), firstErr
+}
 
 // StatRemoteFile returns metadata for a single remote path.
 func (a *App) StatRemoteFile(serverName, remotePath string) (proto.FileStatResult, error) {
@@ -108,17 +178,16 @@ func (a *App) UploadDir(serverName, localDir, remoteDir string, opts FileTransfe
 		return 0, err
 	}
 	created := map[string]bool{remoteDir: true}
+	var cmu sync.Mutex
 	_ = a.RemoteMkdir(serverName, remoteDir)
-	count := 0
-	for _, rel := range sortedRelKeys(files) {
+	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
 		remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
+		cmu.Lock()
 		a.ensureRemoteParent(serverName, remotePath, created)
-		if _, err := a.UploadFile(serverName, filepath.Join(localDir, rel), remotePath, opts, progress); err != nil {
-			return count, fmt.Errorf("%s: %w", rel, err)
-		}
-		count++
-	}
-	return count, nil
+		cmu.Unlock()
+		_, err := a.UploadFile(serverName, filepath.Join(localDir, rel), remotePath, opts, fp)
+		return err
+	})
 }
 
 // DownloadDir recursively downloads every file under remoteDir into localDir.
@@ -133,19 +202,15 @@ func (a *App) DownloadDir(serverName, remoteDir, localDir string, opts FileTrans
 	if err := os.MkdirAll(localDir, 0o750); err != nil {
 		return 0, err
 	}
-	count := 0
-	for _, rel := range sortedRelKeys(files) {
+	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
 		localPath, err := SafeLocalJoin(localDir, rel)
 		if err != nil {
-			return count, err
+			return err
 		}
 		remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-		if _, err := a.DownloadFile(serverName, remotePath, localPath, opts, progress); err != nil {
-			return count, fmt.Errorf("%s: %w", rel, err)
-		}
-		count++
-	}
-	return count, nil
+		_, err = a.DownloadFile(serverName, remotePath, localPath, opts, fp)
+		return err
+	})
 }
 
 func sortedRelKeys(m map[string]fileMeta) []string {

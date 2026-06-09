@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,8 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd.AddCommand(newFileDownloadCommand(configDir))
 	fileCmd.AddCommand(newFileCopyCommand(configDir))
 	fileCmd.AddCommand(newFileServerMoveCommand(configDir))
+	fileCmd.AddCommand(newFileCompressCommand(configDir))
+	fileCmd.AddCommand(newFileExtractCommand(configDir))
 	fileCmd.AddCommand(newFileMkdirCommand(configDir))
 	fileCmd.AddCommand(newFileRemoveCommand(configDir))
 	fileCmd.AddCommand(newFileMoveCommand(configDir))
@@ -373,6 +376,62 @@ func newFileServerMoveCommand(configDir *string) *cobra.Command {
 	cmd.Flags().IntVar(&parallel, "parallel", 0, "parallel streams per file (0 = server/global default)")
 	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
 	return cmd
+}
+
+func newFileCompressCommand(configDir *string) *cobra.Command {
+	var format string
+	cmd := &cobra.Command{
+		Use:   "compress <server> <archive> <item>...",
+		Short: "Compress files/folders into an archive on a server (zip, tar.gz, ...)",
+		Long: "Create <archive> on <server> containing the given items (which live in the same\n" +
+			"directory as <archive>). Format is taken from the archive extension, or --format.\n\n" +
+			"  fleet file compress web-01 /srv/site.tar.gz /srv/public /srv/index.html\n" +
+			"  fleet file compress web-01 /tmp/logs.zip /var/log/app.log --format zip",
+		Args: cobra.MinimumNArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			server, archive, items := args[0], args[1], args[2:]
+			f := format
+			if f == "" {
+				f = core.FormatFromName(archive)
+			}
+			names := make([]string, len(items))
+			for i, it := range items {
+				names[i] = path.Base(it)
+			}
+			if err := app.CompressPaths(server, path.Dir(archive), names, path.Base(archive), f); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "created %s\n", archive)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&format, "format", "", "zip | tar.gz | tar.bz2 | tar.xz | tar (default: from extension)")
+	return cmd
+}
+
+func newFileExtractCommand(configDir *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "extract <server> <archivePath>",
+		Short: "Extract an archive into its directory on a server",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			if err := app.ExtractArchive(args[0], args[1]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "extracted %s\n", args[1])
+			return nil
+		},
+	}
 }
 
 func newFileMkdirCommand(configDir *string) *cobra.Command {
