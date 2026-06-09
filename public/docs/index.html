@@ -86,13 +86,15 @@
     .brand span:not(.brand-dot) { color: var(--accent); }
     .brand:hover { text-decoration: none; }
 
-    .topnav-links { display: flex; gap: 8px; }
+    .topnav-links { display: flex; align-items: center; gap: 8px; }
     .topnav-links a {
       color: var(--muted); font-size: 0.9rem; font-weight: 500;
-      padding: 8px 14px; border-radius: 8px;
+      padding: 8px 16px; border-radius: 8px; transition: all 200ms ease;
     }
     .topnav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
     .topnav-links a.active { color: var(--bg); background: var(--accent); font-weight: 600; box-shadow: 0 0 15px rgba(0,235,184,0.2); }
+    .topnav-links a.topnav-cta { color: var(--bg); background: var(--accent); font-weight: 600; }
+    .topnav-links a.topnav-cta:hover { background: var(--accent-hover); box-shadow: 0 0 20px rgba(0, 235, 184, 0.3); text-decoration: none; }
 
     /* hamburger */
     .menu-btn {
@@ -453,10 +455,12 @@
     cenvero <span class="brand-dot">/</span> <span>fleet</span>
   </a>
   <div class="topnav-links">
-    <a href="/">Home</a>
-    <a href="/docs/" class="active">Docs</a>
+    <a href="/agentic.html">Agentic AI</a>
+    <a href="/whats-new.html">What's new</a>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
     <a href="https://github.com/cenvero/fleet">GitHub</a>
-    <a href="https://github.com/cenvero/fleet/releases">Releases</a>
+    <a href="/docs/#install" class="topnav-cta">Get Started</a>
   </div>
   <button class="menu-btn" id="menuBtn" aria-label="Open sidebar" onclick="toggleSidebar()">
     <span></span><span></span><span></span>

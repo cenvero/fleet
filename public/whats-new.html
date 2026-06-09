@@ -28,10 +28,20 @@
     <a href="/agentic.html">Agentic AI</a>
     <a href="/whats-new.html">What's new</a>
     <a href="/docs/">Docs</a>
+    <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
     <a href="https://github.com/cenvero/fleet">GitHub</a>
     <a href="/docs/#install" class="nav-cta">Get Started</a>
   </div>
+  <button class="nav-burger" onclick="toggleMenu(this)" aria-label="Menu"><span></span><span></span><span></span></button>
 </nav>
+<div class="nav-mobile" id="nav-mobile">
+  <a href="/agentic.html">Agentic AI</a>
+  <a href="/whats-new.html">What's new</a>
+  <a href="/docs/">Docs</a>
+  <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
+  <a href="https://github.com/cenvero/fleet">GitHub</a>
+  <a href="/docs/#install">Get Started</a>
+</div>
 
 <header class="ph wrap">
   <div class="eyebrow"><i data-lucide="sparkles"></i> Major release · v2.0</div>
@@ -88,6 +98,9 @@
     </div>
   </div>
 </footer>
-<script>window.addEventListener('DOMContentLoaded',()=>window.lucide&&lucide.createIcons());</script>
+<script>
+  function toggleMenu(btn){ document.getElementById('nav-mobile').classList.toggle('open'); }
+  window.addEventListener('DOMContentLoaded',()=>window.lucide&&lucide.createIcons());
+</script>
 </body>
 </html>
