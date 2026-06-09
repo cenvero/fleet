@@ -158,7 +158,7 @@ func installAgentsFile(opts skillInstallOptions) ([]string, error) {
 			return nil, nil
 		}
 		merged := strings.TrimRight(string(existing), "\n") + "\n\n" + content
-		if err := os.WriteFile(target, []byte(merged), 0o644); err != nil {
+		if err := os.WriteFile(target, []byte(merged), 0o600); err != nil {
 			return nil, err
 		}
 		return []string{target}, nil
@@ -175,10 +175,10 @@ func writeSkillFile(path, content string, force bool) error {
 			return fmt.Errorf("%s already exists; re-run with --force to overwrite", path)
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return os.WriteFile(path, []byte(content), 0o600)
 }
 
 // ---- content ----
