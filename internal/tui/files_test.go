@@ -140,6 +140,72 @@ func TestTransferGlyph(t *testing.T) {
 	}
 }
 
+func TestGridViewRenders(t *testing.T) {
+	t.Parallel()
+	m := sampleFilesModel(120, 40)
+	m.left.view = viewGrid
+	out := m.View()
+	for _, want := range []string{
+		"build",       // a dir cell name
+		"app.tar.gz",  // a file cell name
+		"View: Icons", // toolbar reflects focused pane's current (grid) layout
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("grid view missing %q", want)
+		}
+	}
+}
+
+func TestGridViewCycleAndNav(t *testing.T) {
+	t.Parallel()
+	m := sampleFilesModel(120, 40)
+	// Cycle the focused (left) pane into grid view.
+	m.cycleView(0)
+	if m.left.view != viewGrid {
+		t.Fatalf("cycleView should switch left pane to grid")
+	}
+	// vStep in grid equals the column count (>=1); list pane stays 1.
+	if m.vStep(0) < 1 {
+		t.Fatalf("grid vStep should be >= 1, got %d", m.vStep(0))
+	}
+	if m.vStep(1) != 1 {
+		t.Fatalf("list vStep should be 1, got %d", m.vStep(1))
+	}
+	// Navigation must clamp without panic across the whole range.
+	for range 50 {
+		m.movePane(0, m.vStep(0))
+	}
+	if m.left.index >= len(m.left.entries) || m.left.index < 0 {
+		t.Fatalf("grid nav index out of range: %d", m.left.index)
+	}
+	// Scroll stays aligned to a grid-row boundary (a multiple of cols).
+	cols, _ := m.gridDims()
+	if m.left.scroll%cols != 0 {
+		t.Fatalf("grid scroll %d not aligned to cols %d", m.left.scroll, cols)
+	}
+	// Cycle back to list.
+	m.cycleView(0)
+	if m.left.view != viewList {
+		t.Fatalf("cycleView should return left pane to list")
+	}
+}
+
+func TestGridViewNarrowAndEmptyNoPanic(t *testing.T) {
+	t.Parallel()
+	// Narrow pane forces a single column; empty dir must not panic either.
+	for _, dim := range [][2]int{{30, 8}, {40, 10}, {200, 60}} {
+		m := sampleFilesModel(dim[0], dim[1])
+		m.left.view = viewGrid
+		m.right.view = viewGrid
+		_ = m.View()
+		// Empty grid pane.
+		m.left.entries = nil
+		m.left.index, m.left.scroll = 0, 0
+		_ = m.View()
+		m.movePane(0, 1) // no-op on empty, must not panic
+	}
+}
+
 func TestOverlayRendersCentered(t *testing.T) {
 	t.Parallel()
 	m := sampleFilesModel(120, 40)

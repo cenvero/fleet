@@ -99,6 +99,14 @@ func newPaneSource(app *core.App, source string) paneState {
 
 // ---- core types ----
 
+// viewMode selects how a pane lays out its directory, Finder-style.
+type viewMode int
+
+const (
+	viewList viewMode = iota // one full-width item per row (default)
+	viewGrid                 // multi-column grid of icon + name cells
+)
+
 type fileItem struct {
 	name    string
 	isDir   bool
@@ -118,6 +126,7 @@ type paneState struct {
 	loading  bool
 	err      error
 	selected map[int]bool // multi-selection (excludes "..")
+	view     viewMode     // list (default) or grid/icons
 }
 
 // label is the human source name for headers/menus.
@@ -483,16 +492,16 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = 1 - m.focus
 		return m, nil
 	case "up", "k":
-		m.movePane(m.focus, -1)
+		m.movePane(m.focus, -m.vStep(m.focus))
 		return m, nil
 	case "down", "j":
-		m.movePane(m.focus, 1)
+		m.movePane(m.focus, m.vStep(m.focus))
 		return m, nil
 	case "pgup":
-		m.movePane(m.focus, -m.visibleRows())
+		m.movePane(m.focus, -m.pageStep(m.focus))
 		return m, nil
 	case "pgdown":
-		m.movePane(m.focus, m.visibleRows())
+		m.movePane(m.focus, m.pageStep(m.focus))
 		return m, nil
 	case "home":
 		m.movePane(m.focus, -1<<30)
@@ -500,12 +509,29 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "end":
 		m.movePane(m.focus, 1<<30)
 		return m, nil
-	case "left", "h", "backspace":
+	case "left":
+		// In grid view a bare ← moves the selection one cell left; in list view
+		// it navigates to the parent directory (classic behaviour).
+		if m.paneRefConst(m.focus).view == viewGrid {
+			m.movePane(m.focus, -1)
+			return m, nil
+		}
 		return m.enterParent(m.focus)
-	case "right", "l", "enter":
+	case "h", "backspace":
+		return m.enterParent(m.focus)
+	case "right":
+		if m.paneRefConst(m.focus).view == viewGrid {
+			m.movePane(m.focus, 1)
+			return m, nil
+		}
+		return m.activate(m.focus)
+	case "l", "enter":
 		return m.activate(m.focus)
 	case " ":
 		m.toggleSelect(m.focus)
+		return m, nil
+	case "v":
+		m.cycleView(m.focus)
 		return m, nil
 	case "g":
 		return m, m.reload(m.focus)
@@ -557,6 +583,10 @@ func (m *filesModel) movePane(side, delta int) {
 
 func (m *filesModel) clampScroll(side int) {
 	pane := m.paneRef(side)
+	if pane.view == viewGrid {
+		m.clampScrollGrid(side)
+		return
+	}
 	visible := m.visibleRows()
 	if pane.index < pane.scroll {
 		pane.scroll = pane.index
@@ -574,6 +604,72 @@ func (m *filesModel) clampScroll(side int) {
 	if pane.scroll > maxScroll {
 		pane.scroll = maxScroll
 	}
+}
+
+// clampScrollGrid keeps pane.scroll aligned to grid-row boundaries (a multiple of
+// the column count) so cells never tear across a partial scroll, and ensures the
+// focused item's cell-row stays visible.
+func (m *filesModel) clampScrollGrid(side int) {
+	pane := m.paneRef(side)
+	cols, visRows := m.gridDims()
+	n := len(pane.entries)
+	if n == 0 {
+		pane.scroll = 0
+		return
+	}
+	idxRow := pane.index / cols
+	topRow := pane.scroll / cols
+	if idxRow < topRow {
+		topRow = idxRow
+	}
+	if idxRow >= topRow+visRows {
+		topRow = idxRow - visRows + 1
+	}
+	if topRow < 0 {
+		topRow = 0
+	}
+	totalRows := (n + cols - 1) / cols
+	maxTopRow := totalRows - visRows
+	if maxTopRow < 0 {
+		maxTopRow = 0
+	}
+	if topRow > maxTopRow {
+		topRow = maxTopRow
+	}
+	pane.scroll = topRow * cols
+}
+
+// vStep is the index delta for a single up/down keypress: one cell-row in grid
+// (the column count) or one item in list view.
+func (m filesModel) vStep(side int) int {
+	if m.paneRefConst(side).view == viewGrid {
+		cols, _ := m.gridDims()
+		return cols
+	}
+	return 1
+}
+
+// pageStep is the index delta for PgUp/PgDn: a full page of visible items.
+func (m filesModel) pageStep(side int) int {
+	if m.paneRefConst(side).view == viewGrid {
+		cols, visRows := m.gridDims()
+		return cols * visRows
+	}
+	return m.visibleRows()
+}
+
+// cycleView toggles the focused pane's layout List → Grid → List and re-clamps
+// the scroll for the new geometry.
+func (m *filesModel) cycleView(side int) {
+	pane := m.paneRef(side)
+	if pane.view == viewList {
+		pane.view = viewGrid
+		m.status = pane.label() + " pane: Icon view"
+	} else {
+		pane.view = viewList
+		m.status = pane.label() + " pane: List view"
+	}
+	m.clampScroll(side)
 }
 
 func (m filesModel) enterParent(side int) (tea.Model, tea.Cmd) {
@@ -716,7 +812,8 @@ func (m filesModel) focusedItem(side int) fileItem {
 
 func (m filesModel) other(side int) int { return 1 - side }
 
-// visibleRows is the number of file rows that fit in a pane body.
+// visibleRows is the number of text lines available in a pane body. In list view
+// this equals the number of file rows; in grid view it is divided among cell-rows.
 func (m filesModel) visibleRows() int {
 	// header(1) + toolbar(1) + blank(1) + pane chrome (border2 + breadcrumb +
 	// rule = 4) + status(1) + transfers dock(varies ~6) + footer(1) + padding(2).
@@ -725,6 +822,52 @@ func (m filesModel) visibleRows() int {
 		h = 4
 	}
 	return h
+}
+
+// ---- grid geometry ----
+
+// gridCellW is the fixed display width of one icon/grid cell (including its
+// inter-cell gutter). gridCellH is how many text lines a cell occupies
+// (icon line + name line).
+const (
+	gridCellW = 16
+	gridCellH = 2
+)
+
+// paneInnerWidth is the content width inside a pane's rounded border, matching
+// renderPane's cw. Used so navigation can compute the grid column count exactly
+// as the renderer does.
+func (m filesModel) paneInnerWidth() int {
+	innerW := m.width - 4
+	if innerW < 48 {
+		innerW = 48
+	}
+	sepW := 3
+	paneWidth := (innerW - sepW) / 2
+	if paneWidth < 28 {
+		paneWidth = 28
+	}
+	return paneWidth - 2 // inside the rounded border
+}
+
+// gridCols is the number of columns that fit in a pane of content width cw.
+func gridCols(cw int) int {
+	cols := cw / gridCellW
+	if cols < 1 {
+		cols = 1
+	}
+	return cols
+}
+
+// gridDims returns (cols, visibleCellRows) for a pane: how many columns fit and
+// how many rows-of-cells are visible given the available text lines.
+func (m filesModel) gridDims() (cols, visRows int) {
+	cols = gridCols(m.paneInnerWidth())
+	visRows = m.visibleRows() / gridCellH
+	if visRows < 1 {
+		visRows = 1
+	}
+	return cols, visRows
 }
 
 // ---- path helpers ----

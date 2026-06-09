@@ -239,7 +239,7 @@ func hitToolbar(msg tea.MouseMsg) (string, bool) {
 
 // toolbarActions are the clickable toolbar buttons (also keyboard shortcuts).
 var toolbarActions = []string{
-	"source", "newfolder", "rename", "delete", "copy", "move", "props", "hidden", "refresh", "quit",
+	"source", "newfolder", "rename", "delete", "copy", "move", "props", "view", "hidden", "refresh", "quit",
 }
 
 func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
@@ -258,6 +258,9 @@ func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
 		return m.moveToOtherPane(m.focus)
 	case "props":
 		return m.openProperties(m.focus)
+	case "view":
+		m.cycleView(m.focus)
+		return m, nil
 	case "hidden":
 		m.showHidden = !m.showHidden
 		m.left.loading, m.right.loading = true, true
@@ -338,6 +341,7 @@ func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
 		{key: "d", label: "Delete", action: "delete", enabled: onRow},
 		{key: "n", label: "New folder", action: "newfolder", enabled: true},
 		{key: "i", label: "Properties", action: "props", enabled: onRow},
+		{key: "v", label: viewLabel(m.paneRefConst(side).view), action: "view", enabled: true},
 		{key: "g", label: "Refresh", action: "refresh", enabled: true},
 	}
 	_ = isDir
@@ -367,6 +371,9 @@ func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
 		return m.openNewFolderPrompt(side), nil
 	case "props":
 		return m.openProperties(side)
+	case "view":
+		m.cycleView(side)
+		return m, nil
 	case "refresh":
 		return m, m.reload(side)
 	}

@@ -159,6 +159,7 @@ func (m filesModel) renderToolbar(innerW int) string {
 		{"copy", "c", "Copy →"},
 		{"move", "m", "Move →"},
 		{"props", "i", "Info"},
+		{"view", "v", viewLabel(m.paneRefConst(m.focus).view)},
 		{"hidden", ".", hiddenLabel(m.showHidden)},
 		{"refresh", "g", "Refresh"},
 		{"quit", "q", "Quit"},
@@ -178,6 +179,15 @@ func hiddenLabel(on bool) string {
 		return "Hidden ✓"
 	}
 	return "Hidden"
+}
+
+// viewLabel names the toolbar/menu button for the focused pane's current layout
+// (showing what `v` will offer next, Finder-style).
+func viewLabel(v viewMode) string {
+	if v == viewGrid {
+		return "View: Icons"
+	}
+	return "View: List"
 }
 
 // ============================================================================
@@ -205,20 +215,10 @@ func (m filesModel) renderPane(side, paneWidth, rows int) string {
 		b.WriteString(fmErrSty.Render("error: " + truncate(pane.err.Error(), cw-7)))
 	case len(pane.entries) == 0:
 		b.WriteString(fmStatusSty.Render("(empty)"))
+	case pane.view == viewGrid:
+		b.WriteString(m.renderGridBody(side, cw, rows, isDropTarget))
 	default:
-		end := pane.scroll + rows
-		if end > len(pane.entries) {
-			end = len(pane.entries)
-		}
-		lines := make([]string, 0, rows)
-		for i := pane.scroll; i < end; i++ {
-			lines = append(lines, zone.Mark(rowZoneID(side, i), m.renderRow(side, i, cw, isDropTarget)))
-		}
-		// Pad the body so the box height is stable while scrolling.
-		for len(lines) < rows {
-			lines = append(lines, strings.Repeat(" ", cw))
-		}
-		b.WriteString(strings.Join(lines, "\n"))
+		b.WriteString(m.renderListBody(side, cw, rows, isDropTarget))
 	}
 
 	box := lipgloss.NewStyle().
@@ -233,6 +233,188 @@ func (m filesModel) renderPane(side, paneWidth, rows int) string {
 		box = box.BorderForeground(fmAccent)
 	}
 	return zone.Mark(paneZoneID(side), box.Render(b.String()))
+}
+
+// renderListBody draws the classic one-item-per-row list, padded to a stable
+// height. Every row is zone.Mark'ed by its item index so hit-testing, hover, and
+// drag-drop resolve clicks back to the right entry.
+func (m filesModel) renderListBody(side, cw, rows int, isDropTarget bool) string {
+	pane := m.paneRefConst(side)
+	end := pane.scroll + rows
+	if end > len(pane.entries) {
+		end = len(pane.entries)
+	}
+	lines := make([]string, 0, rows)
+	for i := pane.scroll; i < end; i++ {
+		lines = append(lines, zone.Mark(rowZoneID(side, i), m.renderRow(side, i, cw, isDropTarget)))
+	}
+	// Pad the body so the box height is stable while scrolling.
+	for len(lines) < rows {
+		lines = append(lines, strings.Repeat(" ", cw))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderGridBody draws a Finder-style icon grid: cells laid out in gridCols
+// columns, each cell gridCellH lines tall (big icon over a centered name). Each
+// cell is zone.Mark'ed with the SAME rowZoneID as its list row, so hitRow,
+// hover, selection, and drag-drop work identically in both views.
+func (m filesModel) renderGridBody(side, cw, rows int, isDropTarget bool) string {
+	pane := m.paneRefConst(side)
+	cols := gridCols(cw)
+	cellW := cw / cols // distribute slack evenly across the row
+	if cellW < 4 {
+		cellW = 4
+	}
+	visRows := rows / gridCellH
+	if visRows < 1 {
+		visRows = 1
+	}
+
+	start := pane.scroll
+	end := start + cols*visRows
+	if end > len(pane.entries) {
+		end = len(pane.entries)
+	}
+
+	var lines []string
+	for i := start; i < end; i += cols {
+		cells := make([]string, 0, cols)
+		for c := range cols {
+			idx := i + c
+			if idx >= end {
+				cells = append(cells, blankCell(cellW))
+				continue
+			}
+			cell := m.renderGridCell(side, idx, cellW, isDropTarget)
+			cells = append(cells, zone.Mark(rowZoneID(side, idx), cell))
+		}
+		// Each cell is gridCellH lines; join them side-by-side per cell-row.
+		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
+	}
+	body := strings.Join(lines, "\n")
+
+	// Pad the body to a stable height (rows text lines).
+	cur := 0
+	if body != "" {
+		cur = lipgloss.Height(body)
+	}
+	for cur < rows {
+		body += "\n" + strings.Repeat(" ", cw)
+		cur++
+	}
+	return body
+}
+
+// blankCell is an empty grid cell (gridCellH lines of spaces) used to pad short
+// final rows so the grid keeps a rectangular shape.
+func blankCell(cellW int) string {
+	line := strings.Repeat(" ", cellW)
+	parts := make([]string, gridCellH)
+	for i := range parts {
+		parts[i] = line
+	}
+	return strings.Join(parts, "\n")
+}
+
+// renderGridCell draws a single icon+name cell of width cellW and height
+// gridCellH. Styling precedence matches renderRow: selected > drop-hover >
+// marked > hover > default, color-coded by kind.
+func (m filesModel) renderGridCell(side, i, cellW int, dropTargetPane bool) string {
+	pane := m.paneRefConst(side)
+	item := pane.entries[i]
+	focused := side == m.focus
+	selected := i == pane.index && focused
+	marked := pane.selected[i]
+	hovered := side == m.hoverSide && i == m.hoverIndex
+	dropHover := dropTargetPane && i == m.hoverIndex && item.isDir
+
+	icon := gridGlyphFor(item)
+	name := item.name
+	if item.isDir && item.name != ".." {
+		name += "/"
+	}
+	if marked {
+		name = "✓ " + name
+	}
+
+	// Color the icon by kind; selection/drop styling repaints the whole cell.
+	iconFg := fmText
+	switch {
+	case item.name == "..":
+		iconFg = fmMutedC
+	case item.isDir:
+		iconFg = fmDirC
+	case item.symlink:
+		iconFg = fmAccent2
+	}
+
+	nameLine := centerCell(truncate(name, cellW), cellW)
+	iconLine := centerCell(icon, cellW)
+
+	switch {
+	case selected:
+		return fmSelRow.Width(cellW).Render(iconLine) + "\n" + fmSelRow.Width(cellW).Render(nameLine)
+	case dropHover:
+		return fmDropRow.Width(cellW).Render(iconLine) + "\n" + fmDropRow.Width(cellW).Render(nameLine)
+	case marked:
+		return fmMarkRow.Width(cellW).Render(iconLine) + "\n" + fmMarkRow.Width(cellW).Render(nameLine)
+	case hovered:
+		return fmHoverRow.Width(cellW).Render(iconLine) + "\n" + fmHoverRow.Width(cellW).Render(nameLine)
+	default:
+		iconStyled := lipgloss.NewStyle().Foreground(iconFg).Bold(true).Width(cellW).Render(iconLine)
+		nameFg := fmText
+		if item.isDir {
+			nameFg = fmDirC
+		}
+		nameStyled := lipgloss.NewStyle().Foreground(nameFg).Width(cellW).Render(nameLine)
+		return iconStyled + "\n" + nameStyled
+	}
+}
+
+// centerCell centers s within width w (display columns), padding with spaces.
+func centerCell(s string, w int) string {
+	sw := lipgloss.Width(s)
+	if sw >= w {
+		return s
+	}
+	left := (w - sw) / 2
+	right := w - sw - left
+	return strings.Repeat(" ", left) + s + strings.Repeat(" ", right)
+}
+
+// gridGlyphFor returns a larger, Finder-like glyph for the icon cell, color
+// distinct by kind. It uses bold single-width geometric glyphs (kept single-width
+// on purpose so cell alignment never tears) bucketed like glyphFor.
+func gridGlyphFor(item fileItem) string {
+	if item.name == ".." {
+		return "⤴"
+	}
+	if item.isDir {
+		return "▰"
+	}
+	if item.symlink {
+		return "↪"
+	}
+	ext := strings.ToLower(filepath.Ext(item.name))
+	switch ext {
+	case ".go", ".rs", ".c", ".h", ".cpp", ".py", ".js", ".ts", ".java", ".rb", ".sh":
+		return "ƒ"
+	case ".md", ".txt", ".rst", ".log":
+		return "≣"
+	case ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml":
+		return "⚙"
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp":
+		return "▦"
+	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar":
+		return "▤"
+	case ".pdf":
+		return "▥"
+	case ".mp3", ".wav", ".flac", ".ogg", ".mp4", ".mkv", ".mov", ".avi":
+		return "♪"
+	default:
+		return "▢"
+	}
 }
 
 func (m filesModel) renderPaneHeader(side, cw int, focused bool) string {
@@ -503,7 +685,7 @@ func (m filesModel) renderFooter() string {
 	hints := [][2]string{
 		{"↑↓", "move"}, {"↵/→", "open"}, {"←", "up"}, {"space", "select"},
 		{"s", "source"}, {"c/m", "copy/move"}, {"n", "new"}, {"d", "del"},
-		{"i", "info"}, {".", "hidden"}, {"drag", "transfer"}, {"q", "quit"},
+		{"i", "info"}, {"v", "view"}, {".", "hidden"}, {"drag", "transfer"}, {"q", "quit"},
 	}
 	parts := make([]string, 0, len(hints))
 	for _, h := range hints {
