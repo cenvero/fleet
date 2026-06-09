@@ -62,6 +62,7 @@ func NewRootCommand() *cobra.Command {
 	var retryMax time.Duration
 	var offlineMetricsInterval time.Duration
 	var metricsQueuePath string
+	var fileRoots []string
 
 	root := &cobra.Command{
 		Use:   "fleet-agent",
@@ -84,6 +85,7 @@ func NewRootCommand() *cobra.Command {
 	root.PersistentFlags().DurationVar(&retryMax, "retry-max", 30*time.Second, "maximum reconnect backoff for reverse mode")
 	root.PersistentFlags().DurationVar(&offlineMetricsInterval, "offline-metrics-interval", time.Minute, "how often to queue local metrics while the controller is unreachable")
 	root.PersistentFlags().StringVar(&metricsQueuePath, "metrics-queue", DefaultMetricsQueuePath(), "path used to persist queued reverse-mode metrics while disconnected")
+	root.PersistentFlags().StringArrayVar(&fileRoots, "file-root", nil, "confine file operations to these directories (repeatable; default: unrestricted)")
 	root.AddCommand(&cobra.Command{
 		Use:   "capabilities",
 		Short: "Print the detected agent capabilities",
@@ -117,6 +119,7 @@ func NewRootCommand() *cobra.Command {
 		Short: "Run the direct-mode SSH transport listener",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+			SetAllowedFileRoots(fileRoots)
 			listener, err := net.Listen("tcp", listenAddress)
 			if err != nil {
 				return err
@@ -135,6 +138,7 @@ func NewRootCommand() *cobra.Command {
 		Short: "Connect outward to a reverse-mode controller and serve RPCs over the tunnel",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+			SetAllowedFileRoots(fileRoots)
 			server := Server{
 				Mode:                     transport.ModeReverse,
 				HostKeyPath:              hostKeyPath,

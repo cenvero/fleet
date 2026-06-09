@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cenvero/fleet/pkg/proto"
 )
@@ -140,7 +141,89 @@ func checkBlockedTransferPath(real string) *RPCError {
 			}
 		}
 	}
+	if !withinAllowedRoots(real) {
+		return &RPCError{
+			Code:    "invalid_path",
+			Message: "path is outside the agent's allowed file roots",
+		}
+	}
 	return nil
+}
+
+// allowedFileRoots, when non-empty, confines every file operation to paths
+// within one of these resolved roots — a defense-in-depth sandbox so a
+// controller (or a stolen controller key) cannot read or write arbitrary paths
+// on the agent host. Set once at startup via SetAllowedFileRoots before serving;
+// read-only afterwards.
+var allowedFileRoots []string
+
+// SetAllowedFileRoots configures the file-operation sandbox. Each root is made
+// absolute and symlink-resolved. An empty list (the default) imposes no limit.
+// Call before the agent begins serving.
+func SetAllowedFileRoots(roots []string) {
+	resolved := make([]string, 0, len(roots))
+	for _, r := range roots {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		abs := filepath.Clean(r)
+		if !filepath.IsAbs(abs) {
+			if a, err := filepath.Abs(abs); err == nil {
+				abs = a
+			}
+		}
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = real
+		}
+		resolved = append(resolved, abs)
+	}
+	allowedFileRoots = resolved
+}
+
+// withinAllowedRoots reports whether real is inside the configured sandbox (or
+// no sandbox is configured).
+func withinAllowedRoots(real string) bool {
+	if len(allowedFileRoots) == 0 {
+		return true
+	}
+	for _, root := range allowedFileRoots {
+		if real == root || strings.HasPrefix(real, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// stalePartMaxAge is how old a leftover upload temp must be before a new upload
+// to the same directory reaps it.
+const stalePartMaxAge = 24 * time.Hour
+
+// reapStaleParts removes abandoned upload temp files (<name>.fleet-<id>.part) in
+// dir older than stalePartMaxAge, except keepName (the current transfer). It is
+// best-effort and runs lazily when a new upload to dir begins, so orphaned temps
+// from interrupted transfers don't accumulate.
+func reapStaleParts(dir, keepName string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == keepName || !strings.Contains(name, ".fleet-") || !strings.HasSuffix(name, ".part") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > stalePartMaxAge {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 func (m *fileManager) List(_ context.Context, p proto.FileListPayload) (proto.FileListResult, error) {
@@ -269,6 +352,9 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 	// TransferID is deterministic from (path,size,content-hash), so the SAME
 	// content still maps to the SAME temp and resumes; different content does not.
 	temp := real + ".fleet-" + p.TransferID + ".part"
+	// Lazily reap temps abandoned by long-dead transfers in this directory
+	// (never the current one), so orphaned .part files don't pile up.
+	reapStaleParts(filepath.Dir(real), filepath.Base(temp), time.Now())
 	// O_CREATE without O_TRUNC: a temp left by a previous interrupted transfer
 	// is reopened so its bytes can be reused for resume.
 	f, err := os.OpenFile(temp, os.O_RDWR|os.O_CREATE, 0o600)
