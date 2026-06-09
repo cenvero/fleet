@@ -68,7 +68,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() {
+	go func() { // #nosec G118 -- server-lifecycle shutdown, not a request-scoped context
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -257,12 +257,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpPath := tmp.Name()
 	if _, err := io.Copy(tmp, http.MaxBytesReader(w, r.Body, maxWebUploadBytes)); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		writeError(w, err)
 		return
 	}
-	tmp.Close()
+	_ = tmp.Close()
 
 	id := s.hub.start()
 	remotePath := path.Join(dir, name)
@@ -289,8 +289,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpPath)
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := s.app.DownloadFile(server, remotePath, tmpPath, core.FileTransferOptions{}, nil); err != nil {
 		writeError(w, err)
