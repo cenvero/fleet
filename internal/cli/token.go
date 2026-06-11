@@ -43,6 +43,7 @@ func newTokenCreateCommand(configDir *string) *cobra.Command {
 		group           string
 		allow           []string
 		deny            []string
+		allowSecrets    []string
 		readOnlyDefault bool
 		destructive     bool
 	)
@@ -56,11 +57,14 @@ func newTokenCreateCommand(configDir *string) *cobra.Command {
 			"  --group EXPR          restrict to servers matching a tag expr (e.g. role=web)\n" +
 			"  --allow exec,file     only these top-level commands are permitted\n" +
 			"  --deny server,key     these top-level commands are denied\n" +
+			"  --allow-secret NAME   permit this stored secret (repeatable); a scoped\n" +
+			"                        token with none may read no secret at all\n" +
 			"  --read-only-default   deny non-read commands unless explicitly allowed\n" +
 			"  --destructive         permit destructive ops (server remove, file rm, ...)\n\n" +
 			"Examples:\n" +
 			"  fleet token create --name ci --allow exec --group role=web --read-only-default\n" +
-			"  fleet token create --name ops --servers web-01,web-02 --destructive",
+			"  fleet token create --name ops --servers web-01,web-02 --destructive\n" +
+			"  fleet token create --name deploy --allow exec --allow-secret deploy_key",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			store := core.NewTokenStore(*configDir)
@@ -69,6 +73,7 @@ func newTokenCreateCommand(configDir *string) *cobra.Command {
 				Servers:            splitCommaFlags(servers),
 				AllowCommands:      splitCommaFlags(allow),
 				DenyCommands:       splitCommaFlags(deny),
+				AllowSecrets:       splitCommaFlags(allowSecrets),
 				ReadOnlyDefault:    readOnlyDefault,
 				DestructiveAllowed: destructive,
 			}
@@ -92,6 +97,7 @@ func newTokenCreateCommand(configDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&group, "group", "", "tag filter expression to scope to (e.g. role=web)")
 	cmd.Flags().StringSliceVar(&allow, "allow", nil, "comma-separated top-level commands to allow (allow-list)")
 	cmd.Flags().StringSliceVar(&deny, "deny", nil, "comma-separated top-level commands to deny")
+	cmd.Flags().StringSliceVar(&allowSecrets, "allow-secret", nil, "stored secret name this token may read (repeatable; scoped token with none reads no secrets)")
 	cmd.Flags().BoolVar(&readOnlyDefault, "read-only-default", false, "deny non-read commands unless explicitly allowed")
 	cmd.Flags().BoolVar(&destructive, "destructive", false, "permit destructive operations")
 	_ = cmd.MarkFlagRequired("name")
@@ -161,6 +167,9 @@ func tokenScopeSummary(t core.Token) string {
 	}
 	if len(t.DenyCommands) > 0 {
 		parts = append(parts, "deny="+strings.Join(t.DenyCommands, ","))
+	}
+	if len(t.AllowSecrets) > 0 {
+		parts = append(parts, "secrets="+strings.Join(t.AllowSecrets, ","))
 	}
 	if t.ReadOnlyDefault {
 		parts = append(parts, "read-only")

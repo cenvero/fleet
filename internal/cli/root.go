@@ -224,6 +224,38 @@ func NewRootCommand() *cobra.Command {
 	return root
 }
 
+// resolveTokenID returns the presented RBAC token id, mirroring enforceToken:
+// the inherited persistent --token flag first, then the FLEET_TOKEN env var. It
+// returns "" when no token is presented (an unscoped invocation).
+func resolveTokenID(cmd *cobra.Command) string {
+	id := ""
+	if f := cmd.Flags().Lookup("token"); f != nil {
+		id = strings.TrimSpace(f.Value.String())
+	}
+	if id == "" {
+		id = strings.TrimSpace(os.Getenv("FLEET_TOKEN"))
+	}
+	return id
+}
+
+// currentVerifiedToken loads the token presented on this invocation (via --token
+// or FLEET_TOKEN). It returns (nil, nil) when no token is presented — an unscoped
+// invocation. enforceToken has already run in PersistentPreRunE and exited the
+// process for an unknown/revoked token, so a presented token resolves here; the
+// returned token carries the scope (incl. AllowSecrets) used for secret
+// authorization in the exec `--secret` path.
+func currentVerifiedToken(cmd *cobra.Command, configDir string) (*core.Token, error) {
+	id := resolveTokenID(cmd)
+	if id == "" {
+		return nil, nil
+	}
+	tok, err := core.NewTokenStore(configDir).Get(id)
+	if err != nil {
+		return nil, fmt.Errorf("denied: unknown or revoked token")
+	}
+	return &tok, nil
+}
+
 // enforceToken implements FL-030 CONTROLLER-side RBAC enforcement.
 //
 // When a scoped token is presented (via --token or the FLEET_TOKEN env var) it
@@ -2406,8 +2438,16 @@ Examples:
 			var secrets []resolvedSecret
 			if len(secretSpecs) > 0 {
 				secretStore := core.NewSecretStore(*configDir)
+				// Load the verified token (if any) so each `@name` reference is
+				// authorized against its per-token secret allowlist (FL-004 privesc
+				// fix): a scoped exec-capable token can read only the secrets in its
+				// AllowSecrets, not every stored secret.
+				token, terr := currentVerifiedToken(cmd, *configDir)
+				if terr != nil {
+					return terr
+				}
 				for _, spec := range secretSpecs {
-					rs, perr := parseSecretSpec(spec, secretStore)
+					rs, perr := parseSecretSpec(spec, secretStore, token)
 					if perr != nil {
 						return perr
 					}
@@ -2789,7 +2829,14 @@ type resolvedSecret struct {
 // accepted (the value is taken verbatim) but is displayed as `VAR=***` so the
 // literal never appears in echoes/dry-run. Both forms keep the value out of the
 // returned display string.
-func parseSecretSpec(spec string, store *core.SecretStore) (resolvedSecret, error) {
+//
+// token is the verified RBAC token for this invocation (nil for an unscoped
+// invocation). For the `@name` form it enforces the per-token secret allowlist
+// (FL-004 privesc fix) BEFORE reading the value: a scoped token may resolve only
+// secrets in its AllowSecrets, so an exec-capable but scoped token can no longer
+// read every stored secret by injecting `--secret VAR=@other`. A literal value
+// carries no stored-secret reference and is not gated.
+func parseSecretSpec(spec string, store *core.SecretStore, token *core.Token) (resolvedSecret, error) {
 	name, rhs, ok := strings.Cut(spec, "=")
 	name = strings.TrimSpace(name)
 	if !ok || name == "" {
@@ -2800,6 +2847,13 @@ func parseSecretSpec(spec string, store *core.SecretStore) (resolvedSecret, erro
 	}
 	if strings.HasPrefix(rhs, "@") {
 		secretName := strings.TrimSpace(strings.TrimPrefix(rhs, "@"))
+		// Per-token secret authorization: a scoped token may reference only the
+		// secrets in its AllowSecrets; an unscoped admin token is unrestricted.
+		if token != nil {
+			if err := core.AuthorizeSecret(*token, secretName); err != nil {
+				return resolvedSecret{}, err
+			}
+		}
 		value, err := store.Get(secretName)
 		if err != nil {
 			return resolvedSecret{}, err

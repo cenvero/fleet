@@ -27,6 +27,7 @@ func newRunCommand(configDir *string) *cobra.Command {
 	var group string
 	var onFail string
 	var dryRun bool
+	var confirm bool
 
 	cmd := &cobra.Command{
 		Use:   "run <playbook.yaml> [<server>]",
@@ -52,6 +53,19 @@ func newRunCommand(configDir *string) *cobra.Command {
 
 			pb, err := core.LoadPlaybook(args[0])
 			if err != nil {
+				return err
+			}
+
+			// SECURITY (cmd-policy gate for playbooks): exec/`job run`/guard/`cron
+			// add` are gated by the cmd-policy deny/confirm list, but `run` executes
+			// a sequence of step commands that previously bypassed that gate — an
+			// operator could run a denied command through a playbook step. Gate EVERY
+			// resolved step command (check/apply/rollback) here, before any step runs:
+			// a deny match refuses the whole run; a confirm match requires --confirm.
+			// This runs even for --dry-run so the plan a denied playbook would print
+			// still reports the refusal. A missing policy allows; a corrupt policy
+			// fails closed (via enforceCmdPolicy).
+			if err := enforcePlaybookCmdPolicy(*configDir, pb, confirm); err != nil {
 				return err
 			}
 
@@ -96,7 +110,30 @@ func newRunCommand(configDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&group, "group", "", "target a group by tag expression (e.g. role=plesk,env=prod)")
 	cmd.Flags().StringVar(&onFail, "on-fail", "", "behavior on a failed step: rollback (undo applied steps) or empty (stop)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the resolved plan without running anything")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm steps that the cmd-policy marks confirm-required")
 	return cmd
+}
+
+// enforcePlaybookCmdPolicy gates every command a playbook would run (each step's
+// check, apply, and rollback) through the cmd-policy deny/confirm list — the same
+// gate `exec`/`job run`/`guard`/`cron add` apply. Without it, `run` let an
+// operator execute a cmd-policy-denied command through a playbook step,
+// bypassing the deny gate entirely. A deny match refuses the WHOLE run (the
+// playbook never starts); a confirm-required match refuses unless confirmed
+// (--confirm). A missing policy allows; a corrupt policy fails closed (via
+// enforceCmdPolicy, which loads the policy fail-closed).
+func enforcePlaybookCmdPolicy(configDir string, pb core.Playbook, confirmed bool) error {
+	for _, step := range pb.Steps {
+		for _, command := range []string{step.Check, step.Apply, step.Rollback} {
+			if strings.TrimSpace(command) == "" {
+				continue
+			}
+			if err := enforceCmdPolicy(configDir, command, confirmed); err != nil {
+				return fmt.Errorf("playbook step %q: %w", step.Name, err)
+			}
+		}
+	}
+	return nil
 }
 
 // parseOnFail interprets the --on-fail flag. Only "rollback" (or empty) is

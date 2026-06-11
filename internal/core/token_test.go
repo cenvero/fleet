@@ -408,6 +408,47 @@ func TestOperatorAttributionNotForgeable(t *testing.T) {
 	}
 }
 
+// TestAuthorizeSecret pins the FL-004 privesc fix: a SCOPED token may read only
+// the secrets in its AllowSecrets allowlist (a scoped token with an empty
+// allowlist may read NONE), while an UNSCOPED admin-equivalent token is
+// unrestricted for back-compat.
+func TestAuthorizeSecret(t *testing.T) {
+	// Scoped token with an allowlist: only listed secrets pass.
+	scoped := Token{Name: "ci", AllowCommands: []string{"exec"}, AllowSecrets: []string{"deploy_key"}}
+	if err := AuthorizeSecret(scoped, "deploy_key"); err != nil {
+		t.Fatalf("allowed secret should pass: %v", err)
+	}
+	if err := AuthorizeSecret(scoped, "db_password"); err == nil {
+		t.Fatal("secret not in AllowSecrets must be denied")
+	} else if !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("error = %q, want a 'denied: ...' message", err)
+	}
+
+	// Scoped token with an EMPTY allowlist: denied EVERY secret.
+	scopedNone := Token{Name: "ci", AllowCommands: []string{"exec"}}
+	if err := AuthorizeSecret(scopedNone, "deploy_key"); err == nil {
+		t.Fatal("a scoped token with empty AllowSecrets must be denied all secrets")
+	}
+
+	// A token scoped ONLY by AllowSecrets is still scoped, and may read its secret.
+	secretOnly := Token{Name: "s", AllowSecrets: []string{"only"}}
+	if !secretOnly.IsScoped() {
+		t.Fatal("a token carrying AllowSecrets must be considered scoped")
+	}
+	if err := AuthorizeSecret(secretOnly, "only"); err != nil {
+		t.Fatalf("its own listed secret should pass: %v", err)
+	}
+	if err := AuthorizeSecret(secretOnly, "other"); err == nil {
+		t.Fatal("an unlisted secret must be denied for a secret-scoped token")
+	}
+
+	// Unscoped admin-equivalent token: unrestricted (back-compat).
+	admin := Token{Name: "admin"}
+	if err := AuthorizeSecret(admin, "anything"); err != nil {
+		t.Fatalf("unscoped token must be unrestricted: %v", err)
+	}
+}
+
 func TestTagDestructiveClassification(t *testing.T) {
 	// `tag <server> key=value` WRITES tags (destructive); `tag` / `tag <server>`
 	// only READ. The command is flat (sub is always ""), so classification keys

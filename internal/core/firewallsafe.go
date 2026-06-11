@@ -217,11 +217,17 @@ type EnableSafeResult struct {
 //     ALWAYS runs first so the door is nailed open before any tightening.
 //  2. Refuse the operation unless either the agent port is now allowed, or the
 //     operator passed forceIHaveConsole (they accept lockout risk knowingly).
-//  3. Schedule a self-reverting undo timer via systemd-run (best effort) so a
-//     mistake auto-rolls-back after undoDelaySecs, then apply the enable.
+//  3. Arm a self-reverting (dead-man) undo timer via systemd-run so a mistake
+//     auto-rolls-back after undoDelaySecs. This MUST be confirmed armed before
+//     the lockdown takes effect: if arming fails we fail CLOSED and do NOT apply
+//     the firewall (returning the arming error), so a host that cannot schedule
+//     the self-revert can never be locked down with no rollback.
+//  4. Only then apply the enable.
 //
-// forceIHaveConsole bypasses the lockout refusal ONLY — the agent-port allow is
-// always injected regardless.
+// forceIHaveConsole bypasses BOTH safety refusals — the lockout-verification
+// refusal (step 2) AND the dead-man-arming refusal (step 3) — because the
+// operator has asserted out-of-band console access to recover. The agent-port
+// allow is always injected regardless.
 func (e *FirewallEngine) EnableSafe(backend FirewallBackend, forceIHaveConsole bool, undoDelaySecs int) (EnableSafeResult, error) {
 	if e.Exec == nil {
 		return EnableSafeResult{}, fmt.Errorf("firewall engine: Exec is nil")
@@ -274,23 +280,51 @@ func (e *FirewallEngine) EnableSafe(backend FirewallBackend, forceIHaveConsole b
 		}
 	}
 
-	// 3) Schedule a self-reverting undo BEFORE applying, so even an apply that
-	//    cuts us off rolls back automatically.
+	// 3) Arm the self-reverting (dead-man) undo BEFORE applying, so even an apply
+	//    that cuts us off rolls back automatically.
+	//
+	// Fail CLOSED: the lockdown must NOT take effect unless the auto-revert is
+	// confirmed armed. If arming fails (the schedule command could not be built, or
+	// running it errored), applying the default-drop firewall anyway could lock the
+	// operator out permanently with no automatic rollback. So on an arm failure we
+	// refuse to enable and return the arming error — UNLESS the operator passed
+	// --force-i-have-console, in which case they have accepted the lockout risk and
+	// have out-of-band recovery. forceIHaveConsole is the ONLY bypass; without it,
+	// no firewall is applied when the dead-man cannot be armed.
 	undoCmd := disableCommand(backend)
 	result.UndoCmd = undoCmd
 	scheduleCmd, revertUnit, scheduleErr := scheduleSelfRevertCommand(undoCmd, undoDelaySecs)
-	if scheduleErr == nil {
+	if scheduleErr != nil {
+		result.UndoScheduleErr = scheduleErr.Error()
+		if !forceIHaveConsole {
+			return result, fmt.Errorf(
+				"refusing to enable firewall: could not arm the auto-revert (dead-man) timer: %w; "+
+					"applying a default-drop firewall without a confirmed self-revert risks a permanent lockout. "+
+					"Re-run with --force-i-have-console only if you have out-of-band console access to recover",
+				scheduleErr)
+		}
+	} else {
 		result.RevertUnit = revertUnit
 		if _, err := e.run(scheduleCmd); err != nil {
 			result.UndoScheduleErr = err.Error()
+			if !forceIHaveConsole {
+				// Clear the unit we never actually armed so the result doesn't
+				// advertise a non-existent revert timer to the operator.
+				result.RevertUnit = ""
+				return result, fmt.Errorf(
+					"refusing to enable firewall: failed to arm the auto-revert (dead-man) timer (unit %s): %w; "+
+						"applying a default-drop firewall without a confirmed self-revert risks a permanent lockout. "+
+						"Re-run with --force-i-have-console only if you have out-of-band console access to recover",
+					revertUnit, err)
+			}
 		} else {
 			result.UndoScheduled = true
 		}
-	} else {
-		result.UndoScheduleErr = scheduleErr.Error()
 	}
 
-	// 4) Apply the enable.
+	// 4) Apply the enable. By this point the dead-man is confirmed armed
+	//    (result.UndoScheduled), or the operator explicitly accepted the lockout
+	//    risk with --force-i-have-console.
 	enableCmd := enableCommand(backend)
 	result.EnableCmd = enableCmd
 	if _, err := e.run(enableCmd); err != nil {

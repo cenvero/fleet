@@ -41,14 +41,21 @@ type TokenStore struct {
 // Hash. ID is populated in memory only at creation time (and is empty for tokens
 // loaded from disk), so the full secret is shown exactly once.
 type Token struct {
-	ID                 string    `json:"id,omitempty"`     // bearer secret; in-memory only, never written
-	Hash               string    `json:"hash,omitempty"`   // SHA-256(id) hex; the at-rest key
-	Prefix             string    `json:"prefix,omitempty"` // first 8 chars of id, for display
-	Name               string    `json:"name"`
-	Servers            []string  `json:"servers,omitempty"`
-	Groups             []string  `json:"groups,omitempty"`
-	AllowCommands      []string  `json:"allow_commands,omitempty"`
-	DenyCommands       []string  `json:"deny_commands,omitempty"`
+	ID            string   `json:"id,omitempty"`     // bearer secret; in-memory only, never written
+	Hash          string   `json:"hash,omitempty"`   // SHA-256(id) hex; the at-rest key
+	Prefix        string   `json:"prefix,omitempty"` // first 8 chars of id, for display
+	Name          string   `json:"name"`
+	Servers       []string `json:"servers,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+	AllowCommands []string `json:"allow_commands,omitempty"`
+	DenyCommands  []string `json:"deny_commands,omitempty"`
+	// AllowSecrets is the per-token secret allowlist (FL-004 privesc fix). A
+	// SCOPED token may reference a stored secret (via `exec --secret VAR=@name`,
+	// or any future `secret get`/`reveal`) ONLY for names listed here; a scoped
+	// token with an empty AllowSecrets is denied ALL secret access. An UNSCOPED
+	// admin-equivalent token (Token.IsScoped() == false) is unrestricted, for
+	// back-compat. Populated by `token create --allow-secret <name>` (repeatable).
+	AllowSecrets       []string  `json:"allow_secrets,omitempty"`
 	ReadOnlyDefault    bool      `json:"read_only_default,omitempty"`
 	DestructiveAllowed bool      `json:"destructive_allowed,omitempty"`
 	Created            time.Time `json:"created"`
@@ -456,8 +463,28 @@ func (t Token) IsScoped() bool {
 	return t.scopesAnyServer() ||
 		len(t.AllowCommands) > 0 ||
 		len(t.DenyCommands) > 0 ||
+		len(t.AllowSecrets) > 0 ||
 		t.ReadOnlyDefault ||
 		t.DestructiveAllowed
+}
+
+// AuthorizeSecret enforces the per-token secret allowlist (FL-004 privesc fix).
+// It returns nil when the token may read the named secret, or a clear
+// "denied: ..." error otherwise. An UNSCOPED admin-equivalent token (no
+// constraints whatsoever) is unrestricted for back-compat; a SCOPED token may
+// read ONLY secrets listed in its AllowSecrets, so a scoped token with an empty
+// AllowSecrets is denied EVERY secret. This is the single chokepoint wired into
+// the exec `--secret` resolution path (and any future `secret get`/`reveal`).
+func AuthorizeSecret(t Token, name string) error {
+	name = strings.TrimSpace(name)
+	// Unscoped admin-equivalent token: unrestricted (back-compat).
+	if !t.IsScoped() {
+		return nil
+	}
+	if stringInSlice(t.AllowSecrets, name) {
+		return nil
+	}
+	return fmt.Errorf("denied: secret %q is not in this token's allowed-secrets list", name)
 }
 
 // Authorize enforces a scoped token against a single controller invocation. It

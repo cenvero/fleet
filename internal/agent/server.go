@@ -27,6 +27,24 @@ import (
 // waiting (which would stall the service restart).
 var globalUpdateMu sync.Mutex
 
+// handshakeTimeout bounds how long the agent waits for an inbound SSH handshake
+// to complete before dropping the raw connection. Without it an unauthenticated
+// peer can open a TCP connection and never finish the handshake, pinning a
+// goroutine and fd indefinitely (a cheap half-open DoS). Mirrors
+// reverseHandshakeTimeout on the controller side.
+const handshakeTimeout = 20 * time.Second
+
+// maxConcurrentHandshakes caps how many inbound connections may be in-handshake
+// or active at once on the direct-mode listener. Each pins a goroutine and at
+// least one fd before any key is verified, so an unauthenticated flood could
+// otherwise exhaust goroutines/fds. A token is acquired before the handshake and
+// released when the connection closes; connections beyond the cap are dropped
+// (the peer can retry). Accepting continues regardless.
+const maxConcurrentHandshakes = 256
+
+// handshakeSlots is a counting semaphore buffered to maxConcurrentHandshakes.
+var handshakeSlots = make(chan struct{}, maxConcurrentHandshakes)
+
 type Server struct {
 	Mode                     transport.Mode
 	HostKeyPath              string
@@ -93,7 +111,17 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return fmt.Errorf("accept transport connection: %w", err)
 		}
+		// Bound concurrent in-handshake/active connections: grab a token or drop
+		// this connection and keep accepting. Acquired before the handshake so a
+		// flood of half-open peers can't pin unbounded goroutines/fds.
+		select {
+		case handshakeSlots <- struct{}{}:
+		default:
+			_ = rawConn.Close()
+			continue
+		}
 		go func() {
+			defer func() { <-handshakeSlots }()
 			_ = s.serveConn(rawConn, config)
 		}()
 	}
@@ -135,10 +163,15 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 	defer rawConn.Close()
 
+	// Bound the SSH handshake so a stalled or half-open peer can't pin a goroutine
+	// and fd open indefinitely (DoS). Cleared once the handshake completes — the
+	// established session manages its own lifetime. Mirrors ReverseHub.ServeConn.
+	_ = rawConn.SetDeadline(time.Now().Add(handshakeTimeout))
 	conn, chans, reqs, err := ssh.NewServerConn(rawConn, config)
 	if err != nil {
 		return err
 	}
+	_ = rawConn.SetDeadline(time.Time{})
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 

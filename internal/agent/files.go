@@ -421,7 +421,15 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 	// Bound the write to the size declared at open_write. Without this a client
 	// could write at an arbitrary offset (e.g. 1 PiB) and allocate an enormous
 	// sparse file; with TotalSize=0 it also blocks any non-empty write.
-	if p.Offset+int64(len(p.Data)) > au.totalSize {
+	//
+	// Overflow-safe: a hostile Offset near MaxInt64 makes Offset+len wrap negative,
+	// which would slip past a naive `Offset+len > totalSize` check. len(p.Data) is
+	// already bounded by MaxRawChunkBytes above and Offset>=0 was checked, so
+	// totalSize-len can't underflow; compare Offset against (totalSize - len)
+	// instead of forming the sum. Equivalent to Offset+len > totalSize when no
+	// overflow.
+	dataLen := int64(len(p.Data))
+	if dataLen < 0 || p.Offset > au.totalSize-dataLen {
 		return proto.FileWriteResult{}, &RPCError{Code: "offset_out_of_range", Message: "write extends beyond the declared file size"}
 	}
 	if p.SHA256 != "" {

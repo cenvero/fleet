@@ -254,6 +254,83 @@ func TestEnableSafeForceBypassesDumpError(t *testing.T) {
 	}
 }
 
+// TestEnableSafeFailsClosedWhenArmingRevertFails: the auto-revert (dead-man)
+// timer is the safety net that auto-rolls-back a lockout. If ARMING it fails,
+// EnableSafe must fail CLOSED — it must NOT apply the default-drop firewall (a
+// permanent lockout with no rollback) and must return the arming error. The
+// agent-port allow still runs first.
+func TestEnableSafeFailsClosedWhenArmingRevertFails(t *testing.T) {
+	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
+		// Agent port is confirmed open so the lockout guard (step 2) passes; the
+		// only failure is arming the self-revert.
+		if strings.Contains(cmd, "iptables -S") {
+			return "-A INPUT -p tcp --dport 2222 -j ACCEPT", 0, nil
+		}
+		// Fail the self-revert scheduling command (unique unit name, so match on
+		// the systemd-run wrapper substring rather than an exact string).
+		if strings.Contains(cmd, "systemd-run") {
+			return "no systemd on this host", 1, nil
+		}
+		return "", 0, nil
+	}}
+	eng := &FirewallEngine{AgentPort: 2222, Exec: fake.exec}
+	res, err := eng.EnableSafe(FirewallBackendIptables, false, 60)
+	if err == nil {
+		t.Fatalf("expected EnableSafe to abort when arming the auto-revert fails")
+	}
+	if !strings.Contains(err.Error(), "auto-revert") {
+		t.Errorf("error should mention the auto-revert/dead-man timer, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "force-i-have-console") {
+		t.Errorf("error should mention the force override, got: %v", err)
+	}
+	if fake.sawSubstring("iptables -P INPUT DROP") {
+		t.Errorf("enable must NOT run when the auto-revert could not be armed; calls=%v", fake.calls)
+	}
+	if res.UndoScheduled {
+		t.Errorf("UndoScheduled must be false when arming failed")
+	}
+	if res.RevertUnit != "" {
+		t.Errorf("RevertUnit must be cleared when the timer was never armed, got %q", res.RevertUnit)
+	}
+	if res.UndoScheduleErr == "" {
+		t.Errorf("UndoScheduleErr should record why arming failed")
+	}
+	// The agent-port allow must still have been attempted first.
+	if !fake.sawSubstring("--dport '2222' -j ACCEPT") {
+		t.Errorf("agent port allow should still run first; calls=%v", fake.calls)
+	}
+}
+
+// TestEnableSafeForceBypassesArmingFailure: --force-i-have-console lets the
+// operator proceed even when the auto-revert cannot be armed (they have
+// out-of-band console access), so the enable still applies.
+func TestEnableSafeForceBypassesArmingFailure(t *testing.T) {
+	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
+		if strings.Contains(cmd, "iptables -S") {
+			return "-A INPUT -p tcp --dport 2222 -j ACCEPT", 0, nil
+		}
+		if strings.Contains(cmd, "systemd-run") {
+			return "no systemd on this host", 1, nil
+		}
+		return "", 0, nil
+	}}
+	eng := &FirewallEngine{AgentPort: 2222, Exec: fake.exec}
+	res, err := eng.EnableSafe(FirewallBackendIptables, true, 30)
+	if err != nil {
+		t.Fatalf("EnableSafe(force) should proceed despite an arming failure: %v", err)
+	}
+	if !fake.sawSubstring("iptables -P INPUT DROP") {
+		t.Errorf("enable should run under --force even when arming the revert fails; calls=%v", fake.calls)
+	}
+	if res.UndoScheduled {
+		t.Errorf("UndoScheduled must be false when arming failed even under --force")
+	}
+	if res.UndoScheduleErr == "" {
+		t.Errorf("UndoScheduleErr should record the arming failure even under --force")
+	}
+}
+
 func TestEnableSafeRejectsBadAgentPort(t *testing.T) {
 	fake := &fakeFirewall{}
 	eng := &FirewallEngine{AgentPort: 0, Exec: fake.exec}

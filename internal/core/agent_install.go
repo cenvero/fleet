@@ -99,13 +99,24 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 
 	executor := sshBootstrapExecutor{networkDialContext: a.NetworkDialContext}
 	req := BootstrapRequest{
-		Address:          server.Address,
-		Port:             loginPort,
-		User:             loginUser,
-		PrivateKeyPath:   loginKeyPath,
-		Password:         loginPassword,
-		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
-		AcceptNewHostKey: server.Observed.HostKeyFingerprint == "",
+		Address:        server.Address,
+		Port:           loginPort,
+		User:           loginUser,
+		PrivateKeyPath: loginKeyPath,
+		Password:       loginPassword,
+		KnownHostsPath: filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
+		// SECURITY (host-key TOFU): never silently force-replace a pinned host key
+		// during a (re-)bootstrap. AcceptNewHostKey maps to forceReplace in the TOFU
+		// callback, which on a MISMATCH against an existing pin overwrites it instead
+		// of refusing — a MITM during a re-bootstrap could then swap the host key
+		// undetected. First-use pinning (no existing pin in bootstrap_known_hosts)
+		// always happens regardless of this flag, so leaving it false still pins a
+		// brand-new host while REQUIRING a re-presented key to match any existing pin
+		// (and refusing with a MITM warning on mismatch). A deliberate re-pin must go
+		// through the explicit operator path: `fleet server bootstrap
+		// --accept-new-host-key` / `fleet server reconnect --accept-new-host-key`
+		// after out-of-band verification, not this silent install flow.
+		AcceptNewHostKey: false,
 		Uploads:          uploads,
 		RunCommand:       "/bin/sh " + shellQuote(tempScriptPath),
 	}
@@ -173,13 +184,18 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 	script := buildAgentTeardownScript(server.Agent.ServiceName, sudo, tempTeardownPath)
 	executor := sshBootstrapExecutor{networkDialContext: a.NetworkDialContext}
 	req := BootstrapRequest{
-		Address:          server.Address,
-		Port:             loginPort,
-		User:             loginUser,
-		PrivateKeyPath:   loginKeyPath,
-		Password:         password,
-		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
-		AcceptNewHostKey: server.Observed.HostKeyFingerprint == "",
+		Address:        server.Address,
+		Port:           loginPort,
+		User:           loginUser,
+		PrivateKeyPath: loginKeyPath,
+		Password:       password,
+		KnownHostsPath: filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
+		// SECURITY (host-key TOFU): same rule as AutoInstallAgent — never silently
+		// force-replace a pinned host key. Setting AcceptNewHostKey=false still pins a
+		// never-seen host on first use but REQUIRES a matching key when a pin already
+		// exists, refusing with a MITM warning on mismatch. A deliberate re-pin goes
+		// through the explicit --accept-new-host-key operator path.
+		AcceptNewHostKey: false,
 		Uploads: []BootstrapUpload{
 			{Path: tempTeardownPath, Mode: 0o700, Content: []byte(script)},
 		},

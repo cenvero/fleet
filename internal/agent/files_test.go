@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -179,6 +180,47 @@ func TestFileManagerWriteRejectsOutOfRangeOffset(t *testing.T) {
 	if err := writeChunk(t, m, "z", dest2, 0, []byte("x")); err == nil {
 		t.Fatalf("expected write to a zero-size upload to be rejected")
 	}
+}
+
+// TestFileManagerWriteRejectsOverflowOffset proves the bound check cannot be
+// bypassed by an Offset so large that Offset+len(data) overflows int64 and wraps
+// negative. A naive `Offset+int64(len(data)) > totalSize` check would let such a
+// write through (wrapped sum is < totalSize) and sparse-allocate near the top of
+// the address space; the overflow-safe comparison must still reject it.
+func TestFileManagerWriteRejectsOverflowOffset(t *testing.T) {
+	t.Parallel()
+	m := NewFileManager()
+	ctx := context.Background()
+	dest := filepath.Join(t.TempDir(), "ovf.bin")
+	if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: 16, TransferID: "ovf"}); err != nil {
+		t.Fatalf("OpenWrite: %v", err)
+	}
+	// math.MaxInt64 + len("evil") wraps to a negative int64; the write must be
+	// rejected rather than slipping past the size bound.
+	if err := writeChunk(t, m, "ovf", dest, math.MaxInt64, []byte("evil")); err == nil {
+		t.Fatalf("expected overflow offset to be rejected")
+	}
+	if rpcErr, ok := lastWriteErr(m, ctx, dest, math.MaxInt64, []byte("evil")).(*RPCError); !ok || rpcErr.Code != "offset_out_of_range" {
+		t.Fatalf("expected offset_out_of_range RPCError for overflow write")
+	}
+	// Exactly filling the declared size still succeeds (boundary: Offset == total-len).
+	if err := writeChunk(t, m, "ovf", dest, 0, []byte("0123456789abcdef")); err != nil {
+		t.Fatalf("a write that exactly fills the declared size must succeed, got %v", err)
+	}
+	// One byte past the end must be rejected.
+	if err := writeChunk(t, m, "ovf", dest, 16, []byte("x")); err == nil {
+		t.Fatalf("a write one byte past the declared size must be rejected")
+	}
+}
+
+// lastWriteErr re-runs a write and returns its error, so a test can assert on the
+// concrete RPCError code without duplicating the Write payload construction.
+func lastWriteErr(m FileManager, ctx context.Context, dest string, offset int64, data []byte) error {
+	sum := sha256.Sum256(data)
+	_, err := m.Write(ctx, proto.FileWritePayload{
+		TransferID: "ovf", Path: dest, Offset: offset, Data: data, SHA256: hex.EncodeToString(sum[:]),
+	})
+	return err
 }
 
 // TestFileManagerSameDestDistinctTransfersIsolated proves two transfers with

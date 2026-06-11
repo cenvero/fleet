@@ -242,6 +242,145 @@ func TestEnforceTokenDeniesSensitiveLocal(t *testing.T) {
 	}
 }
 
+// TestPerTokenSecretAllowlist pins the FL-004 privesc fix: a SCOPED, exec-capable
+// token may resolve `exec --secret VAR=@name` ONLY for secrets in its
+// AllowSecrets allowlist — it can no longer read every stored secret by
+// injecting an arbitrary `@name`. An UNSCOPED admin token is unrestricted.
+func TestPerTokenSecretAllowlist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess RBAC test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+
+	// Seed two secrets: one the scoped token may read, one it may not.
+	secrets := core.NewSecretStore(dir)
+	if err := secrets.Set("allowed_key", "av"); err != nil {
+		t.Fatalf("set allowed secret: %v", err)
+	}
+	if err := secrets.Set("forbidden_key", "fv"); err != nil {
+		t.Fatalf("set forbidden secret: %v", err)
+	}
+
+	store := core.NewTokenStore(dir)
+	// Scoped (exec-capable) token allowed ONLY allowed_key. Not server-scoped, so
+	// the single-server exec passes the RBAC server check and we isolate the
+	// secret-authorization behavior.
+	scoped, err := store.Create(core.Token{
+		Name:          "ci",
+		AllowCommands: []string{"exec"},
+		AllowSecrets:  []string{"allowed_key"},
+	})
+	if err != nil {
+		t.Fatalf("create scoped token: %v", err)
+	}
+	// Unscoped admin-equivalent token: unrestricted.
+	admin, err := store.Create(core.Token{Name: "admin"})
+	if err != nil {
+		t.Fatalf("create admin token: %v", err)
+	}
+
+	run := func(token string, args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir, "--token", token}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+
+	// The scoped token referencing a secret NOT in its allowlist must be denied at
+	// resolution time (before any agent contact), with a non-zero exit.
+	out, code := run(scoped.ID, "exec", "web-01", "--secret", "X=@forbidden_key", "echo hi")
+	if code == 0 {
+		t.Errorf("scoped token read a forbidden secret (privesc!); output: %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "denied") || !strings.Contains(out, "allowed-secrets") {
+		t.Errorf("forbidden-secret denial output %q does not report the secret allowlist", out)
+	}
+
+	// The scoped token referencing its ALLOWED secret must pass secret
+	// authorization (it may still fail later with no live agent, but NOT with a
+	// secret-allowlist denial).
+	out, _ = run(scoped.ID, "exec", "web-01", "--secret", "X=@allowed_key", "echo hi")
+	if strings.Contains(out, "allowed-secrets") {
+		t.Errorf("scoped token was wrongly denied its allowed secret: %q", out)
+	}
+
+	// The unscoped admin token is unrestricted: referencing any secret must not be
+	// denied by the secret allowlist.
+	out, _ = run(admin.ID, "exec", "web-01", "--secret", "X=@forbidden_key", "echo hi")
+	if strings.Contains(out, "allowed-secrets") {
+		t.Errorf("unscoped admin token was wrongly secret-allowlist-denied: %q", out)
+	}
+}
+
+// TestPlaybookCmdPolicyGate pins the FL-injection fix: `fleet run` (playbooks)
+// now applies the cmd-policy deny gate to every step command, so an operator
+// can no longer run a denied command through a playbook step. A playbook whose
+// step apply matches a deny pattern must be refused before any step runs.
+func TestPlaybookCmdPolicyGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess cmd-policy test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+
+	// Deny any command containing "rm -rf /".
+	store, err := core.NewCmdPolicyStore(dir)
+	if err != nil {
+		t.Fatalf("NewCmdPolicyStore: %v", err)
+	}
+	if err := store.SetDenyPatterns([]string{"rm -rf /"}); err != nil {
+		t.Fatalf("SetDenyPatterns: %v", err)
+	}
+
+	writePlaybook := func(name, apply string) string {
+		path := filepath.Join(t.TempDir(), name)
+		body := "name: pb\nsteps:\n  - name: do\n    apply: " + apply + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write playbook: %v", err)
+		}
+		return path
+	}
+
+	run := func(args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+
+	// A denied step command must refuse the whole run, even under --dry-run (so the
+	// plan a denied playbook would print still reports the refusal).
+	denied := writePlaybook("denied.yaml", "\"rm -rf /\"")
+	out, code := run("run", denied, "--dry-run")
+	if code == 0 {
+		t.Errorf("playbook with a denied step ran (bypass!); output: %q", out)
+	}
+	if !strings.Contains(out, "cmd-policy deny pattern") {
+		t.Errorf("playbook denial output %q does not mention the cmd-policy deny pattern", out)
+	}
+
+	// A playbook whose step does NOT match the deny pattern must pass the gate (the
+	// dry-run plan prints without a policy refusal).
+	ok := writePlaybook("ok.yaml", "uptime")
+	out, _ = run("run", ok, "--dry-run")
+	if strings.Contains(out, "cmd-policy deny pattern") {
+		t.Errorf("a non-denied playbook was wrongly blocked by cmd-policy: %q", out)
+	}
+}
+
 // TestCmdPolicyGatesNonExecCommands proves the cmd-policy deny gate that `exec`
 // enforces also covers the other operator-supplied-command paths — `job run`,
 // `guard`, and `cron add` — which previously bypassed it entirely.
