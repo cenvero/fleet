@@ -142,6 +142,13 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newJournalCommand(&configDir))
 	root.AddCommand(newTopCommand(&configDir))
 	root.AddCommand(newCpCommand(&configDir))
+	root.AddCommand(newNotifyCommand(&configDir))
+	root.AddCommand(newCronCommand(&configDir))
+	root.AddCommand(newDriftCommand(&configDir))
+	root.AddCommand(newPolicyCommand(&configDir))
+	agentCmd := &cobra.Command{Use: "agent", Short: "Manage fleet agents (version, consistency)"}
+	agentCmd.AddCommand(newAgentVersionCommand(&configDir))
+	root.AddCommand(agentCmd)
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
 	return root
