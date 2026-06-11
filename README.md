@@ -150,8 +150,10 @@ Register the server on the controller:
 Then start the reverse agent on the remote server:
 
 ```bash
-./fleet-agent reverse --controller controller.example.com:9443 --server-name edge-01
+./fleet-agent reverse --controller controller.example.com:9443 --server-name edge-01 --enroll-token <token>
 ```
+
+> `fleet server add` prints the one-time `--enroll-token` join secret; the agent needs it only on first connect (before its key is pinned). Re-mint with `fleet server enroll-token edge-01`.
 
 Once the reverse session comes up, the controller can use the same live service, metrics, logs, and alerting flows through that tunnel.
 

@@ -252,10 +252,11 @@ func TestRotateKeysUpdatesReverseAgentControllerKnownHosts(t *testing.T) {
 	defer app.Close()
 
 	if err := app.AddServer(ServerRecord{
-		Name:    "reverse-node",
-		Address: "unknown",
-		Mode:    transport.ModeReverse,
-		User:    "cenvero-agent",
+		Name:         "reverse-node",
+		Address:      "unknown",
+		Mode:         transport.ModeReverse,
+		User:         "cenvero-agent",
+		EnrollSecret: testReverseEnroll,
 	}); err != nil {
 		t.Fatalf("AddServer() error = %v", err)
 	}
@@ -279,6 +280,7 @@ func TestRotateKeysUpdatesReverseAgentControllerKnownHosts(t *testing.T) {
 	agentErrCh := make(chan error, 1)
 	go func() {
 		agentErrCh <- agent.RunReverse(ctx, agent.ReverseOptions{
+			EnrollToken:       testReverseEnroll,
 			ControllerAddress: "127.0.0.1:9443",
 			ServerName:        "reverse-node",
 			KnownHostsPath:    knownHostsPath,
@@ -368,10 +370,11 @@ func TestRotateKeysRollsBackOnReverseKnownHostsFailure(t *testing.T) {
 	defer app.Close()
 
 	if err := app.AddServer(ServerRecord{
-		Name:    "reverse-node",
-		Address: "unknown",
-		Mode:    transport.ModeReverse,
-		User:    "cenvero-agent",
+		Name:         "reverse-node",
+		Address:      "unknown",
+		Mode:         transport.ModeReverse,
+		User:         "cenvero-agent",
+		EnrollSecret: testReverseEnroll,
 	}); err != nil {
 		t.Fatalf("AddServer() error = %v", err)
 	}
@@ -398,6 +401,7 @@ func TestRotateKeysRollsBackOnReverseKnownHostsFailure(t *testing.T) {
 	agentErrCh := make(chan error, 1)
 	go func() {
 		agentErrCh <- agent.RunReverse(ctx, agent.ReverseOptions{
+			EnrollToken:       testReverseEnroll,
 			ControllerAddress: "127.0.0.1:9443",
 			ServerName:        "reverse-node",
 			KnownHostsPath:    knownHostsPath,

@@ -879,13 +879,25 @@ func newServerCommand(configDir *string) *cobra.Command {
 			}
 			defer app.Close()
 
+			// Reverse-mode servers get a one-time enrollment token the agent must
+			// present on first connect before its key is pinned (closes the
+			// rogue-agent TOFU race).
+			enrollSecret := ""
+			if parsedMode == transport.ModeReverse || parsedMode == transport.ModePerNode {
+				enrollSecret, err = core.GenerateEnrollSecret()
+				if err != nil {
+					return err
+				}
+			}
+
 			if err := app.AddServer(core.ServerRecord{
-				Name:    name,
-				Address: address,
-				Mode:    parsedMode,
-				Port:    port,
-				User:    user,
-				KeyPath: keyPath,
+				Name:         name,
+				Address:      address,
+				Mode:         parsedMode,
+				Port:         port,
+				User:         user,
+				KeyPath:      keyPath,
+				EnrollSecret: enrollSecret,
 			}); err != nil {
 				return err
 			}
@@ -914,6 +926,12 @@ func newServerCommand(configDir *string) *cobra.Command {
 			} else if parsedMode == transport.ModeDirect && (noAgent || loginUser == "") {
 				record, _ := app.GetServer(name)
 				fmt.Fprintln(cmd.OutOrStdout(), core.AgentInstallInstructions(record, parsedMode))
+			}
+			if enrollSecret != "" {
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintf(cmd.OutOrStdout(), "Reverse-mode enrollment token (one-time, required on the agent's FIRST connect):\n\n  %s\n\n", enrollSecret)
+				fmt.Fprintf(cmd.OutOrStdout(), "Start the agent with:\n  fleet-agent --mode reverse --controller <addr> --server-name %s --enroll-token %s\n\n", name, enrollSecret)
+				fmt.Fprintln(cmd.OutOrStdout(), "Keep it secret; it's consumed once the agent's key is pinned. Re-mint with 'fleet server enroll-token "+name+"'.")
 			}
 			return nil
 		},
@@ -1162,6 +1180,39 @@ If the server is unreachable or credentials have changed, use one of:
 	bootstrapCmd.Flags().BoolVar(&bootstrapAcceptHost, "accept-new-host-key", false, "accept a replacement bootstrap SSH host key after manual verification")
 	bootstrapCmd.Flags().BoolVar(&bootstrapPrintScript, "print-script", false, "print the generated bootstrap script instead of executing it")
 	serverCmd.AddCommand(bootstrapCmd)
+	serverCmd.AddCommand(&cobra.Command{
+		Use:   "enroll-token <name>",
+		Short: "Mint a fresh one-time reverse-mode enrollment token for a server",
+		Long: "Generate a new enrollment token for a reverse-mode server — e.g. to re-enroll\n" +
+			"an agent after a key loss, or for a server registered before tokens existed.\n" +
+			"The agent must present it on its next first-connect via --enroll-token; it is\n" +
+			"consumed once the agent's key is pinned.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			server, err := app.GetServer(args[0])
+			if err != nil {
+				return err
+			}
+			if server.Mode != transport.ModeReverse && server.Mode != transport.ModePerNode {
+				return fmt.Errorf("server %q is not a reverse-mode server", args[0])
+			}
+			secret, err := core.GenerateEnrollSecret()
+			if err != nil {
+				return err
+			}
+			server.EnrollSecret = secret
+			if err := app.SaveServer(server); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "New enrollment token for %s (one-time):\n\n  %s\n\nStart the agent with --enroll-token %s\n", args[0], secret, secret)
+			return nil
+		},
+	})
 	return serverCmd
 }
 

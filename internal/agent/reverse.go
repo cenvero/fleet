@@ -17,9 +17,20 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// reverseAuthUser encodes the SSH username the reverse agent presents: just the
+// server name once enrolled, or "<serverName>:<token>" during first-time
+// enrollment so the controller can verify the join token before pinning the key.
+func reverseAuthUser(serverName, enrollToken string) string {
+	if enrollToken != "" {
+		return serverName + ":" + enrollToken
+	}
+	return serverName
+}
+
 type ReverseOptions struct {
 	ControllerAddress      string
 	ServerName             string
+	EnrollToken            string
 	KnownHostsPath         string
 	AcceptNewHostKey       bool
 	MinRetryDelay          time.Duration
@@ -116,7 +127,7 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 		Config: ssh.Config{
 			Ciphers: transport.SupportedCiphers(),
 		},
-		User:            opts.ServerName,
+		User:            reverseAuthUser(opts.ServerName, opts.EnrollToken),
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,

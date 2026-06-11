@@ -42,8 +42,10 @@ Typical registration and startup:
 ```bash
 fleet server add edge-01 unknown --mode reverse
 fleet daemon
-fleet-agent reverse --controller controller.example.net:9443 --server-name edge-01
+fleet-agent reverse --controller controller.example.net:9443 --server-name edge-01 --enroll-token <token>
 ```
+
+> The one-time `--enroll-token` is printed by `fleet server add`; it is required only on the agent's first connect.
 
 ### Reverse-mode behavior
 

@@ -136,6 +136,7 @@ type ServerRecord struct {
 	Port         int                   `toml:"port" json:"port"`
 	User         string                `toml:"user" json:"user"`
 	KeyPath      string                `toml:"key_path,omitempty" json:"key_path,omitempty"`
+	EnrollSecret string                `toml:"enroll_secret,omitempty" json:"enroll_secret,omitempty"`
 	Agent        AgentInstall          `toml:"agent" json:"agent"`
 	Capabilities []string              `toml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	Observed     ServerObservation     `toml:"observed" json:"observed"`

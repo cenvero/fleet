@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -88,6 +89,10 @@ func (h *ReverseHub) Serve(ctx context.Context, listener net.Listener) error {
 	}
 }
 
+// reverseHandshakeTimeout bounds how long a reverse agent's SSH handshake may
+// take before the controller drops the connection.
+const reverseHandshakeTimeout = 20 * time.Second
+
 func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 	defer rawConn.Close()
 
@@ -104,10 +109,15 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 	}
 	config.AddHostKey(signer)
 
+	// Bound the SSH handshake so a stalled or half-open agent can't pin a
+	// goroutine and fd open indefinitely (DoS). Cleared once the handshake
+	// completes — the established session manages its own lifetime.
+	_ = rawConn.SetDeadline(time.Now().Add(reverseHandshakeTimeout))
 	conn, chans, reqs, err := ssh.NewServerConn(rawConn, config)
 	if err != nil {
 		return err
 	}
+	_ = rawConn.SetDeadline(time.Time{})
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 
@@ -122,7 +132,9 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 		}
 		go ssh.DiscardRequests(requests)
 
-		serverName := conn.User()
+		// The authenticated, colon-stripped server name (the raw SSH username may
+		// carry an enrollment token); authorizeAgent stored the clean name here.
+		serverName := conn.Permissions.Extensions["server"]
 		session := &transport.Session{
 			Mode:               transport.ModeReverse,
 			LocalAddr:          conn.LocalAddr(),
@@ -339,7 +351,14 @@ func (h *ReverseHub) handleControlConn(conn net.Conn) {
 }
 
 func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-	serverName := conn.User()
+	// The SSH username is "<serverName>" or, during first-time enrollment,
+	// "<serverName>:<enroll-token>". Server names never contain a colon, so split
+	// on the first one. The token rides the already-encrypted SSH auth phase.
+	raw := conn.User()
+	serverName, secret := raw, ""
+	if i := strings.IndexByte(raw, ':'); i >= 0 {
+		serverName, secret = raw[:i], raw[i+1:]
+	}
 	if serverName == "" {
 		return nil, fmt.Errorf("reverse agent must provide a server name as the SSH username")
 	}
@@ -352,11 +371,14 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 	}
 
 	path := filepath.Join(h.app.ConfigDir, "keys", "agents", serverName+".pub")
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create reverse agent key directory: %w", err)
 	}
 
-	if data, err := os.ReadFile(path); err == nil {
+	data, readErr := os.ReadFile(path)
+	switch {
+	case readErr == nil:
+		// Already enrolled: the presented key MUST match the pinned key.
 		existing, _, _, _, parseErr := ssh.ParseAuthorizedKey(data)
 		if parseErr != nil {
 			return nil, fmt.Errorf("parse pinned reverse key for %s: %w", serverName, parseErr)
@@ -364,12 +386,26 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 		if string(existing.Marshal()) != string(key.Marshal()) {
 			return nil, fmt.Errorf("reverse agent key mismatch for %s", serverName)
 		}
-	} else if os.IsNotExist(err) {
+	case os.IsNotExist(readErr):
+		// First contact: require a valid one-time enrollment token BEFORE pinning,
+		// so a rogue agent that merely knows the server name and can reach the
+		// listener cannot win the key-pin race.
+		if server.EnrollSecret == "" {
+			return nil, fmt.Errorf("server %q has no pending enrollment token — mint one with 'fleet server enroll-token %s' and start the agent with --enroll-token", serverName, serverName)
+		}
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(server.EnrollSecret)) != 1 {
+			return nil, fmt.Errorf("invalid enrollment token for %s", serverName)
+		}
 		if err := os.WriteFile(path, ssh.MarshalAuthorizedKey(key), 0o644); err != nil { // #nosec G306 -- public key is intentionally world-readable
 			return nil, fmt.Errorf("pin reverse agent key for %s: %w", serverName, err)
 		}
-	} else {
-		return nil, fmt.Errorf("read pinned reverse key for %s: %w", serverName, err)
+		// Consume the one-time token so a stolen token can't be replayed.
+		server.EnrollSecret = ""
+		if err := h.app.SaveServer(server); err != nil {
+			return nil, fmt.Errorf("clear enrollment token for %s: %w", serverName, err)
+		}
+	default:
+		return nil, fmt.Errorf("read pinned reverse key for %s: %w", serverName, readErr)
 	}
 
 	return &ssh.Permissions{
@@ -378,6 +414,15 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 			"fingerprint": ssh.FingerprintSHA256(key),
 		},
 	}, nil
+}
+
+// GenerateEnrollSecret mints a random reverse-mode enrollment token.
+func GenerateEnrollSecret() (string, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate enrollment secret: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 func (h *ReverseHub) setSession(serverName string, session *transport.Session, info ReverseSessionInfo) {

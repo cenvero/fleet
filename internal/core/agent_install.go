@@ -203,12 +203,19 @@ func AgentInstallInstructions(server ServerRecord, mode transport.Mode) string {
 	}
 	switch mode {
 	case transport.ModeReverse:
+		enrollLine := ""
+		note := "Add it to your init system to start on boot."
+		if server.EnrollSecret != "" {
+			enrollLine = " --enroll-token " + server.EnrollSecret
+			note = "--enroll-token is a one-time join secret (needed only on first connect;\n" +
+				"re-mint with 'fleet server enroll-token " + server.Name + "'). Add it to your init system to start on boot."
+		}
 		return fmt.Sprintf(
 			"To install the agent on %s, download fleet-agent_%s for your OS/arch from\n"+
 				"https://github.com/%s/releases and run:\n\n"+
-				"  fleet-agent reverse --controller <this-controller-address> --server-name %s\n\n"+
-				"Add it to your init system to start on boot.",
-			server.Name, ver, agentGitHubRepo, server.Name,
+				"  fleet-agent reverse --controller <this-controller-address> --server-name %s%s\n\n"+
+				"%s",
+			server.Name, ver, agentGitHubRepo, server.Name, enrollLine, note,
 		)
 	default:
 		return fmt.Sprintf(

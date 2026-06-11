@@ -21,6 +21,8 @@ import (
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
+const testReverseEnroll = "test-reverse-enroll-token"
+
 func TestReverseHubAndReverseModeServiceList(t *testing.T) {
 	t.Parallel()
 
@@ -43,10 +45,11 @@ func TestReverseHubAndReverseModeServiceList(t *testing.T) {
 	defer app.Close()
 
 	if err := app.AddServer(ServerRecord{
-		Name:    "reverse-node",
-		Address: "unknown",
-		Mode:    transport.ModeReverse,
-		User:    "cenvero-agent",
+		Name:         "reverse-node",
+		Address:      "unknown",
+		Mode:         transport.ModeReverse,
+		User:         "cenvero-agent",
+		EnrollSecret: testReverseEnroll,
 	}); err != nil {
 		t.Fatalf("AddServer() error = %v", err)
 	}
@@ -78,6 +81,7 @@ func TestReverseHubAndReverseModeServiceList(t *testing.T) {
 	}()
 	go func() {
 		agentErrCh <- agent.RunReverse(ctx, agent.ReverseOptions{
+			EnrollToken:       testReverseEnroll,
 			ControllerAddress: "127.0.0.1:9443",
 			ServerName:        "reverse-node",
 			KnownHostsPath:    filepath.Join(t.TempDir(), "controller_known_hosts"),
@@ -146,10 +150,11 @@ func TestRunReverseRetriesAndReplaysQueuedMetrics(t *testing.T) {
 	defer app.Close()
 
 	if err := app.AddServer(ServerRecord{
-		Name:    "reverse-node",
-		Address: "unknown",
-		Mode:    transport.ModeReverse,
-		User:    "cenvero-agent",
+		Name:         "reverse-node",
+		Address:      "unknown",
+		Mode:         transport.ModeReverse,
+		User:         "cenvero-agent",
+		EnrollSecret: testReverseEnroll,
 	}); err != nil {
 		t.Fatalf("AddServer() error = %v", err)
 	}
@@ -169,6 +174,7 @@ func TestRunReverseRetriesAndReplaysQueuedMetrics(t *testing.T) {
 	agentErrCh := make(chan error, 1)
 	go func() {
 		agentErrCh <- agent.RunReverse(ctx, agent.ReverseOptions{
+			EnrollToken:            testReverseEnroll,
 			ControllerAddress:      "127.0.0.1:9443",
 			ServerName:             "reverse-node",
 			KnownHostsPath:         filepath.Join(t.TempDir(), "controller_known_hosts"),
@@ -257,10 +263,11 @@ func TestReverseHubClearSessionIgnoresStaleDisconnect(t *testing.T) {
 	defer app.Close()
 
 	if err := app.AddServer(ServerRecord{
-		Name:    "reverse-node",
-		Address: "unknown",
-		Mode:    transport.ModeReverse,
-		User:    "cenvero-agent",
+		Name:         "reverse-node",
+		Address:      "unknown",
+		Mode:         transport.ModeReverse,
+		User:         "cenvero-agent",
+		EnrollSecret: testReverseEnroll,
 	}); err != nil {
 		t.Fatalf("AddServer() error = %v", err)
 	}

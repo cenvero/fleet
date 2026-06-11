@@ -118,8 +118,10 @@ Register the server first:
 Then start the reverse agent:
 
 ```bash
-./fleet-agent reverse --controller 127.0.0.1:9443 --server-name edge-01
+./fleet-agent reverse --controller 127.0.0.1:9443 --server-name edge-01 --enroll-token <token>
 ```
+
+> `fleet server add` prints the one-time `--enroll-token` join secret; the agent needs it only on first connect (before its key is pinned). Re-mint with `fleet server enroll-token edge-01`.
 
 Once connected, the reverse session is visible through the same fleet workflows:
 
