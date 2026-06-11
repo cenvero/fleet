@@ -6,6 +6,8 @@ package cli
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -221,6 +223,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 	_ = os.Setenv("FLEET_OPERATOR", "token:"+token.Name)
 
 	top, sub := topLevelCommand(cmd)
+	serverScoped := len(token.Servers) > 0 || len(token.Groups) > 0
 
 	// A scoped token must never be able to mint or modify tokens: that would let
 	// a constrained credential escalate its own (or others') scope.
@@ -229,17 +232,70 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		os.Exit(1)
 	}
 
+	// Sensitive local-store mutations are an escalation surface: secrets, policy,
+	// cmd-policy and token mutations all let a constrained credential change what
+	// it (or another credential) may do, or read/alter injected secret material.
+	// Deny them for ANY scoped token (Servers/Groups/Allow/Deny/ReadOnly set), the
+	// same way token create/revoke is denied above. An entirely unscoped token
+	// (no constraints at all) is the unprivileged-equivalent admin credential and
+	// is unaffected.
+	if token.IsScoped() {
+		switch {
+		case top == "secret" && (sub == "set" || sub == "rotate" || sub == "rm"):
+			fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'secret %s'\n", sub)
+			os.Exit(1)
+		case top == "policy" && sub == "set":
+			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'policy set'")
+			os.Exit(1)
+		case top == "cmd-policy" && sub == "set":
+			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'cmd-policy set'")
+			os.Exit(1)
+		case top == "token":
+			// Any token mutation beyond create/revoke (already handled above).
+			if sub != "" && sub != "list" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'token %s'\n", sub)
+				os.Exit(1)
+			}
+		}
+	}
+
 	args := commandPositionalArgs(cmd)
 	targetServer := bestEffortTargetServer(top, args)
-	isDestructive := core.IsDestructiveCommand(top, args)
+	// Pass the REAL subcommand (sub, from topLevelCommand). cobra has already
+	// consumed the subcommand token, so args[0] is the first POSITIONAL (often a
+	// server name), NOT the subcommand — classifying on args[0] is the root-cause
+	// bug this fixes.
+	isDestructive := core.IsDestructiveCommand(top, sub, args)
+
+	// Fan-out commands (`exec --all`, `exec --group EXPR`) run on a set of servers
+	// the single best-effort target check cannot vet. A server-scoped token is
+	// therefore DENIED them (fail-closed) rather than slipping past with an empty
+	// target. Detect the flags on the leaf command directly.
+	if serverScoped && top == "exec" {
+		allSet, _ := cmd.Flags().GetBool("all")
+		groupSet, _ := cmd.Flags().GetString("group")
+		if allSet || strings.TrimSpace(groupSet) != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a fan-out exec (--all/--group) in RBAC v1")
+			os.Exit(1)
+		}
+	}
 
 	// RBAC v1 enforces a single best-effort target server. Cross-server commands
 	// (cp, file copy/move/diff) touch two servers the single-target check cannot
 	// fully vet, so a server-scoped token is DENIED them (fail-closed) rather than
 	// allowed to slip past the scope check with an empty/partial target.
-	if (len(token.Servers) > 0 || len(token.Groups) > 0) &&
+	if serverScoped &&
 		(top == "cp" || (top == "file" && (sub == "copy" || sub == "move" || sub == "diff"))) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run cross-server %q in RBAC v1\n", strings.TrimSpace(top+" "+sub))
+		os.Exit(1)
+	}
+
+	// FAIL-CLOSED: for a server-scoped token, a command that OPERATES ON A SERVER
+	// (its target is the first leaf positional) must resolve to a concrete target.
+	// If it resolves to NO server (empty), DENY rather than skip the scope check —
+	// otherwise a missing/odd-shaped positional would silently bypass scoping.
+	if serverScoped && serverArgCommands[top] && strings.TrimSpace(targetServer) == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token must target a server in scope for %q (none resolved)\n", strings.TrimSpace(top+" "+sub))
 		os.Exit(1)
 	}
 
@@ -290,14 +346,28 @@ func commandPositionalArgs(cmd *cobra.Command) []string {
 	return nil
 }
 
-// serverFirstArgCommands is the set of top-level commands whose first positional
-// argument is conventionally a server name. Used for the best-effort target
-// resolution in token enforcement; it is deliberately conservative.
-// serverSecondArgCommands are top-level commands that take a SUBCOMMAND as
-// their first positional and the server as the SECOND (e.g. `file rm <server>
-// <path>`, `service start <server> <name>`, `server remove <server>`,
-// `firewall enable <server>`, `port open <server> <port>`).
-var serverSecondArgCommands = map[string]bool{
+// serverArgCommands is the set of top-level commands whose targeted server is
+// the FIRST leaf positional argument (args[0]) at controller-enforcement time.
+//
+// CRITICAL: by the time PersistentPreRunE/enforceToken runs, cobra has ALREADY
+// consumed the subcommand token, so the LEAF command's positional args do NOT
+// contain the subcommand. For BOTH top-level server commands
+// (`exec <server> ...`, `journal <server>`, `guard <server> ...`,
+// `drift <server>`, `svc <server>`) AND subcommand commands
+// (`file rm <server> <path>`, `firewall enable <server>`,
+// `server remove <server>`, `port open <server> <port>`,
+// `service start <server> <name>`) the server is therefore args[0].
+//
+// This set keys on the TOP-LEVEL command; the per-subcommand distinction is no
+// longer needed because the subcommand is not in args at runtime.
+var serverArgCommands = map[string]bool{
+	// top-level, server is first positional
+	"exec":    true,
+	"journal": true,
+	"guard":   true,
+	"drift":   true,
+	"svc":     true,
+	// subcommand commands, server is first leaf positional (sub already consumed)
 	"server":   true,
 	"service":  true,
 	"file":     true,
@@ -306,29 +376,17 @@ var serverSecondArgCommands = map[string]bool{
 	"port":     true,
 }
 
-// serverFirstArgCommands are top-level commands whose FIRST positional argument
-// is conventionally a server name (e.g. `exec <server> <cmd>`, `journal
-// <server>`, `guard <server> <cmd>`, `drift <server>`, `svc <server>`).
-var serverFirstArgCommands = map[string]bool{
-	"exec":    true,
-	"journal": true,
-	"guard":   true,
-	"drift":   true,
-	"svc":     true,
-}
-
 // bestEffortTargetServer extracts the targeted server name for a command, if it
 // can be determined cheaply. It is conservative: commands not known to take a
 // server as a positional arg (e.g. `health`/`top` which use flags, `revert
 // <id>` which takes an id, `cp <src:path> <dst:path>` which encodes servers in
 // a colon form) return "" so no server-scope check is applied.
+//
+// args is the LEAF command's positional args (cobra already consumed any
+// subcommand), so the server is the FIRST positional for every command in
+// serverArgCommands.
 func bestEffortTargetServer(top string, args []string) string {
-	switch {
-	case serverSecondArgCommands[top]:
-		if len(args) >= 2 {
-			return args[1]
-		}
-	case serverFirstArgCommands[top]:
+	if serverArgCommands[top] {
 		if len(args) >= 1 {
 			return args[0]
 		}
@@ -2229,13 +2287,25 @@ Examples:
 			// paths). It returns the execJSON it produced (for --json aggregation),
 			// a skip flag (preflight short-circuited: approval staged, dry-run, or
 			// idempotency hit), and a fatal error (deny/guard/confirm block).
+			// idemKey derives the per-(server,command) cache key from the bare
+			// --idempotency-key. CRITICAL: keying on the bare flag alone collides
+			// across servers (under --all/--group every server would return the
+			// FIRST server's cached result) and across different commands sharing a
+			// key. Composite-keying with the server and command isolates each entry.
+			// The "\x00" separators are bytes that cannot appear in a server name or
+			// the user key, so concatenation is unambiguous.
+			idemKey := func(server, command string) string {
+				sum := sha256.Sum256([]byte(idempotencyKey + "\x00" + server + "\x00" + command))
+				return hex.EncodeToString(sum[:])
+			}
+
 			execOne := func(server, command string, printHeader, human bool) (execJSON, bool, error) {
 				if blocked, berr := preflight(server, command); blocked {
 					return execJSON{}, true, berr
 				}
 				// idempotency-hit: return the cached result instead of running.
 				if idempotencyKey != "" {
-					if cached, ok := idemStore.Get(idempotencyKey); ok {
+					if cached, ok := idemStore.Get(idemKey(server, command)); ok {
 						if human {
 							fmt.Fprintf(cmd.OutOrStdout(), "idempotency-key %s: cached result\n%s\n", idempotencyKey, redact(cached))
 						}
@@ -2259,12 +2329,24 @@ Examples:
 				j := toJSON(server, r, timedOut, agentErr, dur)
 				if idempotencyKey != "" {
 					if data, merr := json.Marshal(j); merr == nil {
-						_ = idemStore.Put(idempotencyKey, string(data), time.Hour)
+						_ = idemStore.Put(idemKey(server, command), string(data), time.Hour)
 					}
 				}
 				// on-fail: a non-zero exit, timeout, or transport error triggers it.
 				failed := agentErr != nil || timedOut || r.ExitCode != 0
 				if onFail != "" && failed {
+					// The on-fail command is a full remote command and MUST pass the
+					// same preflight gate as the main one (deny-list, guard, confirm,
+					// require-approval). Without this it was a complete gate bypass.
+					if blocked, berr := preflight(server, onFail); blocked {
+						if human {
+							printExecHuman(cmd, j, printHeader)
+							if berr != nil {
+								fmt.Fprintf(cmd.ErrOrStderr(), "--- on-fail blocked: %v ---\n", berr)
+							}
+						}
+						return j, false, berr
+					}
 					or, oTimedOut, oAgentErr, oDur := run(server, onFail)
 					oj := toJSON(server, or, oTimedOut, oAgentErr, oDur)
 					if human {

@@ -57,6 +57,16 @@ const secretKeyFile = "secret.key"
 // is the configured PrimaryKey default (see DefaultConfig).
 var controllerPrimaryKeyNames = []string{"id_ed25519", "id_rsa4096"}
 
+// DeriveSecretKey is the exported form of deriveSecretKey, used by the controller
+// key-rotation flow to capture the secret-encryption key BEFORE and AFTER the
+// controller private key is replaced on disk. Because the derived key depends on
+// the controller private-key material, callers must snapshot it at the right
+// moment (old key before promotion, new key after) and pass both to
+// SecretStore.Rekey.
+func DeriveSecretKey(configDir string) ([]byte, error) {
+	return deriveSecretKey(configDir)
+}
+
 // deriveSecretKey returns the stable 32-byte AES key for the store rooted at
 // configDir, preferring the controller private key and falling back to a
 // dedicated key file. It is deterministic for a given config dir.

@@ -381,6 +381,70 @@ func (s *SecretStore) Rotate(name string, length int) error {
 	return s.upgradeAndWrite(doc)
 }
 
+// Rekey re-seals every stored secret from oldKey to newKey, used when the
+// controller's primary private key (the HKDF input for the derived secret key)
+// is rotated. Without this, the post-rotation derived key no longer matches the
+// ciphertexts and every Get fails permanently — a silent data-loss bug.
+//
+// Crash-safety: every value is decrypted under oldKey into memory FIRST and only
+// then re-encrypted under newKey and written via the atomic temp+rename in
+// write(). If a value cannot be opened under oldKey the whole operation aborts
+// before any write, so a half-rotated store is never persisted. Legacy plaintext
+// records (no Enc marker) are simply sealed under newKey. The caller passes the
+// keys explicitly because the on-disk controller key — and therefore the result
+// of deriveSecretKey — changes across the rotation; this method must not re-derive
+// from disk.
+func (s *SecretStore) Rekey(oldKey, newKey []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, err := s.read()
+	if err != nil {
+		return err
+	}
+	if len(doc.Secrets) == 0 {
+		return nil // nothing to re-seal
+	}
+
+	// Phase 1: decrypt every value under the OLD key into memory. Abort on the
+	// first failure so nothing is written if the old key is wrong.
+	plaintexts := make(map[string]string, len(doc.Secrets))
+	for name, rec := range doc.Secrets {
+		if rec.Enc == "" {
+			// Legacy plaintext: carry the value forward to be sealed under newKey.
+			plaintexts[name] = rec.Value
+			continue
+		}
+		if rec.Enc != secretEncMarker {
+			return fmt.Errorf("rekey secret %q: unsupported encryption format %q", name, rec.Enc)
+		}
+		plain, err := decryptValue(oldKey, rec.Value)
+		if err != nil {
+			return fmt.Errorf("rekey secret %q: decrypt under old key: %w", name, err)
+		}
+		plaintexts[name] = plain
+	}
+
+	// Phase 2: re-seal every value under the NEW key, preserving timestamps.
+	for name, plain := range plaintexts {
+		enc, err := encryptValue(newKey, plain)
+		if err != nil {
+			return fmt.Errorf("rekey secret %q: encrypt under new key: %w", name, err)
+		}
+		rec := doc.Secrets[name]
+		doc.Secrets[name] = secretRecord{Value: enc, Enc: secretEncMarker, Created: rec.Created}
+	}
+
+	// Phase 3: atomic write. Update the cached key so subsequent in-process reads
+	// use the new key (matching what is now on disk after promotion).
+	if err := s.write(doc); err != nil {
+		return err
+	}
+	s.key = append([]byte(nil), newKey...)
+	s.keyErr = nil
+	return nil
+}
+
 // Remove deletes a secret. Removing an unknown secret is an error so callers get
 // clear feedback.
 func (s *SecretStore) Remove(name string) error {

@@ -183,6 +183,16 @@ func runTunnel(ctx context.Context, listener net.Listener, dialer *core.TunnelDi
 		}
 
 		connMu.Lock()
+		// Shutdown race: the ctx-cancel goroutine closes every tracked conn
+		// while holding connMu. If we registered a conn after that sweep ran,
+		// nothing would ever close it (the sweep is one-shot), orphaning the
+		// conn and its handler goroutine. Re-check ctx under the lock: if
+		// shutdown began, drop this conn instead of tracking/handling it.
+		if ctx.Err() != nil {
+			connMu.Unlock()
+			_ = local.Close()
+			break
+		}
 		conns[local] = struct{}{}
 		connMu.Unlock()
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -156,11 +157,93 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 			}
 			sessionID := conn.Permissions.Extensions["key_fp"]
 			go serveShell(channel, requests, sessionID)
+		case directTCPIPChannelType:
+			go serveDirectTCPIP(newChannel)
 		default:
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
 		}
 	}
 	return nil
+}
+
+// directTCPIPChannelType is the standard SSH channel type a client opens to
+// request the server make an outbound TCP connection on its behalf — the
+// primitive behind `fleet tunnel`. The Go SSH client's Client.Dial("tcp", addr)
+// opens exactly this channel type (RFC 4254 §7.2).
+const directTCPIPChannelType = "direct-tcpip"
+
+// directTCPIPExtraData is the channel-open extra data for a "direct-tcpip"
+// request, per RFC 4254 §7.2: the host/port the server should connect to,
+// followed by the originator's host/port (informational only).
+//
+// The field order and wire types match what golang.org/x/crypto/ssh's
+// Client.dial marshals, so ssh.Unmarshal decodes it directly.
+type directTCPIPExtraData struct {
+	HostToConnect  string
+	PortToConnect  uint32
+	OriginatorIP   string
+	OriginatorPort uint32
+}
+
+// serveDirectTCPIP fulfills an SSH "direct-tcpip" channel: it parses the
+// requested destination, dials it FROM the agent, accepts the channel, and
+// pipes bytes both ways until either side closes.
+//
+// SECURITY: this lets an authenticated controller reach any host:port the agent
+// can route to — that is the entire point of `fleet tunnel` (e.g. reaching a
+// private DB that only the server can see). It is deliberately NOT restricted by
+// the agent's --file-root: --file-root scopes filesystem access for file.*
+// transfers and has no meaning for TCP destinations, and a network tunnel is a
+// distinct capability from file access. The only gate is the existing SSH
+// public-key authentication (PublicKeyCallback) — by the time a channel is
+// opened the controller's key is already authorized, which is the same trust
+// boundary that grants shell.exec and firewall control. No new authorization is
+// added here; anyone able to open a fleet-shell/fleet-rpc channel can already
+// run arbitrary commands on the agent, so tunneling grants no additional power.
+func serveDirectTCPIP(newChannel ssh.NewChannel) {
+	var req directTCPIPExtraData
+	if err := ssh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, "malformed direct-tcpip request")
+		return
+	}
+
+	dest := net.JoinHostPort(req.HostToConnect, strconv.Itoa(int(req.PortToConnect)))
+	remote, err := net.Dial("tcp", dest)
+	if err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, fmt.Sprintf("dial %s: %v", dest, err))
+		return
+	}
+
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		_ = remote.Close()
+		return
+	}
+	go ssh.DiscardRequests(requests)
+
+	// Pipe both directions. When either side hits EOF/error, close both ends so
+	// the opposite copy unblocks, then wait for both to finish.
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			_ = channel.Close()
+			_ = remote.Close()
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(remote, channel)
+		closeBoth()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(channel, remote)
+		closeBoth()
+	}()
+	wg.Wait()
 }
 
 func (s Server) serveRPC(channel ssh.Channel) {

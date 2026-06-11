@@ -74,6 +74,19 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		return KeyRotationResult{}, err
 	}
 
+	// The secret-encryption AES key is HKDF-derived from the controller's primary
+	// private key (see secret_crypto.go). Promoting the freshly generated key set
+	// below replaces that private key on disk, so the derived key — and thus the
+	// ability to decrypt every stored secret — would change. Snapshot the CURRENT
+	// (pre-rotation) derived secret key now, while the old controller key is still
+	// the active one, so we can re-seal secrets under the new key after promotion.
+	// We read+decrypt all secrets into memory before discarding the old key, so a
+	// crash mid-rotation can never lose them.
+	oldSecretKey, err := DeriveSecretKey(a.ConfigDir)
+	if err != nil {
+		return KeyRotationResult{}, fmt.Errorf("derive pre-rotation secret key: %w", err)
+	}
+
 	directTargets, reverseTargets, skipped := rotationTargets(a, servers)
 	stagedDirect := make([]ServerRecord, 0, len(directTargets))
 	stagedReverse := make([]ServerRecord, 0, len(reverseTargets))
@@ -134,6 +147,22 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 
 	if err := promoteGeneratedKeys(tempDir, filepath.Join(a.ConfigDir, "keys")); err != nil {
 		return KeyRotationResult{}, rollbackBeforePromote(err)
+	}
+
+	// The new controller private key is now active on disk, so the derived
+	// secret-encryption key has changed. Re-seal every stored secret from the old
+	// derived key to the new one. DeriveSecretKey now sees the promoted key, so it
+	// returns the NEW secret key. Rekey decrypts all values under oldSecretKey into
+	// memory before writing anything, then atomically rewrites the store under the
+	// new key — a crash before the rewrite leaves the (old-key-sealed) store intact
+	// and recoverable, since rollbackAfterPromote restores the old controller key
+	// files. Without this, every `fleet secret get` would fail after rotation.
+	newSecretKey, err := DeriveSecretKey(a.ConfigDir)
+	if err != nil {
+		return KeyRotationResult{}, rollbackAfterPromote(fmt.Errorf("derive post-rotation secret key: %w", err))
+	}
+	if err := NewSecretStore(a.ConfigDir).Rekey(oldSecretKey, newSecretKey); err != nil {
+		return KeyRotationResult{}, rollbackAfterPromote(fmt.Errorf("re-encrypt secrets across key rotation: %w", err))
 	}
 
 	for _, server := range reverseTargets {

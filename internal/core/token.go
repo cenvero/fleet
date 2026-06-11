@@ -226,11 +226,13 @@ var readCommands = map[string]bool{
 	"top":       true,
 	"alerts":    true,
 	"drift":     true,
-	"config":    true,
-	"tag":       true,
-	"port":      true, // `port list` is read; `port open/close` is gated by deny/allow + scope
-	"version":   true,
-	"report":    true,
+	"config":    true, // `config show/get/...` are read; mutating subs are classified destructive
+	// NOTE: `tag` is intentionally NOT a read command: `tag set` is a WRITE. A
+	// read-only token that legitimately needs `tag list` must allow it explicitly
+	// via AllowCommands. `tag set` is additionally classified destructive.
+	"port":    true, // `port list` is read; `port open/close` are classified destructive
+	"version": true,
+	"report":  true,
 }
 
 // IsReadCommand reports whether a top-level command is in the read-only set.
@@ -242,13 +244,20 @@ func IsReadCommand(topCommand string) bool {
 // treated as destructive for FL-030. A token without DestructiveAllowed cannot
 // run any of these. The list is intentionally conservative and explicit:
 //
-//	server   remove                      tears down/forgets a managed server
-//	file     rm                          deletes a remote file/dir
-//	key      rotate                      rotates controller keys + rolls them out
-//	firewall enable                      changes live firewall state (lock-out risk)
-//	fw       enable                      alias of firewall enable (if present)
-//	guard    (any)                       arms/triggers the dead-man guard
-//	revert   (any)                       reverts servers to a prior state
+//	server    remove                     tears down/forgets a managed server
+//	file      rm                         deletes a remote file/dir
+//	key       (any mutating sub)         rotates/regenerates controller keys
+//	firewall  enable                     changes live firewall state (lock-out risk)
+//	fw        enable                     alias of firewall enable (if present)
+//	guard     (any)                      arms/triggers the dead-man guard
+//	revert    (any)                      reverts servers to a prior state
+//	tag       set                        rewrites server tags (group membership)
+//	config    (any mutating sub)         edits controller/server config
+//	port      open/close                 changes live exposed-port state
+//	cron      add/rm                     schedules/removes remote jobs
+//	cmd-policy set                       rewrites the command policy
+//	secret    set/rotate/rm              mutates stored secrets
+//	policy    set                        rewrites policy
 //
 // Notes:
 //   - drift is read-only (it reports divergence; it does not change anything),
@@ -256,20 +265,68 @@ func IsReadCommand(topCommand string) bool {
 //   - exec cannot be classified from here (we can't see what the remote command
 //     does), so exec is treated as NON-destructive by default; operators scope
 //     it via DenyCommands/AllowCommands and the server set instead.
+//
+// A subcommand value of "*" means the whole top-level command is destructive.
+// For "key", every mutating sub is destructive; only the read sub
+// "fingerprint" is exempted via keyReadSubs below.
 var destructiveCommands = map[string]map[string]bool{
-	"server":   {"remove": true},
-	"file":     {"rm": true},
-	"key":      {"rotate": true},
-	"firewall": {"enable": true},
-	"fw":       {"enable": true},
-	"guard":    {"*": true},
-	"revert":   {"*": true},
+	"server":     {"remove": true},
+	"file":       {"rm": true},
+	"firewall":   {"enable": true},
+	"fw":         {"enable": true},
+	"guard":      {"*": true},
+	"revert":     {"*": true},
+	"tag":        {"set": true},
+	"port":       {"open": true, "close": true},
+	"cron":       {"add": true, "rm": true},
+	"cmd-policy": {"set": true},
+	"secret":     {"set": true, "rotate": true, "rm": true},
+	"policy":     {"set": true},
 }
 
-// IsDestructiveCommand reports whether the given top-level command (and its
-// args, where the first arg is usually the subcommand) is destructive per the
+// keyReadSubs are the read-only subcommands of `key`. Every other `key`
+// subcommand (rotate, regenerate, etc.) mutates controller keys and is
+// destructive. A bare `key` (no sub) is treated as read (it prints help/list).
+var keyReadSubs = map[string]bool{
+	"fingerprint": true,
+	"list":        true,
+	"show":        true,
+	"export":      true,
+}
+
+// configReadSubs are the read-only subcommands of `config`. Every other
+// `config` subcommand (set/edit/import/...) mutates config and is destructive.
+// A bare `config` (no sub) is treated as read.
+var configReadSubs = map[string]bool{
+	"show":     true,
+	"get":      true,
+	"list":     true,
+	"validate": true,
+	"diff":     true,
+}
+
+// IsDestructiveCommand reports whether the given top-level command plus its
+// resolved subcommand (sub, from topLevelCommand) is destructive per the
 // documented destructiveCommands table.
-func IsDestructiveCommand(topCommand string, args []string) bool {
+//
+// IMPORTANT: by the time controller-side enforcement runs, cobra has already
+// consumed the subcommand token, so the leaf command's positional args do NOT
+// contain the subcommand. Callers MUST pass the real subcommand in sub (from
+// topLevelCommand), not args[0]. args is accepted for future use and is not
+// relied on for classification.
+func IsDestructiveCommand(topCommand, sub string, args []string) bool {
+	topCommand = strings.TrimSpace(topCommand)
+	sub = strings.TrimSpace(sub)
+
+	// `key`: any mutating subcommand is destructive (read subs exempted).
+	if topCommand == "key" {
+		return sub != "" && !keyReadSubs[sub]
+	}
+	// `config`: any mutating subcommand is destructive (read subs exempted).
+	if topCommand == "config" {
+		return sub != "" && !configReadSubs[sub]
+	}
+
 	subs, ok := destructiveCommands[topCommand]
 	if !ok {
 		return false
@@ -277,10 +334,7 @@ func IsDestructiveCommand(topCommand string, args []string) bool {
 	if subs["*"] {
 		return true
 	}
-	if len(args) > 0 && subs[args[0]] {
-		return true
-	}
-	return false
+	return sub != "" && subs[sub]
 }
 
 // stringInSlice reports whether want is present in list (case-sensitive).
@@ -330,6 +384,19 @@ func (t Token) resolvedServers(allServerNames []string, tags *TagStore) (map[str
 // server-scoped and may target any server (subject to the command checks).
 func (t Token) scopesAnyServer() bool {
 	return len(t.Servers) > 0 || len(t.Groups) > 0
+}
+
+// IsScoped reports whether the token carries ANY constraint at all: a server
+// scope (Servers/Groups), a command allow/deny list, or read-only/destructive
+// flags. A token with no constraints whatsoever is the admin-equivalent
+// credential; everything else is "scoped" and is denied sensitive local-store
+// mutations (secrets/policy/cmd-policy/token) by the controller (FL-030).
+func (t Token) IsScoped() bool {
+	return t.scopesAnyServer() ||
+		len(t.AllowCommands) > 0 ||
+		len(t.DenyCommands) > 0 ||
+		t.ReadOnlyDefault ||
+		t.DestructiveAllowed
 }
 
 // Authorize enforces a scoped token against a single controller invocation. It

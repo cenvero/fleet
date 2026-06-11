@@ -74,29 +74,70 @@ func TestCreateRequiresName(t *testing.T) {
 }
 
 func TestIsDestructiveCommand(t *testing.T) {
+	// RUNTIME args shape: cobra has already consumed the subcommand by the time
+	// enforcement runs, so the subcommand is passed explicitly as `sub` and the
+	// positional args (here) do NOT contain it — args[0] is the first leaf
+	// positional (typically a server name), which must NOT drive classification.
 	cases := []struct {
 		top  string
-		args []string
+		sub  string
+		args []string // leaf positionals at runtime (no subcommand)
 		want bool
 	}{
-		{"server", []string{"remove", "web-01"}, true},
-		{"server", []string{"list"}, false},
-		{"file", []string{"rm", "web-01", "/tmp/x"}, true},
-		{"file", []string{"list", "web-01"}, false},
-		{"key", []string{"rotate"}, true},
-		{"key", []string{"fingerprint"}, false},
-		{"firewall", []string{"enable", "web-01"}, true},
-		{"firewall", []string{"status", "web-01"}, false},
-		{"fw", []string{"enable", "web-01"}, true},
-		{"guard", []string{"web-01", "rm -rf /"}, true}, // guard is destructive (any sub)
-		{"revert", []string{"abc123"}, true},            // revert is destructive (any sub)
-		{"drift", []string{"web-01"}, false},            // drift is read-only, NOT destructive
-		{"exec", []string{"web-01", "uptime"}, false},   // exec is non-destructive by default
-		{"status", nil, false},
+		// server
+		{"server", "remove", []string{"web-01"}, true},
+		{"server", "list", nil, false},
+		// file
+		{"file", "rm", []string{"web-01", "/tmp/x"}, true},
+		{"file", "list", []string{"web-01"}, false},
+		// key: any mutating sub destructive, read subs exempt
+		{"key", "rotate", nil, true},
+		{"key", "regenerate", nil, true},
+		{"key", "fingerprint", nil, false},
+		{"key", "list", nil, false},
+		{"key", "", nil, false}, // bare key = help/list
+		// firewall / fw
+		{"firewall", "enable", []string{"web-01"}, true},
+		{"firewall", "status", []string{"web-01"}, false},
+		{"fw", "enable", []string{"web-01"}, true},
+		// guard / revert: any sub destructive
+		{"guard", "web-01", []string{"rm -rf /"}, true},
+		{"revert", "", []string{"abc123"}, true},
+		// newly-added destructive set
+		{"tag", "set", []string{"web-01", "role=web"}, true},
+		{"tag", "list", nil, false},
+		{"port", "open", []string{"web-01", "80"}, true},
+		{"port", "close", []string{"web-01", "80"}, true},
+		{"port", "list", []string{"web-01"}, false},
+		{"cron", "add", []string{"web-01"}, true},
+		{"cron", "rm", []string{"web-01"}, true},
+		{"cron", "list", []string{"web-01"}, false},
+		{"cmd-policy", "set", nil, true},
+		{"cmd-policy", "list", nil, false},
+		{"secret", "set", []string{"name"}, true},
+		{"secret", "rotate", []string{"name"}, true},
+		{"secret", "rm", []string{"name"}, true},
+		{"secret", "list", nil, false},
+		{"policy", "set", nil, true},
+		{"policy", "show", nil, false},
+		// config: mutating subs destructive, read subs exempt
+		{"config", "set", nil, true},
+		{"config", "edit", nil, true},
+		{"config", "show", nil, false},
+		{"config", "", nil, false},
+		// non-destructive
+		{"drift", "", []string{"web-01"}, false},
+		{"exec", "", []string{"web-01", "uptime"}, false},
+		{"status", "", nil, false},
+		// CRITICAL regression: a server name in args[0] must NOT be mistaken for a
+		// destructive subcommand. `firewall <server>` with sub="" (bare) is not
+		// destructive even though args[0] could be any string.
+		{"firewall", "", []string{"enable"}, false},
+		{"server", "", []string{"remove"}, false},
 	}
 	for _, c := range cases {
-		if got := IsDestructiveCommand(c.top, c.args); got != c.want {
-			t.Errorf("IsDestructiveCommand(%q, %v) = %v, want %v", c.top, c.args, got, c.want)
+		if got := IsDestructiveCommand(c.top, c.sub, c.args); got != c.want {
+			t.Errorf("IsDestructiveCommand(%q, %q, %v) = %v, want %v", c.top, c.sub, c.args, got, c.want)
 		}
 	}
 }
@@ -196,6 +237,45 @@ func TestAuthorizeDestructive(t *testing.T) {
 	// Non-destructive op is unaffected by DestructiveAllowed=false.
 	if err := Authorize(tok, "exec", "web-01", false, nil, nil); err != nil {
 		t.Fatalf("non-destructive op should pass: %v", err)
+	}
+}
+
+func TestIsScoped(t *testing.T) {
+	cases := []struct {
+		name string
+		tok  Token
+		want bool
+	}{
+		{"no constraints (admin-equivalent)", Token{Name: "admin"}, false},
+		{"servers", Token{Servers: []string{"web-01"}}, true},
+		{"groups", Token{Groups: []string{"role=web"}}, true},
+		{"allow-list", Token{AllowCommands: []string{"exec"}}, true},
+		{"deny-list", Token{DenyCommands: []string{"server"}}, true},
+		{"read-only", Token{ReadOnlyDefault: true}, true},
+		{"destructive-allowed", Token{DestructiveAllowed: true}, true},
+	}
+	for _, c := range cases {
+		if got := c.tok.IsScoped(); got != c.want {
+			t.Errorf("%s: IsScoped() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestTagSetNotReadOnly guards the regression where `tag set` (a WRITE) slipped
+// past a ReadOnlyDefault token because `tag` was in readCommands. `tag` must NOT
+// be a read command, and `tag set` must additionally be destructive.
+func TestTagSetNotReadOnly(t *testing.T) {
+	if IsReadCommand("tag") {
+		t.Fatal("tag must not be a read-only command (tag set is a WRITE)")
+	}
+	tok := Token{Name: "ro", ReadOnlyDefault: true}
+	if err := Authorize(tok, "tag", "", false, nil, nil); err == nil {
+		t.Fatal("read-only token must be denied 'tag' (no longer a read command)")
+	}
+	// And classified destructive so even a non-read-only token without
+	// DestructiveAllowed is blocked.
+	if !IsDestructiveCommand("tag", "set", []string{"web-01", "role=web"}) {
+		t.Fatal("tag set must be destructive")
 	}
 }
 

@@ -10,7 +10,162 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 )
+
+// writeControllerKey generates a fresh controller ed25519 key set under
+// <configDir>/keys, which is the HKDF input for the derived secret-encryption
+// key (see secret_crypto.go). Returns the keys dir.
+func writeControllerKey(t *testing.T, configDir string) string {
+	t.Helper()
+	keysDir := filepath.Join(configDir, "keys")
+	if err := fleetcrypto.GenerateKeySet(keysDir, fleetcrypto.AlgorithmEd25519, nil); err != nil {
+		t.Fatalf("GenerateKeySet: %v", err)
+	}
+	return keysDir
+}
+
+// promoteFreshControllerKey simulates the controller key promotion performed by
+// RotateKeys: it generates a brand-new ed25519 key set in a temp dir and copies
+// id_ed25519/id_ed25519.pub over the active ones, changing the HKDF input and
+// therefore the derived secret-encryption key.
+func promoteFreshControllerKey(t *testing.T, keysDir string) {
+	t.Helper()
+	tmp := t.TempDir()
+	if err := fleetcrypto.GenerateKeySet(tmp, fleetcrypto.AlgorithmEd25519, nil); err != nil {
+		t.Fatalf("GenerateKeySet (new): %v", err)
+	}
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub"} {
+		data, err := os.ReadFile(filepath.Join(tmp, name))
+		if err != nil {
+			t.Fatalf("read new key %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(keysDir, name), data, 0o600); err != nil {
+			t.Fatalf("promote key %s: %v", name, err)
+		}
+	}
+}
+
+// TestSecretStoreRekeyAcrossControllerKeyRotation is the regression test for the
+// HIGH data-loss bug: the secret-encryption AES key is HKDF-derived from the
+// controller private key, so rotating that key would orphan every ciphertext
+// unless secrets are re-sealed. It mirrors the RotateKeys ordering: snapshot the
+// old derived key, promote a new controller key, derive the new key, Rekey, then
+// confirm Get still returns the original plaintext.
+func TestSecretStoreRekeyAcrossControllerKeyRotation(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := writeControllerKey(t, dir)
+
+	store := NewSecretStore(dir)
+	const (
+		name  = "db_password"
+		value = "correct horse battery staple"
+	)
+	if err := store.Set(name, value); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	// 1. Snapshot the pre-rotation derived key (controller key still active).
+	oldKey, err := DeriveSecretKey(dir)
+	if err != nil {
+		t.Fatalf("DeriveSecretKey (old): %v", err)
+	}
+
+	// 2. Promote a new controller key — this is what would break decryption.
+	promoteFreshControllerKey(t, keysDir)
+
+	// 3. Derive the new key (now reads the promoted controller key).
+	newKey, err := DeriveSecretKey(dir)
+	if err != nil {
+		t.Fatalf("DeriveSecretKey (new): %v", err)
+	}
+	if string(oldKey) == string(newKey) {
+		t.Fatal("derived secret key did not change across controller key rotation; test would not exercise the bug")
+	}
+
+	// 4. Re-seal under the new key.
+	if err := store.Rekey(oldKey, newKey); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	// 5. A FRESH store (cold read, new derived key from disk) must still decrypt.
+	got, err := NewSecretStore(dir).Get(name)
+	if err != nil {
+		t.Fatalf("Get after rotation+Rekey: %v", err)
+	}
+	if got != value {
+		t.Fatalf("Get after rotation = %q, want %q", got, value)
+	}
+}
+
+// TestSecretStoreRotationWithoutRekeyOrphansSecrets documents the bug the fix
+// guards against: promoting a new controller key WITHOUT a Rekey makes every
+// secret undecryptable.
+func TestSecretStoreRotationWithoutRekeyOrphansSecrets(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := writeControllerKey(t, dir)
+
+	if err := NewSecretStore(dir).Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	promoteFreshControllerKey(t, keysDir)
+
+	// Without Rekey, a fresh store derives the NEW key and cannot open the old
+	// ciphertext.
+	if _, err := NewSecretStore(dir).Get("k"); err == nil {
+		t.Fatal("expected Get to fail after controller key rotation without Rekey (orphaned ciphertext)")
+	}
+}
+
+// TestSecretStoreRekeyNoSecrets is a no-op safety check: rekeying an empty store
+// must not error.
+func TestSecretStoreRekeyNoSecrets(t *testing.T) {
+	dir := t.TempDir()
+	writeControllerKey(t, dir)
+	store := NewSecretStore(dir)
+	oldKey, err := DeriveSecretKey(dir)
+	if err != nil {
+		t.Fatalf("DeriveSecretKey: %v", err)
+	}
+	if err := store.Rekey(oldKey, oldKey); err != nil {
+		t.Fatalf("Rekey on empty store: %v", err)
+	}
+}
+
+// TestSecretStoreRekeyWrongOldKeyAborts confirms Rekey fails cleanly (no write)
+// when the old key cannot decrypt the existing ciphertext, so a bad key can never
+// corrupt the store.
+func TestSecretStoreRekeyWrongOldKeyAborts(t *testing.T) {
+	dir := t.TempDir()
+	writeControllerKey(t, dir)
+	store := NewSecretStore(dir)
+	if err := store.Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	correctKey, err := DeriveSecretKey(dir)
+	if err != nil {
+		t.Fatalf("DeriveSecretKey: %v", err)
+	}
+	wrongOld := make([]byte, 32) // all-zero key, will not decrypt
+	newKey := make([]byte, 32)
+	for i := range newKey {
+		newKey[i] = 0xAB
+	}
+	if err := store.Rekey(wrongOld, newKey); err == nil {
+		t.Fatal("Rekey with wrong old key should fail")
+	}
+	// The store must be untouched: the original (correct-key) value still opens.
+	got, err := NewSecretStore(dir).Get("k")
+	if err != nil {
+		t.Fatalf("Get after failed Rekey: %v", err)
+	}
+	if got != "v" {
+		t.Fatalf("Get after failed Rekey = %q, want %q", got, "v")
+	}
+	_ = correctKey
+}
 
 func TestSecretStoreSetGet(t *testing.T) {
 	dir := t.TempDir()

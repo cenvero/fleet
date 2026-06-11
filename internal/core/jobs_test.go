@@ -11,9 +11,10 @@ import (
 )
 
 func TestBuildJobLaunch_QuotesAndDetaches(t *testing.T) {
-	got := buildJobLaunch("echo hi; rm -rf /tmp", "/var/tmp/fleet-job-7.log")
-	// Detaching primitives must be present.
-	for _, want := range []string{"setsid sh -c ", "</dev/null", ">/dev/null 2>&1 &", jobExitMarker + "$?"} {
+	const nonce = "deadbeefcafef00d"
+	got := buildJobLaunch("echo hi; rm -rf /tmp", "/var/tmp/fleet-job-7.log", nonce)
+	// Detaching primitives must be present, and the marker must carry the nonce.
+	for _, want := range []string{"setsid sh -c ", "</dev/null", ">/dev/null 2>&1 &", jobExitMarker + nonce + ":$?"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launch missing %q in: %s", want, got)
 		}
@@ -25,27 +26,59 @@ func TestBuildJobLaunch_QuotesAndDetaches(t *testing.T) {
 	}
 	// A logfile containing a quote must be safely escaped (package core's
 	// shellQuote uses the '"'"' escaping idiom).
-	tricky := buildJobLaunch("true", "/tmp/a'b.log")
+	tricky := buildJobLaunch("true", "/tmp/a'b.log", nonce)
 	if !strings.Contains(tricky, `'"'"'`) {
 		t.Fatalf("logfile single-quote not escaped: %s", tricky)
 	}
 }
 
+func TestNewJobNonce_UniqueAndCharsetSafe(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		n, err := newJobNonce()
+		if err != nil {
+			t.Fatalf("newJobNonce: %v", err)
+		}
+		if len(n) != jobNonceBytes*2 {
+			t.Fatalf("nonce length = %d, want %d", len(n), jobNonceBytes*2)
+		}
+		// Charset-safe: lowercase hex only, so it carries no shell metacharacters
+		// and embeds literally into the launcher script.
+		for _, c := range n {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+				t.Fatalf("nonce has non-hex char %q in %q", c, n)
+			}
+		}
+		if seen[n] {
+			t.Fatalf("duplicate nonce %q", n)
+		}
+		seen[n] = true
+	}
+}
+
 func TestParseExit(t *testing.T) {
+	const nonce = "abcd1234"
+	m := jobExitMarker + nonce + ":"
 	cases := []struct {
 		in       string
 		wantCode int
 		wantDone bool
 	}{
 		{"still running\n", 0, false},
-		{"output\nFLEETEXIT:0\n", 0, true},
-		{"output\nFLEETEXIT:137\n", 137, true},
-		{"FLEETEXIT:2", 2, true},
-		{"FLEETEXIT:", 0, false},
-		{"FLEETEXIT:abc", 0, false},
+		{"output\n" + m + "0\n", 0, true},
+		{"output\n" + m + "137\n", 137, true},
+		{m + "2", 2, true},
+		{m, 0, false},
+		{m + "abc", 0, false},
+		// A spoofed bare "FLEETEXIT:0" (no nonce) must NOT be accepted.
+		{"output\nFLEETEXIT:0\n", 0, false},
+		// A marker with the wrong nonce must NOT be accepted.
+		{"output\n" + jobExitMarker + "wrongnonce:0\n", 0, false},
+		// A marker not anchored at line start (mid-line forgery) must NOT match.
+		{"junk" + m + "0\n", 0, false},
 	}
 	for _, c := range cases {
-		code, done := parseExit(c.in)
+		code, done := parseExit(c.in, nonce)
 		if code != c.wantCode || done != c.wantDone {
 			t.Errorf("parseExit(%q) = (%d,%v), want (%d,%v)", c.in, code, done, c.wantCode, c.wantDone)
 		}
@@ -53,11 +86,76 @@ func TestParseExit(t *testing.T) {
 }
 
 func TestStripExitMarker(t *testing.T) {
-	if got := stripExitMarker("line1\nline2\nFLEETEXIT:0\n"); got != "line1\nline2" {
+	const nonce = "abcd1234"
+	m := jobExitMarker + nonce + ":"
+	if got := stripExitMarker("line1\nline2\n"+m+"0\n", nonce); got != "line1\nline2" {
 		t.Fatalf("stripExitMarker = %q", got)
 	}
-	if got := stripExitMarker("no marker here"); got != "no marker here" {
+	if got := stripExitMarker("no marker here", nonce); got != "no marker here" {
 		t.Fatalf("stripExitMarker passthrough = %q", got)
+	}
+	// A spoofed bare "FLEETEXIT:0" line is genuine user output and must remain
+	// verbatim (no authentic marker found -> content passes through untouched).
+	if got := stripExitMarker("user said FLEETEXIT:0 here\n", nonce); got != "user said FLEETEXIT:0 here\n" {
+		t.Fatalf("stripExitMarker stripped non-authentic output: %q", got)
+	}
+}
+
+// TestJobStore_TailIgnoresSpoofedMarker is the regression test for the
+// completion-spoofing bug: a job whose own output prints "FLEETEXIT:0" (and even
+// a marker with a guessed-but-wrong nonce) must stay running until the launcher
+// writes the authentic FLEETEXIT:<nonce>:<code> line.
+func TestJobStore_TailIgnoresSpoofedMarker(t *testing.T) {
+	dir := t.TempDir()
+	store := NewJobStore(dir)
+
+	// Initial content: the user command spoofs a completion marker (and tries a
+	// wrong-nonce variant) while it is still running.
+	logContent := "starting work\nFLEETEXIT:0\nFLEETEXIT:guess123:0\nstill working\n"
+	exec := func(server, command string) (string, int, error) {
+		if strings.HasPrefix(command, "cat ") {
+			return logContent, 0, nil
+		}
+		return "", 0, nil // launch
+	}
+
+	rec, err := store.Start(exec, "web-01", "echo FLEETEXIT:0")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if rec.Nonce == "" {
+		t.Fatal("expected a non-empty job nonce")
+	}
+
+	// Despite the spoofed marker(s), the job must still be reported running and
+	// the fake "FLEETEXIT:0" output must be preserved (it is genuine job output).
+	r, out, err := store.Tail(exec, rec.ID)
+	if err != nil {
+		t.Fatalf("Tail: %v", err)
+	}
+	if r.Status != JobRunning {
+		t.Fatalf("spoofed marker reported job done: %+v", r)
+	}
+	if !strings.Contains(out, "FLEETEXIT:0") {
+		t.Fatalf("spoofed user output was stripped: %q", out)
+	}
+
+	// Now the launcher writes the authentic, nonce'd marker as the final line.
+	logContent = "starting work\nFLEETEXIT:0\nstill working\ndone\n" +
+		jobExitMarker + rec.Nonce + ":7\n"
+	r, out, err = store.Tail(exec, rec.ID)
+	if err != nil {
+		t.Fatalf("Tail 2: %v", err)
+	}
+	if r.Status != JobDone || r.ExitCode != 7 {
+		t.Fatalf("authentic marker not honored: status=%s exit=%d", r.Status, r.ExitCode)
+	}
+	// The authentic trailer is stripped, but the user's own spoof line remains.
+	if strings.Contains(out, jobExitMarker+rec.Nonce) {
+		t.Fatalf("authentic marker leaked into output: %q", out)
+	}
+	if !strings.Contains(out, "FLEETEXIT:0") {
+		t.Fatalf("user output FLEETEXIT:0 should be preserved: %q", out)
 	}
 }
 
@@ -164,8 +262,9 @@ func TestJobStore_TailDetectsCompletion(t *testing.T) {
 		t.Fatalf("unexpected output %q", out)
 	}
 
-	// Now the job finishes: marker appears, status flips to done with exit code.
-	logContent = "running...\ndone\nFLEETEXIT:3\n"
+	// Now the job finishes: the authentic nonce'd marker appears, status flips to
+	// done with the exit code.
+	logContent = "running...\ndone\n" + jobExitMarker + rec.Nonce + ":3\n"
 	r, out, err = store.Tail(exec, rec.ID)
 	if err != nil {
 		t.Fatalf("Tail 2: %v", err)
@@ -193,11 +292,12 @@ func TestJobStore_Wait(t *testing.T) {
 	store := NewJobStore(dir)
 
 	tails := 0
+	var nonce string
 	exec := func(server, command string) (string, int, error) {
 		if strings.HasPrefix(command, "cat ") {
 			tails++
 			if tails >= 3 {
-				return "out\nFLEETEXIT:0\n", 0, nil
+				return "out\n" + jobExitMarker + nonce + ":0\n", 0, nil
 			}
 			return "out\n", 0, nil
 		}
@@ -208,6 +308,7 @@ func TestJobStore_Wait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	nonce = rec.Nonce
 
 	slept := 0
 	done, err := store.Wait(exec, rec.ID, 0, 10*time.Millisecond, func(time.Duration) { slept++ })
