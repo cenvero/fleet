@@ -66,8 +66,10 @@ func NewRootCommand() *cobra.Command {
 				// context/ai/skill describe the CLI and install agent integrations;
 				// they never touch controller state, so they must work pre-init.
 				"context", "ai", "skill",
-				// shell helpers operate on local files only (config dir + shell rc).
-				"automation", "shell-init", "autocomplete":
+				// shell helpers + local-store commands operate on local files only
+				// (config dir + shell rc), so they work before init.
+				"automation", "shell-init", "autocomplete",
+				"jobs", "cmd-policy", "approvals", "approve":
 				return nil
 			}
 			if cmd.HasParent() {
@@ -149,6 +151,18 @@ func NewRootCommand() *cobra.Command {
 	agentCmd := &cobra.Command{Use: "agent", Short: "Manage fleet agents (version, consistency)"}
 	agentCmd.AddCommand(newAgentVersionCommand(&configDir))
 	root.AddCommand(agentCmd)
+	root.AddCommand(newRunCommand(&configDir))
+	root.AddCommand(newGuardCommand(&configDir))
+	root.AddCommand(newConfirmCommand(&configDir))
+	root.AddCommand(newRevertCommand(&configDir))
+	root.AddCommand(newDoctorCommand(&configDir))
+	root.AddCommand(newJobCommand(&configDir))
+	root.AddCommand(newJobsListCommand(&configDir))
+	root.AddCommand(newCmdPolicyCommand(&configDir))
+	root.AddCommand(newHealthCommand(&configDir))
+	root.AddCommand(newFirewallSafeCommand(&configDir))
+	root.AddCommand(newApprovalsCommand(&configDir))
+	root.AddCommand(newApproveCommand(&configDir))
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
 	return root
