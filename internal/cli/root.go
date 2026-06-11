@@ -105,15 +105,20 @@ func NewRootCommand() *cobra.Command {
 			}
 			if cmd.HasParent() {
 				switch cmd.Parent().Name() {
-				case "help", "completion", "update", "skill", "automation", "autocomplete":
+				// Truly-local helpers (cobra built-ins / CLI self-description) that
+				// never touch controller state — safe to short-circuit.
+				case "help", "completion", "skill":
 					return nil
-				// token subcommands (create/list/revoke) only touch tokens.json, so
-				// they work before full init (FL-030).
-				case "token":
-					return enforceToken(cmd, configDir, tokenID)
-				// secret subcommands (set/list/rotate/rm) only touch secrets.json in
-				// the config dir, so they work before full init (FL-004).
-				case "secret":
+				// Subcommands of these parents WRITE local controller state —
+				// tokens.json, secrets.json, automations/ (+ the shell rc that
+				// shell-init eval()s), and the controller/agent binaries. They MUST be
+				// token-enforced (reject unknown/revoked/scoped tokens + record the
+				// operator), never bypassed: otherwise a scoped or revoked token could
+				// plant a shell-init automation script (RC injection → admin code
+				// execution) or trigger a fleet-wide update. enforceToken returns
+				// before the init check, so the pre-init local behavior these commands
+				// rely on is preserved.
+				case "token", "secret", "automation", "autocomplete", "update":
 					return enforceToken(cmd, configDir, tokenID)
 				}
 			}
