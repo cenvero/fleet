@@ -65,3 +65,46 @@ func TestSQLiteStateAndEventStores(t *testing.T) {
 		}
 	}
 }
+
+// TestSQLiteFilesAreOwnerOnly confirms the SQLite database and its WAL/SHM
+// sidecars are created (or tightened) to 0600 rather than the driver's
+// world-readable default, so on-disk state/secrets aren't readable by others.
+func TestSQLiteFilesAreOwnerOnly(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	cfg := DefaultDatabaseConfig(base)
+
+	st, err := Open(cfg, WorkloadState)
+	if err != nil {
+		t.Fatalf("Open(state) error = %v", err)
+	}
+	defer st.Close()
+
+	// Force a write so the WAL/SHM sidecars exist too.
+	if err := st.PutState("k", "v"); err != nil {
+		t.Fatalf("PutState() error = %v", err)
+	}
+
+	dataDir := filepath.Join(base, "data")
+	if fi, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("stat data dir: %v", err)
+	} else if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("data dir perms = %o, want 0700", perm)
+	}
+
+	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
+		p := filepath.Join(dataDir, name)
+		fi, err := os.Stat(p)
+		if err != nil {
+			// Sidecars may not always be present depending on checkpoint timing.
+			if os.IsNotExist(err) && name != "state.db" {
+				continue
+			}
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s perms = %o, want 0600", name, perm)
+		}
+	}
+}

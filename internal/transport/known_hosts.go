@@ -11,10 +11,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+// pinMu serializes the read-check-then-append/replace sequence used when
+// pinning host keys. The knownhosts callback re-reads the file from disk, so
+// concurrent first-connections to the same (or different) hosts can otherwise
+// interleave their check-then-write and double-pin or corrupt the file. A
+// single process-wide mutex is sufficient: known_hosts writes are infrequent
+// and cheap, and they all funnel through this package.
+var pinMu sync.Mutex
 
 type HostKeyState struct {
 	Fingerprint string
@@ -22,7 +31,24 @@ type HostKeyState struct {
 	Outcome     string
 }
 
-func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyState) (ssh.HostKeyCallback, error) {
+// NewTOFUHostKeyCallback returns a host-key callback that pins a host's key on
+// first use (TOFU) and thereafter verifies it against the pinned value.
+//
+// SECURITY: a host-key MISMATCH (a pinned key exists but the presented key
+// differs) is the exact signal host-key pinning is meant to catch — it means
+// either the server's key legitimately rotated or an attacker is performing a
+// man-in-the-middle attack. By default this callback REJECTS the connection on
+// mismatch; it never silently overwrites a pinned key. Re-trusting a changed
+// key is a deliberate operator action: either delete the pin (RemoveKnownHost
+// / `fleet server reconnect --accept-new-host-key`) after out-of-band
+// verification, or pass forceReplace=true.
+//
+// forceReplace must ONLY be set true on an explicit, operator-initiated re-pin
+// after the new fingerprint has been verified out of band. It must NEVER be
+// wired to a default-on flag or to any automated/unattended path, because that
+// reintroduces the silent-replace MITM hole. First-use pinning (no existing
+// pin) always happens regardless of forceReplace.
+func NewTOFUHostKeyCallback(path string, forceReplace bool, state *HostKeyState) (ssh.HostKeyCallback, error) {
 	if err := ensureKnownHostsFile(path); err != nil {
 		return nil, err
 	}
@@ -65,9 +91,21 @@ func NewTOFUHostKeyCallback(path string, acceptReplacement bool, state *HostKeyS
 			return nil
 		}
 
-		if !acceptReplacement {
-			return fmt.Errorf("host key mismatch for %s: %w", normalized, err)
+		// A pin exists and the presented key does not match it: possible MITM.
+		// Refuse by default and tell the operator exactly how to recover.
+		if !forceReplace {
+			oldFP := ssh.FingerprintSHA256(keyErr.Want[0].Key)
+			newFP := ssh.FingerprintSHA256(key)
+			if state != nil {
+				state.Outcome = "rejected"
+			}
+			return fmt.Errorf(
+				"host key changed for %s: possible MITM; pinned %s but server presented %s. "+
+					"Remove the pin to re-trust (e.g. `fleet server reconnect --accept-new-host-key` "+
+					"after verifying the new key out of band)",
+				normalized, oldFP, newFP)
 		}
+		// Explicit, operator-authorized re-pin after out-of-band verification.
 		if err := replaceKnownHost(path, normalized, key); err != nil {
 			return err
 		}
@@ -188,6 +226,10 @@ func RemoveKnownHost(path, address string) error {
 }
 
 func appendKnownHost(path, address string, key ssh.PublicKey) error {
+	// Serialize the read-check-then-append so two concurrent first-connections
+	// can't both observe "no entry" and append duplicate (or racing) pins.
+	pinMu.Lock()
+	defer pinMu.Unlock()
 	// Skip if an entry for this address already exists — prevents duplicates
 	// even if the in-memory callback somehow misses a recently written entry.
 	if data, err := os.ReadFile(path); err == nil {
@@ -211,6 +253,10 @@ func appendKnownHost(path, address string, key ssh.PublicKey) error {
 }
 
 func replaceKnownHost(path, address string, key ssh.PublicKey) error {
+	// Shares pinMu with appendKnownHost so a replace can't interleave with a
+	// concurrent append (or another replace) and clobber the file mid-rewrite.
+	pinMu.Lock()
+	defer pinMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read known_hosts for replacement: %w", err)

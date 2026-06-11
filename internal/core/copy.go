@@ -62,9 +62,21 @@ func (a *App) CopyFile(srcServer, srcPath, dstServer, dstPath string, opts FileT
 	if _, err := a.DownloadFile(srcServer, srcPath, tmpPath, opts, relayProgress(progress, 0, total)); err != nil {
 		return proto.FileFinalizeResult{}, fmt.Errorf("relay download: %w", err)
 	}
+	// Whole-file integrity across the relay: hash the controller-side temp file
+	// (the exact bytes we received from the source) so we can confirm the bytes
+	// that land on the destination match them end-to-end. UploadFile returns the
+	// destination agent's finalize digest; comparing the two detects corruption
+	// on either leg or a destination that wrote something different.
+	relaySum, err := localFileSHA256(tmpPath)
+	if err != nil {
+		return proto.FileFinalizeResult{}, fmt.Errorf("relay hash: %w", err)
+	}
 	res, err := a.UploadFile(dstServer, tmpPath, dstPath, opts, relayProgress(progress, size, total))
 	if err != nil {
 		return res, fmt.Errorf("relay upload: %w", err)
+	}
+	if res.SHA256 != "" && res.SHA256 != relaySum {
+		return res, fmt.Errorf("relay integrity check failed: source bytes hashed %s but destination finalized %s", relaySum, res.SHA256)
 	}
 	if progress != nil {
 		progress(ProgressUpdate{BytesDone: total, TotalBytes: total, Done: true})
@@ -73,9 +85,20 @@ func (a *App) CopyFile(srcServer, srcPath, dstServer, dstPath string, opts FileT
 		Action:   "file.copy",
 		Target:   srcServer + " -> " + dstServer,
 		Operator: a.operator(),
-		Details:  fmt.Sprintf("%s:%s -> %s:%s (%d bytes)", srcServer, srcPath, dstServer, dstPath, size),
+		Details:  fmt.Sprintf("%s:%s -> %s:%s (%d bytes, sha256=%s)", srcServer, srcPath, dstServer, dstPath, size, relaySum),
 	})
 	return res, nil
+}
+
+// localFileSHA256 returns the SHA-256 of a local file, reusing the streaming
+// hasher so a large relay temp file is never read fully into memory.
+func localFileSHA256(p string) (string, error) {
+	f, err := os.Open(p) // #nosec G304 -- controller-managed temp path
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return streamSHA256(f)
 }
 
 // relayProgress shifts a leg's byte counter into the combined transfer total.

@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
@@ -493,9 +495,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// controller — no spooling or agent round-trip needed.
 	if server == "" {
 		localPath := filepath.Join(filepath.Clean(dir), name)
-		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) // #nosec G304 -- dir validated absolute above
+		// O_NOFOLLOW so a symlink planted at the destination can't redirect the
+		// truncating write to an arbitrary file; a symlinked target is rejected.
+		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600) // #nosec G304 -- dir validated absolute above, O_NOFOLLOW set
 		if err != nil {
-			writeError(w, err)
+			writeError(w, symlinkClobberError(localPath, err))
 			return
 		}
 		if _, err := io.Copy(out, http.MaxBytesReader(w, r.Body, maxWebUploadBytes)); err != nil {
@@ -714,7 +718,19 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		if err := os.WriteFile(clean, body, 0o600); err != nil { // #nosec G306 -- explicit 0o600
+		// O_NOFOLLOW so an attacker-planted symlink at the edit target can't
+		// redirect this truncating write elsewhere; a symlinked target errors out.
+		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600) // #nosec G304 -- path validated by cleanLocalPath, O_NOFOLLOW set
+		if err != nil {
+			writeError(w, symlinkClobberError(clean, err))
+			return
+		}
+		if _, err := f.Write(body); err != nil {
+			_ = f.Close()
+			writeError(w, err)
+			return
+		}
+		if err := f.Close(); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -800,6 +816,11 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// maxSSELifetime caps how long a single progress (SSE) stream may stay open, so
+// a client can't hold a connection — and a server goroutine — open forever even
+// if the underlying transfer never reports Done.
+const maxSSELifetime = 30 * time.Minute
+
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
@@ -815,11 +836,15 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Bound the stream's lifetime so it can't leak past the cap.
+	ctx, cancel := context.WithTimeout(r.Context(), maxSSELifetime)
+	defer cancel()
+
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			snap, ok := s.hub.snapshot(id)
@@ -1214,6 +1239,26 @@ func ensureLoopbackAddr(addr string) error {
 	return nil
 }
 
+// symlinkClobberError turns the ELOOP that an O_NOFOLLOW open returns for a
+// symlinked target into a clear, actionable message, and otherwise lstats the
+// path to catch platforms that report a symlink differently. Non-symlink errors
+// pass through unchanged.
+func symlinkClobberError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	symlinked := errors.Is(err, syscall.ELOOP)
+	if !symlinked {
+		if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			symlinked = true
+		}
+	}
+	if symlinked {
+		return fmt.Errorf("refusing to write through symlink %q", path)
+	}
+	return err
+}
+
 func isLoopbackRequest(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -1223,12 +1268,19 @@ func isLoopbackRequest(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// originLoopback reports whether a state-changing request carries a trustworthy
+// same-origin signal. It FAILS CLOSED: a request must present either a loopback
+// Origin or a same-origin/none Sec-Fetch-Site. Browsers always send at least one
+// of these on a fetch/form POST, so the absence of both indicates a non-browser
+// or forged request and is rejected.
 func originLoopback(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		// Some same-origin POSTs omit Origin; allow when Sec-Fetch-Site is same-origin or absent.
+		// No Origin: trust only an explicit same-origin Fetch Metadata signal.
+		// A missing Sec-Fetch-Site (older/non-browser client) is rejected so the
+		// check can't be bypassed by simply omitting both headers.
 		site := r.Header.Get("Sec-Fetch-Site")
-		return site == "" || site == "same-origin" || site == "none"
+		return site == "same-origin" || site == "none"
 	}
 	host := origin
 	if _, after, found := strings.Cut(origin, "://"); found {

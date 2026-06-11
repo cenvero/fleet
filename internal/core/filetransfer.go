@@ -27,6 +27,18 @@ const (
 	DefaultParallelStreams = 4
 	// DefaultChunkSizeBytes is the fallback raw chunk size (pre-base64).
 	DefaultChunkSizeBytes = 4 * 1024 * 1024 // 4 MiB
+
+	// maxTransferChunks caps the number of chunks a single transfer may plan.
+	// The chunk plan is sized from a size the *remote agent reports* (download)
+	// or the local file (upload); without a ceiling a malicious/buggy agent that
+	// reports an absurd size would make buildChunks allocate an unbounded slice
+	// and OOM the controller. At the 4 MiB default chunk size this still permits
+	// a ~1 TiB transfer, which is far beyond any realistic single-file move.
+	maxTransferChunks = 1 << 18 // 262144
+	// maxTransferFileBytes is a hard ceiling on a single transfer's size,
+	// independent of chunk size, so a tiny chunk size can't be combined with a
+	// huge reported size to slip past maxTransferChunks. 8 TiB.
+	maxTransferFileBytes = int64(8) * 1024 * 1024 * 1024 * 1024
 )
 
 // transferRetryDelay is the backoff between per-chunk retry attempts. It
@@ -149,6 +161,27 @@ func (a *App) simpleFileOp(serverName, action string, payload any, auditAction, 
 type chunkSpec struct {
 	offset int64
 	length int64
+}
+
+// validateTransferSize bounds a transfer planned from total bytes at the given
+// chunk size, rejecting an absurd (e.g. agent-reported) size before buildChunks
+// is allowed to allocate a chunk plan from it. It guards against OOM from a
+// malicious or buggy peer that reports a gigantic file size.
+func validateTransferSize(total, chunkSize int64) error {
+	if total < 0 {
+		return fmt.Errorf("invalid negative file size %d", total)
+	}
+	if total > maxTransferFileBytes {
+		return fmt.Errorf("file size %d exceeds the maximum supported single-file transfer size (%d bytes)", total, maxTransferFileBytes)
+	}
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSizeBytes
+	}
+	// Number of chunks == ceil(total/chunkSize); compute without overflow.
+	if total > 0 && (total-1)/chunkSize+1 > maxTransferChunks {
+		return fmt.Errorf("file would require more than %d chunks at chunk size %d; refusing to plan an unbounded transfer", maxTransferChunks, chunkSize)
+	}
+	return nil
 }
 
 func buildChunks(total, chunkSize int64) []chunkSpec {
@@ -307,6 +340,9 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		return proto.FileFinalizeResult{}, fmt.Errorf("%s is a directory; recursive upload is not supported", localPath)
 	}
 	totalSize := info.Size()
+	if err := validateTransferSize(totalSize, resolved.ChunkSize); err != nil {
+		return proto.FileFinalizeResult{}, fmt.Errorf("refusing to upload %s: %w", localPath, err)
+	}
 	wholeSum, err := streamSHA256(lf)
 	if err != nil {
 		return proto.FileFinalizeResult{}, err
@@ -543,6 +579,12 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 		return proto.FileStatResult{}, fmt.Errorf("%s is a directory; recursive download is not supported", remotePath)
 	}
 	totalSize := stat.Entry.Size
+	// The size here is reported by the remote agent. Bound it before it sizes a
+	// chunk plan, so a malicious/buggy agent can't trigger an unbounded
+	// allocation (OOM) by claiming an absurd file size.
+	if err := validateTransferSize(totalSize, resolved.ChunkSize); err != nil {
+		return proto.FileStatResult{}, fmt.Errorf("refusing to download %s: %w", remotePath, err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
 		return proto.FileStatResult{}, err
@@ -625,6 +667,24 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 						Action:  proto.ActionFileRead,
 						Payload: proto.FileReadPayload{Path: remotePath, Offset: c.offset, Length: c.length},
 					}))
+					// Reject a chunk whose payload is not exactly the range we
+					// asked for: a short/over-long chunk would otherwise be
+					// written at c.offset and silently corrupt the assembled
+					// file (and a huge one is an allocation/DoS vector).
+					if rerr == nil && int64(len(res.Data)) != c.length {
+						rerr = fmt.Errorf("chunk length mismatch at %d: requested %d bytes, agent returned %d", c.offset, c.length, len(res.Data))
+					}
+					// SECURITY: this only confirms the chunk's bytes match the
+					// SHA the *same agent* sent alongside them — it is a
+					// transport-corruption check, NOT independent integrity: a
+					// fully-compromised SOURCE agent can return wrong bytes with a
+					// matching SHA. There is no end-to-end guarantee against the
+					// agent we download from (we trust it by definition). The
+					// fleet-rpc channel is host-key-pinned + encrypted, so a
+					// network MITM cannot alter chunks in flight; the residual
+					// trust is in the source host itself. The whole-file SHA-256
+					// computed after assembly (below) lets a caller that already
+					// knows the expected digest detect a substituted file.
 					if rerr == nil && sha256Hex(res.Data) != res.SHA256 {
 						rerr = fmt.Errorf("chunk checksum mismatch at %d", c.offset)
 					}
@@ -665,13 +725,30 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 	if err := dest.Sync(); err != nil {
 		return proto.FileStatResult{}, err
 	}
+
+	// Whole-file integrity: hash the fully assembled local file and confirm its
+	// size. This catches a corrupt assembly (e.g. a missing/duplicated chunk)
+	// and yields a digest a caller with a known-good hash can compare against.
+	// SECURITY: this digest is computed over bytes supplied by the source agent;
+	// it is NOT independent integrity against a compromised source (see the
+	// per-chunk note above). Its value is (a) detecting assembly bugs/transport
+	// corruption and (b) letting the relay/sync caller cross-check both legs of
+	// a server->server copy. The whole-file SHA is surfaced to callers via the
+	// audit trail and, for the relay path, re-derived in CopyFile.
+	wholeSum, err := streamSHA256(dest)
+	if err != nil {
+		return proto.FileStatResult{}, fmt.Errorf("hash assembled file: %w", err)
+	}
+	if fi, serr := dest.Stat(); serr == nil && fi.Size() != totalSize {
+		return proto.FileStatResult{}, fmt.Errorf("assembled file size %d does not match expected %d", fi.Size(), totalSize)
+	}
 	emit(true, nil)
 
 	_ = a.AuditLog.Append(logs.AuditEntry{
 		Action:   "file.download",
 		Target:   serverName,
 		Operator: a.operator(),
-		Details:  fmt.Sprintf("%s:%s -> %s (%d bytes)", serverName, remotePath, localPath, totalSize),
+		Details:  fmt.Sprintf("%s:%s -> %s (%d bytes, sha256=%s)", serverName, remotePath, localPath, totalSize, wholeSum),
 	})
 	return stat, nil
 }

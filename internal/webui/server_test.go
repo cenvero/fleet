@@ -544,3 +544,119 @@ func TestEnsureLoopbackAddr(t *testing.T) {
 		}
 	}
 }
+
+// TestCSRFOriginFailsClosed checks the mutating-request origin gate: a POST with
+// neither an Origin nor a Sec-Fetch-Site header (a forged/non-browser request)
+// is rejected, while a same-origin signal via either header is accepted.
+func TestCSRFOriginFailsClosed(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	client := ts.Client()
+
+	postWith := func(headers map[string]string) int {
+		params := url.Values{"path": {filepath.Join(dir, "made-"+headers["case"])}}
+		params.Set("t", s.Token())
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/mkdir?"+params.Encode(), nil)
+		for k, v := range headers {
+			if k == "case" {
+				continue
+			}
+			req.Header.Set(k, v)
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer res.Body.Close()
+		return res.StatusCode
+	}
+
+	// No Origin and no Sec-Fetch-Site: must be rejected (fail closed).
+	if code := postWith(map[string]string{"case": "none"}); code != http.StatusForbidden {
+		t.Fatalf("missing origin+sec-fetch: status %d, want 403", code)
+	}
+	// Empty/unknown Sec-Fetch-Site with no Origin: still rejected.
+	if code := postWith(map[string]string{"case": "cross", "Sec-Fetch-Site": "cross-site"}); code != http.StatusForbidden {
+		t.Fatalf("cross-site sec-fetch: status %d, want 403", code)
+	}
+	// Loopback Origin: accepted.
+	if code := postWith(map[string]string{"case": "origin", "Origin": ts.URL}); code != http.StatusOK {
+		t.Fatalf("loopback origin: status %d, want 200", code)
+	}
+	// No Origin but Sec-Fetch-Site: same-origin: accepted.
+	if code := postWith(map[string]string{"case": "samesite", "Sec-Fetch-Site": "same-origin"}); code != http.StatusOK {
+		t.Fatalf("same-origin sec-fetch: status %d, want 200", code)
+	}
+}
+
+// TestOriginLoopback unit-tests the header logic directly, including the
+// fail-closed behavior when both signals are absent.
+func TestOriginLoopback(t *testing.T) {
+	t.Parallel()
+	mk := func(origin, site string) *http.Request {
+		r, _ := http.NewRequest(http.MethodPost, "/api/mkdir", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if site != "" {
+			r.Header.Set("Sec-Fetch-Site", site)
+		}
+		return r
+	}
+	cases := []struct {
+		origin, site string
+		want         bool
+	}{
+		{"", "", false},                             // fail closed
+		{"", "cross-site", false},                   // explicit cross-site
+		{"", "same-origin", true},                   // fetch-metadata same-origin
+		{"", "none", true},                          // user-initiated navigation
+		{"http://127.0.0.1:9445", "", true},         // loopback origin
+		{"http://localhost:9445", "", true},         // localhost origin
+		{"https://evil.example.com", "", false},     // remote origin
+		{"https://evil.example.com", "none", false}, // remote origin wins over site
+	}
+	for _, c := range cases {
+		if got := originLoopback(mk(c.origin, c.site)); got != c.want {
+			t.Fatalf("originLoopback(origin=%q site=%q) = %v, want %v", c.origin, c.site, got, c.want)
+		}
+	}
+}
+
+// TestLocalWriteRefusesSymlink confirms O_NOFOLLOW stops a local write/upload
+// from clobbering the file a symlinked target points at.
+func TestLocalWriteRefusesSymlink(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	client := ts.Client()
+
+	// secret is the would-be clobber victim; link points at it inside the pane.
+	secret := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("original\n"), 0o600); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	params := url.Values{"path": {link}}
+	params.Set("t", s.Token())
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/write?"+params.Encode(), strings.NewReader("attacker\n"))
+	req.Header.Set("Origin", ts.URL)
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusOK {
+		t.Fatalf("write through symlink unexpectedly succeeded")
+	}
+
+	// The victim file must be untouched.
+	if b, _ := os.ReadFile(secret); string(b) != "original\n" {
+		t.Fatalf("symlink target was clobbered: %q", b)
+	}
+}

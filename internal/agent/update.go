@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/cenvero/fleet/internal/update"
@@ -29,8 +30,11 @@ type managedUpdater struct {
 	Runner         commandRunner
 	ExecutablePath string
 	ConfigDir      string
-	FetchManifest  func(context.Context, string) (update.Manifest, error)
-	DownloadURL    func(context.Context, string) ([]byte, error)
+	// SigningPublicKey overrides the embedded minisign key; empty uses the
+	// embedded default. Set only in tests.
+	SigningPublicKey string
+	FetchManifest    func(context.Context, string) (update.Manifest, error)
+	DownloadURL      func(context.Context, string) ([]byte, error)
 }
 
 func defaultUpdater() Updater {
@@ -53,14 +57,15 @@ func (u managedUpdater) Apply(ctx context.Context, payload proto.UpdateApplyPayl
 	}
 
 	result, err := update.Apply(ctx, update.ApplyOptions{
-		ManifestURL:    payload.ManifestURL,
-		Channel:        payload.Channel,
-		ConfigDir:      configDir,
-		ExecutablePath: executablePath,
-		CurrentVersion: version.Version,
-		AgentBinary:    true,
-		FetchManifest:  u.FetchManifest,
-		DownloadURL:    u.DownloadURL,
+		ManifestURL:      payload.ManifestURL,
+		Channel:          payload.Channel,
+		ConfigDir:        configDir,
+		ExecutablePath:   executablePath,
+		CurrentVersion:   version.Version,
+		AgentBinary:      true,
+		SigningPublicKey: u.SigningPublicKey,
+		FetchManifest:    u.FetchManifest,
+		DownloadURL:      u.DownloadURL,
 	})
 	if err != nil {
 		return UpdateOperation{}, err
@@ -94,6 +99,20 @@ func (u managedUpdater) Apply(ctx context.Context, payload proto.UpdateApplyPayl
 func (u managedUpdater) scheduleRestart(serviceName string) (bool, error) {
 	if runtime.GOOS != "linux" {
 		return false, nil
+	}
+	// Validate the controller-supplied service name before it reaches
+	// systemd-run/systemctl. These run via exec (no shell), so the risk is not
+	// shell metacharacters but OPTION INJECTION: a name like "--no-block" or
+	// "-H" would be parsed as a flag by systemctl, and a leading '-' anywhere is
+	// dangerous. validServiceName already constrains to the systemd unit charset
+	// ([A-Za-z0-9_@.:-], <=256); we additionally reject a leading '-' so the name
+	// can never be taken for an option. With this charset the value cannot be an
+	// option or carry a metacharacter, so it is safe to pass as a bare argument.
+	if !validServiceName.MatchString(serviceName) || strings.HasPrefix(serviceName, "-") {
+		return false, &RPCError{
+			Code:    "invalid_service_name",
+			Message: "service name must be a valid systemd unit name and may not start with '-'",
+		}
 	}
 	if u.Runner == nil {
 		u.Runner = execRunner{}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -38,6 +39,9 @@ type Alert struct {
 
 type Store struct {
 	dir string
+	// mu serializes Save's read-modify-write so concurrent updates can't lose
+	// each other's changes or leave a half-written file.
+	mu sync.Mutex
 }
 
 func NewStore(dir string) *Store {
@@ -80,7 +84,11 @@ func (s *Store) Save(alert Alert) error {
 	if err := validateAlertID(alert.ID); err != nil {
 		return fmt.Errorf("save alert: %w", err)
 	}
-	if err := os.MkdirAll(s.dir, 0o750); err != nil {
+	// Serialize the read-modify-write below: two concurrent Saves of the same
+	// alert must not clobber each other's merged fields or race on the file.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("create alerts directory: %w", err)
 	}
 	existing, err := s.Get(alert.ID)
@@ -119,7 +127,42 @@ func (s *Store) Save(alert Alert) error {
 	if err != nil {
 		return fmt.Errorf("marshal alert: %w", err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	return writeFileAtomic(path, append(data, '\n'), 0o600)
+}
+
+// writeFileAtomic writes data to a temp file in the same directory and renames
+// it into place, so a reader never sees a partially written alert and a crash
+// mid-write leaves the previous file intact. The rename is atomic on POSIX when
+// source and destination share a filesystem (they always do here).
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".alert-*.tmp")
+	if err != nil {
+		return fmt.Errorf("write alert: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write alert: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write alert: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write alert: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("write alert: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
 		return fmt.Errorf("write alert: %w", err)
 	}
 	return nil
@@ -207,6 +250,9 @@ func (s *Store) Unsuppress(id string) error {
 }
 
 func (s *Store) Delete(id string) error {
+	if err := validateAlertID(id); err != nil {
+		return fmt.Errorf("delete alert: %w", err)
+	}
 	path := filepath.Join(s.dir, id+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete alert: %w", err)

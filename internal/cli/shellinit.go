@@ -104,7 +104,10 @@ func appendOnce(path, marker, content string) (bool, error) {
 	if strings.Contains(string(existing), marker) {
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	// Create any missing parent directory owner-only (0700): it may sit under the
+	// controller's config tree and hold automation data. The rc file itself is
+	// only appended to, never created with broadened perms.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- the operator's own shell rc file

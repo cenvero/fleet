@@ -11,6 +11,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -323,4 +325,219 @@ func testSignature(t *testing.T, payload []byte) (string, []byte) {
 		t.Fatalf("MarshalText() error = %v", err)
 	}
 	return string(publicKeyText), minisign.Sign(privateKey, payload)
+}
+
+// TestApplyRefusesUnsignedWithoutOptIn verifies that an update whose manifest
+// entry carries no minisign signature is refused fail-closed, on every channel,
+// when AllowUnsigned is not set — even when a SHA-256 checksum is present.
+func TestApplyRefusesUnsignedWithoutOptIn(t *testing.T) {
+	t.Parallel()
+
+	for _, channel := range []string{"stable", "dev", ""} {
+		channel := channel
+		t.Run("channel="+channel, func(t *testing.T) {
+			t.Parallel()
+
+			configDir := filepath.Join(t.TempDir(), "fleet")
+			executablePath := filepath.Join(t.TempDir(), runtimeExecutableName())
+			oldBinary := []byte("old-fleet-binary")
+			if err := os.WriteFile(executablePath, oldBinary, 0o755); err != nil {
+				t.Fatalf("WriteFile(executable) error = %v", err)
+			}
+
+			archive := tarGzArchive(t, runtimeExecutableName(), []byte("unsigned-fleet-binary"), 0o755)
+			sum := sha256.Sum256(archive)
+			manifest := Manifest{
+				Channels: map[string]ChannelInfo{
+					"stable": {Version: "v9.9.9"},
+					"dev":    {Version: "v9.9.9"},
+				},
+				Binaries: map[string]map[string]BinaryInfo{
+					"v9.9.9": {
+						runtime.GOOS + "-" + runtime.GOARCH: {
+							URL:    "https://example.invalid/fleet.tar.gz",
+							SHA256: hex.EncodeToString(sum[:]),
+							// No Signature on purpose.
+						},
+					},
+				},
+			}
+
+			_, err := Apply(context.Background(), ApplyOptions{
+				Channel:        channel,
+				ConfigDir:      configDir,
+				ExecutablePath: executablePath,
+				CurrentVersion: "v1.0.0",
+				FetchManifest: func(context.Context, string) (Manifest, error) {
+					return manifest, nil
+				},
+				DownloadURL: func(_ context.Context, rawURL string) ([]byte, error) {
+					return archive, nil
+				},
+			})
+			if err == nil {
+				t.Fatalf("expected unsigned update to be refused without opt-in")
+			}
+			if !strings.Contains(err.Error(), "no minisign signature") {
+				t.Fatalf("expected missing-signature error, got %v", err)
+			}
+			current, readErr := os.ReadFile(executablePath)
+			if readErr != nil {
+				t.Fatalf("ReadFile(executable) error = %v", readErr)
+			}
+			if string(current) != string(oldBinary) {
+				t.Fatalf("expected refused update to leave executable unchanged")
+			}
+		})
+	}
+}
+
+// TestApplyAllowsUnsignedWithExplicitOptIn verifies that an unsigned update is
+// applied only when the explicit AllowUnsigned opt-in is set.
+func TestApplyAllowsUnsignedWithExplicitOptIn(t *testing.T) {
+	t.Parallel()
+
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	executablePath := filepath.Join(t.TempDir(), runtimeExecutableName())
+	if err := os.WriteFile(executablePath, []byte("old-fleet-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(executable) error = %v", err)
+	}
+
+	newBinary := []byte("unsigned-but-allowed")
+	archive := tarGzArchive(t, runtimeExecutableName(), newBinary, 0o755)
+	manifest := Manifest{
+		Channels: map[string]ChannelInfo{
+			"stable": {Version: "v2.0.0"},
+		},
+		Binaries: map[string]map[string]BinaryInfo{
+			"v2.0.0": {
+				runtime.GOOS + "-" + runtime.GOARCH: {
+					URL: "https://example.invalid/fleet.tar.gz",
+				},
+			},
+		},
+	}
+
+	result, err := Apply(context.Background(), ApplyOptions{
+		Channel:        "stable",
+		ConfigDir:      configDir,
+		ExecutablePath: executablePath,
+		CurrentVersion: "v1.0.0",
+		AllowUnsigned:  true,
+		FetchManifest: func(context.Context, string) (Manifest, error) {
+			return manifest, nil
+		},
+		DownloadURL: func(_ context.Context, rawURL string) ([]byte, error) {
+			return archive, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply() with AllowUnsigned error = %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("expected unsigned update to be applied with opt-in")
+	}
+	if result.SignatureVerified {
+		t.Fatalf("did not expect signature verification on unsigned update")
+	}
+	current, err := os.ReadFile(executablePath)
+	if err != nil {
+		t.Fatalf("ReadFile(executable) error = %v", err)
+	}
+	if string(current) != string(newBinary) {
+		t.Fatalf("expected executable to be updated under opt-in")
+	}
+}
+
+// TestDownloadURLRejectsFileScheme verifies that file:// URLs are rejected
+// (no local-file read / LFI), along with other non-https schemes.
+func TestDownloadURLRejectsFileScheme(t *testing.T) {
+	t.Parallel()
+
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("top-secret"), 0o600); err != nil {
+		t.Fatalf("WriteFile(secret) error = %v", err)
+	}
+
+	for _, rawURL := range []string{
+		"file://" + secret,
+		"file:///etc/passwd",
+		"ftp://example.invalid/fleet.tar.gz",
+		"gopher://example.invalid/x",
+		"http://example.invalid/fleet.tar.gz",
+	} {
+		rawURL := rawURL
+		t.Run(rawURL, func(t *testing.T) {
+			t.Parallel()
+			if _, err := downloadURL(context.Background(), rawURL); err == nil {
+				t.Fatalf("expected download of %q to be rejected", rawURL)
+			}
+		})
+	}
+}
+
+// TestDownloadURLRejectsOversizedArtifact verifies that downloadURL bounds the
+// artifact body before buffering: an oversized response is rejected with a
+// clear error rather than buffered in full (OOM protection). The server runs on
+// loopback http://, which the scheme allowlist permits for local mirrors, so
+// the real downloadURL code path (LimitReader + size check) is exercised.
+func TestDownloadURLRejectsOversizedArtifact(t *testing.T) {
+	t.Parallel()
+
+	if testing.Short() {
+		t.Skip("skipping multi-GiB streaming test in -short mode")
+	}
+
+	// Stream just past maxArtifactBytes without allocating it all up front.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		chunk := make([]byte, 1<<20) // 1 MiB
+		var written int64
+		for written <= maxArtifactBytes {
+			n, err := w.Write(chunk)
+			if err != nil {
+				return
+			}
+			written += int64(n)
+		}
+	}))
+	defer server.Close()
+
+	_, err := downloadURL(context.Background(), server.URL)
+	if err == nil {
+		t.Fatalf("expected oversized artifact to be rejected")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("expected size-limit error, got %v", err)
+	}
+}
+
+// TestValidateDownloadSchemeAllowsHTTPSAndLoopback documents the allowlist:
+// https everywhere, http only for loopback mirrors, everything else rejected.
+func TestValidateDownloadSchemeAllowsHTTPSAndLoopback(t *testing.T) {
+	t.Parallel()
+
+	allowed := []string{
+		"https://fleet.cenvero.org/fleet.tar.gz",
+		"http://localhost:8080/fleet.tar.gz",
+		"http://127.0.0.1/fleet.tar.gz",
+		"http://[::1]:9000/fleet.tar.gz",
+	}
+	for _, u := range allowed {
+		if err := validateDownloadScheme(u); err != nil {
+			t.Fatalf("validateDownloadScheme(%q) = %v, want nil", u, err)
+		}
+	}
+
+	rejected := []string{
+		"file:///etc/passwd",
+		"http://example.invalid/fleet.tar.gz",
+		"ftp://example.invalid/fleet.tar.gz",
+		"://broken",
+	}
+	for _, u := range rejected {
+		if err := validateDownloadScheme(u); err == nil {
+			t.Fatalf("validateDownloadScheme(%q) = nil, want error", u)
+		}
+	}
 }

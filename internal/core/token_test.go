@@ -73,6 +73,81 @@ func TestCreateRequiresName(t *testing.T) {
 	}
 }
 
+// TestTokenIDHashedAtRest pins the FL-030 hardening: the cleartext bearer id is
+// NEVER written to tokens.json. Only a SHA-256 hash and an 8-char display prefix
+// are persisted; a presented id is hashed and looked up by hash. The full id is
+// returned (in memory) exactly once at create time.
+func TestTokenIDHashedAtRest(t *testing.T) {
+	dir := t.TempDir()
+	store := NewTokenStore(dir)
+
+	created, err := store.Create(Token{Name: "ci", Servers: []string{"web-01"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(created.ID) != 32 {
+		t.Fatalf("create should return the full 32-char id, got %q", created.ID)
+	}
+
+	// The raw file must NOT contain the cleartext id, but MUST contain its hash
+	// and the 8-char prefix.
+	raw, err := os.ReadFile(TokensPath(dir))
+	if err != nil {
+		t.Fatalf("read tokens.json: %v", err)
+	}
+	if strings.Contains(string(raw), created.ID) {
+		t.Fatalf("cleartext token id leaked to disk:\n%s", raw)
+	}
+	wantHash := hashTokenID(created.ID)
+	if !strings.Contains(string(raw), wantHash) {
+		t.Fatalf("tokens.json does not contain the id hash %q:\n%s", wantHash, raw)
+	}
+	if !strings.Contains(string(raw), created.ID[:8]) {
+		t.Fatalf("tokens.json does not contain the 8-char display prefix %q:\n%s", created.ID[:8], raw)
+	}
+
+	// Look up by the cleartext id (which gets hashed internally).
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get by id: %v", err)
+	}
+	if got.Hash != wantHash {
+		t.Fatalf("loaded token Hash = %q, want %q", got.Hash, wantHash)
+	}
+	if got.Prefix != created.ID[:8] {
+		t.Fatalf("loaded token Prefix = %q, want %q", got.Prefix, created.ID[:8])
+	}
+	// The loaded token must NOT carry the cleartext id.
+	if got.ID != "" {
+		t.Fatalf("loaded token should not carry the cleartext id, got %q", got.ID)
+	}
+
+	// A wrong id (and the hash value itself) must not resolve.
+	if _, err := store.Get("deadbeefdeadbeefdeadbeefdeadbeef"); err == nil {
+		t.Fatal("Get with an unknown id should fail")
+	}
+	if _, err := store.Get(wantHash); err == nil {
+		t.Fatal("Get with the HASH (not the id) should fail — the hash is not the bearer secret")
+	}
+
+	// List surfaces the non-secret prefix in the ID field for display.
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != created.ID[:8] {
+		t.Fatalf("List should surface the 8-char prefix as the display id, got %+v", list)
+	}
+
+	// Revoke by the cleartext id works (hashed internally).
+	if err := store.Revoke(created.ID); err != nil {
+		t.Fatalf("Revoke by id: %v", err)
+	}
+	if _, err := store.Get(created.ID); err == nil {
+		t.Fatal("token should be gone after revoke")
+	}
+}
+
 func TestIsDestructiveCommand(t *testing.T) {
 	// RUNTIME args shape: cobra has already consumed the subcommand by the time
 	// enforcement runs, so the subcommand is passed explicitly as `sub` and the
@@ -120,6 +195,14 @@ func TestIsDestructiveCommand(t *testing.T) {
 		{"secret", "list", nil, false},
 		{"policy", "set", nil, true},
 		{"policy", "show", nil, false},
+		// svc: state-changing systemd control is destructive; status is read.
+		{"svc", "restart", []string{"web-01", "nginx"}, true},
+		{"svc", "stop", []string{"web-01", "nginx"}, true},
+		{"svc", "disable", []string{"web-01", "nginx"}, true},
+		{"svc", "enable", []string{"web-01", "nginx"}, true},
+		{"svc", "start", []string{"web-01", "nginx"}, true},
+		{"svc", "status", []string{"web-01", "nginx"}, false},
+		{"svc", "", []string{"web-01"}, false},
 		// config: mutating subs destructive, read subs exempt
 		{"config", "set", nil, true},
 		{"config", "edit", nil, true},
@@ -294,5 +377,33 @@ func TestAuthorizeReadOnlyDefault(t *testing.T) {
 	tokAllow := Token{Name: "t", ReadOnlyDefault: true, AllowCommands: []string{"exec"}}
 	if err := Authorize(tokAllow, "exec", "web-01", false, nil, nil); err != nil {
 		t.Fatalf("explicitly-allowed exec should pass under read-only default: %v", err)
+	}
+}
+
+// TestOperatorAttributionNotForgeable pins the FL-030 fix: the audited operator
+// comes from the programmatic SetActingOperator (set by the CLI ONLY after it
+// verifies --token), and the previously-trusted FLEET_OPERATOR environment
+// variable is IGNORED so no other process can spoof the audit operator.
+func TestOperatorAttributionNotForgeable(t *testing.T) {
+	// A forged env var must NOT be honored anymore.
+	t.Setenv("FLEET_OPERATOR", "token:attacker")
+
+	// With nothing set programmatically and no config operator, attribution falls
+	// back to the OS user — NEVER to the forged env var.
+	app := &App{}
+	if got := app.operator(); got == "token:attacker" {
+		t.Fatalf("operator() honored the forgeable FLEET_OPERATOR env var: %q", got)
+	}
+
+	// Config operator is used when no acting operator is set.
+	app.Config.Operator = "config-user"
+	if got := app.operator(); got != "config-user" {
+		t.Fatalf("operator() = %q, want config-user (env var must be ignored)", got)
+	}
+
+	// A verified token's acting operator wins over config and env.
+	app.SetActingOperator("token:ci")
+	if got := app.operator(); got != "token:ci" {
+		t.Fatalf("operator() = %q, want token:ci (the programmatic acting operator)", got)
 	}
 }

@@ -48,7 +48,25 @@ type App struct {
 	ReverseStatusLookup func(string) (ReverseSessionInfo, error)
 	ReverseDisconnect   func(string) error
 
+	// actingOperator attributes every audited action to a specific operator
+	// (e.g. "token:<name>"). It is set PROGRAMMATICALLY by the CLI only after a
+	// presented --token has been verified — never from the environment, which any
+	// process could forge. Empty means "fall back to config/OS user".
+	actingOperator string
+
 	serverMu sync.RWMutex
+}
+
+// SetActingOperator records who is acting for audit attribution. The CLI calls
+// this ONLY after successfully verifying the --token, passing a value it derives
+// from the verified token (e.g. "token:<name>"). It deliberately has no env-var
+// path: an attacker-settable environment variable must not be able to spoof the
+// audit operator.
+func (a *App) SetActingOperator(op string) {
+	if a == nil {
+		return
+	}
+	a.actingOperator = strings.TrimSpace(op)
 }
 
 func Open(configDir string) (*App, error) {
@@ -1026,10 +1044,13 @@ func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, 
 }
 
 func (a *App) operator() string {
-	// An active RBAC token (set by the CLI pre-run gate) attributes every audited
-	// action to that token, so the audit log answers "which token did what" (FL-030).
-	if op := os.Getenv("FLEET_OPERATOR"); op != "" {
-		return op
+	// A verified RBAC token sets actingOperator via SetActingOperator (the CLI
+	// pre-run gate, AFTER it validates --token), so the audit log answers "which
+	// token did what" (FL-030). This is a programmatic field, NOT an environment
+	// variable: an attacker-settable env var must never be able to spoof the
+	// audited operator.
+	if a.actingOperator != "" {
+		return a.actingOperator
 	}
 	if a.Config.Operator != "" {
 		return a.Config.Operator

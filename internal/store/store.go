@@ -236,7 +236,7 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 	switch cfg.Backend {
 	case BackendSQLite:
 		path := cfg.PathFor(workload)
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, nil, fmt.Errorf("create database directory: %w", err)
 		}
 		dialector = sqlite.Open(path)
@@ -271,9 +271,26 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 		if err := db.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
 			return nil, nil, fmt.Errorf("enable sqlite WAL mode: %w", err)
 		}
+		// The driver creates the db (and WAL/SHM sidecars) with world-readable
+		// default perms; these may hold secrets/state, so restrict to 0600.
+		if err := restrictSQLitePerms(cfg.PathFor(workload)); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return db, sqlDB, nil
+}
+
+// restrictSQLitePerms tightens the SQLite database file and its WAL/SHM sidecars
+// to 0600 (owner-only), since the driver creates them with umask-default perms
+// that are typically world-readable. Missing sidecars are ignored.
+func restrictSQLitePerms(path string) error {
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict sqlite file permissions: %w", err)
+		}
+	}
+	return nil
 }
 
 func configurePool(sqlDB *sql.DB, cfg SQLBackendConfig) {

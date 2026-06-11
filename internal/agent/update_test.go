@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"testing"
 
+	"aead.dev/minisign"
 	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/pkg/proto"
 )
@@ -30,17 +32,29 @@ func TestManagedUpdaterAppliesAgentBinaryAndSchedulesRestart(t *testing.T) {
 
 	archive := tarGzBinary(t, filepath.Base(executablePath), []byte("new-agent"))
 	sum := sha256.Sum256(archive)
+	// Signature verification is now fail-closed on every channel, so the agent
+	// update must carry a valid minisign signature (the agent downloads from the
+	// release server, an untrusted source).
+	pub, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error = %v", err)
+	}
+	signature := minisign.Sign(priv, archive)
+	pubText, err := pub.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText error = %v", err)
+	}
+	const sigURL = "https://example.invalid/fleet-agent.tar.gz.minisig"
 	manifest := update.Manifest{
 		Channels: map[string]update.ChannelInfo{
-			// dev channel: this test covers the agent apply/restart mechanics;
-			// signature-policy enforcement is covered by the updater package tests.
 			"dev": {Version: "v1.2.3"},
 		},
 		AgentBinaries: map[string]map[string]update.BinaryInfo{
 			"v1.2.3": {
 				runtime.GOOS + "-" + runtime.GOARCH: {
-					URL:    "https://example.invalid/fleet-agent.tar.gz",
-					SHA256: hex.EncodeToString(sum[:]),
+					URL:       "https://example.invalid/fleet-agent.tar.gz",
+					SHA256:    hex.EncodeToString(sum[:]),
+					Signature: sigURL,
 				},
 			},
 		},
@@ -48,13 +62,17 @@ func TestManagedUpdaterAppliesAgentBinaryAndSchedulesRestart(t *testing.T) {
 
 	runner := &recordingRunner{}
 	updater := managedUpdater{
-		Runner:         runner,
-		ExecutablePath: executablePath,
-		ConfigDir:      configDir,
+		Runner:           runner,
+		ExecutablePath:   executablePath,
+		ConfigDir:        configDir,
+		SigningPublicKey: string(pubText),
 		FetchManifest: func(context.Context, string) (update.Manifest, error) {
 			return manifest, nil
 		},
-		DownloadURL: func(context.Context, string) ([]byte, error) {
+		DownloadURL: func(_ context.Context, url string) ([]byte, error) {
+			if url == sigURL {
+				return signature, nil
+			}
 			return archive, nil
 		},
 	}

@@ -379,3 +379,23 @@ func TestEnableDisableCommandsNonEmpty(t *testing.T) {
 	}
 	_ = fmt.Sprint(FirewallBackendUnknown)
 }
+
+// TestNftablesUndoScopedToFleetTable is the regression for the LOW finding: the
+// nftables self-revert undo must remove ONLY the fleet table, never the whole
+// host ruleset. A `nft flush ruleset` would wipe every unrelated host firewall
+// rule, so it must not appear in the undo command.
+func TestNftablesUndoScopedToFleetTable(t *testing.T) {
+	undo := disableCommand(FirewallBackendNftables)
+	if strings.Contains(undo, "flush ruleset") {
+		t.Fatalf("nftables undo still flushes the whole ruleset (wipes all host rules):\n%s", undo)
+	}
+	// It must delete the fleet table specifically.
+	if !strings.Contains(undo, "delete table inet fleet") {
+		t.Fatalf("nftables undo should delete only the fleet table, got:\n%s", undo)
+	}
+	// And it should first reopen the fleet chain policy so the host reopens even
+	// before the table delete lands.
+	if !strings.Contains(undo, "policy accept") {
+		t.Fatalf("nftables undo should reset the fleet chain policy to accept, got:\n%s", undo)
+	}
+}

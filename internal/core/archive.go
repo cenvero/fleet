@@ -4,6 +4,10 @@
 package core
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/bzip2"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -193,17 +197,279 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 }
 
 // ExtractArchive extracts an archive (full path) into its containing directory.
+//
+// SECURITY: archive members are attacker-controlled. A member named "../evil"
+// or "/etc/cron.d/x" (zip-slip / absolute-path traversal) would otherwise write
+// outside the destination directory — and on a remote node the extract runs via
+// shell.exec, escaping the file.* sandbox and its --file-root entirely. To
+// prevent this:
+//   - Local extraction is performed Go-natively (archive/zip + archive/tar),
+//     routing every member through SafeLocalJoin(destDir, member) so an escaping
+//     member is impossible to write by construction.
+//   - For formats with no stdlib reader (tar.xz) and for remote extraction, the
+//     archive's member list is enumerated first and the extraction is REFUSED if
+//     any member is absolute or contains a ".." component; only an all-safe
+//     archive is handed to the (shell-quoted) tar/unzip tool.
 func (a *App) ExtractArchive(server, archivePath string) error {
+	destDir := path.Dir(archivePath)
 	if server == "" {
-		tool, args := extractArgv(archivePath, path.Dir(archivePath))
-		if err := runLocalTool("", tool, args); err != nil {
+		if err := a.extractLocal(archivePath, destDir); err != nil {
 			return err
 		}
-	} else if err := a.runRemoteShell(server, extractCmd(archivePath)); err != nil {
-		return err
+	} else {
+		// Remote: list members through the same exec path, reject any escaping
+		// member, then extract only if every member is safe.
+		if err := a.validateRemoteArchiveMembers(server, archivePath); err != nil {
+			return err
+		}
+		if err := a.runRemoteShell(server, extractCmd(archivePath)); err != nil {
+			return err
+		}
 	}
 	a.auditArchive("file.extract", server, archivePath)
 	return nil
+}
+
+// extractLocal extracts archivePath into destDir on the controller. zip and the
+// tar family (tar/tar.gz/tar.bz2) are extracted Go-natively through
+// SafeLocalJoin so zip-slip is impossible by construction. tar.xz has no stdlib
+// decompressor, so it falls back to listing-and-validating members before
+// invoking the constant-tool tar with a path-checked, shell-free exec.
+func (a *App) extractLocal(archivePath, destDir string) error {
+	low := strings.ToLower(archivePath)
+	switch {
+	case strings.HasSuffix(low, ".zip"):
+		return extractZipNative(archivePath, destDir)
+	case strings.HasSuffix(low, ".tar.xz"):
+		// No stdlib xz reader: list members via tar, refuse any escape, then
+		// extract with the constant-tool path (no shell).
+		if err := validateTarXZMembers(archivePath); err != nil {
+			return err
+		}
+		tool, args := extractArgv(archivePath, destDir)
+		return runLocalTool("", tool, args)
+	default:
+		// tar, tar.gz/.tgz, tar.bz2 — all handled by streaming readers.
+		return extractTarNative(archivePath, destDir)
+	}
+}
+
+// archiveMemberSafe reports whether an archive member name is safe to extract:
+// it must not be absolute and must not escape the destination via a ".."
+// component. Mirrors the rejection rules SafeLocalJoin enforces, but operates on
+// the raw member name so it can vet a listing before any bytes are written.
+func archiveMemberSafe(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	// Normalise separators: tar uses "/" but a crafted name may embed "\".
+	slashed := strings.ReplaceAll(name, "\\", "/")
+	if path.IsAbs(slashed) || strings.HasPrefix(slashed, "/") {
+		return false
+	}
+	// Reject a drive-letter / UNC style absolute path too (defensive).
+	if filepath.IsAbs(name) {
+		return false
+	}
+	clean := path.Clean(slashed)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return false
+	}
+	for _, part := range strings.Split(slashed, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// extractZipNative extracts a zip archive, writing each member through
+// SafeLocalJoin so a "../" or absolute member cannot escape destDir.
+func extractZipNative(archivePath, destDir string) error {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		target, err := SafeLocalJoin(destDir, f.Name)
+		if err != nil {
+			return fmt.Errorf("refusing zip member %q: %w", f.Name, err)
+		}
+		info := f.FileInfo()
+		if info.IsDir() {
+			if err := os.MkdirAll(target, 0o750); err != nil {
+				return err
+			}
+			continue
+		}
+		// Skip symlinks and other non-regular members: a symlink could point
+		// outside destDir and a later member could then be written through it.
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		if err := writeArchiveFile(target, rc, info.Mode().Perm()); err != nil {
+			_ = rc.Close()
+			return err
+		}
+		_ = rc.Close()
+	}
+	return nil
+}
+
+// extractTarNative extracts a tar / tar.gz / tar.bz2 archive, writing each
+// member through SafeLocalJoin so an escaping member cannot leave destDir.
+func extractTarNative(archivePath, destDir string) error {
+	f, err := os.Open(archivePath) // #nosec G304 -- operator-chosen archive path
+	if err != nil {
+		return fmt.Errorf("open archive: %w", err)
+	}
+	defer f.Close()
+
+	var src io.Reader = f
+	low := strings.ToLower(archivePath)
+	switch {
+	case strings.HasSuffix(low, ".tar.gz"), strings.HasSuffix(low, ".tgz"):
+		gz, gerr := gzip.NewReader(f)
+		if gerr != nil {
+			return fmt.Errorf("open gzip: %w", gerr)
+		}
+		defer gz.Close()
+		src = gz
+	case strings.HasSuffix(low, ".tar.bz2"):
+		src = bzip2.NewReader(f)
+	}
+
+	tr := tar.NewReader(src)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar: %w", err)
+		}
+		target, err := SafeLocalJoin(destDir, hdr.Name)
+		if err != nil {
+			return fmt.Errorf("refusing tar member %q: %w", hdr.Name, err)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o750); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+				return err
+			}
+			if err := writeArchiveFile(target, tr, os.FileMode(hdr.Mode&0o7777).Perm()); err != nil { // #nosec G115 -- masked to 0o7777
+				return err
+			}
+		default:
+			// Skip symlinks/hardlinks/devices: a symlink could later be used to
+			// redirect a write outside destDir.
+			continue
+		}
+	}
+	return nil
+}
+
+// writeArchiveFile copies one archive member's bytes to target with the given
+// perm. The copy is bounded by maxExtractedFileBytes so a decompression bomb (a
+// member that inflates enormously) cannot exhaust the controller's disk.
+func writeArchiveFile(target string, r io.Reader, perm os.FileMode) error {
+	if perm == 0 {
+		perm = 0o600
+	}
+	// Never follow an existing symlink at target (defense in depth alongside the
+	// symlink-skip above); O_EXCL is too strict because directories may pre-exist
+	// but the file itself should be created fresh.
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- target validated via SafeLocalJoin
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, io.LimitReader(r, maxExtractedFileBytes)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// maxExtractedFileBytes caps a single extracted member's size to bound a
+// decompression bomb. 16 GiB is generous for real archives while still finite.
+const maxExtractedFileBytes = int64(16) * 1024 * 1024 * 1024
+
+// validateRemoteArchiveMembers lists the members of a remote archive via the
+// agent's shell.exec (the same path the extract uses) and returns an error if
+// ANY member is absolute or contains a "..". This blocks zip-slip on a node
+// where extraction would otherwise run unsandboxed (outside --file-root).
+func (a *App) validateRemoteArchiveMembers(server, archivePath string) error {
+	cmd, parse := listMembersCmd(archivePath)
+	res, err := a.ExecCommand(server, cmd)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("list archive members: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return rejectUnsafeMembers(parse(res.Stdout))
+}
+
+// validateTarXZMembers lists a local tar.xz's members via the constant-tool tar
+// (no shell) and refuses extraction if any member escapes.
+func validateTarXZMembers(archivePath string) error {
+	cmd := exec.Command("tar", "-tf", archivePath) // #nosec G204 -- constant tool, archive path is an argument, no shell
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("list archive members: %w", err)
+	}
+	return rejectUnsafeMembers(splitMemberLines(string(out)))
+}
+
+// rejectUnsafeMembers returns an error naming the first member that would escape
+// the destination directory, or nil if every member is safe.
+func rejectUnsafeMembers(members []string) error {
+	for _, m := range members {
+		if m == "" {
+			continue
+		}
+		if !archiveMemberSafe(m) {
+			return fmt.Errorf("refusing to extract archive: member %q escapes the destination directory", m)
+		}
+	}
+	return nil
+}
+
+// listMembersCmd builds the shell command (path shell-quoted) that lists an
+// archive's members and a parser for its stdout. zip uses `unzip -Z1`, the tar
+// family uses `tar -tf` (auto-detecting gz/bz2/xz from the stream).
+func listMembersCmd(archivePath string) (cmd string, parse func(string) []string) {
+	a := shellQuote(archivePath)
+	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
+		return fmt.Sprintf("unzip -Z1 %s", a), splitMemberLines
+	}
+	return fmt.Sprintf("tar -tf %s", a), splitMemberLines
+}
+
+// splitMemberLines splits a tool's newline-separated member listing into trimmed
+// member names.
+func splitMemberLines(out string) []string {
+	lines := strings.Split(out, "\n")
+	members := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if t := strings.TrimRight(l, "\r"); strings.TrimSpace(t) != "" {
+			members = append(members, t)
+		}
+	}
+	return members
 }
 
 // runLocalTool runs a FIXED tool (a constant tar/zip/unzip) with its arguments

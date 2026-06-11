@@ -6,18 +6,12 @@ package agent
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/cenvero/fleet/pkg/proto"
 )
-
-// blockedLogPrefixes are OS virtual filesystems that must never be read as log
-// files. Reading from these can expose arbitrary process memory (/proc/N/mem),
-// kernel data structures, or raw device data — even to an authenticated client.
-var blockedLogPrefixes = []string{"/proc/", "/sys/", "/dev/"}
 
 // maxLogTailLines caps how many log lines are buffered/returned for a single
 // read, bounding the agent's memory regardless of the requested tail or file
@@ -47,22 +41,27 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 			Message: "log path must be absolute",
 		}
 	}
-	// Resolve symlinks so a symlink pointing to /proc/1/mem cannot bypass the
-	// block below. Ignore resolution errors — the open below will surface them.
-	// We then open realPath (not payload.Path) to eliminate the TOCTOU window
-	// between the EvalSymlinks check and the open: if an attacker swaps the
-	// symlink after we resolve it, we still open the originally resolved target.
-	realPath := payload.Path
-	if resolved, err := filepath.EvalSymlinks(payload.Path); err == nil {
+	// Resolve symlinks so a symlink pointing to /proc/1/mem (or anywhere outside
+	// --file-root) cannot bypass the checks below. Ignore resolution errors — the
+	// open below will surface them. We then open realPath (not payload.Path) to
+	// eliminate the TOCTOU window between the check and the open: if an attacker
+	// swaps the symlink after we resolve it, we still open the originally
+	// resolved target.
+	realPath := filepath.Clean(payload.Path)
+	if resolved, err := filepath.EvalSymlinks(realPath); err == nil {
 		realPath = resolved
 	}
-	for _, blocked := range blockedLogPrefixes {
-		if strings.HasPrefix(realPath, blocked) {
-			return proto.LogReadResult{}, &RPCError{
-				Code:    "invalid_log_path",
-				Message: fmt.Sprintf("reading from %s is not permitted", blocked),
-			}
-		}
+	// log.read must honor the SAME sandbox as file.* operations: reject the OS
+	// pseudo filesystems AND confine to the agent's allowed file roots
+	// (--file-root). Without this an authenticated controller could read ANY
+	// file the agent user can — /etc/shadow, ~/.ssh/id_*, the agent host key —
+	// regardless of the configured roots. checkBlockedTransferPath covers both
+	// the /proc,/sys,/dev block list and withinAllowedRoots, so it subsumes the
+	// previous prefix-only check.
+	if rerr := checkBlockedTransferPath(realPath); rerr != nil {
+		// Surface under the log-path error code for callers that special-case it,
+		// but keep the descriptive message from the shared validator.
+		return proto.LogReadResult{}, &RPCError{Code: "invalid_log_path", Message: rerr.Message}
 	}
 	if payload.Follow {
 		return proto.LogReadResult{}, &RPCError{

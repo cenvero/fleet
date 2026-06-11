@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -246,17 +247,29 @@ func TestUploadResumesAfterDrop(t *testing.T) {
 }
 
 // instrumentedFileManager wraps a real agent file manager to count writes and
-// optionally inject a failure after N successful writes.
+// optionally inject a failure after N successful writes. It can also corrupt
+// reads by truncating the returned chunk (while keeping its SHA consistent with
+// the truncated bytes) so the download path's chunk-length guard is exercised.
 type instrumentedFileManager struct {
 	agent.FileManager
-	mu        sync.Mutex
-	writes    int
-	failAfter int
+	mu             sync.Mutex
+	writes         int
+	failAfter      int
+	truncateReadBy int64
 }
 
 func (m *instrumentedFileManager) setFailAfter(n int) {
 	m.mu.Lock()
 	m.failAfter = n
+	m.mu.Unlock()
+}
+
+// setTruncateReadBy makes every Read drop the last n bytes of the chunk it would
+// otherwise return, then re-checksum the shortened payload. The SHA therefore
+// still matches the (short) Data, so only an explicit length check can catch it.
+func (m *instrumentedFileManager) setTruncateReadBy(n int64) {
+	m.mu.Lock()
+	m.truncateReadBy = n
 	m.mu.Unlock()
 }
 
@@ -276,4 +289,121 @@ func (m *instrumentedFileManager) Write(ctx context.Context, p proto.FileWritePa
 		return proto.FileWriteResult{}, &agent.RPCError{Code: "injected_drop", Message: "simulated connection drop"}
 	}
 	return m.FileManager.Write(ctx, p)
+}
+
+func (m *instrumentedFileManager) Read(ctx context.Context, p proto.FileReadPayload) (proto.FileReadResult, error) {
+	res, err := m.FileManager.Read(ctx, p)
+	if err != nil {
+		return res, err
+	}
+	m.mu.Lock()
+	trunc := m.truncateReadBy
+	m.mu.Unlock()
+	if trunc > 0 && int64(len(res.Data)) > trunc {
+		res.Data = res.Data[:int64(len(res.Data))-trunc]
+		sum := sha256.Sum256(res.Data)
+		res.SHA256 = hex.EncodeToString(sum[:]) // keep SHA consistent with short data
+		res.Length = int64(len(res.Data))
+	}
+	return res, nil
+}
+
+func TestValidateTransferSize(t *testing.T) {
+	t.Parallel()
+	const chunk = int64(4 * 1024 * 1024)
+	if err := validateTransferSize(0, chunk); err != nil {
+		t.Fatalf("zero size should be allowed: %v", err)
+	}
+	if err := validateTransferSize(1<<30, chunk); err != nil {
+		t.Fatalf("1 GiB should be allowed: %v", err)
+	}
+	if err := validateTransferSize(-1, chunk); err == nil {
+		t.Fatal("negative size must be rejected")
+	}
+	if err := validateTransferSize(maxTransferFileBytes+1, chunk); err == nil {
+		t.Fatal("absurd size must be rejected")
+	}
+	// Tiny chunk size + huge size must trip the chunk-count cap even though the
+	// byte ceiling alone might not.
+	if err := validateTransferSize(maxTransferFileBytes, 1); err == nil {
+		t.Fatal("excessive chunk count must be rejected")
+	}
+}
+
+func TestDownloadRejectsChunkLengthMismatch(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+
+	src := make([]byte, 256*1024)
+	for i := range src {
+		src[i] = byte((i*2654435761 + 7) % 251)
+	}
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	remotePath := filepath.Join(remoteDir, "payload.bin")
+	if err := os.WriteFile(remotePath, src, 0o644); err != nil {
+		t.Fatalf("write remote source: %v", err)
+	}
+
+	// Force every chunk to come back one byte short (with a matching SHA). The
+	// length guard must reject it even though the checksum "passes".
+	rig.fileMgr.setTruncateReadBy(1)
+
+	backPath := filepath.Join(t.TempDir(), "back.bin")
+	opts := FileTransferOptions{Parallel: 1, ChunkSize: 64 * 1024}
+	_, err := rig.app.DownloadFile("loopback", remotePath, backPath, opts, nil)
+	if err == nil {
+		t.Fatal("expected download to fail on a length-mismatched chunk")
+	}
+	if !strings.Contains(err.Error(), "length mismatch") {
+		t.Fatalf("expected a chunk length-mismatch error, got: %v", err)
+	}
+}
+
+func TestDownloadSurfacesWholeFileHash(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+
+	src := make([]byte, 300*1024)
+	for i := range src {
+		src[i] = byte((i*40503 + 13) % 251)
+	}
+	wantSum := sha256.Sum256(src)
+
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	remotePath := filepath.Join(remoteDir, "payload.bin")
+	if err := os.WriteFile(remotePath, src, 0o644); err != nil {
+		t.Fatalf("write remote source: %v", err)
+	}
+
+	backPath := filepath.Join(t.TempDir(), "back.bin")
+	opts := FileTransferOptions{Parallel: 2, ChunkSize: 64 * 1024}
+	if _, err := rig.app.DownloadFile("loopback", remotePath, backPath, opts, nil); err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	// The whole-file digest is recorded in the audit trail; confirm it matches
+	// the source so a caller comparing against a known hash would succeed.
+	if !auditDetailsContain(t, rig.app, "sha256="+hex.EncodeToString(wantSum[:])) {
+		t.Fatal("download did not surface the whole-file sha256 in the audit trail")
+	}
+}
+
+// auditDetailsContain reports whether any audit entry's Details contains sub.
+func auditDetailsContain(t *testing.T, app *App, sub string) bool {
+	t.Helper()
+	entries, err := app.AuditLog.ReadAll()
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Details, sub) {
+			return true
+		}
+	}
+	return false
 }

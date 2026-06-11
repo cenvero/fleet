@@ -5,10 +5,13 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -73,6 +76,12 @@ type NotifyTarget struct {
 	Kind   NotifyKind `json:"kind"`
 	URL    string     `json:"url"`
 	Events []string   `json:"events"`
+	// AllowInternal opts this target out of the SSRF guard that otherwise blocks
+	// delivery to loopback/link-local/private addresses. A self-hosted operator
+	// may legitimately target an internal endpoint (e.g. an in-cluster webhook),
+	// so this is configurable per target. The cloud metadata IP 169.254.169.254 is
+	// ALWAYS blocked regardless of this flag.
+	AllowInternal bool `json:"allow_internal,omitempty"`
 }
 
 // Subscribed reports whether this target wants the given event.
@@ -298,9 +307,109 @@ func parseIndex(s string) (int, error) {
 	return n, nil
 }
 
+// cloudMetadataIP is the link-local cloud-metadata endpoint (AWS/GCP/Azure/etc.).
+// Reaching it via a webhook would let an attacker exfiltrate instance
+// credentials, so it is hard-blocked ALWAYS — even for allow-internal targets.
+var cloudMetadataIP = net.IPv4(169, 254, 169, 254)
+
+// isBlockedSSRFIP reports whether ip must never be reached (true) given the
+// target's allow-internal flag. 169.254.169.254 is always blocked. When
+// allowInternal is false, loopback, link-local, and private (RFC1918 / ULA)
+// ranges are also blocked. Public addresses are allowed.
+func isBlockedSSRFIP(ip net.IP, allowInternal bool) bool {
+	if ip.Equal(cloudMetadataIP) {
+		return true // cloud metadata: always blocked
+	}
+	if allowInternal {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsPrivate() {
+		return true
+	}
+	return false
+}
+
+// guardSSRF resolves the URL host and refuses delivery to any address the SSRF
+// policy blocks (see isBlockedSSRFIP). It resolves the host once here and the
+// caller's resolved IP is what the request connects to via a pinned dialer, so a
+// DNS-rebind between this check and the dial cannot slip a blocked IP through.
+// It returns the single safe IP to dial.
+func guardSSRF(rawURL string, allowInternal bool) (net.IP, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse url: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("notification url %q has no host", rawURL)
+	}
+
+	// A literal IP host needs no DNS lookup.
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedSSRFIP(ip, allowInternal) {
+			return nil, ssrfBlockedErr(host, ip, allowInternal)
+		}
+		return ip, nil
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %q: no addresses", host)
+	}
+	// Block if ANY resolved address is blocked: a host that resolves to both a
+	// public and a blocked IP must not be reachable via the blocked one.
+	for _, ip := range ips {
+		if isBlockedSSRFIP(ip, allowInternal) {
+			return nil, ssrfBlockedErr(host, ip, allowInternal)
+		}
+	}
+	return ips[0], nil
+}
+
+// ssrfPinnedTransport returns an *http.Transport derived from base that dials
+// EVERY address to ip (preserving the requested port). It is how Send forces the
+// connection to the validated IP, defeating a DNS rebind between guardSSRF and
+// the dial. base may be nil, an *http.Transport (cloned), or any other
+// RoundTripper (in which case a fresh transport is used so pinning still applies).
+func ssrfPinnedTransport(base http.RoundTripper, ip net.IP) *http.Transport {
+	var t *http.Transport
+	if bt, ok := base.(*http.Transport); ok && bt != nil {
+		t = bt.Clone()
+	} else if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		t = dt.Clone()
+	} else {
+		t = &http.Transport{}
+	}
+	dialer := &net.Dialer{Timeout: 8 * time.Second}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Replace the host with the validated IP; keep the caller's port.
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	return t
+}
+
+func ssrfBlockedErr(host string, ip net.IP, allowInternal bool) error {
+	if ip.Equal(cloudMetadataIP) {
+		return fmt.Errorf("refusing to deliver notification to %s (%s): the cloud metadata endpoint is always blocked", host, ip)
+	}
+	return fmt.Errorf("refusing to deliver notification to %s (%s): internal/loopback/private address blocked (set allow-internal on the target to permit this; the cloud metadata IP stays blocked either way)", host, ip)
+}
+
 // Send POSTs a single notification to one target. Slack targets receive
 // {"text": message}; webhook targets receive {event, message, time}. A non-2xx
 // HTTP status is treated as an error.
+//
+// Before delivery it applies an SSRF guard: the URL host is resolved and the
+// request is refused if it would reach a blocked address (always 169.254.169.254;
+// also loopback/link-local/private unless the target opts in with AllowInternal).
 func (s *NotifyStore) Send(target NotifyTarget, event, message string) error {
 	var body []byte
 	var err error
@@ -320,6 +429,11 @@ func (s *NotifyStore) Send(target NotifyTarget, event, message string) error {
 		return fmt.Errorf("encode notification: %w", err)
 	}
 
+	safeIP, err := guardSSRF(target.URL, target.AllowInternal)
+	if err != nil {
+		return err
+	}
+
 	req, err := http.NewRequest(http.MethodPost, target.URL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -330,7 +444,14 @@ func (s *NotifyStore) Send(target NotifyTarget, event, message string) error {
 	if client == nil {
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
-	resp, err := client.Do(req)
+	// Pin every dial for this request to the IP we just validated. This closes the
+	// DNS-rebind TOCTOU window: even if the host's DNS now resolves to a blocked
+	// address, the connection still goes to the address that passed guardSSRF (the
+	// requested port is preserved). We clone the client so the shared/base client
+	// is never mutated.
+	pinned := *client
+	pinned.Transport = ssrfPinnedTransport(client.Transport, safeIP)
+	resp, err := pinned.Do(req)
 	if err != nil {
 		return fmt.Errorf("post to %s: %w", target.URL, err)
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -14,6 +15,12 @@ import (
 )
 
 const DefaultManifestURL = "https://fleet.cenvero.org/manifest.json"
+
+// maxManifestBytes bounds how much of the manifest body we will read/decode.
+// The manifest is a small JSON document; 8 MiB is far more than any legitimate
+// release manifest needs while preventing a malicious or misconfigured server
+// from streaming an unbounded body and exhausting memory.
+const maxManifestBytes = 8 << 20 // 8 MiB
 
 type Policy string
 
@@ -78,8 +85,20 @@ func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("unexpected manifest status %s", resp.Status)
 	}
 
+	// Bound the manifest body before decoding so a malicious/oversized response
+	// cannot exhaust memory. We allow one extra byte so we can distinguish a
+	// body that is exactly at the limit from one that overruns it.
+	limited := io.LimitReader(resp.Body, maxManifestBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("read manifest body: %w", err)
+	}
+	if int64(len(body)) > maxManifestBytes {
+		return Manifest{}, fmt.Errorf("manifest exceeds maximum size of %d bytes", maxManifestBytes)
+	}
+
 	var manifest Manifest
-	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+	if err := json.Unmarshal(body, &manifest); err != nil {
 		return Manifest{}, fmt.Errorf("decode manifest: %w", err)
 	}
 	return manifest, nil

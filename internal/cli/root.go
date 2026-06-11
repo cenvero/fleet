@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -34,6 +35,28 @@ import (
 	"github.com/cenvero/fleet/pkg/proto"
 	"github.com/spf13/cobra"
 )
+
+// actingOperator is the audit-attribution label for the verified --token, set by
+// enforceToken AFTER the token is loaded and its name validated. openApp applies
+// it to every App it opens so audited actions are attributed to the token. It is
+// process-scoped (the CLI runs one command per process) and is never read from or
+// written to the environment, which would be forgeable.
+var actingOperator string
+
+// tokenNamePattern is the strict charset allowed for a token name used in audit
+// attribution: letters, digits, dot, underscore and hyphen, 1-64 chars. It
+// excludes whitespace and control characters so a token name can never inject a
+// forged operator label into the audit log.
+var tokenNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validateTokenName rejects a token name that is empty or contains characters
+// outside the strict attribution charset (root.go:223 INFO).
+func validateTokenName(name string) error {
+	if !tokenNamePattern.MatchString(name) {
+		return fmt.Errorf("name %q must be 1-64 chars of letters, digits, '.', '_' or '-'", name)
+	}
+	return nil
+}
 
 func NewRootCommand() *cobra.Command {
 	var configDir string
@@ -112,6 +135,15 @@ func NewRootCommand() *cobra.Command {
 				}
 				// Stamp last-seen version so 'fleet recover' can detect mismatches.
 				core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
+			}
+			// Apply the cmd-policy deny/confirm gate to command paths that run an
+			// arbitrary operator-supplied command but are NOT `fleet exec` and so do
+			// not carry exec's own preflight: `guard` and `cron add`. (`job run` is
+			// gated in jobs.go where it assembles the command; `exec` gates itself.)
+			// This runs for every invocation, with or without a token, mirroring how
+			// exec always consults the policy.
+			if err := enforceCommandPolicyForLeaf(cmd, configDir); err != nil {
+				return err
 			}
 			// FL-030: controller-side RBAC enforcement. After the init check (so a
 			// scoped token can resolve servers/groups), if a token is presented,
@@ -219,8 +251,21 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		os.Exit(1)
 	}
 
-	// Attribute every audited action to this token (FL-030 audit attribution).
-	_ = os.Setenv("FLEET_OPERATOR", "token:"+token.Name)
+	// The token name is used for audit attribution and is embedded in the
+	// operator string; validate it against a strict charset BEFORE trusting it so
+	// a maliciously-named token cannot inject control characters / forge a
+	// different operator label in the audit log (root.go:223 INFO).
+	if err := validateTokenName(token.Name); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: token has an invalid name: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Attribute every audited action to this VERIFIED token (FL-030 audit
+	// attribution). This is recorded programmatically and applied to every App
+	// opened by this process via openApp -> SetActingOperator; it deliberately
+	// does NOT go through an environment variable, which any process could set to
+	// spoof the audited operator.
+	actingOperator = "token:" + token.Name
 
 	top, sub := topLevelCommand(cmd)
 	serverScoped := len(token.Servers) > 0 || len(token.Groups) > 0
@@ -277,6 +322,37 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		if allSet || strings.TrimSpace(groupSet) != "" {
 			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a fan-out exec (--all/--group) in RBAC v1")
 			os.Exit(1)
+		}
+	}
+
+	// `run` executes a playbook against MULTIPLE servers resolved from an explicit
+	// positional, --group, OR the playbook's own `hosts` expression. The single
+	// best-effort target check cannot vet that set (targets may live inside the
+	// playbook file), so — exactly like a fan-out exec — a server-scoped token is
+	// DENIED `run` outright (fail-closed) rather than allowed to slip past scoping.
+	if serverScoped && top == "run" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a playbook (multi-server targets cannot be vetted) in RBAC v1")
+		os.Exit(1)
+	}
+
+	// Fleet-wide READ fan-outs (`top`, `health`, and a bare `inventory`) probe
+	// EVERY server, regardless of the token's scope — an information leak for a
+	// server-scoped token. They live in command files that re-resolve the server
+	// set themselves, so RBAC v1 cannot narrow their fan-out; instead a
+	// server-scoped token is DENIED them (fail-closed). `inventory <server>` with
+	// an in-scope positional is still allowed (handled by the server-scope check
+	// below, since a single-server inventory does not fan out).
+	if serverScoped {
+		switch top {
+		case "top", "health":
+			fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run the fleet-wide read %q (it would probe out-of-scope servers) in RBAC v1\n", top)
+			os.Exit(1)
+		case "inventory":
+			// A bare `inventory` (no positional server) fans out to all servers.
+			if strings.TrimSpace(bestEffortInventoryServer(args)) == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a fleet-wide 'inventory' (it would probe out-of-scope servers); target a single in-scope server instead")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -353,13 +429,21 @@ func commandPositionalArgs(cmd *cobra.Command) []string {
 // consumed the subcommand token, so the LEAF command's positional args do NOT
 // contain the subcommand. For BOTH top-level server commands
 // (`exec <server> ...`, `journal <server>`, `guard <server> ...`,
-// `drift <server>`, `svc <server>`) AND subcommand commands
+// `drift <server>`, `svc <server>`, `tunnel <server> <spec>`,
+// `sync <server> ...`, `cron <sub> <server> ...`) AND subcommand commands
 // (`file rm <server> <path>`, `firewall enable <server>`,
 // `server remove <server>`, `port open <server> <port>`,
 // `service start <server> <name>`) the server is therefore args[0].
 //
 // This set keys on the TOP-LEVEL command; the per-subcommand distinction is no
 // longer needed because the subcommand is not in args at runtime.
+//
+// SECURITY: a command here takes its server as args[0], so a server-scoped token
+// is checked against that target. OMITTING a server-first command is a silent
+// scope BYPASS — the token would run it against ANY server (the original
+// cron/tunnel/sync finding) — so every server-first command MUST be listed.
+// `cron` keys here for all of add/list/rm: the subcommand was consumed, leaving
+// <server> as the first positional in every case.
 var serverArgCommands = map[string]bool{
 	// top-level, server is first positional
 	"exec":    true,
@@ -367,6 +451,9 @@ var serverArgCommands = map[string]bool{
 	"guard":   true,
 	"drift":   true,
 	"svc":     true,
+	"tunnel":  true,
+	"sync":    true,
+	"cron":    true,
 	// subcommand commands, server is first leaf positional (sub already consumed)
 	"server":   true,
 	"service":  true,
@@ -385,11 +472,28 @@ var serverArgCommands = map[string]bool{
 // args is the LEAF command's positional args (cobra already consumed any
 // subcommand), so the server is the FIRST positional for every command in
 // serverArgCommands.
+//
+// `inventory` is special: its server positional is OPTIONAL (a bare `inventory`
+// fans out to all). When present we return it so the scope check applies to a
+// single-server inventory; a bare inventory is denied for a scoped token by the
+// fleet-wide read fan-out guard, not here.
 func bestEffortTargetServer(top string, args []string) string {
+	if top == "inventory" {
+		return bestEffortInventoryServer(args)
+	}
 	if serverArgCommands[top] {
 		if len(args) >= 1 {
 			return args[0]
 		}
+	}
+	return ""
+}
+
+// bestEffortInventoryServer returns the optional positional server for
+// `inventory [server]`, or "" for a bare (fleet-wide) inventory.
+func bestEffortInventoryServer(args []string) string {
+	if len(args) >= 1 {
+		return strings.TrimSpace(args[0])
 	}
 	return ""
 }
@@ -1935,6 +2039,12 @@ func openApp(configDir string) (*core.App, error) {
 			return nil, fmt.Errorf("%w; run `fleet init` first", err)
 		}
 	}
+	// Attribute audited actions to the verified --token (set by enforceToken).
+	// This replaces the forgeable FLEET_OPERATOR env var: only a token this
+	// process actually validated can set the operator label.
+	if app != nil && actingOperator != "" {
+		app.SetActingOperator(actingOperator)
+	}
 	return app, err
 }
 
@@ -2045,6 +2155,91 @@ func classifyAgentError(err error) string {
 	}
 }
 
+// loadCmdPolicyOrFailClosed loads the command policy, distinguishing a MISSING
+// policy file (allowed: returns an empty store, nil error, so callers run with no
+// command gate) from a CORRUPT/UNREADABLE one (the file exists but won't parse:
+// returns a non-nil error so the caller FAILS CLOSED and refuses to run).
+//
+// NewCmdPolicyStore already returns (empty store, nil) for a missing file and
+// (nil, err) for a corrupt one; we wrap the error with operator guidance.
+func loadCmdPolicyOrFailClosed(configDir string) (*core.CmdPolicyStore, error) {
+	p, err := core.NewCmdPolicyStore(configDir)
+	if err != nil {
+		return nil, fmt.Errorf("refusing to run: the command policy could not be loaded (fix or remove %s): %w", core.CmdPolicyPath(configDir), err)
+	}
+	return p, nil
+}
+
+// enforceCmdPolicy applies the cmd-policy deny/confirm gate to a single operator-
+// supplied command, the same gate `exec` uses. It loads the policy FAIL-CLOSED (a
+// corrupt policy refuses the command). A deny match is refused outright; a confirm
+// match is refused unless confirmed is true (the caller's --confirm). It returns
+// nil when the command may proceed.
+//
+// This is the shared chokepoint for every code path that runs an arbitrary
+// operator-supplied command but is NOT `fleet exec`: `job run`, `guard`, and
+// `cron add`. Without it those paths bypassed the deny/confirm policy entirely.
+func enforceCmdPolicy(configDir, command string, confirmed bool) error {
+	policy, err := loadCmdPolicyOrFailClosed(configDir)
+	if err != nil {
+		return err
+	}
+	if policy == nil {
+		return nil
+	}
+	if denied, pat := policy.MatchDeny(command); denied {
+		return fmt.Errorf("command blocked by cmd-policy deny pattern %q", pat)
+	}
+	if needs, pat := policy.MatchConfirm(command); needs && !confirmed {
+		return fmt.Errorf("command matches cmd-policy confirm pattern %q — pass --confirm to run it", pat)
+	}
+	return nil
+}
+
+// enforceCommandPolicyForLeaf gates the operator-supplied command carried by the
+// `guard` and `cron add` leaf commands through the cmd-policy deny/confirm policy
+// — the same gate `exec` applies — from the central PersistentPreRunE hook. These
+// two paths execute an arbitrary command on a server but live in command files
+// outside exec's preflight, so without this they bypassed the deny/confirm policy
+// entirely.
+//
+// It is a no-op for every other command (including `job run`, which is gated in
+// jobs.go where it assembles its command, and `exec`, which gates itself). A
+// missing policy allows; a corrupt policy fails closed (via enforceCmdPolicy).
+func enforceCommandPolicyForLeaf(cmd *cobra.Command, configDir string) error {
+	top, sub := topLevelCommand(cmd)
+	switch {
+	case top == "guard":
+		// `guard <server> <risky command...>`: the command is every positional
+		// after the server. guard has no --confirm flag, so a confirm-required
+		// pattern blocks it (fail-safe) until the operator amends the policy.
+		args := commandPositionalArgs(cmd)
+		if len(args) < 2 {
+			return nil // arg-count errors are surfaced by cobra's own validator
+		}
+		command := strings.Join(args[1:], " ")
+		return enforceCmdPolicy(configDir, command, false)
+	case top == "cron" && sub == "add":
+		// `cron add <server> --cmd <command>`: the command is the --cmd flag. cron
+		// add has no --confirm flag, so a confirm-required pattern blocks it.
+		command := strings.TrimSpace(flagValue(cmd, "cmd"))
+		if command == "" {
+			return nil // a required-flag error is surfaced by cobra
+		}
+		return enforceCmdPolicy(configDir, command, false)
+	}
+	return nil
+}
+
+// flagValue safely returns a string flag's value, or "" when the flag is absent
+// on this command (so the helper can probe flags that exist only on some leaves).
+func flagValue(cmd *cobra.Command, name string) string {
+	if f := cmd.Flags().Lookup(name); f != nil {
+		return f.Value.String()
+	}
+	return ""
+}
+
 func newExecCommand(configDir *string) *cobra.Command {
 	var all, asJSON, propagateExit bool
 	var timeout, backoff time.Duration
@@ -2097,16 +2292,23 @@ Examples:
 			}
 			defer app.Close()
 
-			// Enforcement stores are loaded best-effort: a missing/fresh file is
-			// treated as "no policy" so plain `fleet exec` never breaks. The two
-			// stores whose ctor can error (cmd-policy, redact) are nil on error.
-			var cmdPolicy *core.CmdPolicyStore
-			if p, perr := core.NewCmdPolicyStore(*configDir); perr == nil {
-				cmdPolicy = p
+			// Enforcement stores: a MISSING/fresh policy file is treated as "no
+			// policy" (these ctors return a nil error + empty store in that case),
+			// so plain `fleet exec` never breaks. But a CORRUPT/UNREADABLE file —
+			// the file EXISTS yet won't parse — returns a non-nil error, and we must
+			// FAIL CLOSED rather than silently run with the security gate disabled.
+			// Treating a corrupt cmd-policy as "no policy" let denied/confirm-gated
+			// commands through; treating a corrupt redaction policy as "no redaction"
+			// leaked secrets the operator meant to scrub. Both refuse to run.
+			cmdPolicy, err := loadCmdPolicyOrFailClosed(*configDir)
+			if err != nil {
+				return err
 			}
 			var redactor *core.RedactStore
 			if rstore, rerr := core.NewRedactStore(*configDir); rerr == nil {
 				redactor = rstore
+			} else {
+				return fmt.Errorf("refusing to run: the output-redaction policy could not be loaded (fix or remove %s): %w", core.PolicyPath(*configDir), rerr)
 			}
 			approvals := core.NewApprovalStore(*configDir)
 			idemStore := core.NewIdempotencyStore(*configDir)

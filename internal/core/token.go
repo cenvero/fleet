@@ -5,6 +5,7 @@ package core
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,8 +34,16 @@ type TokenStore struct {
 // Token is a scoped credential. The ID is the bearer secret: anyone holding it
 // can act within the token's scope, so it is generated from crypto/rand and is
 // shown to the operator exactly once at creation time.
+//
+// SECURITY: the bearer ID is NEVER persisted in cleartext. At rest the store
+// keeps only Hash (a SHA-256 of the id) and Prefix (the first 8 chars of the id,
+// for `token list` display); a presented --token is hashed and looked up by
+// Hash. ID is populated in memory only at creation time (and is empty for tokens
+// loaded from disk), so the full secret is shown exactly once.
 type Token struct {
-	ID                 string    `json:"id"`
+	ID                 string    `json:"id,omitempty"`     // bearer secret; in-memory only, never written
+	Hash               string    `json:"hash,omitempty"`   // SHA-256(id) hex; the at-rest key
+	Prefix             string    `json:"prefix,omitempty"` // first 8 chars of id, for display
 	Name               string    `json:"name"`
 	Servers            []string  `json:"servers,omitempty"`
 	Groups             []string  `json:"groups,omitempty"`
@@ -45,9 +54,27 @@ type Token struct {
 	Created            time.Time `json:"created"`
 }
 
-// tokensDocument is the on-disk JSON shape: token ID -> token.
+// tokensDocument is the on-disk JSON shape: token HASH -> token. The map key is
+// the SHA-256 hash of the bearer id (NOT the id itself), so the cleartext secret
+// never touches disk.
 type tokensDocument struct {
 	Tokens map[string]Token `json:"tokens"`
+}
+
+// hashTokenID returns the hex SHA-256 of a bearer token id. This is the at-rest
+// key and the value looked up when a --token is presented.
+func hashTokenID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:])
+}
+
+// tokenIDPrefix returns the first 8 chars of an id (or the whole id when
+// shorter) for non-secret display in `token list` / `token revoke`.
+func tokenIDPrefix(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 // NewTokenStore opens (without reading) a token store rooted at configDir. If
@@ -127,9 +154,10 @@ func newTokenID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// Create persists a new token. ID and Created are filled in by the store; any
-// caller-supplied values for those fields are ignored. The stored token (with
-// its generated ID) is returned so the caller can show the secret once.
+// Create persists a new token. ID, Hash, Prefix and Created are filled in by the
+// store; any caller-supplied values for those fields are ignored. Only the Hash
+// and Prefix are written to disk — the cleartext ID never is. The returned token
+// carries the in-memory ID so the caller can show the bearer secret exactly once.
 func (s *TokenStore) Create(t Token) (Token, error) {
 	if strings.TrimSpace(t.Name) == "" {
 		return Token{}, fmt.Errorf("token name is required")
@@ -139,6 +167,8 @@ func (s *TokenStore) Create(t Token) (Token, error) {
 		return Token{}, err
 	}
 	t.ID = id
+	t.Hash = hashTokenID(id)
+	t.Prefix = tokenIDPrefix(id)
 	t.Created = time.Now().UTC()
 
 	s.mu.Lock()
@@ -147,18 +177,25 @@ func (s *TokenStore) Create(t Token) (Token, error) {
 	if err != nil {
 		return Token{}, err
 	}
-	if _, exists := doc.Tokens[t.ID]; exists {
+	if _, exists := doc.Tokens[t.Hash]; exists {
 		// Astronomically unlikely with 128 bits of entropy, but be explicit.
 		return Token{}, fmt.Errorf("token id collision; please retry")
 	}
-	doc.Tokens[t.ID] = t
+	// Persist WITHOUT the cleartext id: the on-disk record keeps only Hash+Prefix.
+	stored := t
+	stored.ID = ""
+	doc.Tokens[t.Hash] = stored
 	if err := s.write(doc); err != nil {
 		return Token{}, err
 	}
 	return t, nil
 }
 
-// List returns all tokens sorted by creation time (oldest first).
+// List returns all tokens sorted by creation time (oldest first). The cleartext
+// bearer id is never stored, so listed tokens carry no secret ID; for display
+// convenience the (non-secret) 8-char Prefix is surfaced in the ID field so
+// existing prefix-rendering callers keep working. Use Token.Prefix directly when
+// the distinction matters.
 func (s *TokenStore) List() ([]Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,19 +205,23 @@ func (s *TokenStore) List() ([]Token, error) {
 	}
 	out := make([]Token, 0, len(doc.Tokens))
 	for _, t := range doc.Tokens {
+		// Surface the prefix as the display id; the real secret is gone from disk.
+		t.ID = t.Prefix
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Created.Equal(out[j].Created) {
-			return out[i].ID < out[j].ID
+			return out[i].Hash < out[j].Hash
 		}
 		return out[i].Created.Before(out[j].Created)
 	})
 	return out, nil
 }
 
-// Get returns the token with the given ID, or an error if it does not exist
-// (i.e. unknown or revoked).
+// Get returns the token whose bearer id is the given value, or an error if it
+// does not exist (i.e. unknown or revoked). The id is hashed and looked up by
+// hash, since the cleartext id is never stored. The returned token does NOT
+// carry the cleartext ID (only Hash/Prefix), so callers must not rely on it.
 func (s *TokenStore) Get(id string) (Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -188,15 +229,16 @@ func (s *TokenStore) Get(id string) (Token, error) {
 	if err != nil {
 		return Token{}, err
 	}
-	t, ok := doc.Tokens[id]
+	t, ok := doc.Tokens[hashTokenID(id)]
 	if !ok {
 		return Token{}, fmt.Errorf("token not found")
 	}
 	return t, nil
 }
 
-// Revoke deletes the token with the given ID. Revoking an unknown token is an
-// error so the operator gets clear feedback.
+// Revoke deletes the token whose bearer id is the given value. The id is hashed
+// and removed by hash. Revoking an unknown token is an error so the operator
+// gets clear feedback.
 func (s *TokenStore) Revoke(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,10 +246,11 @@ func (s *TokenStore) Revoke(id string) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := doc.Tokens[id]; !ok {
+	hash := hashTokenID(id)
+	if _, ok := doc.Tokens[hash]; !ok {
 		return fmt.Errorf("token not found")
 	}
-	delete(doc.Tokens, id)
+	delete(doc.Tokens, hash)
 	return s.write(doc)
 }
 
@@ -258,6 +301,8 @@ func IsReadCommand(topCommand string) bool {
 //	cmd-policy set                       rewrites the command policy
 //	secret    set/rotate/rm              mutates stored secrets
 //	policy    set                        rewrites policy
+//	svc       restart/stop/disable/      changes live systemd unit state
+//	          enable/start
 //
 // Notes:
 //   - drift is read-only (it reports divergence; it does not change anything),
@@ -282,6 +327,9 @@ var destructiveCommands = map[string]map[string]bool{
 	"cmd-policy": {"set": true},
 	"secret":     {"set": true, "rotate": true, "rm": true},
 	"policy":     {"set": true},
+	// svc control mutates live systemd state and must clear the --destructive
+	// gate; only `svc status` (read) is exempt by omission.
+	"svc": {"restart": true, "stop": true, "disable": true, "enable": true, "start": true},
 }
 
 // keyReadSubs are the read-only subcommands of `key`. Every other `key`

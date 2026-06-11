@@ -235,3 +235,53 @@ func TestReconnectServerUpdatesObservedState(t *testing.T) {
 		t.Fatalf("agent server did not exit")
 	}
 }
+
+// TestEnsureLayoutKeysDirPerms asserts the keys/ directory (which holds the
+// controller private key AND the secret-encryption key) and its rotations/ subdir
+// are created 0700 — owner-only — not 0750. Other layout dirs remain 0750.
+func TestEnsureLayoutKeysDirPerms(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureLayout(dir); err != nil {
+		t.Fatalf("EnsureLayout: %v", err)
+	}
+	for _, rel := range []string{"keys", filepath.Join("keys", "rotations")} {
+		info, err := os.Stat(filepath.Join(dir, rel))
+		if err != nil {
+			t.Fatalf("stat %s: %v", rel, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Errorf("%s perm = %o, want 0700", rel, perm)
+		}
+	}
+	// A non-key dir is still 0750.
+	info, err := os.Stat(filepath.Join(dir, "logs"))
+	if err != nil {
+		t.Fatalf("stat logs: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o750 {
+		t.Errorf("logs perm = %o, want 0750", perm)
+	}
+}
+
+// TestEnsureLayoutTightensExistingKeysDir confirms EnsureLayout fixes an existing
+// keys/ that a prior version created 0750, re-securing it to 0700.
+func TestEnsureLayoutTightensExistingKeysDir(t *testing.T) {
+	dir := t.TempDir()
+	keys := filepath.Join(dir, "keys")
+	if err := os.MkdirAll(keys, 0o750); err != nil {
+		t.Fatalf("pre-create keys 0750: %v", err)
+	}
+	if err := os.Chmod(keys, 0o750); err != nil {
+		t.Fatalf("chmod 0750: %v", err)
+	}
+	if err := EnsureLayout(dir); err != nil {
+		t.Fatalf("EnsureLayout: %v", err)
+	}
+	info, err := os.Stat(keys)
+	if err != nil {
+		t.Fatalf("stat keys: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("existing keys/ not tightened: perm = %o, want 0700", perm)
+	}
+}

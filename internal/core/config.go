@@ -256,9 +256,24 @@ func IsInitialized(configDir string) bool {
 }
 
 func EnsureLayout(configDir string) error {
-	dirs := []string{
+	// keys/ (and its rotations/ subdir) hold the controller PRIVATE key and the
+	// secret-encryption key, so they are created 0700 — owner-only, never group/
+	// world traversable. The remaining layout dirs are 0750.
+	keyDirs := []string{
 		filepath.Join(configDir, "keys"),
 		filepath.Join(configDir, "keys", "rotations"),
+	}
+	for _, dir := range keyDirs {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create directory %s: %w", dir, err)
+		}
+		// MkdirAll is a no-op on an already-existing dir, so tighten an existing
+		// keys/ that a prior version created 0750.
+		if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directory needs the owner execute bit
+			return fmt.Errorf("secure directory %s: %w", dir, err)
+		}
+	}
+	dirs := []string{
 		filepath.Join(configDir, "servers"),
 		filepath.Join(configDir, "templates"),
 		filepath.Join(configDir, "logs"),

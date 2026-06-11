@@ -19,10 +19,12 @@ import (
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
-// blockedTransferPrefixes mirrors blockedLogPrefixes: OS virtual filesystems
-// that must never be read from or written to through file transfer, even by an
+// blockedTransferPrefixes lists OS virtual filesystems that must never be read
+// from or written to through file transfer (or log.read), even by an
 // authenticated controller. Reading /proc/N/mem leaks process memory; writing
-// under /sys or /dev can damage the host.
+// under /sys or /dev can damage the host. checkBlockedTransferPath enforces
+// both this block list and the --file-root sandbox for every file.* op and for
+// log.read.
 var blockedTransferPrefixes = []string{"/proc/", "/sys/", "/dev/"}
 
 // FileManager is the agent-side surface for browsing and transferring files.
@@ -108,10 +110,18 @@ func validateTransferPath(path string) (string, *RPCError) {
 }
 
 // validateWriteTarget resolves a path that may NOT exist yet (upload
-// destination, mkdir, rename target). The final component can't be resolved,
-// so we resolve the parent directory's symlinks and rejoin — that still
+// destination, mkdir, rename target). The final component can't always be
+// resolved, so we resolve the parent directory's symlinks and rejoin — that
 // prevents a symlinked parent (e.g. /tmp/x -> /proc) from escaping the block
 // list.
+//
+// Crucially we also lstat the FINAL component: if an attacker has pre-planted a
+// symlink AT the destination (e.g. /root/upload -> /etc/cron.d/evil), the join
+// above would validate the symlink's own path (inside the sandbox) while the
+// subsequent write/mkdir/rename follows the link to an arbitrary location. So
+// when the final component is itself a symlink we fully resolve it and
+// re-validate the real target; callers that perform the actual write should
+// also use O_NOFOLLOW where they can to close the residual TOCTOU window.
 func validateWriteTarget(path string) (string, *RPCError) {
 	if path == "" {
 		return "", &RPCError{Code: "missing_path", Message: "path is required"}
@@ -128,6 +138,18 @@ func validateWriteTarget(path string) (string, *RPCError) {
 	real := filepath.Join(realDir, filepath.Base(clean))
 	if err := checkBlockedTransferPath(real); err != nil {
 		return "", err
+	}
+	// If the final component already exists and is a symlink, resolve it and
+	// re-validate the real target — a planted symlink must not let a write escape
+	// the sandbox even though `real` itself sits inside it.
+	if info, err := os.Lstat(real); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(real)
+		if err != nil {
+			return "", &RPCError{Code: "invalid_path", Message: "target symlink could not be resolved"}
+		}
+		if err := checkBlockedTransferPath(resolved); err != nil {
+			return "", err
+		}
 	}
 	return real, nil
 }
@@ -504,9 +526,17 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 			return proto.FileProbeResult{}, rerr
 		}
 		// Prefer an upload temp left by an interrupted transfer; otherwise fall
-		// back to the real path (download source probe).
-		if temp := real + ".fleetpart"; fileExists(temp) {
-			probePath = temp
+		// back to the real path (download source probe). The temp name MUST match
+		// what OpenWrite creates — "<name>.fleet-<TransferID>.part" — otherwise
+		// the lookup never hits and resume is silently disabled (the controller
+		// always sends TransferID on probe). The previous ".fleetpart" suffix was
+		// wrong and could never match.
+		if p.TransferID != "" {
+			if temp := real + ".fleet-" + p.TransferID + ".part"; fileExists(temp) {
+				probePath = temp
+			} else {
+				probePath = real
+			}
 		} else {
 			probePath = real
 		}

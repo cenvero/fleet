@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/transport"
@@ -172,6 +173,23 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 // opens exactly this channel type (RFC 4254 §7.2).
 const directTCPIPChannelType = "direct-tcpip"
 
+// tunnelDialTimeout bounds how long the agent waits when dialing a tunnel
+// target. Without it a controller could open many channels to unroutable or
+// black-holed host:ports and pin a goroutine + fd per channel until the OS
+// connect timeout (minutes), a cheap fd/goroutine DoS.
+const tunnelDialTimeout = 10 * time.Second
+
+// maxConcurrentTunnels caps how many direct-tcpip channels may be live at once
+// across the whole agent. Each live tunnel holds an fd to the target plus two
+// copy goroutines; bounding the count prevents an authenticated controller from
+// exhausting file descriptors or goroutines by opening unbounded channels.
+// Requests beyond the cap are rejected (the controller can retry).
+const maxConcurrentTunnels = 64
+
+// tunnelSlots is a counting semaphore: a token is acquired before a tunnel is
+// served and released when it tears down. Buffered to maxConcurrentTunnels.
+var tunnelSlots = make(chan struct{}, maxConcurrentTunnels)
+
 // directTCPIPExtraData is the channel-open extra data for a "direct-tcpip"
 // request, per RFC 4254 §7.2: the host/port the server should connect to,
 // followed by the originator's host/port (informational only).
@@ -207,8 +225,20 @@ func serveDirectTCPIP(newChannel ssh.NewChannel) {
 		return
 	}
 
+	// Bound concurrent tunnels: grab a semaphore token or reject. Done before the
+	// dial so we cap in-flight dials too, not just established tunnels.
+	select {
+	case tunnelSlots <- struct{}{}:
+		defer func() { <-tunnelSlots }()
+	default:
+		_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent tunnels")
+		return
+	}
+
 	dest := net.JoinHostPort(req.HostToConnect, strconv.Itoa(int(req.PortToConnect)))
-	remote, err := net.Dial("tcp", dest)
+	// DialTimeout, not Dial: a black-holed target must not pin a goroutine + fd
+	// for the OS-default connect timeout (minutes).
+	remote, err := net.DialTimeout("tcp", dest, tunnelDialTimeout)
 	if err != nil {
 		_ = newChannel.Reject(ssh.ConnectionFailed, fmt.Sprintf("dial %s: %v", dest, err))
 		return

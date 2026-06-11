@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,11 @@ func TestBestEffortTargetServer(t *testing.T) {
 		{"guard", "guard", []string{"web-01", "rm -rf /"}, "web-01"},
 		{"drift", "drift", []string{"web-01"}, "web-01"},
 		{"svc", "svc", []string{"web-01"}, "web-01"},
+		// newly-scoped server-first commands (the cron/tunnel/sync bypass fix)
+		{"tunnel", "tunnel", []string{"web-01", "8080:80"}, "web-01"},
+		{"sync", "sync", []string{"web-01", "./a", "/b"}, "web-01"},
+		{"cron add", "cron", []string{"web-01"}, "web-01"}, // sub consumed, server is args[0]
+		{"cron list", "cron", []string{"web-01"}, "web-01"},
 		// subcommand commands: server is args[0] because the sub was consumed
 		{"file rm", "file", []string{"web-01", "/tmp/x"}, "web-01"},
 		{"firewall enable", "firewall", []string{"web-01"}, "web-01"},
@@ -38,12 +44,17 @@ func TestBestEffortTargetServer(t *testing.T) {
 		{"server remove", "server", []string{"web-01"}, "web-01"},
 		{"port open", "port", []string{"web-01", "80"}, "web-01"},
 		{"service start", "service", []string{"web-01", "nginx"}, "web-01"},
+		// inventory: optional positional server flows into the scope check
+		{"inventory server", "inventory", []string{"web-01"}, "web-01"},
+		{"inventory bare", "inventory", nil, ""},
 		// commands that do not take a server positional
 		{"status", "status", nil, ""},
 		{"health", "health", nil, ""},
 		// no positional present -> empty (caller fail-closes)
 		{"firewall no args", "firewall", nil, ""},
 		{"server no args", "server", nil, ""},
+		{"tunnel no args", "tunnel", nil, ""},
+		{"cron no args", "cron", nil, ""},
 	}
 	for _, c := range cases {
 		if got := bestEffortTargetServer(c.top, c.args); got != c.want {
@@ -121,9 +132,26 @@ func TestEnforceTokenDeniesOutOfScope(t *testing.T) {
 		// out-of-scope destructive subcommand commands (server is args[0]=db-01)
 		{"firewall enable out-of-scope", []string{"firewall", "enable", "db-01"}},
 		{"server remove out-of-scope", []string{"server", "remove", "db-01"}},
+		// cron/tunnel/sync take a server as the FIRST positional but were MISSING
+		// from serverArgCommands, so a server-scoped token ran them against ANY
+		// server. They must now be scope-denied out of scope (db-01).
+		{"cron add out-of-scope", []string{"cron", "add", "db-01", "--name", "j", "--schedule", "0 3 * * *", "--cmd", "true"}},
+		{"cron list out-of-scope", []string{"cron", "list", "db-01"}},
+		{"tunnel out-of-scope", []string{"tunnel", "db-01", "8080:80"}},
+		{"sync out-of-scope", []string{"sync", "db-01", "./a", "/b"}},
 		// fan-out exec denied for a server-scoped token
 		{"exec --all", []string{"exec", "--all", "uptime"}},
 		{"exec --group", []string{"exec", "--group", "role=web", "uptime"}},
+		// `run` (playbooks) targets multiple servers that can't be vetted by the
+		// single-target check, so a server-scoped token is denied it outright. The
+		// playbook path need not exist: the RBAC gate fires before the file is read.
+		{"run playbook", []string{"run", "playbook.yaml"}},
+		{"run playbook --group", []string{"run", "playbook.yaml", "--group", "role=web"}},
+		// fleet-wide read fan-outs leak out-of-scope servers; denied for a scoped
+		// token (top/health always; bare inventory).
+		{"top fleet-wide", []string{"top", "--once"}},
+		{"health fleet-wide", []string{"health"}},
+		{"inventory fleet-wide", []string{"inventory"}},
 	}
 	for _, c := range cases {
 		out, code := run(c.args...)
@@ -141,6 +169,13 @@ func TestEnforceTokenDeniesOutOfScope(t *testing.T) {
 	out, _ := run("firewall", "enable", "web-01")
 	if strings.Contains(strings.ToLower(out), "is not in this token's scope") {
 		t.Errorf("in-scope firewall enable web-01 was wrongly scope-denied: %q", out)
+	}
+
+	// Positive control: an IN-scope single-server inventory (web-01) must NOT be
+	// scope-denied or hit the fleet-wide-read denial — only the bare fan-out is.
+	out, _ = run("inventory", "web-01")
+	if strings.Contains(strings.ToLower(out), "denied") {
+		t.Errorf("in-scope 'inventory web-01' was wrongly denied: %q", out)
 	}
 }
 
@@ -191,5 +226,114 @@ func TestEnforceTokenDeniesSensitiveLocal(t *testing.T) {
 		if code != 1 || !strings.Contains(strings.ToLower(out), "denied") {
 			t.Errorf("%v: code=%d out=%q, want exit 1 + 'denied'", args, code, out)
 		}
+	}
+}
+
+// TestCmdPolicyGatesNonExecCommands proves the cmd-policy deny gate that `exec`
+// enforces also covers the other operator-supplied-command paths — `job run`,
+// `guard`, and `cron add` — which previously bypassed it entirely.
+func TestCmdPolicyGatesNonExecCommands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess cmd-policy test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+
+	// Seed a deny pattern that blocks any command containing "rm -rf /".
+	store, err := core.NewCmdPolicyStore(dir)
+	if err != nil {
+		t.Fatalf("NewCmdPolicyStore: %v", err)
+	}
+	if err := store.SetDenyPatterns([]string{"rm -rf /"}); err != nil {
+		t.Fatalf("SetDenyPatterns: %v", err)
+	}
+
+	run := func(args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+
+	// Each of these carries a denied command and must be refused by the cmd-policy
+	// gate (non-zero exit + the deny-pattern message), NOT executed.
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"job run", []string{"job", "run", "web-01", "rm -rf /"}},
+		{"guard", []string{"guard", "web-01", "--revert-after", "1m", "rm -rf /"}},
+		{"cron add", []string{"cron", "add", "web-01", "--name", "j", "--schedule", "0 3 * * *", "--cmd", "rm -rf /"}},
+	}
+	for _, c := range cases {
+		out, code := run(c.args...)
+		if code == 0 {
+			t.Errorf("%s: exit 0, want non-zero (command should be blocked); output: %q", c.name, out)
+		}
+		if !strings.Contains(out, "cmd-policy deny pattern") {
+			t.Errorf("%s: output %q does not mention the cmd-policy deny pattern", c.name, out)
+		}
+	}
+
+	// Positive control: a command that does NOT match the deny pattern must pass
+	// the cmd-policy gate (it may still fail later with no live agent, but NOT for
+	// a policy reason).
+	out, _ := run("job", "run", "web-01", "uptime")
+	if strings.Contains(out, "cmd-policy deny pattern") {
+		t.Errorf("non-denied 'job run uptime' was wrongly blocked by cmd-policy: %q", out)
+	}
+}
+
+// TestCmdPolicyCorruptFailsClosed proves the HIGH fail-open fix: when the
+// cmd-policy file EXISTS but cannot be parsed, exec (and the shared gate) refuse
+// to run rather than treating it as "no policy" and executing anyway.
+func TestCmdPolicyCorruptFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess cmd-policy test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+
+	// Write a corrupt (unparseable) cmd-policy.json.
+	if err := os.WriteFile(core.CmdPolicyPath(dir), []byte("{ not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt cmd-policy: %v", err)
+	}
+
+	run := func(args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+
+	// exec must FAIL CLOSED: refuse to run with a clear message telling the
+	// operator to fix/remove the policy.
+	out, code := run("exec", "web-01", "uptime")
+	if code == 0 {
+		t.Fatalf("exec ran despite a corrupt cmd-policy (fail-open!); output: %q", out)
+	}
+	if !strings.Contains(out, "refusing to run") || !strings.Contains(out, "command policy") {
+		t.Fatalf("exec error %q does not clearly report the corrupt command policy", out)
+	}
+
+	// job run goes through the same shared gate and must also refuse.
+	out, code = run("job", "run", "web-01", "uptime")
+	if code == 0 {
+		t.Fatalf("job run ran despite a corrupt cmd-policy (fail-open!); output: %q", out)
+	}
+	if !strings.Contains(out, "refusing to run") {
+		t.Fatalf("job run error %q does not report fail-closed refusal", out)
 	}
 }

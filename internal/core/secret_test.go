@@ -530,3 +530,129 @@ func TestSecretStoreLegacyPlaintextMigration(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretKeySourcePinnedToControllerKey is the regression for the MED finding:
+// once the secret key is derived from the controller key, the SOURCE is pinned.
+// Deleting the controller key (so derivation would otherwise silently fall back
+// to a fresh dedicated key file and a DIFFERENT key) must instead fail with a
+// clear "source unavailable" error rather than bricking decryption silently.
+func TestSecretKeySourcePinnedToControllerKey(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := writeControllerKey(t, dir)
+
+	store := NewSecretStore(dir)
+	if err := store.Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	// The pin file must now record the controller source.
+	pin, err := os.ReadFile(filepath.Join(keysDir, secretKeySourceFile))
+	if err != nil {
+		t.Fatalf("read pin: %v", err)
+	}
+	if got := strings.TrimSpace(string(pin)); got != "controller:id_ed25519" {
+		t.Fatalf("pinned source = %q, want controller:id_ed25519", got)
+	}
+
+	// Remove the controller private key. A fresh derivation must NOT silently flip
+	// to the dedicated key file; it must error clearly.
+	if err := os.Remove(filepath.Join(keysDir, "id_ed25519")); err != nil {
+		t.Fatalf("remove controller key: %v", err)
+	}
+	_, err = deriveSecretKey(dir)
+	if err == nil {
+		t.Fatal("deriveSecretKey should fail when the pinned controller key is gone")
+	}
+	if !strings.Contains(err.Error(), "unavailable") || !strings.Contains(err.Error(), "controller:id_ed25519") {
+		t.Fatalf("error = %q, want a clear 'source unavailable' for controller:id_ed25519", err)
+	}
+}
+
+// TestSecretKeySourcePinnedToDedicatedFile asserts the pin also covers the
+// dedicated-file path: a bare dir (no controller key) pins to the dedicated file,
+// and the recorded source is honored on later reads.
+func TestSecretKeySourcePinnedToDedicatedFile(t *testing.T) {
+	dir := t.TempDir() // no controller key present
+	store := NewSecretStore(dir)
+	if err := store.Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	pin, err := os.ReadFile(filepath.Join(dir, "keys", secretKeySourceFile))
+	if err != nil {
+		t.Fatalf("read pin: %v", err)
+	}
+	if got := strings.TrimSpace(string(pin)); got != "dedicated:secret.key" {
+		t.Fatalf("pinned source = %q, want dedicated:secret.key", got)
+	}
+	// A fresh store still reads it back (dedicated key file is stable).
+	if got, err := NewSecretStore(dir).Get("k"); err != nil || got != "v" {
+		t.Fatalf("Get from fresh store = %q, %v; want v, nil", got, err)
+	}
+}
+
+// TestSecretKeyPinBlocksControllerToDedicatedFlip proves the exact silent-flip
+// the finding warns about is now blocked: with secrets pinned to the controller
+// key, even if a dedicated secret.key is ALSO present on disk, removing the
+// controller key must error rather than decrypt-with-the-wrong-(dedicated)-key.
+func TestSecretKeyPinBlocksControllerToDedicatedFlip(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := writeControllerKey(t, dir)
+
+	store := NewSecretStore(dir)
+	if err := store.Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	// Stage a dedicated key file too, so a naive fallback WOULD find a usable key.
+	if _, err := loadOrCreateSecretKeyFile(keysDir); err != nil {
+		t.Fatalf("stage dedicated key: %v", err)
+	}
+	// Remove the pinned controller key.
+	if err := os.Remove(filepath.Join(keysDir, "id_ed25519")); err != nil {
+		t.Fatalf("remove controller key: %v", err)
+	}
+
+	// Get must fail clearly, NOT silently return garbage from the dedicated key.
+	if _, err := NewSecretStore(dir).Get("k"); err == nil {
+		t.Fatal("Get should fail (pinned source gone), not flip to the dedicated key file")
+	}
+}
+
+// TestSecretKeyHonorsConfigPrimaryKey covers the LOW finding: derivation must
+// honor Config.Crypto.PrimaryKey when choosing the controller key source. With a
+// config that names id_rsa4096 as primary AND both key types present, the pinned
+// source must be id_rsa4096, not the hard-coded id_ed25519 default.
+func TestSecretKeyHonorsConfigPrimaryKey(t *testing.T) {
+	dir := t.TempDir()
+	keysDir := filepath.Join(dir, "keys")
+	// Generate BOTH an ed25519 and an rsa4096 controller key set.
+	if err := fleetcrypto.GenerateKeySet(keysDir, fleetcrypto.AlgorithmEd25519, nil); err != nil {
+		t.Fatalf("GenerateKeySet ed25519: %v", err)
+	}
+	if err := fleetcrypto.GenerateKeySet(keysDir, fleetcrypto.AlgorithmRSA4096, nil); err != nil {
+		t.Fatalf("GenerateKeySet rsa: %v", err)
+	}
+	// Write a config that selects id_rsa4096 as the primary key.
+	cfg := DefaultConfig(dir)
+	cfg.Crypto.PrimaryKey = "id_rsa4096"
+	cfg.Crypto.Algorithm = "rsa"
+	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	if order := controllerKeyOrder(dir); len(order) == 0 || order[0] != "id_rsa4096" {
+		t.Fatalf("controllerKeyOrder = %v, want id_rsa4096 first", order)
+	}
+
+	store := NewSecretStore(dir)
+	if err := store.Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	pin, err := os.ReadFile(filepath.Join(keysDir, secretKeySourceFile))
+	if err != nil {
+		t.Fatalf("read pin: %v", err)
+	}
+	if got := strings.TrimSpace(string(pin)); got != "controller:id_rsa4096" {
+		t.Fatalf("pinned source = %q, want controller:id_rsa4096 (PrimaryKey honored)", got)
+	}
+}

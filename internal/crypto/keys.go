@@ -124,30 +124,36 @@ func generateEd25519(dir string, passphrase []byte) error {
 	return os.WriteFile(filepath.Join(dir, "id_ed25519.pub"), ssh.MarshalAuthorizedKey(pub), 0o644) // #nosec G306 -- public key is intentionally world-readable
 }
 
+// NOTE: ed25519 is the default and recommended key algorithm (see
+// generateEd25519); RSA-4096 is offered only for interoperability with older
+// systems. New deployments should prefer ed25519.
 func generateRSA4096(dir string, passphrase []byte) error {
 	priv, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
 		return fmt.Errorf("generate rsa key: %w", err)
 	}
-	if err := writePEM(filepath.Join(dir, "id_rsa4096"), "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(priv), passphrase); err != nil {
-		return err
+	var block *pem.Block
+	if len(passphrase) > 0 {
+		// Encrypt using the modern OpenSSH private-key format (bcrypt KDF +
+		// AES-CTR), the same scheme used for passphrase-protected ed25519 keys.
+		// This deliberately replaces the deprecated x509.EncryptPEMBlock, whose
+		// PEM ("DEK-Info") encryption uses a weak MD5-based KDF and is
+		// considered insecure. Existing on-disk keys in the old format still
+		// load: ssh.ParsePrivateKeyWithPassphrase (used by LoadPrivateKeySigner)
+		// transparently decrypts both the legacy and the OpenSSH formats.
+		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, "", passphrase)
+		if err != nil {
+			return fmt.Errorf("encrypt rsa private key: %w", err)
+		}
+	} else {
+		block = &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "id_rsa4096"), pem.EncodeToMemory(block), 0o600); err != nil {
+		return fmt.Errorf("write rsa private key: %w", err)
 	}
 	pub, err := ssh.NewPublicKey(priv.Public())
 	if err != nil {
 		return fmt.Errorf("create rsa public key: %w", err)
 	}
 	return os.WriteFile(filepath.Join(dir, "id_rsa4096.pub"), ssh.MarshalAuthorizedKey(pub), 0o644) // #nosec G306 -- public key is intentionally world-readable
-}
-
-func writePEM(path, blockType string, data, passphrase []byte) error {
-	block := &pem.Block{Type: blockType, Bytes: data}
-	if len(passphrase) > 0 {
-		encrypted, err := x509.EncryptPEMBlock(rand.Reader, blockType, data, passphrase, x509.PEMCipherAES256)
-		if err != nil {
-			return fmt.Errorf("encrypt private key %s: %w", path, err)
-		}
-		block = encrypted
-	}
-	payload := pem.EncodeToMemory(block)
-	return os.WriteFile(path, payload, 0o600)
 }

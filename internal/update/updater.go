@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,9 +34,15 @@ type ApplyOptions struct {
 	CurrentVersion   string
 	AgentBinary      bool
 	SigningPublicKey string
-	FetchManifest    func(context.Context, string) (Manifest, error)
-	DownloadURL      func(context.Context, string) ([]byte, error)
-	Now              func() time.Time
+	// AllowUnsigned is an explicit, fail-open opt-in that permits applying an
+	// update that carries no minisign signature. It defaults to false so that
+	// verification is FAIL-CLOSED: callers that leave it unset can never apply
+	// an unsigned update, regardless of channel. It must only be set from an
+	// explicit operator action (e.g. an --allow-unsigned/--insecure flag).
+	AllowUnsigned bool
+	FetchManifest func(context.Context, string) (Manifest, error)
+	DownloadURL   func(context.Context, string) ([]byte, error)
+	Now           func() time.Time
 }
 
 type ApplyResult struct {
@@ -121,15 +128,24 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	}
 	hasSig := strings.TrimSpace(binary.Signature) != ""
 	hasHash := strings.TrimSpace(binary.SHA256) != ""
-	// Require a minisign SIGNATURE for any non-development channel. A SHA-256
-	// checksum alone is not sufficient: the manifest is the only thing binding
-	// the binary to that checksum, so an attacker who tampers with the manifest
-	// can swap both the binary and its hash. The signature is verified against a
-	// pinned public key and cannot be forged that way. Development builds
-	// (channel == "dev" or empty) may omit both for ad-hoc testing.
-	isDev := opts.Channel == "dev" || opts.Channel == ""
-	if !hasSig && !isDev {
-		return ApplyResult{}, fmt.Errorf("manifest entry for %s has no minisign signature — refusing to apply on channel %q", binary.URL, opts.Channel)
+	// Signature verification is FAIL-CLOSED: every applied update must carry a
+	// valid minisign signature, on every channel, by default. A SHA-256 checksum
+	// alone is not sufficient — the manifest is the only thing binding the binary
+	// to that checksum, so an attacker who tampers with the manifest can swap
+	// both the binary and its hash. The minisign signature is verified against a
+	// pinned public key and cannot be forged that way.
+	//
+	// The ONLY way to apply an unsigned update is the explicit AllowUnsigned
+	// opt-in (e.g. an --allow-unsigned/--insecure flag wired by the caller).
+	// An empty or "dev" channel does NOT silently disable verification.
+	if !hasSig {
+		if !opts.AllowUnsigned {
+			return ApplyResult{}, fmt.Errorf(
+				"manifest entry for %s has no minisign signature — refusing to apply (pass --allow-unsigned to override)",
+				binary.URL,
+			)
+		}
+		result.Note = "WARNING: applied without signature verification (--allow-unsigned)"
 	}
 	if hasSig {
 		signature, err := opts.DownloadURL(ctx, binary.Signature)
@@ -300,10 +316,16 @@ func readRollbackState(path string) (rollbackState, error) {
 	return state, nil
 }
 
+// maxArtifactBytes bounds how much of a downloaded artifact (binary archive or
+// signature) we will buffer in memory. The body is wrapped in an io.LimitReader
+// BEFORE the signature is verified, so a malicious or misconfigured server
+// cannot stream an unbounded body and OOM the host ahead of verification. 1 GiB
+// is generous for any release archive while remaining safely bounded.
+const maxArtifactBytes = 1 << 30 // 1 GiB
+
 func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
-	parsed, err := url.Parse(rawURL)
-	if err == nil && parsed.Scheme == "file" {
-		return os.ReadFile(parsed.Path)
+	if err := validateDownloadScheme(rawURL); err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -317,11 +339,52 @@ func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected artifact status %s", resp.Status)
 	}
-	data, err := io.ReadAll(resp.Body)
+	// Bound the body before buffering. Read one extra byte so an artifact that
+	// is exactly at the limit is accepted, while anything larger is rejected.
+	limited := io.LimitReader(resp.Body, maxArtifactBytes+1)
+	data, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("read artifact body: %w", err)
 	}
+	if int64(len(data)) > maxArtifactBytes {
+		return nil, fmt.Errorf("artifact %s exceeds maximum size of %d bytes", rawURL, maxArtifactBytes)
+	}
 	return data, nil
+}
+
+// validateDownloadScheme enforces an allowlist on manifest-controlled download
+// URLs. Only https:// is accepted by default; http:// is permitted ONLY for an
+// explicit loopback/localhost mirror. file://, ftp:// and every other scheme are
+// rejected to prevent local-file reads (LFI) and SSRF via attacker-controlled
+// manifest entries.
+func validateDownloadScheme(rawURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("parse download url: %w", err)
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(parsed.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("refusing insecure http:// download from non-loopback host %q (only https:// is allowed)", parsed.Host)
+	default:
+		return fmt.Errorf("refusing download URL with disallowed scheme %q (only https:// is allowed): %s", parsed.Scheme, rawURL)
+	}
+}
+
+// isLoopbackHost reports whether host is a loopback address or the conventional
+// localhost name, identifying an explicit local mirror.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func extractBinaryPayload(sourceURL string, archive []byte, displayName, executableName string) ([]byte, os.FileMode, error) {

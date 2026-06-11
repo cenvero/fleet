@@ -220,17 +220,50 @@ func RemoveManagedCron(crontab, name string) string {
 	return result + "\n"
 }
 
+// cronHeredocDelim is the quoted heredoc terminator used to feed new crontab
+// content to `crontab -`. It is a sufficiently unique token (not a plausible
+// crontab line) AND ContentBreaksCronHeredoc rejects any content that contains a
+// line equal to it, so the heredoc can never be broken out of — mirroring the
+// dead-man's-switch heredoc hardening in deadman.go.
+const cronHeredocDelim = "FLEET_CRONTAB_EOF_b3f1c2a4"
+
+// ContentBreaksCronHeredoc reports whether content contains a line that exactly
+// equals the heredoc delimiter (ignoring a trailing CR). Such a line would
+// terminate the heredoc early and let the remainder run as shell, so it must be
+// rejected before the content is written back. Exported so callers can validate
+// up front; CronWriteCommand also enforces it.
+func ContentBreaksCronHeredoc(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimRight(line, "\r") == cronHeredocDelim {
+			return true
+		}
+	}
+	return false
+}
+
 // CronWriteCommand builds the remote shell command that writes newContent back
 // to the user crontab via `crontab -`, using a quoted heredoc so the content is
-// never interpreted by the shell. The delimiter is fixed and the content is
-// validated to be marker/schedule/command lines only.
+// never interpreted by the shell.
+//
+// Heredoc safety: the body is fed through a quoted-delimiter heredoc (<<'EOF'),
+// so $, `, \ inside commands are passed through literally. The ONLY way crafted
+// content could escape such a heredoc is a line exactly equal to the delimiter;
+// if newContent contains one, this returns a command that fails loudly on the
+// remote (non-zero exit, which writeCrontab surfaces) and writes NOTHING, instead
+// of emitting a breakable heredoc. The delimiter itself is a unique token that a
+// real crontab line would never equal. This mirrors the deadman heredoc guard.
 func CronWriteCommand(newContent string) string {
-	const delim = "FLEET_CRONTAB_EOF"
+	if ContentBreaksCronHeredoc(newContent) {
+		// Refuse on the remote without ever opening the heredoc, so the injected
+		// delimiter line cannot start a shell. writeCrontab treats the non-zero exit
+		// as a failure and reports it to the operator.
+		return "echo 'fleet: refusing to write crontab: content contains the reserved heredoc delimiter' >&2; exit 1"
+	}
 	body := newContent
 	if body != "" && !strings.HasSuffix(body, "\n") {
 		body += "\n"
 	}
 	// Quoting the delimiter ('EOF') disables all expansion inside the heredoc,
 	// so $, `, \ in commands are passed through literally.
-	return "crontab - <<'" + delim + "'\n" + body + delim + "\n"
+	return "crontab - <<'" + cronHeredocDelim + "'\n" + body + cronHeredocDelim + "\n"
 }

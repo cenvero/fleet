@@ -11,11 +11,40 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"golang.org/x/crypto/ssh"
 )
 
+// checkPrivateKeyPerms refuses to load a private key whose file is accessible to
+// anyone other than its owner, mirroring OpenSSH's "UNPROTECTED PRIVATE KEY
+// FILE" check. A key that is group- or world-readable/writable may already be
+// compromised, so we fail closed rather than silently trusting it.
+//
+// Permission bits are not meaningful on Windows, where Go reports synthetic
+// modes, so the check is skipped there.
+func checkPrivateKeyPerms(path string, info os.FileInfo) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf(
+			"private key %s has insecure permissions %#o: it is accessible by group/others; "+
+				"run `chmod 600 %s` (OpenSSH refuses such keys)",
+			path, perm, path)
+	}
+	return nil
+}
+
 func LoadPrivateKeySigner(path string, passphrase []byte) (ssh.Signer, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat private key %s: %w", path, err)
+	}
+	if err := checkPrivateKeyPerms(path, info); err != nil {
+		return nil, err
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read private key %s: %w", path, err)

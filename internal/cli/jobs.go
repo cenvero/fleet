@@ -99,6 +99,13 @@ func newJobRunCommand(configDir *string) *cobra.Command {
 			}
 			defer app.Close()
 			command := strings.Join(args[1:], " ")
+			// `job run` executes an arbitrary operator-supplied command on a server,
+			// so it MUST pass the same cmd-policy deny/confirm gate that `exec` does;
+			// otherwise it was a complete bypass of the policy. job run has no
+			// --confirm flag, so a confirm-required pattern blocks it (fail-safe).
+			if err := enforceCmdPolicy(*configDir, command, false); err != nil {
+				return err
+			}
 			store := core.NewJobStore(*configDir)
 			rec, err := store.Start(appExec(app), args[0], command)
 			if err != nil {

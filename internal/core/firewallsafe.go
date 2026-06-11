@@ -379,10 +379,18 @@ func disableCommand(backend FirewallBackend) string {
 	case FirewallBackendFirewalld:
 		return "systemctl stop firewalld"
 	case FirewallBackendNftables:
-		// Modify the existing chain's policy back to accept (idempotent; does not
-		// fail "File exists" the way a re-`add` would). Fall back to flushing the
-		// whole ruleset if the chain is somehow gone, so the host always reopens.
-		return "nft chain inet fleet input '{ policy accept ; }' 2>/dev/null || nft flush ruleset"
+		// Undo ONLY what EnableSafe added (the `inet fleet` table), never the whole
+		// host ruleset. First flip the fleet chain's policy back to accept so the
+		// host reopens immediately (idempotent; does not fail "File exists" the way a
+		// re-`add` would), then delete the fleet table outright to remove the drop
+		// policy and the agent-port rule we inserted. `delete table` also removes the
+		// chain, so the host returns to exactly its pre-EnableSafe state for every
+		// OTHER table. Both steps tolerate a missing table (2>/dev/null) so the undo
+		// is safe to run even if the table is already gone. We deliberately do NOT
+		// `nft flush ruleset` here — that would wipe every unrelated host firewall
+		// rule, not just fleet's.
+		return "nft chain inet fleet input '{ policy accept ; }' 2>/dev/null; " +
+			"nft delete table inet fleet 2>/dev/null || true"
 	case FirewallBackendIptables:
 		return "iptables -P INPUT ACCEPT"
 	default:
