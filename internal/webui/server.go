@@ -497,7 +497,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		localPath := filepath.Join(filepath.Clean(dir), name)
 		// O_NOFOLLOW so a symlink planted at the destination can't redirect the
 		// truncating write to an arbitrary file; a symlinked target is rejected.
-		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600) // #nosec G304 -- dir validated absolute above, O_NOFOLLOW set
+		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- dir validated absolute above, O_NOFOLLOW set
 		if err != nil {
 			writeError(w, symlinkClobberError(localPath, err))
 			return
@@ -720,7 +720,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		}
 		// O_NOFOLLOW so an attacker-planted symlink at the edit target can't
 		// redirect this truncating write elsewhere; a symlinked target errors out.
-		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600) // #nosec G304 -- path validated by cleanLocalPath, O_NOFOLLOW set
+		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- path validated by cleanLocalPath, O_NOFOLLOW set
 		if err != nil {
 			writeError(w, symlinkClobberError(clean, err))
 			return

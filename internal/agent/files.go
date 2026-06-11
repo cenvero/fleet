@@ -378,8 +378,10 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 	// (never the current one), so orphaned .part files don't pile up.
 	reapStaleParts(filepath.Dir(real), filepath.Base(temp), time.Now())
 	// O_CREATE without O_TRUNC: a temp left by a previous interrupted transfer
-	// is reopened so its bytes can be reused for resume.
-	f, err := os.OpenFile(temp, os.O_RDWR|os.O_CREATE, 0o600)
+	// is reopened so its bytes can be reused for resume. O_NOFOLLOW (oNoFollow,
+	// a no-op on non-unix) refuses to follow a symlink swapped in at the temp
+	// path after validateWriteTarget's Lstat — closing the write TOCTOU.
+	f, err := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|oNoFollow, 0o600)
 	if err != nil {
 		return proto.FileOpenWriteResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
 	}
@@ -566,9 +568,12 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 		defer file.Close()
 		for _, r := range p.Ranges {
 			// Overflow-safe: avoid r.Offset+r.Length which can wrap for hostile
-			// near-MaxInt64 values. Equivalent to r.Offset+r.Length > size.
-			if r.Length <= 0 || r.Offset < 0 || r.Length > info.Size() || r.Offset > info.Size()-r.Length {
-				continue // range not fully present yet — leave it out
+			// near-MaxInt64 values. Equivalent to r.Offset+r.Length > size. The
+			// MaxRawChunkBytes cap bounds the per-range allocation below: a probe
+			// range is a transfer chunk, so anything larger is invalid and skipped
+			// (otherwise one range could force a file-size-large allocation).
+			if r.Length <= 0 || r.Length > proto.MaxRawChunkBytes || r.Offset < 0 || r.Length > info.Size() || r.Offset > info.Size()-r.Length {
+				continue // range not fully present / not a valid chunk — leave it out
 			}
 			buf := make([]byte, r.Length)
 			if _, err := file.ReadAt(buf, r.Offset); err != nil {

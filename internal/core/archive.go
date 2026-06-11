@@ -119,14 +119,20 @@ func compressCmd(dir string, names []string, archive, format string) (string, er
 // extractCmd builds the shell command that extracts `archive` (full path) into its
 // own directory.
 func extractCmd(archivePath string) string {
-	dir := shellQuote(path.Dir(archivePath))
-	a := shellQuote(archivePath)
-	low := strings.ToLower(archivePath)
-	if strings.HasSuffix(low, ".zip") {
-		return fmt.Sprintf("unzip -o -q %s -d %s", a, dir)
+	return extractCmdToDir(archivePath, path.Dir(archivePath))
+}
+
+// extractCmdToDir builds the shell command that extracts archiveFile into destDir.
+// The archive format is detected from archiveFile's extension (so a staged copy
+// must preserve the original base name). Both operands are shell-quoted.
+func extractCmdToDir(archiveFile, destDir string) string {
+	a := shellQuote(archiveFile)
+	d := shellQuote(destDir)
+	if strings.HasSuffix(strings.ToLower(archiveFile), ".zip") {
+		return fmt.Sprintf("unzip -o -q %s -d %s", a, d)
 	}
 	// GNU/BSD tar auto-detect gzip/bzip2/xz from the stream with -xf.
-	return fmt.Sprintf("tar -xf %s -C %s", a, dir)
+	return fmt.Sprintf("tar -xf %s -C %s", a, d)
 }
 
 // compressArgv builds the (tool, args) for creating `archive` from base `names`
@@ -217,12 +223,19 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 			return err
 		}
 	} else {
-		// Remote: list members through the same exec path, reject any escaping
-		// member, then extract only if every member is safe.
-		if err := a.validateRemoteArchiveMembers(server, archivePath); err != nil {
+		// Remote: copy the archive to a private, unpredictably-named temp, then
+		// validate + extract THAT copy. Operating on the copy (not the original)
+		// closes the validate/extract TOCTOU — a local attacker can no longer swap
+		// the archive between the member-check and the extraction.
+		staged, err := a.stageRemoteArchiveCopy(server, archivePath)
+		if err != nil {
 			return err
 		}
-		if err := a.runRemoteShell(server, extractCmd(archivePath)); err != nil {
+		defer func() { _ = a.runRemoteShell(server, "rm -rf "+shellQuote(path.Dir(staged))) }()
+		if err := a.validateRemoteArchiveMembers(server, staged); err != nil {
+			return err
+		}
+		if err := a.runRemoteShell(server, extractCmdToDir(staged, destDir)); err != nil {
 			return err
 		}
 	}
@@ -406,6 +419,30 @@ func writeArchiveFile(target string, r io.Reader, perm os.FileMode) error {
 // maxExtractedFileBytes caps a single extracted member's size to bound a
 // decompression bomb. 16 GiB is generous for real archives while still finite.
 const maxExtractedFileBytes = int64(16) * 1024 * 1024 * 1024
+
+// stageRemoteArchiveCopy copies archivePath into a fresh 0700 temp dir on the
+// server (preserving the base name so format detection by extension still works)
+// and returns the copy's path. Validating + extracting the COPY closes the
+// validate/extract TOCTOU: both operations read this agent-private,
+// unpredictably-named file, so a local attacker cannot swap the archive between
+// the member-check and the extraction. The caller removes the temp dir.
+func (a *App) stageRemoteArchiveCopy(server, archivePath string) (string, error) {
+	qbase := shellQuote(path.Base(archivePath))
+	cmd := `d=$(mktemp -d) && cp -- ` + shellQuote(archivePath) + ` "$d"/` + qbase +
+		` && chmod 600 "$d"/` + qbase + ` && printf '%s' "$d"/` + qbase
+	res, err := a.ExecCommand(server, cmd)
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("stage archive copy: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	tmp := strings.TrimSpace(res.Stdout)
+	if tmp == "" || !strings.Contains(tmp, "/") {
+		return "", fmt.Errorf("stage archive copy: unexpected temp path %q", tmp)
+	}
+	return tmp, nil
+}
 
 // validateRemoteArchiveMembers lists the members of a remote archive via the
 // agent's shell.exec (the same path the extract uses) and returns an error if
