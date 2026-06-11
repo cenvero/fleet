@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -1764,18 +1765,55 @@ func followServiceLogs(ctx context.Context, cmd *cobra.Command, app *core.App, s
 	})
 }
 
+// execJSON is the --json shape: remote stdout/stderr/exit_code stay distinct, and
+// fleet-layer/transport failures land in agent_error so they never pollute stdout.
+type execJSON struct {
+	Server     string `json:"server"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMs int64  `json:"duration_ms"`
+	TimedOut   bool   `json:"timed_out"`
+	AgentError string `json:"agent_error,omitempty"`
+}
+
+// classifyAgentError labels a transport/agent failure: unreachable | auth | agent-error.
+func classifyAgentError(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "dial"), strings.Contains(s, "refused"), strings.Contains(s, "no route"),
+		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"):
+		return "unreachable"
+	case strings.Contains(s, "auth"), strings.Contains(s, "unauthorized"), strings.Contains(s, "permission"),
+		strings.Contains(s, "host key"), strings.Contains(s, "handshake"):
+		return "auth"
+	default:
+		return "agent-error"
+	}
+}
+
 func newExecCommand(configDir *string) *cobra.Command {
-	var all bool
+	var all, asJSON, propagateExit bool
+	var timeout, backoff time.Duration
+	var retries int
 	cmd := &cobra.Command{
 		Use:   "exec <server> <command>",
 		Short: "Run a shell command on one server or all servers",
 		Long: `Run a shell command on a managed server via the fleet agent.
 
+Flags:
+  --json            structured output: {stdout, stderr, exit_code, duration_ms, timed_out, agent_error}
+  --timeout 30s     abort the command after a duration (reports timed_out)
+  --retry N         retry ONLY transport failures (never re-runs a command that ran)
+  --backoff 2s      delay between transport retries
+  --propagate-exit  exit the fleet process with the remote command's exit code
+
 Examples:
   fleet exec web-01 uptime
-  fleet exec web-01 "df -h /"
-  fleet exec --all uptime`,
-		Args: cobra.MinimumNArgs(1),
+  fleet exec web-01 --json --timeout 10s "df -h /"
+  fleet exec --all --json uptime`,
+		Args:         cobra.MinimumNArgs(1),
+		SilenceUsage: true, // a remote non-zero exit / transport error must not dump usage text
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -1783,20 +1821,82 @@ Examples:
 			}
 			defer app.Close()
 
+			// runOnce applies the optional controller-side timeout to a single attempt.
+			// TODO: agent-side kill so the remote process also stops on timeout.
+			runOnce := func(server, command string) (proto.ExecResult, bool, error) {
+				if timeout <= 0 {
+					r, e := app.ExecCommand(server, command)
+					return r, false, e
+				}
+				type out struct {
+					r proto.ExecResult
+					e error
+				}
+				ch := make(chan out, 1)
+				go func() { r, e := app.ExecCommand(server, command); ch <- out{r, e} }()
+				select {
+				case o := <-ch:
+					return o.r, false, o.e
+				case <-time.After(timeout):
+					return proto.ExecResult{}, true, fmt.Errorf("timed out after %s", timeout)
+				}
+			}
+			// run retries only transport-class failures (agentErr set, not a timeout,
+			// and the command never reached execution), never a command that ran.
+			run := func(server, command string) (res proto.ExecResult, timedOut bool, agentErr error, dur time.Duration) {
+				for attempt := 0; ; attempt++ {
+					start := time.Now()
+					res, timedOut, agentErr = runOnce(server, command)
+					dur = time.Since(start)
+					if agentErr == nil || timedOut || attempt >= retries {
+						return
+					}
+					time.Sleep(backoff)
+				}
+			}
+			toJSON := func(server string, r proto.ExecResult, timedOut bool, agentErr error, dur time.Duration) execJSON {
+				j := execJSON{Server: server, Stdout: r.Stdout, Stderr: r.Stderr, ExitCode: r.ExitCode, DurationMs: dur.Milliseconds(), TimedOut: timedOut}
+				if agentErr != nil {
+					j.AgentError = agentErr.Error()
+				}
+				return j
+			}
+
 			if all {
 				command := strings.Join(args, " ")
-				results := app.ExecCommandAll(command)
-				for _, r := range results {
-					if r.Error != nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "=== %s [error] ===\n%s\n", r.Server, r.Error)
+				servers, err := app.ListServers()
+				if err != nil {
+					return err
+				}
+				out := make([]execJSON, len(servers))
+				var wg sync.WaitGroup
+				for i, s := range servers {
+					wg.Add(1)
+					go func(i int, name string) {
+						defer wg.Done()
+						r, timedOut, agentErr, dur := run(name, command)
+						out[i] = toJSON(name, r, timedOut, agentErr, dur)
+					}(i, s.Name)
+				}
+				wg.Wait()
+				if asJSON {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
+				}
+				for _, j := range out {
+					switch {
+					case j.AgentError != "":
+						fmt.Fprintf(cmd.OutOrStdout(), "=== %s [%s] ===\n%s\n", j.Server, classifyAgentErrorStr(j.AgentError), j.AgentError)
 						continue
+					case j.TimedOut:
+						fmt.Fprintf(cmd.OutOrStdout(), "=== %s [timed out] ===\n", j.Server)
+					default:
+						fmt.Fprintf(cmd.OutOrStdout(), "=== %s [exit %d] ===\n", j.Server, j.ExitCode)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "=== %s [exit %d] ===\n", r.Server, r.Result.ExitCode)
-					if r.Result.Stdout != "" {
-						fmt.Fprint(cmd.OutOrStdout(), r.Result.Stdout)
+					if j.Stdout != "" {
+						fmt.Fprint(cmd.OutOrStdout(), j.Stdout)
 					}
-					if r.Result.Stderr != "" {
-						fmt.Fprint(cmd.ErrOrStderr(), r.Result.Stderr)
+					if j.Stderr != "" {
+						fmt.Fprint(cmd.ErrOrStderr(), j.Stderr)
 					}
 				}
 				return nil
@@ -1807,25 +1907,52 @@ Examples:
 			}
 			serverName := args[0]
 			command := strings.Join(args[1:], " ")
-			result, err := app.ExecCommand(serverName, command)
-			if err != nil {
-				return err
+			r, timedOut, agentErr, dur := run(serverName, command)
+
+			if asJSON {
+				if err := json.NewEncoder(cmd.OutOrStdout()).Encode(toJSON(serverName, r, timedOut, agentErr, dur)); err != nil {
+					return err
+				}
+				if propagateExit && agentErr == nil && !timedOut && r.ExitCode != 0 {
+					_ = app.Close()
+					os.Exit(r.ExitCode)
+				}
+				return nil // JSON mode never errors on a remote non-zero exit
 			}
-			if result.Stdout != "" {
-				fmt.Fprint(cmd.OutOrStdout(), result.Stdout)
+
+			if agentErr != nil {
+				return fmt.Errorf("%s: %w", classifyAgentError(agentErr), agentErr)
 			}
-			if result.Stderr != "" {
-				fmt.Fprint(cmd.ErrOrStderr(), result.Stderr)
+			if r.Stdout != "" {
+				fmt.Fprint(cmd.OutOrStdout(), r.Stdout)
 			}
-			if result.ExitCode != 0 {
-				return fmt.Errorf("exit status %d", result.ExitCode)
+			if r.Stderr != "" {
+				fmt.Fprint(cmd.ErrOrStderr(), r.Stderr)
+			}
+			if timedOut {
+				return fmt.Errorf("timed out after %s", timeout)
+			}
+			if r.ExitCode != 0 {
+				if propagateExit {
+					_ = app.Close()
+					os.Exit(r.ExitCode)
+				}
+				return fmt.Errorf("exit status %d", r.ExitCode)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "run on all servers concurrently")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "structured JSON output (stdout/stderr/exit_code/duration/agent_error)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the command after this duration (e.g. 30s)")
+	cmd.Flags().IntVar(&retries, "retry", 0, "retry transport failures up to this many times")
+	cmd.Flags().DurationVar(&backoff, "backoff", 2*time.Second, "delay between transport retries")
+	cmd.Flags().BoolVar(&propagateExit, "propagate-exit", false, "exit with the remote command's exit code")
 	return cmd
 }
+
+// classifyAgentErrorStr is classifyAgentError for an already-stringified error.
+func classifyAgentErrorStr(s string) string { return classifyAgentError(fmt.Errorf("%s", s)) }
 
 func newSyncAgentCommand(configDir *string) *cobra.Command {
 	var targetServers []string
