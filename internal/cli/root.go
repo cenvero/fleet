@@ -35,6 +35,7 @@ import (
 
 func NewRootCommand() *cobra.Command {
 	var configDir string
+	var tokenID string
 
 	root := &cobra.Command{
 		Use:   "fleet",
@@ -68,13 +69,20 @@ func NewRootCommand() *cobra.Command {
 				// shell helpers + local-store commands operate on local files only
 				// (config dir + shell rc), so they work before init.
 				"automation", "shell-init", "autocomplete",
+				// `token` (bare) only touches tokens.json in the config dir, so it
+				// works before full init (FL-030).
+				"token",
 				"jobs", "cmd-policy", "approvals", "approve":
-				return nil
+				return enforceToken(cmd, configDir, tokenID)
 			}
 			if cmd.HasParent() {
 				switch cmd.Parent().Name() {
 				case "help", "completion", "update", "skill", "automation", "autocomplete":
 					return nil
+				// token subcommands (create/list/revoke) only touch tokens.json, so
+				// they work before full init (FL-030).
+				case "token":
+					return enforceToken(cmd, configDir, tokenID)
 				}
 			}
 			if !core.IsInitialized(configDir) {
@@ -96,12 +104,16 @@ func NewRootCommand() *cobra.Command {
 				// Stamp last-seen version so 'fleet recover' can detect mismatches.
 				core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
 			}
-			return nil
+			// FL-030: controller-side RBAC enforcement. After the init check (so a
+			// scoped token can resolve servers/groups), if a token is presented,
+			// load it and authorize this invocation against its scope.
+			return enforceToken(cmd, configDir, tokenID)
 		},
 	}
 
 	root.Version = version.Version
 	root.PersistentFlags().StringVar(&configDir, "config-dir", "", "configuration directory")
+	root.PersistentFlags().StringVar(&tokenID, "token", "", "scoped RBAC token id (FL-030); falls back to FLEET_TOKEN")
 	root.SetVersionTemplate("Cenvero Fleet {{.Version}}\n")
 
 	root.AddCommand(newInitCommand(&configDir))
@@ -138,6 +150,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newShellInitCommand())
 	root.AddCommand(newAutocompleteCommand())
 	root.AddCommand(newTagCommand(&configDir))
+	root.AddCommand(newTokenCommand(&configDir))
 	root.AddCommand(newInventoryCommand(&configDir))
 	root.AddCommand(newServiceStatusCommand(&configDir))
 	root.AddCommand(newJournalCommand(&configDir))
@@ -165,6 +178,149 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
 	return root
+}
+
+// enforceToken implements FL-030 CONTROLLER-side RBAC enforcement.
+//
+// When a scoped token is presented (via --token or the FLEET_TOKEN env var) it
+// is loaded from the TokenStore and this invocation is authorized against the
+// token's scope. If the token is unknown/revoked or the invocation is out of
+// scope, a clear error is printed to stderr and the process exits 1.
+//
+// This is controller-side enforcement only: it constrains what THIS controller
+// process will attempt. Agent-side enforcement — where the agent validates the
+// presented token per-RPC and refuses out-of-scope work even if the controller
+// is patched or bypassed — is a future hardening (FL-030 server-side).
+func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
+	tokenID := strings.TrimSpace(tokenFlag)
+	if tokenID == "" {
+		tokenID = strings.TrimSpace(os.Getenv("FLEET_TOKEN"))
+	}
+	if tokenID == "" {
+		return nil // no token presented: unscoped invocation
+	}
+
+	store := core.NewTokenStore(configDir)
+	token, err := store.Get(tokenID)
+	if err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: unknown or revoked token")
+		os.Exit(1)
+	}
+
+	top, sub := topLevelCommand(cmd)
+
+	// A scoped token must never be able to mint or modify tokens: that would let
+	// a constrained credential escalate its own (or others') scope.
+	if top == "token" && (sub == "create" || sub == "revoke") {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'token %s'\n", sub)
+		os.Exit(1)
+	}
+
+	args := commandPositionalArgs(cmd)
+	targetServer := bestEffortTargetServer(top, args)
+	isDestructive := core.IsDestructiveCommand(top, args)
+
+	// RBAC v1 enforces a single best-effort target server. Cross-server commands
+	// (cp, file copy/move/diff) touch two servers the single-target check cannot
+	// fully vet, so a server-scoped token is DENIED them (fail-closed) rather than
+	// allowed to slip past the scope check with an empty/partial target.
+	if (len(token.Servers) > 0 || len(token.Groups) > 0) &&
+		(top == "cp" || (top == "file" && (sub == "copy" || sub == "move" || sub == "diff"))) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run cross-server %q in RBAC v1\n", strings.TrimSpace(top+" "+sub))
+		os.Exit(1)
+	}
+
+	var allServerNames []string
+	if core.IsInitialized(configDir) && len(token.Groups) > 0 {
+		if app, aerr := openApp(configDir); aerr == nil {
+			if servers, serr := app.ListServers(); serr == nil {
+				for _, s := range servers {
+					allServerNames = append(allServerNames, s.Name)
+				}
+			}
+			_ = app.Close()
+		}
+	}
+	tags := core.NewTagStore(configDir)
+
+	if authErr := core.Authorize(token, top, targetServer, isDestructive, allServerNames, tags); authErr != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), authErr.Error())
+		os.Exit(1)
+	}
+	return nil
+}
+
+// topLevelCommand walks cmd up to the first-level command under root and returns
+// its name plus the immediate subcommand name (the leaf, when it differs from
+// the top-level command). For `fleet server remove web-01` it returns
+// ("server", "remove"); for `fleet status` it returns ("status", "").
+func topLevelCommand(cmd *cobra.Command) (top, sub string) {
+	chain := []*cobra.Command{}
+	for c := cmd; c != nil && c.HasParent(); c = c.Parent() {
+		chain = append([]*cobra.Command{c}, chain...)
+	}
+	if len(chain) == 0 {
+		return cmd.Name(), ""
+	}
+	top = chain[0].Name()
+	if len(chain) > 1 {
+		sub = chain[1].Name()
+	}
+	return top, sub
+}
+
+// commandPositionalArgs returns the positional (non-flag) args for cmd.
+func commandPositionalArgs(cmd *cobra.Command) []string {
+	if cmd.Flags() != nil {
+		return cmd.Flags().Args()
+	}
+	return nil
+}
+
+// serverFirstArgCommands is the set of top-level commands whose first positional
+// argument is conventionally a server name. Used for the best-effort target
+// resolution in token enforcement; it is deliberately conservative.
+// serverSecondArgCommands are top-level commands that take a SUBCOMMAND as
+// their first positional and the server as the SECOND (e.g. `file rm <server>
+// <path>`, `service start <server> <name>`, `server remove <server>`,
+// `firewall enable <server>`, `port open <server> <port>`).
+var serverSecondArgCommands = map[string]bool{
+	"server":   true,
+	"service":  true,
+	"file":     true,
+	"firewall": true,
+	"fw":       true,
+	"port":     true,
+}
+
+// serverFirstArgCommands are top-level commands whose FIRST positional argument
+// is conventionally a server name (e.g. `exec <server> <cmd>`, `journal
+// <server>`, `guard <server> <cmd>`, `drift <server>`, `svc <server>`).
+var serverFirstArgCommands = map[string]bool{
+	"exec":    true,
+	"journal": true,
+	"guard":   true,
+	"drift":   true,
+	"svc":     true,
+}
+
+// bestEffortTargetServer extracts the targeted server name for a command, if it
+// can be determined cheaply. It is conservative: commands not known to take a
+// server as a positional arg (e.g. `health`/`top` which use flags, `revert
+// <id>` which takes an id, `cp <src:path> <dst:path>` which encodes servers in
+// a colon form) return "" so no server-scope check is applied.
+func bestEffortTargetServer(top string, args []string) string {
+	switch {
+	case serverSecondArgCommands[top]:
+		if len(args) >= 2 {
+			return args[1]
+		}
+	case serverFirstArgCommands[top]:
+		if len(args) >= 1 {
+			return args[0]
+		}
+	}
+	return ""
 }
 
 func newInitCommand(configDir *string) *cobra.Command {
