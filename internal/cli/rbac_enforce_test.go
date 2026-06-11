@@ -152,6 +152,12 @@ func TestEnforceTokenDeniesOutOfScope(t *testing.T) {
 		{"backup denied fail-closed", []string{"backup"}},
 		{"dashboard denied fail-closed", []string{"dashboard"}},
 		{"config show denied fail-closed", []string{"config", "show"}},
+		// round-3: automation subcommands previously BYPASSED enforceToken entirely
+		// (RC-injection via shell-init: `automation set` plants a script that
+		// shell-init eval()s into the operator's shell). They are now token-enforced
+		// and a scoped token is denied by the fail-closed backstop. (--file is never
+		// read: the RBAC gate fires in PersistentPreRunE before RunE.)
+		{"automation set denied", []string{"automation", "set", "evil", "--file", "/dev/null"}},
 		// fan-out exec denied for a server-scoped token
 		{"exec --all", []string{"exec", "--all", "uptime"}},
 		{"exec --group", []string{"exec", "--group", "role=web", "uptime"}},
