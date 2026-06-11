@@ -4,10 +4,12 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSecretStoreSetGet(t *testing.T) {
@@ -235,5 +237,141 @@ func TestValidateSecretName(t *testing.T) {
 	}
 	if _, err := store.Get(".."); err == nil {
 		t.Fatal("Get with invalid name should error")
+	}
+}
+
+// TestSecretStoreEncryptedAtRest asserts that after Set, the raw on-disk bytes
+// of secrets.json never contain the plaintext value, carry the aesgcm-v1 marker,
+// and that Get round-trips back to the exact original value.
+func TestSecretStoreEncryptedAtRest(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSecretStore(dir)
+
+	const plaintext = "PLAINTEXT-CANARY-do-not-store-on-disk-12345"
+	if err := store.Set("api_key", plaintext); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "secrets.json"))
+	if err != nil {
+		t.Fatalf("read secrets.json: %v", err)
+	}
+	if strings.Contains(string(raw), plaintext) {
+		t.Fatal("secrets.json contains the plaintext secret value at rest")
+	}
+	if !strings.Contains(string(raw), "aesgcm-v1") {
+		t.Fatalf("secrets.json missing encryption marker; got:\n%s", raw)
+	}
+
+	// Get returns the exact original value (decrypts correctly).
+	got, err := store.Get("api_key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != plaintext {
+		t.Fatalf("Get returned %q, want %q", got, plaintext)
+	}
+
+	// A fresh store over the same dir derives the same key and decrypts too.
+	fresh := NewSecretStore(dir)
+	got, err = fresh.Get("api_key")
+	if err != nil {
+		t.Fatalf("Get from fresh store: %v", err)
+	}
+	if got != plaintext {
+		t.Fatalf("fresh store Get returned %q, want %q", got, plaintext)
+	}
+}
+
+// TestSecretStoreRotateEncrypted asserts a rotated value is stored encrypted
+// (not present in plaintext on disk) and round-trips through Get.
+func TestSecretStoreRotateEncrypted(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSecretStore(dir)
+	if err := store.Set("db", "original"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := store.Rotate("db", 48); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	rotated, err := store.Get("db")
+	if err != nil {
+		t.Fatalf("Get after Rotate: %v", err)
+	}
+	if rotated == "original" || len(rotated) != 48 {
+		t.Fatalf("Rotate produced unexpected value %q (len %d)", rotated, len(rotated))
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "secrets.json"))
+	if err != nil {
+		t.Fatalf("read secrets.json: %v", err)
+	}
+	if strings.Contains(string(raw), rotated) {
+		t.Fatal("secrets.json contains the rotated plaintext value at rest")
+	}
+}
+
+// TestSecretStoreLegacyPlaintextMigration writes a legacy plaintext secrets.json
+// (no encryption marker), confirms it is read back correctly for back-compat,
+// and confirms the next write transparently re-encrypts every value with no loss.
+func TestSecretStoreLegacyPlaintextMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.json")
+
+	// Hand-craft a legacy document: records carry only value+created, no "enc".
+	legacy := map[string]any{
+		"secrets": map[string]any{
+			"legacy_a": map[string]any{"value": "legacy-value-A", "created": time.Now().UTC()},
+			"legacy_b": map[string]any{"value": "legacy-value-B", "created": time.Now().UTC()},
+		},
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	// Sanity: the legacy file really is plaintext.
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "legacy-value-A") {
+		t.Fatal("test setup: legacy file is not plaintext as expected")
+	}
+
+	store := NewSecretStore(dir)
+
+	// Back-compat: legacy plaintext reads correctly.
+	if got, err := store.Get("legacy_a"); err != nil || got != "legacy-value-A" {
+		t.Fatalf("Get(legacy_a) = %q, %v; want legacy-value-A, nil", got, err)
+	}
+	if got, err := store.Get("legacy_b"); err != nil || got != "legacy-value-B" {
+		t.Fatalf("Get(legacy_b) = %q, %v; want legacy-value-B, nil", got, err)
+	}
+
+	// The next mutating write must upgrade EVERY record, including the untouched
+	// legacy_b, not just the one being added.
+	if err := store.Set("new_c", "new-value-C"); err != nil {
+		t.Fatalf("Set new_c: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgraded file: %v", err)
+	}
+	for _, plaintext := range []string{"legacy-value-A", "legacy-value-B", "new-value-C"} {
+		if strings.Contains(string(raw), plaintext) {
+			t.Fatalf("after upgrade, secrets.json still contains plaintext %q", plaintext)
+		}
+	}
+	// Every record must now be encrypted: confirm via the marker count.
+	if n := strings.Count(string(raw), "aesgcm-v1"); n != 3 {
+		t.Fatalf("expected 3 encrypted records after upgrade, found %d markers", n)
+	}
+	// All values still readable after the upgrade — nothing lost.
+	for name, want := range map[string]string{
+		"legacy_a": "legacy-value-A",
+		"legacy_b": "legacy-value-B",
+		"new_c":    "new-value-C",
+	} {
+		if got, err := store.Get(name); err != nil || got != want {
+			t.Fatalf("after upgrade Get(%s) = %q, %v; want %q", name, got, err, want)
+		}
 	}
 }

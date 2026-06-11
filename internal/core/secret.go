@@ -21,23 +21,40 @@ import (
 // dir and kept off *App so it does not require touching app.go (matching the
 // TagStore / RedactStore pattern).
 //
-// At-rest storage choice (v1): the document is written 0600 (owner read/write
-// only) via an atomic temp+rename, and its parent dir is created 0700. Values
-// are stored AT-REST-PLAINTEXT inside that 0600 file. internal/crypto offers no
-// simple symmetric encrypt-at-rest helper keyed off a controller key file in
-// this version, so encryption-at-rest is intentionally deferred: the security
-// boundary in v1 is filesystem permissions (0600/0700) plus the guarantee that
-// values are NEVER printed, returned by List/meta, logged, or echoed. When a
-// symmetric helper lands, Set/Get become the single place to wrap/unwrap.
+// At-rest storage choice: the document is written 0600 (owner read/write only)
+// via an atomic temp+rename, and its parent dir is created 0700. Each secret
+// VALUE is encrypted at rest with AES-256-GCM (a fresh random 12-byte nonce per
+// value; nonce||ciphertext base64-encoded; record marker "enc":"aesgcm-v1") — no
+// longer plaintext-0600. The AES key is a stable 32-byte key derived via
+// HKDF-SHA256 (see secret_crypto.go): preferring the controller's existing
+// primary private key under <configDir>/keys (binding secrets to controller
+// identity, no new key file) and falling back to a dedicated 0600
+// <configDir>/keys/secret.key when no usable controller key is present. The
+// remaining boundary is still filesystem permissions plus the guarantee that
+// values are NEVER printed, returned by List/meta, logged, or echoed. Set/Get
+// are the single place that wrap/unwrap.
+//
+// Migration: a legacy secrets.json with plaintext values (records without the
+// "enc" marker) is read as-is for back-compat, and every value is transparently
+// re-encrypted on the next write (Set/Generate/Rotate/Remove all rewrite the
+// whole document), so no secret is ever lost.
 type SecretStore struct {
 	path string
 	mu   sync.Mutex
+
+	// key is the lazily-derived 32-byte AES key, cached after first use. keyErr
+	// records a derivation failure so it surfaces consistently.
+	key    []byte
+	keyErr error
 }
 
-// secretRecord is the on-disk shape of a single secret. The Value is the secret
-// material; it is NEVER exposed by List or any meta accessor.
+// secretRecord is the on-disk shape of a single secret. The Value holds the
+// secret material — AES-256-GCM ciphertext (base64 nonce||ciphertext) when Enc
+// is set, or legacy plaintext when Enc is empty. It is NEVER exposed by List or
+// any meta accessor.
 type secretRecord struct {
 	Value   string    `json:"value"`
+	Enc     string    `json:"enc,omitempty"`
 	Created time.Time `json:"created"`
 }
 
@@ -70,6 +87,56 @@ func NewSecretStore(configDir string) *SecretStore {
 // dir.
 func SecretsPath(configDir string) string {
 	return filepath.Join(configDir, "secrets.json")
+}
+
+// encKey lazily derives and caches the store's 32-byte AES key. The caller must
+// hold s.mu. Derivation is deterministic for a config dir, so caching is safe
+// across reads and writes of the same store instance.
+func (s *SecretStore) encKey() ([]byte, error) {
+	if s.key != nil || s.keyErr != nil {
+		return s.key, s.keyErr
+	}
+	configDir := filepath.Dir(s.path)
+	key, err := deriveSecretKey(configDir)
+	if err != nil {
+		s.keyErr = err
+		return nil, err
+	}
+	s.key = key
+	return key, nil
+}
+
+// sealRecord returns a secretRecord with value encrypted at rest under the
+// store's AES key. The caller must hold s.mu.
+func (s *SecretStore) sealRecord(value string, created time.Time) (secretRecord, error) {
+	key, err := s.encKey()
+	if err != nil {
+		return secretRecord{}, err
+	}
+	enc, err := encryptValue(key, value)
+	if err != nil {
+		return secretRecord{}, err
+	}
+	return secretRecord{Value: enc, Enc: secretEncMarker, Created: created}, nil
+}
+
+// openRecord returns the plaintext value of rec, decrypting AES-256-GCM records
+// and passing legacy plaintext (no Enc marker) through unchanged. The caller
+// must hold s.mu.
+func (s *SecretStore) openRecord(rec secretRecord) (string, error) {
+	if rec.Enc == "" {
+		// Legacy plaintext record (pre-encryption file): read as-is. It will be
+		// re-encrypted on the next write of the document.
+		return rec.Value, nil
+	}
+	if rec.Enc != secretEncMarker {
+		return "", fmt.Errorf("unsupported secret encryption format %q", rec.Enc)
+	}
+	key, err := s.encKey()
+	if err != nil {
+		return "", err
+	}
+	return decryptValue(key, rec.Value)
 }
 
 // ValidateSecretName enforces a charset-safe name with no path separators or
@@ -156,6 +223,25 @@ func (s *SecretStore) write(doc secretsDocument) error {
 	return nil
 }
 
+// upgradeAndWrite encrypts any legacy plaintext records in doc (records without
+// the Enc marker, left over from a pre-encryption secrets.json) before writing,
+// so that every persisted value ends up AES-256-GCM sealed. This makes any
+// mutating call (Set/Generate/Rotate/Remove) transparently migrate the whole
+// document forward with no risk of losing a secret. The caller must hold s.mu.
+func (s *SecretStore) upgradeAndWrite(doc secretsDocument) error {
+	for name, rec := range doc.Secrets {
+		if rec.Enc != "" {
+			continue // already encrypted
+		}
+		sealed, err := s.sealRecord(rec.Value, rec.Created)
+		if err != nil {
+			return err
+		}
+		doc.Secrets[name] = sealed
+	}
+	return s.write(doc)
+}
+
 // Set stores (or replaces) a secret value under name. The creation time is
 // preserved across a replace so List meta stays stable. The value is never
 // returned or logged by this call.
@@ -173,8 +259,12 @@ func (s *SecretStore) Set(name, value string) error {
 	if existing, ok := doc.Secrets[name]; ok && !existing.Created.IsZero() {
 		created = existing.Created
 	}
-	doc.Secrets[name] = secretRecord{Value: value, Created: created}
-	return s.write(doc)
+	rec, err := s.sealRecord(value, created)
+	if err != nil {
+		return err
+	}
+	doc.Secrets[name] = rec
+	return s.upgradeAndWrite(doc)
 }
 
 // secretAlphabet is the alphanumeric charset used by Generate/Rotate. It is
@@ -242,7 +332,7 @@ func (s *SecretStore) Get(name string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("secret %q not found", name)
 	}
-	return rec.Value, nil
+	return s.openRecord(rec)
 }
 
 // List returns value-free metadata (name + created) for every stored secret,
@@ -283,8 +373,12 @@ func (s *SecretStore) Rotate(name string, length int) error {
 		return fmt.Errorf("secret %q not found", name)
 	}
 	// Rotation refreshes both the value and the creation/rotation timestamp.
-	doc.Secrets[name] = secretRecord{Value: value, Created: time.Now().UTC()}
-	return s.write(doc)
+	rec, err := s.sealRecord(value, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	doc.Secrets[name] = rec
+	return s.upgradeAndWrite(doc)
 }
 
 // Remove deletes a secret. Removing an unknown secret is an error so callers get
@@ -303,5 +397,5 @@ func (s *SecretStore) Remove(name string) error {
 		return fmt.Errorf("secret %q not found", name)
 	}
 	delete(doc.Secrets, name)
-	return s.write(doc)
+	return s.upgradeAndWrite(doc)
 }
