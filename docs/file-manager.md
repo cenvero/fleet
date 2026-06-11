@@ -30,12 +30,18 @@ fleet file list <server> [path]
 fleet file stat <server> <path>                 # size, mode, mtime, type (JSON)
 fleet file cat  <server> <path>                  # stream a file to stdout (checksum-verified)
 fleet file tail <server> <path> [-n 200] [--search TEXT]
+fleet file diff <serverA:path> <serverB:path>    # unified line diff (exit 1 if they differ)
+
+# Edit a remote file in $EDITOR (download → edit → atomic re-upload)
+fleet file edit <server:path>                    # $EDITOR, fallback vi/nano; skips upload if unchanged
 
 # Transfer (chunked, parallel, resumable; -r for whole directories)
 fleet file upload   <server> <local> [remote] [-r] [--parallel N] [--chunk-size 4M]
 fleet file download <server> <remote> [local]  [-r] [--parallel N] [--chunk-size 4M]
+fleet file download <server:remote> [local]                  # combined source form, e.g. web-01:/root/x.log ./
 fleet file copy     <srcServer:path> <dstServer:path> [-r]   # server → server copy (relayed)
 fleet file move     <srcServer:path> <dstServer:path> [-r]   # server → server move (copy then delete)
+fleet cp            <srcServer:path> <dstServer:path> [-r]   # top-level shortcut for 'fleet file copy'
 
 # Manage
 fleet file mkdir <server> <path>

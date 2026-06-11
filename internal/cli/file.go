@@ -4,10 +4,17 @@
 package cli
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +42,8 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd.AddCommand(newFileStatCommand(configDir))
 	fileCmd.AddCommand(newFileCatCommand(configDir))
 	fileCmd.AddCommand(newFileTailCommand(configDir))
+	fileCmd.AddCommand(newFileEditCommand(configDir))
+	fileCmd.AddCommand(newFileDiffCommand(configDir))
 	fileCmd.AddCommand(newFileUploadCommand(configDir))
 	fileCmd.AddCommand(newFileDownloadCommand(configDir))
 	fileCmd.AddCommand(newFileCopyCommand(configDir))
@@ -136,16 +145,20 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 	var chunkSize string
 	var recursive bool
 	cmd := &cobra.Command{
-		Use:   "download <server> <remote> [local]",
+		Use:   "download <server> <remote> [local] | <server:remote> [local]",
 		Short: "Download a file (or directory with -r) from a server (chunked, parallel, resumable)",
 		Long: "Download <remote> from <server> into <local> (defaults to the remote base name\n" +
 			"in the current directory; a local directory is allowed and the base name is\n" +
 			"appended). Same engine as upload: chunked, parallel, SHA-256 verified, and\n" +
 			"resumable from a partial local file.\n\n" +
+			"The source may be given as two arguments (<server> <remote>) or combined as\n" +
+			"<server:remote>, so both of these are equivalent:\n" +
+			"  fleet file download web-01 /root/x.log ./\n" +
+			"  fleet file download web-01:/root/x.log ./\n\n" +
 			"With -r/--recursive, <remote> is a directory and the whole tree is downloaded\n" +
 			"into <local> (default: current directory). Remote names are vetted so a\n" +
 			"compromised server cannot write outside <local>.",
-		Args: cobra.RangeArgs(2, 3),
+		Args: cobra.RangeArgs(1, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -156,16 +169,16 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			local := ""
-			if len(args) == 3 {
-				local = args[2]
+			server, remote, local, err := parseDownloadArgs(args)
+			if err != nil {
+				return err
 			}
 			if recursive {
 				dest := local
 				if dest == "" {
 					dest = "."
 				}
-				n, err := app.DownloadDir(args[0], args[1], dest, opts, nil)
+				n, err := app.DownloadDir(server, remote, dest, opts, nil)
 				if err != nil {
 					return err
 				}
@@ -173,12 +186,12 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 				return nil
 			}
 			progress, finish := newProgressReporter(cmd, "download")
-			result, err := app.DownloadFile(args[0], args[1], local, opts, progress)
+			result, err := app.DownloadFile(server, remote, local, opts, progress)
 			finish()
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "downloaded %s (%s)\n", args[1], humanizeBytes(result.Entry.Size))
+			fmt.Fprintf(cmd.OutOrStdout(), "downloaded %s (%s)\n", remote, humanizeBytes(result.Entry.Size))
 			return nil
 		},
 	}
@@ -254,6 +267,192 @@ func newFileTailCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
+func newFileEditCommand(configDir *string) *cobra.Command {
+	var parallel int
+	var chunkSize string
+	cmd := &cobra.Command{
+		Use:   "edit <server:path>",
+		Short: "Edit a remote file in $EDITOR, then upload it back atomically",
+		Long: "Download <path> from <server> into a local temp file, open it in your editor\n" +
+			"($EDITOR, falling back to vi then nano), and on save upload it back over the\n" +
+			"same chunked, checksummed, resumable engine — the remote file is replaced\n" +
+			"atomically (temp file -> fsync -> rename). If you quit the editor without\n" +
+			"changing anything, the upload is skipped.\n\n" +
+			"  fleet file edit web-01:/etc/nginx/nginx.conf",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			server, remotePath, err := parseServerPath(args[0])
+			if err != nil {
+				return err
+			}
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			opts, err := transferOptsFromFlags(parallel, chunkSize)
+			if err != nil {
+				return err
+			}
+
+			tmpDir, err := os.MkdirTemp("", "fleet-edit-")
+			if err != nil {
+				return err
+			}
+			defer func() { _ = os.RemoveAll(tmpDir) }()
+			tmpPath := filepath.Join(tmpDir, path.Base(remotePath))
+
+			if _, err := app.DownloadFile(server, remotePath, tmpPath, opts, nil); err != nil {
+				return fmt.Errorf("download for edit: %w", err)
+			}
+			before, err := fileSHA256(tmpPath)
+			if err != nil {
+				return err
+			}
+
+			if err := openInEditor(cmd, tmpPath); err != nil {
+				return err
+			}
+
+			after, err := fileSHA256(tmpPath)
+			if err != nil {
+				return err
+			}
+			if after == before {
+				fmt.Fprintln(cmd.OutOrStdout(), "no changes — upload skipped")
+				return nil
+			}
+
+			progress, finish := newProgressReporter(cmd, "upload")
+			result, err := app.UploadFile(server, tmpPath, remotePath, opts, progress)
+			finish()
+			if err != nil {
+				return fmt.Errorf("upload after edit: %w", err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "saved %s:%s (%s, sha256=%s)\n", server, result.Path, humanizeBytes(result.Size), shortHash(result.SHA256))
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&parallel, "parallel", 0, "number of parallel streams (0 = use server/global default)")
+	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
+	return cmd
+}
+
+// openInEditor opens path in the operator's editor: $EDITOR (then $VISUAL),
+// falling back to vi then nano. stdin/stdout/stderr are wired to the terminal so
+// full-screen editors work.
+func openInEditor(cmd *cobra.Command, path string) error {
+	editor := firstNonEmpty(os.Getenv("EDITOR"), os.Getenv("VISUAL"))
+	if editor == "" {
+		for _, candidate := range []string{"vi", "nano"} {
+			if _, err := exec.LookPath(candidate); err == nil {
+				editor = candidate
+				break
+			}
+		}
+	}
+	if editor == "" {
+		return fmt.Errorf("no editor found: set $EDITOR (or install vi/nano)")
+	}
+	// The editor string may carry arguments (e.g. "code --wait"); split on spaces.
+	parts := strings.Fields(editor)
+	c := exec.Command(parts[0], append(parts[1:], path)...) // #nosec G204 -- operator-controlled $EDITOR
+	c.Stdin = os.Stdin
+	c.Stdout = cmd.OutOrStdout()
+	c.Stderr = cmd.ErrOrStderr()
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("editor exited with error: %w", err)
+	}
+	return nil
+}
+
+// fileSHA256 returns the hex SHA-256 of a local file, used to detect whether an
+// edit actually changed the file before re-uploading.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path) // #nosec G304 -- controller-created temp file
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func newFileDiffCommand(configDir *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "diff <serverA:path> <serverB:path>",
+		Short: "Show a unified line diff of the same-or-different file on two servers",
+		Long: "Fetch a file from each side (each chunk checksum-verified) and print a unified\n" +
+			"line diff (the format `patch` understands). Useful for spotting config drift\n" +
+			"across the fleet.\n\n" +
+			"  fleet file diff web-01:/etc/nginx/nginx.conf web-02:/etc/nginx/nginx.conf\n\n" +
+			"Exit status is 0 when the files are identical and 1 when they differ.",
+		Args: cobra.ExactArgs(2),
+		// A non-zero "files differ" exit must not dump usage text or an
+		// "Error: files differ" line — the diff itself is the output. Genuine
+		// errors are printed explicitly below before being returned.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			err := runFileDiff(cmd, *configDir, args[0], args[1])
+			if err != nil && !errors.Is(err, errFilesDiffer) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+			}
+			return err
+		},
+	}
+	return cmd
+}
+
+func runFileDiff(cmd *cobra.Command, configDir, srcA, srcB string) error {
+	serverA, pathA, err := parseServerPath(srcA)
+	if err != nil {
+		return err
+	}
+	serverB, pathB, err := parseServerPath(srcB)
+	if err != nil {
+		return err
+	}
+	app, err := openApp(configDir)
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+
+	var bufA, bufB bytes.Buffer
+	if _, err := app.CatRemoteFile(serverA, pathA, &bufA); err != nil {
+		return fmt.Errorf("read %s: %w", srcA, err)
+	}
+	if _, err := app.CatRemoteFile(serverB, pathB, &bufB); err != nil {
+		return fmt.Errorf("read %s: %w", srcB, err)
+	}
+
+	out := unifiedDiff(srcA, srcB, bufA.String(), bufB.String())
+	if out == "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "files are identical\n")
+		return nil
+	}
+	fmt.Fprint(cmd.OutOrStdout(), out)
+	// Mirror diff(1): exit non-zero when the files differ.
+	return errFilesDiffer
+}
+
+// errFilesDiffer signals that `fleet file diff` found differences. main.go
+// translates any returned error into a non-zero process exit.
+var errFilesDiffer = errors.New("files differ")
+
 // parseServerPath splits a "<server>:<path>" argument.
 func parseServerPath(arg string) (server, remotePath string, err error) {
 	i := strings.IndexByte(arg, ':')
@@ -261,6 +460,36 @@ func parseServerPath(arg string) (server, remotePath string, err error) {
 		return "", "", fmt.Errorf("expected <server>:<path>, got %q", arg)
 	}
 	return arg[:i], arg[i+1:], nil
+}
+
+// parseDownloadArgs accepts the download source either as two positional
+// arguments (<server> <remote> [local]) or a combined <server:remote> [local],
+// returning the server, remote path, and optional local destination ("" if
+// none). It lets the same command serve both ergonomic forms.
+func parseDownloadArgs(args []string) (server, remote, local string, err error) {
+	if len(args) >= 1 && strings.ContainsRune(args[0], ':') {
+		// Combined <server:remote> form; at most one extra arg (the local dest).
+		if len(args) > 2 {
+			return "", "", "", fmt.Errorf("with <server:remote>, pass at most one [local] argument")
+		}
+		server, remote, err = parseServerPath(args[0])
+		if err != nil {
+			return "", "", "", err
+		}
+		if len(args) == 2 {
+			local = args[1]
+		}
+		return server, remote, local, nil
+	}
+	// Split <server> <remote> [local] form.
+	if len(args) < 2 {
+		return "", "", "", fmt.Errorf("expected <server> <remote> [local] or <server:remote> [local]")
+	}
+	server, remote = args[0], args[1]
+	if len(args) == 3 {
+		local = args[2]
+	}
+	return server, remote, local, nil
 }
 
 func newFileCopyCommand(configDir *string) *cobra.Command {

@@ -136,6 +136,12 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newAutomationCommand(&configDir))
 	root.AddCommand(newShellInitCommand())
 	root.AddCommand(newAutocompleteCommand())
+	root.AddCommand(newTagCommand(&configDir))
+	root.AddCommand(newInventoryCommand(&configDir))
+	root.AddCommand(newServiceStatusCommand(&configDir))
+	root.AddCommand(newJournalCommand(&configDir))
+	root.AddCommand(newTopCommand(&configDir))
+	root.AddCommand(newCpCommand(&configDir))
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
 	return root
