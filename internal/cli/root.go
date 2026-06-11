@@ -217,6 +217,9 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		os.Exit(1)
 	}
 
+	// Attribute every audited action to this token (FL-030 audit attribution).
+	_ = os.Setenv("FLEET_OPERATOR", "token:"+token.Name)
+
 	top, sub := topLevelCommand(cmd)
 
 	// A scoped token must never be able to mint or modify tokens: that would let

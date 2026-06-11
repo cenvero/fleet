@@ -1026,6 +1026,11 @@ func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, 
 }
 
 func (a *App) operator() string {
+	// An active RBAC token (set by the CLI pre-run gate) attributes every audited
+	// action to that token, so the audit log answers "which token did what" (FL-030).
+	if op := os.Getenv("FLEET_OPERATOR"); op != "" {
+		return op
+	}
 	if a.Config.Operator != "" {
 		return a.Config.Operator
 	}
