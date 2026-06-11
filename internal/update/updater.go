@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,9 +41,14 @@ type ApplyOptions struct {
 	// an unsigned update, regardless of channel. It must only be set from an
 	// explicit operator action (e.g. an --allow-unsigned/--insecure flag).
 	AllowUnsigned bool
-	FetchManifest func(context.Context, string) (Manifest, error)
-	DownloadURL   func(context.Context, string) ([]byte, error)
-	Now           func() time.Time
+	// AllowDowngrade is an explicit opt-in that permits applying a target version
+	// OLDER than the running version (or below the manifest's MinSupported floor).
+	// It defaults to false so anti-rollback is enforced: a replayed/old signed
+	// manifest cannot silently downgrade the binary to a known-vulnerable release.
+	AllowDowngrade bool
+	FetchManifest  func(context.Context, string) (Manifest, error)
+	DownloadURL    func(context.Context, string) ([]byte, error)
+	Now            func() time.Time
 }
 
 type ApplyResult struct {
@@ -120,6 +126,23 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	}
 	if sameVersion(version, opts.CurrentVersion) {
 		return result, nil
+	}
+
+	// Anti-rollback / downgrade protection: refuse a target OLDER than the running
+	// version, or below the manifest's MinSupported floor, unless explicitly
+	// allowed. Stops a replayed/stale (but validly signed) manifest from
+	// downgrading the binary to a known-vulnerable release.
+	if !opts.AllowDowngrade {
+		if strings.TrimSpace(opts.CurrentVersion) != "" && compareVersions(version, opts.CurrentVersion) < 0 {
+			return ApplyResult{}, fmt.Errorf(
+				"refusing to downgrade from %s to %s (anti-rollback); pass --allow-downgrade to override",
+				opts.CurrentVersion, version)
+		}
+		if minV := strings.TrimSpace(manifest.Channels[opts.Channel].MinSupported); minV != "" && compareVersions(version, minV) < 0 {
+			return ApplyResult{}, fmt.Errorf(
+				"target version %s is below the manifest's minimum supported version %s; refusing (pass --allow-downgrade to override)",
+				version, minV)
+		}
 	}
 
 	archive, err := opts.DownloadURL(ctx, binary.URL)
@@ -235,6 +258,52 @@ func sameVersion(candidate, current string) bool {
 		return false
 	}
 	return trimVersionPrefix(candidate) == trimVersionPrefix(current)
+}
+
+// compareVersions returns -1, 0, or +1 comparing two dotted version strings by
+// NUMERIC components (so 1.2.10 > 1.2.3, not lexical). A leading "v" and any
+// pre-release/build suffix (after the first '-' or '+') are ignored.
+func compareVersions(a, b string) int {
+	ap := versionParts(a)
+	bp := versionParts(b)
+	n := len(ap)
+	if len(bp) > n {
+		n = len(bp)
+	}
+	for i := 0; i < n; i++ {
+		var ai, bi int
+		if i < len(ap) {
+			ai = ap[i]
+		}
+		if i < len(bp) {
+			bi = bp[i]
+		}
+		if ai != bi {
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// versionParts splits a version into its numeric components, dropping a leading
+// "v" and any pre-release/build suffix. Non-numeric components parse to 0.
+func versionParts(v string) []int {
+	v = trimVersionPrefix(strings.TrimSpace(v))
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	if v == "" {
+		return nil
+	}
+	fields := strings.Split(v, ".")
+	out := make([]int, len(fields))
+	for i, f := range fields {
+		out[i], _ = strconv.Atoi(f)
+	}
+	return out
 }
 
 func trimVersionPrefix(v string) string {

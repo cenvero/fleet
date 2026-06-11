@@ -541,3 +541,70 @@ func TestValidateDownloadSchemeAllowsHTTPSAndLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.2.3", "1.2.3", 0},
+		{"v1.2.3", "1.2.3", 0},
+		{"1.2.10", "1.2.3", 1}, // numeric, not lexical
+		{"1.2.3", "1.2.10", -1},
+		{"2.0.0", "1.9.9", 1},
+		{"1.2.3-rc1", "1.2.3", 0}, // pre-release suffix dropped
+		{"1.0", "1.0.0", 0},
+	}
+	for _, c := range cases {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%q,%q)=%d want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestApplyRefusesDowngrade(t *testing.T) {
+	t.Parallel()
+	configDir := t.TempDir()
+	executablePath := filepath.Join(t.TempDir(), runtimeExecutableName())
+	if err := os.WriteFile(executablePath, []byte("current-2.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archive := tarGzArchive(t, runtimeExecutableName(), []byte("old-1.0.0"), 0o755)
+	sum := sha256.Sum256(archive)
+	pubText, signature := testSignature(t, archive)
+	const sigURL = "https://example.invalid/fleet.tar.gz.minisig"
+	manifest := Manifest{
+		Channels: map[string]ChannelInfo{"stable": {Version: "1.0.0"}},
+		Binaries: map[string]map[string]BinaryInfo{
+			"1.0.0": {runtime.GOOS + "-" + runtime.GOARCH: {
+				URL: "https://example.invalid/fleet.tar.gz", SHA256: hex.EncodeToString(sum[:]), Signature: sigURL,
+			}},
+		},
+	}
+	dl := func(_ context.Context, url string) ([]byte, error) {
+		if url == sigURL {
+			return signature, nil
+		}
+		return archive, nil
+	}
+	base := ApplyOptions{
+		Channel: "stable", ConfigDir: configDir, ExecutablePath: executablePath,
+		CurrentVersion: "2.0.0", SigningPublicKey: pubText,
+		FetchManifest: func(context.Context, string) (Manifest, error) { return manifest, nil },
+		DownloadURL:   dl,
+	}
+	// Downgrade (2.0.0 -> 1.0.0) refused by default.
+	if _, err := Apply(context.Background(), base); err == nil || !strings.Contains(err.Error(), "downgrade") {
+		t.Fatalf("expected anti-rollback refusal, got %v", err)
+	}
+	// Explicit opt-in permits it.
+	opt := base
+	opt.AllowDowngrade = true
+	res, err := Apply(context.Background(), opt)
+	if err != nil {
+		t.Fatalf("AllowDowngrade should permit downgrade: %v", err)
+	}
+	if !res.Applied {
+		t.Fatal("expected the downgrade to apply under AllowDowngrade")
+	}
+}
