@@ -20,10 +20,27 @@ import (
 // shells. It lives under the config dir so it travels with the controller config.
 func automationDir(configDir string) string { return filepath.Join(configDir, "automations") }
 
-// validAutomationName keeps a name confined to the store directory.
+// validAutomationName keeps a name confined to the store directory AND safe to
+// interpolate into the shell-init rc snippet. The name is emitted unescaped into
+// `eval "$(fleet automation get <name>)"`, so it must contain no shell
+// metacharacters whatsoever. We allow only a strict charset — [A-Za-z0-9._-] —
+// and forbid a leading '.' or '-' (no hidden files, no traversal, no leading
+// dash that an argv parser could mistake for an option). This makes both the
+// on-disk path and the generated rc snippet safe.
 func validAutomationName(name string) error {
-	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
-		return fmt.Errorf("invalid automation name %q (no path separators or '..')", name)
+	if name == "" {
+		return fmt.Errorf("invalid automation name: must not be empty")
+	}
+	if name[0] == '.' || name[0] == '-' {
+		return fmt.Errorf("invalid automation name %q: must not start with '.' or '-'", name)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("invalid automation name %q: only letters, digits, '.', '_', '-' are allowed", name)
+		}
 	}
 	return nil
 }

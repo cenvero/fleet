@@ -17,7 +17,12 @@ func TestValidUnitName(t *testing.T) {
 			t.Errorf("expected %q valid, got %v", n, err)
 		}
 	}
-	bad := []string{"", "a b", "rm -rf /", "nginx;reboot", "$(id)", "a|b", "x`y`", "a&b", "a>b", "a\nb"}
+	bad := []string{
+		"", "a b", "rm -rf /", "nginx;reboot", "$(id)", "a|b", "x`y`", "a&b", "a>b", "a\nb",
+		// Leading '-' is option injection even when shell-quoted: systemctl would
+		// parse these as options, not as a unit argument.
+		"-foo", "--version", "-H host", `a\b`,
+	}
 	for _, n := range bad {
 		if err := validUnitName(n); err == nil {
 			t.Errorf("expected %q to be rejected", n)

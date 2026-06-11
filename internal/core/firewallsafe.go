@@ -250,12 +250,28 @@ func (e *FirewallEngine) EnableSafe(backend FirewallBackend, forceIHaveConsole b
 	}
 
 	// 2) Verify the agent port is actually open now (unless forced).
-	dump, derr := e.dumpRuleset(backend)
-	if derr == nil && !rulesetAllowsPort(dump, e.AgentPort) && !forceIHaveConsole {
-		return result, fmt.Errorf(
-			"refusing to enable firewall: agent port %d does not appear to be allowed in the resulting ruleset, "+
-				"which would drop the agent connection. Re-run with --force-i-have-console only if you have out-of-band "+
-				"console access to recover", e.AgentPort)
+	//
+	// Fail CLOSED: this guard must never let a default-drop firewall through
+	// without a POSITIVE confirmation that the agent port survives. There are two
+	// ways the verification can fail to confirm that — and both must refuse:
+	//   a) the ruleset read errored, so we cannot see whether the port is allowed; or
+	//   b) the ruleset read succeeded but does not show the agent port allowed.
+	// Only --force-i-have-console (out-of-band console access) may bypass either.
+	if !forceIHaveConsole {
+		dump, derr := e.dumpRuleset(backend)
+		switch {
+		case derr != nil:
+			return result, fmt.Errorf(
+				"refusing to enable firewall: cannot verify the agent port %d is allowed (ruleset read failed: %v); "+
+					"refusing to enable a default-drop firewall that might lock out the agent. "+
+					"Re-run with --force-i-have-console only if you have out-of-band console access to recover",
+				e.AgentPort, derr)
+		case !rulesetAllowsPort(dump, e.AgentPort):
+			return result, fmt.Errorf(
+				"refusing to enable firewall: agent port %d does not appear to be allowed in the resulting ruleset, "+
+					"which would drop the agent connection. Re-run with --force-i-have-console only if you have out-of-band "+
+					"console access to recover", e.AgentPort)
+		}
 	}
 
 	// 3) Schedule a self-reverting undo BEFORE applying, so even an apply that

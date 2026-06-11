@@ -60,14 +60,25 @@ func newFirewallSafeEngine(configDir, server string) (*core.App, *core.FirewallE
 		_ = app.Close()
 		return nil, nil, err
 	}
+	// Resolve the REAL agent port to guard. Guarding a guessed port is worse than
+	// useless here: if we inject an allow rule for the wrong port and then enable a
+	// default-drop firewall, the actual agent connection is dropped — the exact
+	// lockout this command exists to prevent. So resolve from the record's
+	// configured management port, then the controller-wide default
+	// (Config.Runtime.DefaultAgentPort), and if neither is set REFUSE rather than
+	// fall back to a guessed port. This keeps the agent-port-allow-FIRST invariant
+	// honest: we only ever allow-first the port the agent actually listens on.
 	agentPort := record.Port
 	if agentPort == 0 {
-		// Fall back to the controller default so we still guard *some* port rather
-		// than silently guarding port 0 (which would be meaningless).
 		agentPort = app.Config.Runtime.DefaultAgentPort
-		if agentPort == 0 {
-			agentPort = 2222
-		}
+	}
+	if agentPort == 0 {
+		_ = app.Close()
+		return nil, nil, fmt.Errorf(
+			"cannot determine the agent port for %q: server record has no port and no controller default "+
+				"(runtime.default_agent_port) is set. Refusing to run an agent-safe firewall operation against a "+
+				"guessed port, which could lock out the agent. Set the server's port (fleet server edit) or the "+
+				"controller default and retry", server)
 	}
 	engine := &core.FirewallEngine{
 		AgentPort: agentPort,

@@ -21,12 +21,16 @@ import (
 //
 // Patterns use simple substring + glob matching (see matchPattern): a pattern
 // with no '*' or '?' metacharacters matches when it appears anywhere in the
-// command (substring); a pattern containing '*'/'?' is treated as a glob that
-// must match the whole command. Matching is case-sensitive. Examples:
+// command (substring); a pattern containing '*'/'?' is treated as an UNANCHORED
+// glob that matches when it occurs anywhere in the command (substring-glob),
+// consistent with the plain-substring behaviour. This matters for a DENY list:
+// a dangerous fragment must block the command wherever it appears, not only when
+// it spans the whole command line. Matching is case-sensitive. Examples:
 //
 //	rm -rf /        substring: blocks any command containing "rm -rf /"
 //	mkfs            substring: blocks any command containing "mkfs"
-//	dd of=/dev/sd*  glob: blocks "dd of=/dev/sda", "dd of=/dev/sdb1", etc.
+//	rm -rf /*       glob: blocks "cd /tmp && rm -rf /etc", "rm -rf /var", etc.
+//	dd of=/dev/sd*  glob: blocks "dd of=/dev/sda", "sudo dd of=/dev/sdb1 bs=1M", etc.
 //
 // The store is a read/modify/write store opened from a config dir and kept off
 // *App so it does not require touching app.go. The main loop wires MatchDeny
@@ -184,15 +188,20 @@ func matchAny(command string, patterns []string) (bool, string) {
 }
 
 // matchPattern matches command against a single pattern. A pattern containing
-// any glob metacharacter ('*' or '?') is treated as a whole-command glob;
-// otherwise it is a substring match (the pattern appears anywhere in command).
-// Matching is case-sensitive.
+// any glob metacharacter ('*' or '?') is treated as an UNANCHORED glob: it
+// matches when it occurs anywhere in command (substring-glob), the same as a
+// plain pattern is a substring. Otherwise it is a plain substring match (the
+// pattern appears anywhere in command). Matching is case-sensitive.
+//
+// Anchoring a deny glob to the whole command would fail open: a deny pattern
+// like "rm -rf /*" would not block "cd /tmp && rm -rf /etc" because the whole
+// command does not match the glob. Substring-glob keeps the deny list reliable.
 func matchPattern(command, pattern string) bool {
 	if pattern == "" {
 		return false
 	}
 	if hasGlobMeta(pattern) {
-		return globMatch(pattern, command)
+		return globMatchSubstring(pattern, command)
 	}
 	return containsSubstring(command, pattern)
 }
@@ -221,6 +230,71 @@ func containsSubstring(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// globMatchSubstring reports whether pattern matches any substring of name —
+// i.e. an UNANCHORED glob. It is equivalent to anchoring pattern with an implicit
+// '*' on both ends, so a deny/confirm glob fires wherever its dangerous fragment
+// appears in the command (not only when it spans the whole command line).
+//
+// It works by anchoring the pattern's leading and trailing '*' semantics: it
+// tries the whole-string globMatch with '*' wrapped around the pattern, which it
+// achieves by attempting a match at every start offset of name. Because '*' may
+// match the empty string, an empty name is handled by trying offset 0.
+func globMatchSubstring(pattern, name string) bool {
+	// A pattern made only of '*' (and matching anything) still needs one attempt
+	// even when name is empty, so iterate start from 0 to len(name) inclusive.
+	for start := 0; start <= len(name); start++ {
+		if globMatchPrefix(pattern, name[start:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// globMatchPrefix reports whether pattern matches a PREFIX of name (the pattern
+// is anchored at the start of name but a trailing '*' is implied — it need not
+// consume the rest of name). Combined with trying every start offset in
+// globMatchSubstring, this yields an unanchored substring glob.
+func globMatchPrefix(pattern, name string) bool {
+	var (
+		px, nx           int
+		starPx, starNx   = -1, -1
+		hasStarBacktrack bool
+	)
+	for px < len(pattern) {
+		if px < len(pattern) {
+			switch pattern[px] {
+			case '*':
+				hasStarBacktrack = true
+				starPx, starNx = px, nx
+				px++
+				continue
+			case '?':
+				if nx < len(name) {
+					px++
+					nx++
+					continue
+				}
+			default:
+				if nx < len(name) && pattern[px] == name[nx] {
+					px++
+					nx++
+					continue
+				}
+			}
+		}
+		if hasStarBacktrack && starNx < len(name) {
+			px = starPx + 1
+			starNx++
+			nx = starNx
+			continue
+		}
+		return false
+	}
+	// All of pattern consumed -> it matched a prefix of name (trailing chars in
+	// name are allowed; that is the "implicit trailing '*'" of a substring match).
+	return true
 }
 
 // globMatch reports whether pattern matches the whole of name, where '*' matches

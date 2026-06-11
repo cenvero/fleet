@@ -10,12 +10,22 @@ import (
 )
 
 func TestValidAutomationName(t *testing.T) {
-	for _, n := range []string{"", "a/b", "..", "../x", `a\b`, "x/../y"} {
+	bad := []string{
+		// path separators / traversal
+		"", "a/b", "..", "../x", `a\b`, "x/../y",
+		// leading '.' or '-' (hidden files, option-injection)
+		".hidden", "-foo", "--version",
+		// shell metacharacters — the name is interpolated unescaped into the
+		// shell-init rc snippet, so any of these would inject into the rc file.
+		"a;reboot", "$(id)", "a`id`b", "a b", "a&b", "a|b", "a>b",
+		"a(b)", "a'b", `a"b`, "a$b", "a*b", "a\nb",
+	}
+	for _, n := range bad {
 		if err := validAutomationName(n); err == nil {
 			t.Errorf("expected %q to be rejected", n)
 		}
 	}
-	for _, n := range []string{"default", "deploy", "my-script_1"} {
+	for _, n := range []string{"default", "deploy", "my-script_1", "a.b.c", "A1_2-3"} {
 		if err := validAutomationName(n); err != nil {
 			t.Errorf("expected %q valid, got %v", n, err)
 		}

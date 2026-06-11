@@ -205,6 +205,55 @@ func TestEnableSafeForceBypassesLockout(t *testing.T) {
 	}
 }
 
+// TestEnableSafeFailsClosedOnDumpError: if the ruleset dump ERRORS we cannot
+// verify the agent port survives, so EnableSafe must refuse (fail CLOSED) and
+// must NOT enable a default-drop firewall — otherwise a transient read failure
+// could lock out the controller. The agent-port allow is still attempted first.
+func TestEnableSafeFailsClosedOnDumpError(t *testing.T) {
+	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
+		if strings.Contains(cmd, "iptables -S") {
+			return "", 0, fmt.Errorf("transport read failed")
+		}
+		return "", 0, nil
+	}}
+	eng := &FirewallEngine{AgentPort: 2222, Exec: fake.exec}
+	_, err := eng.EnableSafe(FirewallBackendIptables, false, 60)
+	if err == nil {
+		t.Fatalf("expected EnableSafe to refuse when the ruleset dump errors (fail-closed)")
+	}
+	if !strings.Contains(err.Error(), "force-i-have-console") {
+		t.Errorf("refusal should mention the force flag, got: %v", err)
+	}
+	if fake.sawSubstring("iptables -P INPUT DROP") {
+		t.Errorf("enable must NOT run when the dump fails; calls=%v", fake.calls)
+	}
+	if !fake.sawSubstring("--dport '2222' -j ACCEPT") {
+		t.Errorf("agent port allow should still run first; calls=%v", fake.calls)
+	}
+}
+
+// TestEnableSafeForceBypassesDumpError: --force-i-have-console bypasses the
+// fail-closed dump-error refusal too (the operator accepts the lockout risk),
+// but the agent-port allow still runs first.
+func TestEnableSafeForceBypassesDumpError(t *testing.T) {
+	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
+		if strings.Contains(cmd, "iptables -S") {
+			return "", 0, fmt.Errorf("transport read failed")
+		}
+		return "", 0, nil
+	}}
+	eng := &FirewallEngine{AgentPort: 2222, Exec: fake.exec}
+	if _, err := eng.EnableSafe(FirewallBackendIptables, true, 30); err != nil {
+		t.Fatalf("EnableSafe(force) should proceed despite a dump error: %v", err)
+	}
+	if !fake.sawSubstring("iptables -P INPUT DROP") {
+		t.Errorf("enable should run under --force even when the dump errors; calls=%v", fake.calls)
+	}
+	if !fake.sawSubstring("--dport '2222' -j ACCEPT") {
+		t.Errorf("agent allow must still run first under --force; calls=%v", fake.calls)
+	}
+}
+
 func TestEnableSafeRejectsBadAgentPort(t *testing.T) {
 	fake := &fakeFirewall{}
 	eng := &FirewallEngine{AgentPort: 0, Exec: fake.exec}

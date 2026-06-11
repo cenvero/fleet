@@ -2236,7 +2236,12 @@ Examples:
 			toJSON := func(server string, r proto.ExecResult, timedOut bool, agentErr error, dur time.Duration) execJSON {
 				j := execJSON{Server: server, Stdout: redact(r.Stdout), Stderr: redact(r.Stderr), ExitCode: r.ExitCode, DurationMs: dur.Milliseconds(), TimedOut: timedOut}
 				if agentErr != nil {
-					j.AgentError = agentErr.Error()
+					// Scrub secret/redacted content from the transport/agent error too:
+					// an agent error string can echo back a value that we redact from
+					// stdout/stderr, so it must pass through the same redact() closure.
+					// Every consumer (--json output, the human-mode error, and
+					// printExecHuman) reads j.AgentError, so redacting here covers them all.
+					j.AgentError = redact(agentErr.Error())
 				}
 				return j
 			}

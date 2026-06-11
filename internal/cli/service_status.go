@@ -52,6 +52,10 @@ type serviceStatus struct {
 // validUnitName rejects unit names that could smuggle extra shell words into the
 // remote command line. ExecCommand runs a single command string on the agent, so
 // the unit is interpolated as an argument — keep it to characters systemd allows.
+//
+// A leading '-' is rejected outright: even when shell-quoted, systemctl parses a
+// '-'-prefixed argument as an OPTION (e.g. a unit named "--version" or "-H host"
+// would be option injection), so the strict charset below also forbids it leading.
 func validUnitName(unit string) error {
 	unit = strings.TrimSpace(unit)
 	if unit == "" {
@@ -60,10 +64,13 @@ func validUnitName(unit string) error {
 	if len(unit) > 256 {
 		return fmt.Errorf("unit name too long")
 	}
+	if unit[0] == '-' {
+		return fmt.Errorf("invalid unit name %q: must not start with '-'", unit)
+	}
 	for _, r := range unit {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.', r == '-', r == '_', r == '@', r == ':', r == '\\':
+		case r == '.', r == '-', r == '_', r == '@', r == ':':
 		default:
 			return fmt.Errorf("invalid unit name %q: contains %q", unit, string(r))
 		}
@@ -156,7 +163,7 @@ parses systemctl/journalctl directly over the live agent transport.
 // runSystemctlAction issues `systemctl <action> <unit>` on the server and fails
 // on a non-zero exit, surfacing stderr (e.g. permission denied).
 func runSystemctlAction(app *core.App, server, action, unit string) error {
-	cmd := fmt.Sprintf("systemctl %s %s", action, shellQuote(unit))
+	cmd := fmt.Sprintf("systemctl %s -- %s", action, shellQuote(unit))
 	res, err := app.ExecCommand(server, cmd)
 	if err != nil {
 		return err
@@ -181,7 +188,7 @@ func collectServiceStatus(app *core.App, server, unit string) (serviceStatus, er
 
 	// `systemctl show` is the most reliable single source: it never errors on a
 	// missing/inactive unit, returning Key=Value lines we can parse.
-	showCmd := fmt.Sprintf("systemctl show %s --property=ActiveState,SubState,UnitFileState,Description,MainPID,ActiveEnterTimestamp --no-pager", shellQuote(unit))
+	showCmd := fmt.Sprintf("systemctl show --property=ActiveState,SubState,UnitFileState,Description,MainPID,ActiveEnterTimestamp --no-pager -- %s", shellQuote(unit))
 	showRes, err := app.ExecCommand(server, showCmd)
 	if err != nil {
 		return status, err
@@ -197,12 +204,12 @@ func collectServiceStatus(app *core.App, server, unit string) (serviceStatus, er
 	// Fall back to is-active / is-enabled when `show` returned nothing useful
 	// (older systemd, or a unit with a non-standard provider).
 	if status.Active == "" {
-		if res, err := app.ExecCommand(server, fmt.Sprintf("systemctl is-active %s", shellQuote(unit))); err == nil {
+		if res, err := app.ExecCommand(server, fmt.Sprintf("systemctl is-active -- %s", shellQuote(unit))); err == nil {
 			status.Active = strings.TrimSpace(res.Stdout)
 		}
 	}
 	if status.Enabled == "" {
-		if res, err := app.ExecCommand(server, fmt.Sprintf("systemctl is-enabled %s", shellQuote(unit))); err == nil {
+		if res, err := app.ExecCommand(server, fmt.Sprintf("systemctl is-enabled -- %s", shellQuote(unit))); err == nil {
 			status.Enabled = strings.TrimSpace(res.Stdout)
 		}
 	}

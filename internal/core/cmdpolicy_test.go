@@ -219,11 +219,58 @@ func TestMatchPatternSubstringVsGlob(t *testing.T) {
 	if !matchPattern("please reboot the box", "reboot") {
 		t.Fatal("expected substring match")
 	}
-	// Glob -> whole-command match only.
-	if matchPattern("please reboot the box", "reboot*the") {
-		t.Fatal("glob should match the whole command, not a substring")
+	// Glob -> UNANCHORED substring-glob: it fires wherever the fragment occurs,
+	// not only when it spans the whole command. This is what keeps a deny list
+	// from failing open.
+	if !matchPattern("please reboot the box", "reboot*the") {
+		t.Fatal("glob should match a fragment anywhere in the command")
 	}
 	if !matchPattern("reboot the box", "reboot*box") {
-		t.Fatal("glob should match the whole command")
+		t.Fatal("glob should match the command")
+	}
+	if !matchPattern("cd /tmp && reboot --force now", "reboot*--force") {
+		t.Fatal("glob should match a fragment in the middle of a chained command")
+	}
+	// A glob whose fragment is absent must still NOT match.
+	if matchPattern("ls -la /tmp", "reboot*now") {
+		t.Fatal("glob should not match when its fragment is absent")
+	}
+}
+
+// TestCmdPolicyDenyGlobUnanchored is the regression guard for the audit finding:
+// a deny glob like "rm -rf /*" must block any command that contains "rm -rf /...",
+// including when it is buried in a chained command. Anchoring the glob to the
+// whole command line previously let "cd /tmp && rm -rf /etc" slip through.
+func TestCmdPolicyDenyGlobUnanchored(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCmdPolicyStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDenyPatterns([]string{"rm -rf /*"}); err != nil {
+		t.Fatal(err)
+	}
+	blocked := []string{
+		"rm -rf /",
+		"rm -rf /etc",
+		"sudo rm -rf /var/lib/foo",
+		"cd /tmp && rm -rf /",
+		"cd /tmp && rm -rf /etc/passwd",
+		"true; rm -rf /; echo done",
+	}
+	for _, cmd := range blocked {
+		if match, p := store.MatchDeny(cmd); !match || p != "rm -rf /*" {
+			t.Fatalf("MatchDeny(%q) = (%v, %q), want blocked by %q", cmd, match, p, "rm -rf /*")
+		}
+	}
+	allowed := []string{
+		"rm -rf ./build", // relative path, not "rm -rf /"
+		"ls -la /",
+		"rm -i file",
+	}
+	for _, cmd := range allowed {
+		if match, _ := store.MatchDeny(cmd); match {
+			t.Fatalf("MatchDeny(%q) should not be blocked by %q", cmd, "rm -rf /*")
+		}
 	}
 }
