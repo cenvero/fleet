@@ -31,6 +31,8 @@ fleet file stat <server> <path>                 # size, mode, mtime, type (JSON)
 fleet file cat  <server> <path>                  # stream a file to stdout (checksum-verified)
 fleet file tail <server> <path> [-n 200] [--search TEXT]
 fleet file diff <serverA:path> <serverB:path>    # unified line diff (exit 1 if they differ)
+fleet file diff --group <expr> <path>            # diff one path across every server matching the tag expression
+fleet file checksum <server> <path>              # SHA-256 of a remote file
 
 # Edit a remote file in $EDITOR (download → edit → atomic re-upload)
 fleet file edit <server:path>                    # $EDITOR, fallback vi/nano; skips upload if unchanged
@@ -44,9 +46,11 @@ fleet file move     <srcServer:path> <dstServer:path> [-r]   # server → server
 fleet cp            <srcServer:path> <dstServer:path> [-r]   # top-level shortcut for 'fleet file copy'
 
 # Manage
-fleet file mkdir <server> <path>
-fleet file rm    <server> <path> [--recursive]
-fleet file mv    <server> <from> <to>
+fleet file mkdir     <server> <path>
+fleet file rm        <server> <path> [--recursive]
+fleet file mv        <server> <from> <to>
+fleet file chmod     <server> <path> <mode>          # e.g. 0644
+fleet file duplicate <server> <src> <dst>            # copy a file in place on the server
 
 # Archive (runs the host's tar/zip on the target)
 fleet file compress <server> <archive> <item>...   # zip · tar.gz · tar.bz2 · tar.xz · tar

@@ -18,6 +18,11 @@ Today the repository includes:
 - Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
 - Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet file ui`)
+- Structured remote execution (`fleet exec --json`) with timeouts, retries, dry-run, tag-group fan-out, and automatic output redaction
+- Unattended-operation guardrails: scoped RBAC tokens (`fleet token` / `--token`), named secrets (`fleet secret`), a dead-man's-switch (`fleet guard`/`confirm`/`revert`), command policy (`fleet cmd-policy`), and an approval queue (`fleet approvals`/`approve`)
+- Transactional, idempotent playbooks (`fleet run`) with check/apply/rollback, plus tag-based grouping (`fleet tag`) and scheduled jobs (`fleet cron`)
+- Fleet observability: `fleet health`, `fleet top`, `fleet svc`, `fleet journal`, `fleet drift`, `fleet inventory --json`, and event notifications (`fleet notify`)
+- Background jobs (`fleet job`/`jobs`), port tunneling (`fleet tunnel`), and health-gated rolling agent updates (`fleet agent update --canary`)
 - Metrics polling, alerting, suppression, acknowledgement, and desktop notifications
 - Linux-first service management, firewall control, and remote bootstrap
 - Controller-owned cached service logs with size, count, and age-based retention
@@ -227,6 +232,9 @@ File manager and transfers (**new in v2**):
 - `fleet file upload <server> <local> [remote] [--parallel N] [--chunk-size 8M]`
 - `fleet file download <server> <remote> [local] [--parallel N]`
 - `fleet file mkdir|rm|mv <server> ...`
+- `fleet file edit <server:path>` — edit a remote file in `$EDITOR`, then re-upload atomically
+- `fleet file diff <serverA:path> <serverB:path>` (or `--group EXPR <path>`) — unified diff across servers
+- `fleet file compress|extract|chmod|checksum|duplicate <server> ...` — archive, permission, and copy ops on the host
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
 - `fleet files [server...]` (also `fleet filemanager` / `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, List/Icons views, and Finder-style drag-to-copy/move (local↔server **and** server↔server)
 - `fleet file ui` (also `fleet filemanager ui`) — premium **dual-pane** localhost browser file manager (Local + server panes, same operations, drag-to-copy/move, desktop-drop upload, live progress)
@@ -242,6 +250,57 @@ Agentic control (**new in v2**):
 - `fleet skill claude|codex|agents` — install a global skill so your AI coding agent can drive Fleet
 
 `context` and `ai` are generated live from the binary by walking the command tree, so they always match the installed version — there is nothing to keep in sync by hand, and any new command (with its help text) shows up automatically.
+
+## Operating Safely and Unattended
+
+Fleet is built to be driven programmatically and run unattended — by a script or an AI agent — with guardrails that keep a constrained credential from doing more than intended.
+
+Structured remote execution:
+
+- `fleet exec <server> <cmd> --json` — structured result (`stdout`/`stderr`/`exit_code`/`duration`)
+- `fleet exec ... --timeout 30s --retry 2 --backoff 2s` — bounded, retried execution
+- `fleet exec ... --group role=web` — fan out by tag; `--dry-run` previews; `--propagate-exit` surfaces the remote exit code
+- `fleet exec ... --secret VAR=@name` — inject a stored secret as an env var (value redacted from all output)
+- `fleet exec ... --guard` / `--confirm` / `--require-approval` / `--idempotency-key` — safety gates (below)
+
+Access and safety:
+
+- `fleet token create --name … [--servers … | --group EXPR] [--allow …] [--deny …] [--destructive]` — mint a scoped RBAC token; present it with `--token <id>` or `FLEET_TOKEN`. Enforcement is controller-side and fails closed.
+- `fleet secret set|list|rotate|rm <name>` — named secrets, never echoed; referenced as `@name` from `exec --secret`
+- `fleet guard <server> <cmd> --revert-after 2m --revert-cmd '<undo>'` — dead-man's-switch: auto-reverts unless you `fleet confirm <id>`; `fleet revert <id>` undoes now
+- `fleet cmd-policy set deny|confirm <patterns>` — deny or confirm-gate dangerous commands
+- `fleet approvals list` / `fleet approve <id>` — review and release commands staged with `exec --require-approval`
+- `fleet policy set redact-pattern <regexes>` — reusable output-redaction patterns
+- `fleet doctor <server>` — health checklist (agent, ports, disk, swap, reboot, clock)
+
+Orchestration:
+
+- `fleet run <playbook.yaml> [--group EXPR] [--on-fail rollback] [--dry-run]` — transactional, idempotent check/apply/rollback playbooks
+- `fleet tag <server> key=value …` / `fleet tag --list` — label servers; `--group EXPR` (comma = AND) targets the matching set
+- `fleet cron add|list|rm <server>` — manage scheduled jobs on a server
+
+Observability:
+
+- `fleet health [--json] [--group EXPR] [--watch]` — per-server checks (offline, swap, disk, reboot, clock skew, high load)
+- `fleet top` — live CPU/mem/swap/disk/load table across servers
+- `fleet svc <server> status|start|stop|restart|enable|disable <unit>` — structured systemd control
+- `fleet journal <server> --unit <name> [--since 1h] [--follow]` — page or follow a unit's journal
+- `fleet drift capture <server> --paths …` / `fleet drift <server>` — config-drift baseline and check
+- `fleet inventory [--json] [--refresh]` — machine-readable fleet snapshot (OS, resources, ports, services, tags)
+- `fleet notify add slack|webhook <url> --on …` — Slack/webhook targets that auto-fire on events (offline, job-failed, drift)
+
+Background jobs, network, and agents:
+
+- `fleet job run <server> <cmd>` / `fleet job status|wait|logs <id>` / `fleet jobs` — detached background jobs
+- `fleet tunnel <server> <localPort>:<host>:<port>` — forward a local (loopback) port to a host reachable by the server
+- `fleet agent version [--all]` — report agent versions and flag mismatches
+- `fleet agent update [--all | --group EXPR] [--canary N]` — health-gated rolling agent update
+
+Shell integration:
+
+- `fleet automation set|get|list|rm <name>` — store named shell scripts
+- `fleet shell-init [name] [--install]` — load the latest automation in every new shell
+- `fleet autocomplete install` — enable tab-completion
 
 ## Configuration Layout
 

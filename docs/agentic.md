@@ -50,14 +50,31 @@ text and it appears in both automatically.
 
 After loading the context, the agent operates Fleet with ordinary `fleet` commands:
 
-- **Inspect** — `fleet status`, `fleet server list/show/metrics`, `fleet service list`, `fleet logs`, `fleet file list`
+- **Inspect** — `fleet status`, `fleet health --json`, `fleet inventory --json`, `fleet server list/show/metrics`, `fleet service list`, `fleet svc status`, `fleet logs`, `fleet file list`
+- **Run commands programmatically** — `fleet exec <server> <cmd> --json` returns `{stdout, stderr, exit_code, duration}`; add `--timeout`, `--retry`, `--dry-run`, `--group EXPR`
 - **Control any managed server** — start/stop/restart services, manage the firewall and ports, run commands, rotate keys
 - **Move files** — `fleet file upload/download` (chunked, parallel, resumable)
+- **Apply multi-step changes** — `fleet run <playbook.yaml>` (idempotent check/apply, `--on-fail rollback`)
 - **Guide you** — explain state, propose next steps, and confirm before anything destructive
+
+## Operating unattended
+
+Because the agent often runs without a human watching every step, Fleet gives it guardrails (all
+documented in [Operations → Operating Safely and Unattended](operations.md#operating-safely-and-unattended)):
+
+- **Scope the credential** — run inside a token's scope with `--token <id>` / `FLEET_TOKEN`; the
+  controller denies out-of-scope or destructive calls and fails closed.
+- **Never inline secrets** — `fleet secret set <name>`, then `fleet exec ... --secret VAR=@name`;
+  values are redacted from all output and the audit log.
+- **Guard risky changes** — `fleet guard <server> <cmd> --revert-after … --revert-cmd …` auto-reverts
+  unless the agent (or you) runs `fleet confirm <id>` in time; `fleet exec --guard` refuses
+  lock-yourself-out commands.
+- **Stage for sign-off** — `fleet exec ... --require-approval` queues a command for `fleet approve <id>`;
+  `fleet cmd-policy` deny/confirm-gates dangerous patterns.
 
 ## Safety
 
 - The agent runs the `fleet` CLI **on your machine, with your keys**, against only the servers you added. There is no hosted control plane.
 - Every action rides the same authenticated, host-key-pinned SSH channel as the rest of the controller.
 - The context tells the agent to treat `server remove`, `file rm`, `key rotate`, `update apply`, `self-uninstall`, and `config restore` as destructive and to confirm first.
-- Read-only commands (`status`, `server list/show/metrics`, `service list`, `logs`, `file list`, `config show`, `context`) are safe for the agent to explore freely.
+- Read-only commands (`status`, `health`, `inventory`, `top`, `doctor`, `drift`, `server list/show/metrics`, `service list`, `svc status`, `journal`, `logs`, `file list`, `config show`, `context`) are safe for the agent to explore freely.

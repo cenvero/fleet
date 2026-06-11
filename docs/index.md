@@ -22,6 +22,9 @@ The documentation currently focuses on:
 - how direct and reverse transport modes behave, including SSH reconnect and persistent shell sessions
 - where Cenvero Fleet stores its data and how backend selection works
 - how operators use services, logs, alerts, templates, key rotation, and updates
+- how to run commands programmatically (`fleet exec --json`), tag and group servers, and observe fleet health (`fleet health`, `fleet top`, `fleet inventory`, `fleet drift`, `fleet doctor`)
+- how to operate unattended safely — scoped RBAC tokens, named secrets, the dead-man's-switch (`fleet guard`/`confirm`/`revert`), command policy, and approvals
+- how to apply multi-step changes with transactional playbooks (`fleet run`) and manage scheduled and background jobs (`fleet cron`, `fleet job`)
 - how to move files with the v2 file manager — `fleet file`, the `fleet files` TUI, and the `fleet file ui` web app
 - how AI coding agents drive the fleet via `fleet context` and `fleet skill`
 - how to back up, restore, and recover a controller installation with `fleet backup` and `fleet recover`

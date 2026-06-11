@@ -243,18 +243,42 @@ const contextAbout = "## What this is\n\n" +
 	"Cenvero Fleet is a self-hosted, operator-owned fleet manager for Linux, macOS, and Windows " +
 	"servers. A single controller (`fleet`) manages remote agents (`fleet-agent`) over an " +
 	"authenticated, host-key-pinned SSH transport. State lives in an operator-controlled directory; " +
-	"there is no cloud dependency in the core runtime.\n\n"
+	"there is no cloud dependency in the core runtime.\n\n" +
+	"It is built to be driven programmatically and operated unattended: most commands emit JSON, " +
+	"`exec --json` returns a structured result (stdout/stderr/exit_code/duration), and a set of safety " +
+	"primitives (scoped RBAC tokens, named secrets, a dead-man's-switch, command policy, and an approval " +
+	"queue) lets an agent make changes without holding a live human's hand on every keystroke.\n\n"
 
 const contextForAgents = "## How to use this as an agent\n\n" +
 	"- Run commands with `fleet <group> <subcommand> ...`. Most commands print JSON to stdout — parse it.\n" +
 	"- Need the full details of one command? Run `fleet ai <command>` (e.g. `fleet ai file upload`), or add `--json`. It's the machine-readable counterpart to `--help` and always matches the installed binary.\n" +
 	"- Add `--config-dir <path>` if the user runs a controller outside the default `~/.cenvero-fleet`.\n" +
-	"- Start by checking state: `fleet status` (overall) and `fleet server list` (the fleet).\n" +
+	"- Start by checking state: `fleet status` (overall), `fleet server list` (the fleet), `fleet health` and " +
+	"`fleet inventory --json` (plan against a machine-readable view of every server's OS, resources, ports, services, and tags).\n" +
+	"- Prefer structured execution for anything you'll parse or gate on: `fleet exec <server> <cmd> --json` returns " +
+	"`{stdout, stderr, exit_code, duration}`. Add `--timeout`, `--retry/--backoff` for flaky transports, " +
+	"`--dry-run` to preview, `--propagate-exit` to surface the remote exit code, and `--group role=web` to fan out by tag.\n" +
 	"- If you see \"not initialized\", the controller needs `fleet init` first — confirm with the user before initializing.\n" +
 	"- DESTRUCTIVE or outward-facing actions require explicit user intent — confirm before running: " +
 	"`server remove`, `file rm`, `key rotate`, `update apply`, `self-uninstall`, `config restore`.\n" +
-	"- Read-only/safe to explore freely: `status`, `server list/show/metrics`, `service list`, `logs`, " +
-	"`file list`, `config show`, `context`.\n\n"
+	"- Read-only/safe to explore freely: `status`, `health`, `inventory`, `top`, `doctor`, `drift`, " +
+	"`server list/show/metrics`, `service list`, `svc status`, `journal`, `logs`, `file list`, `config show`, `context`.\n\n" +
+	"### Operating unattended (safety primitives)\n\n" +
+	"- **Scope yourself with an RBAC token.** Pass `--token <id>` (or set `FLEET_TOKEN`) to run inside a scope the operator " +
+	"minted with `fleet token create` (`--servers`, `--group`, `--allow`/`--deny` commands, `--destructive`). The controller " +
+	"fails closed: out-of-scope or destructive calls are denied, and a scoped token can never mint or modify tokens.\n" +
+	"- **Never inline credentials.** Store them with `fleet secret set <name>`, then inject per-command with " +
+	"`fleet exec ... --secret VAR=@name` (resolves the stored secret into an env var). Secret values are redacted from " +
+	"stdout/stderr and the audit log; add reusable redaction patterns with `fleet policy`.\n" +
+	"- **Guard risky changes with a dead-man's-switch.** `fleet guard <server> <cmd> --revert-after 2m --revert-cmd '<undo>'` " +
+	"arms a detached server-side timer that auto-reverts unless you `fleet confirm <id>` in time; `fleet revert <id>` undoes it now. " +
+	"`fleet exec --guard` refuses commands that could lock the controller out of a server.\n" +
+	"- **Stage instead of running** when a human must sign off: `fleet exec ... --require-approval` queues the command " +
+	"(`fleet approvals list`, then `fleet approve <id>` / `approvals reject <id>`). `fleet cmd-policy` defines deny/confirm " +
+	"patterns; a confirm-flagged command needs `--confirm`. Use `--idempotency-key` so a retried `exec` returns the cached " +
+	"result instead of running twice.\n" +
+	"- **Multi-step changes** belong in a playbook: `fleet run <playbook.yaml>` runs idempotent check/apply steps and can " +
+	"`--on-fail rollback`; preview with `--dry-run` and target with `--group`.\n\n"
 
 const contextConcepts = "## Concepts\n\n" +
 	"- Transport modes: `direct` (controller dials the agent's port) and `reverse` (agent dials out to the " +
@@ -264,7 +288,17 @@ const contextConcepts = "## Concepts\n\n" +
 	"- Files: secure file transfers are chunked, parallel (direct mode), checksummed, and resumable. " +
 	"Surfaces are the `fleet file` CLI (incl. `fleet file copy`/`move` directly between two servers), the `fleet files` dual-pane TUI (alias `fleet filemanager` / `fm`, supports local↔server and server↔server), and the localhost web app `fleet file ui` (alias `fleet filemanager ui`). Both UIs have full operations (new folder, rename, delete, copy, move), a hidden-files toggle, and List/Icons views.\n" +
 	"- Storage: config + per-server records live as TOML under the config dir; workload/metrics state in a " +
-	"SQLite/Postgres/MySQL/MariaDB backend. Everything is operator-controlled.\n\n"
+	"SQLite/Postgres/MySQL/MariaDB backend. Tokens, secrets, tags, guards, jobs, and policy each live in a small " +
+	"local JSON store under the config dir. Everything is operator-controlled.\n" +
+	"- Tags & groups: `fleet tag <server> key=value` labels a server; commands that take `--group EXPR` " +
+	"(e.g. `role=web,env=prod`, comma = AND) target every server matching the tag expression.\n" +
+	"- RBAC: scoped tokens (`fleet token`) are enforced controller-side. A token can be limited to named servers " +
+	"or a tag group, to an allow/deny list of top-level commands, and to whether destructive operations are permitted.\n" +
+	"- Safety state: secrets (`fleet secret`), command policy (`fleet cmd-policy`), output redaction (`fleet policy`), " +
+	"the approval queue (`fleet approvals`/`approve`), and dead-man's-switch guards (`fleet guard`/`confirm`/`revert`) " +
+	"are all local to the controller and apply before anything touches a server.\n" +
+	"- Observability: `fleet health`/`top` summarize the fleet; `doctor` and `drift` check one server; `inventory` " +
+	"is the machine-readable fleet snapshot; `notify` fires Slack/webhook alerts on events (offline, job-failed, drift).\n\n"
 
 const contextWorkflows = "## Common workflows\n\n" +
 	"Add a Linux server and auto-install the agent:\n" +
@@ -275,4 +309,14 @@ const contextWorkflows = "## Common workflows\n\n" +
 	"```\nfleet file upload web-01 ./app.tar.gz /srv/app.tar.gz --parallel 4\nfleet file download web-01 /var/log/syslog ./syslog\n```\n\n" +
 	"Open the interactive UIs:\n" +
 	"```\nfleet dashboard            # fleet-wide TUI\nfleet files web-01 db-01   # dual-pane file manager (a.k.a. fleet filemanager)\nfleet file ui              # localhost web file manager (a.k.a. fleet filemanager ui)\nfleet file copy web-01:/a db-01:/a   # server-to-server copy (move: fleet file move)\n```\n\n" +
+	"Run a command for a machine-readable result, with a timeout and retries:\n" +
+	"```\nfleet exec web-01 \"systemctl is-active nginx\" --json --timeout 30s --retry 2\nfleet exec --group role=web \"uname -r\" --json   # fan out by tag\n```\n\n" +
+	"Operate unattended with a scoped token + a stored secret:\n" +
+	"```\nfleet token create --name deploy --group role=web --allow exec,service --destructive\nfleet secret set deploy_key --generate 40\nFLEET_TOKEN=<id> fleet exec web-01 \"./deploy.sh\" --secret DEPLOY_KEY=@deploy_key --json\n```\n\n" +
+	"Make a risky change safely (auto-reverts unless confirmed):\n" +
+	"```\nfleet guard web-01 \"ufw default deny incoming && ufw reload\" --revert-after 2m --revert-cmd \"ufw default allow incoming && ufw reload\"\nfleet confirm <id>     # keep the change; or: fleet revert <id> to undo now\n```\n\n" +
+	"Apply a multi-step change as a transactional playbook:\n" +
+	"```\nfleet run deploy.yaml --group role=web --on-fail rollback --dry-run   # preview\nfleet run deploy.yaml --group role=web --on-fail rollback              # apply\n```\n\n" +
+	"Inspect health and plan against the inventory:\n" +
+	"```\nfleet health --json\nfleet inventory --json\nfleet doctor web-01 --json\n```\n\n" +
 	"Re-print this reference at any time with `fleet context` (add `--json` for a structured command tree).\n"

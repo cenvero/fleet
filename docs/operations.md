@@ -66,14 +66,33 @@ fleet exec web-01 "df -h /"
 fleet exec web-01 "cat /etc/os-release"
 ```
 
-Run a command across all servers at once:
+Run a command across all servers at once, or across a tag group:
 
 ```bash
 fleet exec --all uptime
 fleet exec --all "free -m"
+fleet exec --group role=web "uname -r"
 ```
 
 Results are shown per-server with the exit code. Non-zero exits are reported as errors.
+
+### Structured execution
+
+For anything a script or agent will parse or gate on, use the structured flags:
+
+```bash
+fleet exec web-01 "systemctl is-active nginx" --json     # {stdout, stderr, exit_code, duration}
+fleet exec web-01 "./migrate.sh" --timeout 5m --retry 2 --backoff 2s
+fleet exec web-01 "rm -rf /tmp/cache" --dry-run          # prints "would run: …" and exits
+fleet exec web-01 "./deploy.sh" --propagate-exit         # exit with the remote command's code
+fleet exec web-01 "./deploy.sh" --idempotency-key v3-2026-06-11   # cached result on retry
+```
+
+`--json` emits a structured result; `--timeout` aborts a hung command; `--retry`/`--backoff`
+retry transport failures; `--dry-run` previews; `--propagate-exit` returns the remote exit
+code; and `--idempotency-key KEY` returns the cached result for `KEY` instead of re-running.
+The safety flags (`--secret`, `--guard`, `--confirm`, `--require-approval`) are covered under
+[Operating safely and unattended](#operating-safely-and-unattended).
 
 ## Services
 
@@ -167,6 +186,212 @@ fleet port close web-01 443
 ```
 
 On unsupported platforms, the agent returns typed unsupported-capability errors instead of pretending success.
+
+## Tags and Groups
+
+Label servers with `key=value` tags and target the matching set with `--group`:
+
+```bash
+fleet tag web-01 role=web env=prod      # set tags (an empty value, key=, deletes it)
+fleet tag web-01                        # show one server's tags
+fleet tag --list                        # all servers and their tags
+```
+
+A *group expression* is one or more `key=value` pairs joined by commas (AND): `role=web` or
+`role=web,env=prod`. Many commands accept `--group EXPR` to fan out across the matching
+servers — `fleet exec`, `fleet run`, `fleet health`, `fleet top`, `fleet agent update`, and
+`fleet file diff` among them.
+
+## Fleet Health and Observability
+
+Get a per-server health view across the whole fleet:
+
+```bash
+fleet health                     # table: offline, no-swap, disk-full, reboot, clock-skew, high-load
+fleet health --json              # machine-readable report
+fleet health --group role=web --watch --disk 90 --load 1.5
+```
+
+A live resource table and a single-server checklist:
+
+```bash
+fleet top                        # live CPU/mem/swap/disk/load across servers (--once for one frame)
+fleet doctor web-01              # agent/ports/disk/swap/reboot/clock checklist (--json)
+```
+
+A machine-readable snapshot of the fleet (hostname, IPs, OS, resources, ports, services, tags),
+cached under `data/inventory.json`:
+
+```bash
+fleet inventory --json
+fleet inventory --refresh        # re-probe every server and rewrite the cache
+```
+
+Structured systemd control and journal access for any unit:
+
+```bash
+fleet svc web-01 status nginx.service --json
+fleet svc web-01 restart nginx.service
+fleet journal web-01 --unit nginx.service --since 1h --grep error
+fleet journal web-01 --unit nginx.service --follow
+```
+
+Capture a config baseline and detect drift later:
+
+```bash
+fleet drift capture web-01 --paths /etc/ssh/sshd_config,/etc/fstab
+fleet drift web-01               # report what changed since the baseline
+```
+
+Send fleet events (offline, job-failed, drift) to Slack or a webhook:
+
+```bash
+fleet notify add slack https://hooks.slack.com/... --on offline,job-failed,drift
+fleet notify list
+fleet notify test --event offline
+```
+
+## Operating Safely and Unattended
+
+Fleet provides guardrails so a script or AI agent can make changes without a human on every
+keystroke, while keeping a constrained credential from doing more than intended.
+
+### Scoped RBAC tokens
+
+Mint a token scoped to a set of servers (or a tag group) and a list of commands, then present
+it with `--token <id>` or the `FLEET_TOKEN` environment variable:
+
+```bash
+fleet token create --name deploy --group role=web --allow exec,service --destructive
+fleet token list                 # IDs are shown as a short prefix only
+fleet token revoke <id>
+
+FLEET_TOKEN=<id> fleet exec web-01 "./deploy.sh"
+```
+
+Token flags: `--servers` (named servers), `--group EXPR` (tag scope), `--allow` / `--deny`
+(top-level commands), `--read-only-default` (deny non-read commands unless allowed), and
+`--destructive` (permit destructive operations). Enforcement is **controller-side and fails
+closed**: out-of-scope, destructive, or cross-server calls a server-scoped token can't fully
+vet are denied, and a scoped token can never mint or modify tokens.
+
+### Named secrets
+
+Store credentials by name (never echoed) and inject them per-command as environment variables;
+the value is redacted from stdout, stderr, and the audit log:
+
+```bash
+fleet secret set deploy_key --generate 40      # or --value …, or from stdin
+fleet secret list                              # names and creation times only
+fleet secret rotate deploy_key --length 40
+fleet secret rm deploy_key
+
+fleet exec web-01 "./deploy.sh" --secret DEPLOY_KEY=@deploy_key
+```
+
+`VAR=@name` resolves a stored secret into `$VAR`; `VAR=literal` injects a literal. Add reusable
+redaction patterns with `fleet policy set redact-pattern '<regex>,<regex>'` (toggle the built-in
+defaults with `redact-defaults on|off`).
+
+### Dead-man's-switch (auto-rollback)
+
+Run a risky change behind a detached, server-side timer that auto-reverts unless you confirm in
+time — so a botched firewall or sshd change can't lock you out:
+
+```bash
+fleet guard web-01 "ufw default deny incoming && ufw reload" \
+  --revert-after 2m \
+  --revert-cmd "ufw default allow incoming && ufw reload"
+fleet confirm <id>               # keep the change (cancels the revert)
+fleet revert  <id>               # undo it now
+```
+
+`fleet exec ... --guard` is a lighter check: it refuses commands that could lock the controller
+out of the server (downgrade to a warning with `--guard-warn`).
+
+### Command policy and approvals
+
+Deny or confirm-gate dangerous commands fleet-wide, and stage commands for human sign-off:
+
+```bash
+fleet cmd-policy set deny "rm -rf /,mkfs*"     # substring, or glob when * / ? present
+fleet cmd-policy set confirm "reboot,shutdown*"
+fleet cmd-policy show
+
+fleet exec web-01 "reboot" --confirm           # required for a confirm-flagged command
+fleet exec web-01 "./deploy.sh" --require-approval   # stage instead of running
+fleet approvals list
+fleet approve <id>                             # or: fleet approvals reject <id>
+```
+
+## Playbooks
+
+Apply a multi-step change as an idempotent, transactional playbook. For each target server every
+step runs in order: if its `check` exits 0 the step is already satisfied and its `apply` is
+skipped; otherwise `apply` runs. With `--on-fail rollback`, a failed step undoes the previously
+applied steps in reverse order before stopping that server.
+
+```bash
+fleet run deploy.yaml --group role=web --dry-run            # print the resolved plan
+fleet run deploy.yaml --group role=web --on-fail rollback   # apply transactionally
+fleet run deploy.yaml web-01                                # a single named server
+```
+
+Targets resolve from a positional server, else `--group EXPR`, else the playbook's own `hosts`
+expression.
+
+## Scheduled Jobs and Background Jobs
+
+Manage cron jobs on a server:
+
+```bash
+fleet cron add web-01 --name nightly-backup --schedule "0 3 * * *" --cmd "/usr/local/bin/backup.sh"
+fleet cron list web-01
+fleet cron rm web-01 --name nightly-backup
+```
+
+Run and track detached background jobs (they keep running on the server independent of your
+session):
+
+```bash
+fleet job run web-01 "./long-import.sh"        # prints a job id (--json for the record)
+fleet jobs                                     # list tracked jobs
+fleet job status <id>                          # detects completion + exit code
+fleet job logs   <id> --follow                 # stream captured output
+fleet job wait   <id> --timeout 30m            # block until it finishes
+```
+
+## Port Tunnels
+
+Forward a local (loopback-only) port to a host:port reachable from a server:
+
+```bash
+fleet tunnel web-01 5432:db.internal:5432      # localhost:5432 → db.internal:5432 via web-01
+fleet tunnel web-01 8080:80                     # shorthand: target host = localhost on web-01
+```
+
+## Agents
+
+Check agent versions and roll out updates in a health-gated canary order:
+
+```bash
+fleet agent version --all                      # report versions, flag mismatches
+fleet agent update --group role=web --canary 1 # update 1, health-check, then the rest
+```
+
+`--canary N` updates a small batch of `N` servers first and only proceeds to the remainder if
+every canary comes back healthy.
+
+## Shell Integration
+
+Store named shell scripts and load the latest into every new terminal:
+
+```bash
+fleet automation set deploy --file ./deploy.sh # or pipe via stdin
+fleet automation list
+fleet shell-init --install                     # append the loader snippet to your shell rc
+fleet autocomplete install                     # enable tab-completion
+```
 
 ## Templates
 
