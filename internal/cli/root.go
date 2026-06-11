@@ -64,12 +64,14 @@ func NewRootCommand() *cobra.Command {
 				"backup", "recover", "adjust-init",
 				// context/ai/skill describe the CLI and install agent integrations;
 				// they never touch controller state, so they must work pre-init.
-				"context", "ai", "skill":
+				"context", "ai", "skill",
+				// shell helpers operate on local files only (config dir + shell rc).
+				"automation", "shell-init", "autocomplete":
 				return nil
 			}
 			if cmd.HasParent() {
 				switch cmd.Parent().Name() {
-				case "help", "completion", "update", "skill":
+				case "help", "completion", "update", "skill", "automation", "autocomplete":
 					return nil
 				}
 			}
@@ -130,6 +132,9 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
 	root.AddCommand(newContextCommand())
+	root.AddCommand(newAutomationCommand(&configDir))
+	root.AddCommand(newShellInitCommand())
+	root.AddCommand(newAutocompleteCommand())
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
 	return root
