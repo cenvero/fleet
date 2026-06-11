@@ -149,6 +149,9 @@ func runDrift(cmd *cobra.Command, configDir, server string) error {
 	}
 
 	if drifted {
+		// Best-effort notification: a fire failure must not change the drift
+		// result the operator sees, so its error is intentionally ignored.
+		_ = core.NewNotifyStore(configDir).Fire(core.NotifyEventDrift, fmt.Sprintf("config drift detected on %q", server))
 		return fmt.Errorf("drift detected on %q", server)
 	}
 	fmt.Fprintf(out, "\nno drift on %q\n", server)

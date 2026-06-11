@@ -293,9 +293,26 @@ func (s *JobStore) Tail(exec ExecFunc, id int) (rec JobRecord, output string, er
 			if uerr := s.update(rec); uerr != nil {
 				return rec, output, uerr
 			}
+			// On the transition to finished-with-a-nonzero-exit, fire the
+			// "job-failed" notification. Best-effort: it must never affect the
+			// returned record or fail the Tail.
+			if code != 0 {
+				s.fireJobFailed(rec)
+			}
 		}
 	}
 	return rec, output, nil
+}
+
+// fireJobFailed sends a best-effort "job-failed" notification for a finished job
+// whose exit code was non-zero. The NotifyStore is loaded from the same config
+// dir as the job store (jobs.json's parent), so it requires no extra wiring. Any
+// failure — including a panic — is swallowed so it can never break Tail/Wait.
+func (s *JobStore) fireJobFailed(rec JobRecord) {
+	defer func() { _ = recover() }()
+	configDir := filepath.Dir(s.path)
+	msg := fmt.Sprintf("job %d on %s failed (exit %d): %s", rec.ID, rec.Server, rec.ExitCode, rec.Command)
+	_ = NewNotifyStore(configDir).Fire(NotifyEventJobFailed, msg)
 }
 
 // update persists a single changed job record in place.

@@ -14,6 +14,21 @@ import (
 	"github.com/cenvero/fleet/internal/logs"
 )
 
+// fireNotify delivers a notification to every subscribed target for event,
+// best-effort: any failure (load or send) is swallowed so it can never break the
+// operation that triggered it. The store is loaded from the app's config dir at
+// the call site so it always reflects the latest configured targets.
+func (a *App) fireNotify(event, message string) {
+	if a == nil {
+		return
+	}
+	defer func() {
+		// A panic in best-effort notification must never propagate.
+		_ = recover()
+	}()
+	_ = NewNotifyStore(a.ConfigDir).Fire(event, message)
+}
+
 func (a *App) raiseAlert(alert alerts.Alert) error {
 	existing, err := a.Alerts.Get(alert.ID)
 	created := false

@@ -214,7 +214,7 @@ func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.S
 	if err := h.app.evaluateMetricAlerts(serverName, latest); err != nil {
 		return 0, err
 	}
-	if err := h.app.Alerts.Delete(collectionFailureAlertID(serverName)); err != nil {
+	if err := h.app.clearCollectionFailureAlert(serverName); err != nil {
 		return 0, err
 	}
 	if err := h.app.AuditLog.Append(logs.AuditEntry{

@@ -391,29 +391,129 @@ func firstNonEmpty(values ...string) string {
 }
 
 func newFileDiffCommand(configDir *string) *cobra.Command {
+	var group string
 	cmd := &cobra.Command{
-		Use:   "diff <serverA:path> <serverB:path>",
-		Short: "Show a unified line diff of the same-or-different file on two servers",
+		Use:   "diff <serverA:path> <serverB:path> | --group EXPR <path>",
+		Short: "Show a unified line diff of a file across two (or a group of) servers",
 		Long: "Fetch a file from each side (each chunk checksum-verified) and print a unified\n" +
 			"line diff (the format `patch` understands). Useful for spotting config drift\n" +
 			"across the fleet.\n\n" +
+			"Two-server form (compare one file on each of two servers):\n\n" +
 			"  fleet file diff web-01:/etc/nginx/nginx.conf web-02:/etc/nginx/nginx.conf\n\n" +
+			"Group form (compare the SAME path across every server matching a tag\n" +
+			"expression, each diffed against the first server):\n\n" +
+			"  fleet file diff --group role=web /etc/nginx/nginx.conf\n\n" +
 			"Exit status is 0 when the files are identical and 1 when they differ.",
-		Args: cobra.ExactArgs(2),
+		// With --group exactly one <path> arg; otherwise the two-server form.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(group) != "" {
+				if len(args) != 1 {
+					return fmt.Errorf("--group takes a single <path> argument, got %d", len(args))
+				}
+				return nil
+			}
+			return cobra.ExactArgs(2)(cmd, args)
+		},
 		// A non-zero "files differ" exit must not dump usage text or an
 		// "Error: files differ" line — the diff itself is the output. Genuine
 		// errors are printed explicitly below before being returned.
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := runFileDiff(cmd, *configDir, args[0], args[1])
+			var err error
+			if strings.TrimSpace(group) != "" {
+				err = runFileDiffGroup(cmd, *configDir, group, args[0])
+			} else {
+				err = runFileDiff(cmd, *configDir, args[0], args[1])
+			}
 			if err != nil && !errors.Is(err, errFilesDiffer) {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
 			}
 			return err
 		},
 	}
+	cmd.Flags().StringVar(&group, "group", "", "diff <path> across every server whose tags match EXPR (e.g. role=web,env=prod)")
 	return cmd
+}
+
+// runFileDiffGroup fetches the same path from every server matching the tag
+// expression and diffs each server against the first (reference). It prints one
+// labelled section per server and returns errFilesDiffer if any server's content
+// differs from the reference, mirroring the two-server form's exit semantics.
+func runFileDiffGroup(cmd *cobra.Command, configDir, group, remotePath string) error {
+	app, err := openApp(configDir)
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+
+	records, err := app.ListServers()
+	if err != nil {
+		return err
+	}
+	allServerNames := make([]string, 0, len(records))
+	for _, r := range records {
+		allServerNames = append(allServerNames, r.Name)
+	}
+	servers, err := core.NewTagStore(configDir).ServersMatching(group, allServerNames)
+	if err != nil {
+		return err
+	}
+	if len(servers) == 0 {
+		return fmt.Errorf("no servers match %q", group)
+	}
+	if len(servers) == 1 {
+		return fmt.Errorf("only one server (%s) matches %q — need at least two to diff", servers[0], group)
+	}
+
+	// Fetch the path from every matching server, in resolved (sorted) order.
+	type fetched struct {
+		server  string
+		content string
+		err     error
+	}
+	results := make([]fetched, len(servers))
+	for i, name := range servers {
+		var buf bytes.Buffer
+		if _, ferr := app.CatRemoteFile(name, remotePath, &buf); ferr != nil {
+			results[i] = fetched{server: name, err: ferr}
+			continue
+		}
+		results[i] = fetched{server: name, content: buf.String()}
+	}
+
+	out := cmd.OutOrStdout()
+	reference := results[0]
+	if reference.err != nil {
+		return fmt.Errorf("read %s:%s (reference): %w", reference.server, remotePath, reference.err)
+	}
+	refLabel := reference.server + ":" + remotePath
+	fmt.Fprintf(out, "reference: %s\n\n", refLabel)
+
+	differ := false
+	for _, r := range results[1:] {
+		label := r.server + ":" + remotePath
+		if r.err != nil {
+			differ = true
+			fmt.Fprintf(out, "ERROR    %s (%v)\n\n", label, r.err)
+			continue
+		}
+		d := unifiedDiff(refLabel, label, reference.content, r.content)
+		if d == "" {
+			fmt.Fprintf(out, "same     %s\n", label)
+			continue
+		}
+		differ = true
+		fmt.Fprintf(out, "DIFFERS  %s\n", label)
+		fmt.Fprint(out, d)
+		fmt.Fprintln(out)
+	}
+	if differ {
+		// Mirror diff(1) / the two-server form: non-zero exit when anything differs.
+		return errFilesDiffer
+	}
+	fmt.Fprintf(out, "\nall %d server(s) agree on %s\n", len(servers), remotePath)
+	return nil
 }
 
 func runFileDiff(cmd *cobra.Command, configDir, srcA, srcB string) error {

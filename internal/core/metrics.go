@@ -5,7 +5,9 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/cenvero/fleet/internal/alerts"
@@ -49,7 +51,7 @@ func (a *App) collectMetrics(serverName string, recordAudit bool) (proto.Metrics
 	if err := a.persistMetricsSnapshot(serverName, snapshot); err != nil {
 		return proto.MetricsSnapshot{}, err
 	}
-	if err := a.Alerts.Delete(collectionFailureAlertID(serverName)); err != nil {
+	if err := a.clearCollectionFailureAlert(serverName); err != nil {
 		return proto.MetricsSnapshot{}, err
 	}
 	if err := a.evaluateMetricAlerts(serverName, snapshot); err != nil {
@@ -133,13 +135,38 @@ func (a *App) syncThresholdAlert(serverName, metric string, value, warningThresh
 }
 
 func (a *App) saveCollectionFailureAlert(serverName string, err error) error {
+	id := collectionFailureAlertID(serverName)
+	// Fire the "offline" notification only on the transition into the failed
+	// state (the alert did not already exist), so repeated polls while a server
+	// stays down do not spam subscribers. Best-effort: never blocks the alert.
+	if _, getErr := a.Alerts.Get(id); errors.Is(getErr, os.ErrNotExist) {
+		a.fireNotify(NotifyEventOffline, fmt.Sprintf("%s is offline: metrics collection failed (%s)", serverName, err))
+	}
 	return a.raiseAlert(alerts.Alert{
-		ID:       collectionFailureAlertID(serverName),
+		ID:       id,
 		Code:     "metrics.collect.failed",
 		Server:   serverName,
 		Severity: alerts.SeverityCritical,
 		Message:  fmt.Sprintf("metrics collection failed for %s: %s", serverName, err),
 	})
+}
+
+// clearCollectionFailureAlert removes a server's collection-failure ("offline")
+// alert and, when one was actually present, fires the "online" notification —
+// i.e. only on the recovery transition, not on every successful poll. The Delete
+// itself is idempotent, so the worst case of a racing read is a missed (or, far
+// less likely, duplicate) online notification, never a broken collection.
+func (a *App) clearCollectionFailureAlert(serverName string) error {
+	id := collectionFailureAlertID(serverName)
+	_, getErr := a.Alerts.Get(id)
+	wasDown := getErr == nil
+	if err := a.Alerts.Delete(id); err != nil {
+		return err
+	}
+	if wasDown {
+		a.fireNotify(NotifyEventOnline, fmt.Sprintf("%s is back online: metrics collection recovered", serverName))
+	}
+	return nil
 }
 
 func metricAlertID(serverName, metric string, severity alerts.Severity) string {

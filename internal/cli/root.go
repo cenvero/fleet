@@ -138,6 +138,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newLogsCommand(&configDir))
 	root.AddCommand(newExecCommand(&configDir))
 	root.AddCommand(newSSHCommand(&configDir))
+	root.AddCommand(newTunnelCommand(&configDir))
 	root.AddCommand(newPortCommand(&configDir))
 	root.AddCommand(newFirewallCommand(&configDir))
 	root.AddCommand(newAlertsCommand(&configDir))
@@ -170,6 +171,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newPolicyCommand(&configDir))
 	agentCmd := &cobra.Command{Use: "agent", Short: "Manage fleet agents (version, consistency)"}
 	agentCmd.AddCommand(newAgentVersionCommand(&configDir))
+	agentCmd.AddCommand(newAgentUpdateCommand(&configDir))
 	root.AddCommand(agentCmd)
 	root.AddCommand(newRunCommand(&configDir))
 	root.AddCommand(newGuardCommand(&configDir))
