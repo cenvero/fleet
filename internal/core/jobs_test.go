@@ -176,8 +176,16 @@ func TestJobStore_StartGetList(t *testing.T) {
 	if rec.ID != 1 || rec.Status != JobRunning || rec.Server != "web-01" {
 		t.Fatalf("unexpected record: %+v", rec)
 	}
-	if rec.Logfile != "/var/tmp/fleet-job-1.log" {
+	if rec.Logfile != JobLogfile(1, rec.Nonce) {
 		t.Fatalf("unexpected logfile: %s", rec.Logfile)
+	}
+	// The logfile path must include the per-job nonce (unpredictable) and the
+	// launcher must create it 0600 (umask 077), not world-readable.
+	if rec.Nonce == "" || !strings.Contains(rec.Logfile, rec.Nonce) {
+		t.Fatalf("logfile should include the nonce: %s (nonce %q)", rec.Logfile, rec.Nonce)
+	}
+	if !strings.Contains(launched[0], "umask 077") {
+		t.Fatalf("launch should set umask 077 for 0600 logfile: %v", launched[0])
 	}
 	if len(launched) != 1 || !strings.Contains(launched[0], "setsid") {
 		t.Fatalf("launch command not issued: %v", launched)

@@ -83,7 +83,16 @@ func (h *ReverseHub) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return fmt.Errorf("accept reverse transport connection: %w", err)
 		}
+		// Bound concurrent pre-auth handshakes: drop (don't queue) excess
+		// connections so half-open floods can't exhaust goroutines/fds.
+		select {
+		case reverseHandshakeSlots <- struct{}{}:
+		default:
+			_ = conn.Close()
+			continue
+		}
 		go func() {
+			defer func() { <-reverseHandshakeSlots }()
 			_ = h.ServeConn(conn)
 		}()
 	}
@@ -92,6 +101,20 @@ func (h *ReverseHub) Serve(ctx context.Context, listener net.Listener) error {
 // reverseHandshakeTimeout bounds how long a reverse agent's SSH handshake may
 // take before the controller drops the connection.
 const reverseHandshakeTimeout = 20 * time.Second
+
+// maxConcurrentReverseHandshakes caps how many inbound reverse connections may be
+// in the pre-auth SSH handshake at once. Without it an attacker who can reach the
+// listener could open thousands of half-open connections, each pinning a
+// goroutine + fd (and a private-key disk read) for up to reverseHandshakeTimeout.
+const maxConcurrentReverseHandshakes = 256
+
+// reverseHandshakeSlots is a counting semaphore buffered to the cap above.
+var reverseHandshakeSlots = make(chan struct{}, maxConcurrentReverseHandshakes)
+
+// reversePostAuthTimeout bounds the synchronous post-auth RPCs (Hello + queued
+// metric replay) so a peer that completes auth but never answers can't pin the
+// connection goroutine indefinitely.
+const reversePostAuthTimeout = 30 * time.Second
 
 func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 	defer rawConn.Close()
@@ -144,7 +167,9 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 			Closer:             conn,
 		}
 
-		hello, err := session.Hello(context.Background(), h.app.Config.InstanceID)
+		helloCtx, cancelHello := context.WithTimeout(context.Background(), reversePostAuthTimeout)
+		hello, err := session.Hello(helloCtx, h.app.Config.InstanceID)
+		cancelHello()
 		if err != nil {
 			_ = session.Close()
 			return err
@@ -179,7 +204,9 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 }
 
 func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.Session) (int, error) {
-	response, err := session.Call(context.Background(), proto.Envelope{
+	ctx, cancel := context.WithTimeout(context.Background(), reversePostAuthTimeout)
+	defer cancel()
+	response, err := session.Call(ctx, proto.Envelope{
 		Action: "metrics.flush_queue",
 		Payload: proto.MetricsPayload{
 			Server: serverName,

@@ -168,9 +168,12 @@ func (s *JobStore) reserve(doc *jobsDocument) int {
 	return doc.Counter
 }
 
-// JobLogfile returns the deterministic remote logfile path for a job id.
-func JobLogfile(id int) string {
-	return "/var/tmp/fleet-job-" + strconv.Itoa(id) + ".log"
+// JobLogfile returns the remote logfile path for a job. The per-job nonce is
+// included so the path is UNPREDICTABLE (another local user on the remote host
+// can't guess it from the sequential id), and buildJobLaunch creates it 0600
+// (umask 077) so it isn't world-readable.
+func JobLogfile(id int, nonce string) string {
+	return "/var/tmp/fleet-job-" + strconv.Itoa(id) + "-" + nonce + ".log"
 }
 
 // buildJobLaunch builds the detached launcher command. The command is wrapped
@@ -192,7 +195,7 @@ func JobLogfile(id int) string {
 // Every other interpolated value (the user command and the logfile path) is
 // single-quoted for safe embedding in the remote /bin/sh command.
 func buildJobLaunch(command, logfile, nonce string) string {
-	inner := "{ sh -c " + shellQuote(command) + "; echo " + jobExitMarker + nonce + ":$?; } > " + shellQuote(logfile) + " 2>&1"
+	inner := "umask 077; { sh -c " + shellQuote(command) + "; echo " + jobExitMarker + nonce + ":$?; } > " + shellQuote(logfile) + " 2>&1"
 	return "setsid sh -c " + shellQuote(inner) + " </dev/null >/dev/null 2>&1 &"
 }
 
@@ -221,7 +224,7 @@ func (s *JobStore) Start(exec ExecFunc, server, command string) (JobRecord, erro
 		return JobRecord{}, err
 	}
 	id := s.reserve(&doc)
-	logfile := JobLogfile(id)
+	logfile := JobLogfile(id, nonce)
 	rec := JobRecord{
 		ID:      id,
 		Server:  server,
