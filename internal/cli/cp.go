@@ -4,11 +4,35 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// maxDiffFileBytes caps how much of a remote file `file diff` reads into memory
+// (it reads BOTH files whole before diffing). A larger file yields a "too large
+// to diff" result instead of being slurped — bounding controller memory.
+const maxDiffFileBytes = 8 << 20 // 8 MiB
+
+// errDiffFileTooLarge signals a diff operand exceeded maxDiffFileBytes.
+var errDiffFileTooLarge = errors.New("file too large to diff")
+
+// cappedWriter buffers writes up to limit bytes, then fails with
+// errDiffFileTooLarge so a huge remote file can't be read fully into memory.
+type cappedWriter struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.limit {
+		return 0, errDiffFileTooLarge
+	}
+	return c.buf.Write(p)
+}
 
 // newCpCommand is the top-level `fleet cp` convenience wrapper around the
 // server-to-server file copy already exposed as `fleet file copy`. It exists so
@@ -144,10 +168,12 @@ type diffOp struct {
 
 // diffLines computes a line-level diff of a and b via a classic LCS dynamic
 // program, emitting equal/delete/insert ops in order.
-// maxDiffLines bounds the O(n*m) LCS table so two very large files cannot blow
-// up controller memory (and satisfies the allocation-size-overflow check by
-// bounding the allocation sizes before the make).
-const maxDiffLines = 20000
+// maxDiffLines bounds the O(n*m) LCS table so two large files cannot blow up
+// controller memory: at this cap the int table is ~maxDiffLines² ints
+// (~50 MB at 2500), and files exceeding it get a one-line "too large" summary
+// instead. (Also satisfies the allocation-size-overflow check by bounding the
+// make sizes.)
+const maxDiffLines = 2500
 
 func diffLines(a, b []string) []diffOp {
 	n, m := len(a), len(b)

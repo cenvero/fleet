@@ -4,7 +4,6 @@
 package cli
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -474,12 +473,12 @@ func runFileDiffGroup(cmd *cobra.Command, configDir, group, remotePath string) e
 	}
 	results := make([]fetched, len(servers))
 	for i, name := range servers {
-		var buf bytes.Buffer
-		if _, ferr := app.CatRemoteFile(name, remotePath, &buf); ferr != nil {
+		content, ferr := readRemoteForDiff(app, name, remotePath)
+		if ferr != nil {
 			results[i] = fetched{server: name, err: ferr}
 			continue
 		}
-		results[i] = fetched{server: name, content: buf.String()}
+		results[i] = fetched{server: name, content: content}
 	}
 
 	out := cmd.OutOrStdout()
@@ -531,15 +530,16 @@ func runFileDiff(cmd *cobra.Command, configDir, srcA, srcB string) error {
 	}
 	defer app.Close()
 
-	var bufA, bufB bytes.Buffer
-	if _, err := app.CatRemoteFile(serverA, pathA, &bufA); err != nil {
+	contentA, err := readRemoteForDiff(app, serverA, pathA)
+	if err != nil {
 		return fmt.Errorf("read %s: %w", srcA, err)
 	}
-	if _, err := app.CatRemoteFile(serverB, pathB, &bufB); err != nil {
+	contentB, err := readRemoteForDiff(app, serverB, pathB)
+	if err != nil {
 		return fmt.Errorf("read %s: %w", srcB, err)
 	}
 
-	out := unifiedDiff(srcA, srcB, bufA.String(), bufB.String())
+	out := unifiedDiff(srcA, srcB, contentA, contentB)
 	if out == "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "files are identical\n")
 		return nil
@@ -552,6 +552,20 @@ func runFileDiff(cmd *cobra.Command, configDir, srcA, srcB string) error {
 // errFilesDiffer signals that `fleet file diff` found differences. main.go
 // translates any returned error into a non-zero process exit.
 var errFilesDiffer = errors.New("files differ")
+
+// readRemoteForDiff reads a remote file for diffing, bounded to maxDiffFileBytes
+// so a hostile/huge file can't exhaust controller memory (diff buffers both
+// operands whole before comparing).
+func readRemoteForDiff(app *core.App, server, remotePath string) (string, error) {
+	cw := &cappedWriter{limit: maxDiffFileBytes}
+	if _, err := app.CatRemoteFile(server, remotePath, cw); err != nil {
+		if errors.Is(err, errDiffFileTooLarge) {
+			return "", fmt.Errorf("%s exceeds the %d-byte diff size limit", remotePath, maxDiffFileBytes)
+		}
+		return "", err
+	}
+	return cw.buf.String(), nil
+}
 
 // parseServerPath splits a "<server>:<path>" argument.
 func parseServerPath(arg string) (server, remotePath string, err error) {
