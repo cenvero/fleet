@@ -72,6 +72,9 @@ func NewRootCommand() *cobra.Command {
 				// `token` (bare) only touches tokens.json in the config dir, so it
 				// works before full init (FL-030).
 				"token",
+				// `secret` only touches secrets.json in the config dir (local store,
+				// no server needed), so it works before full init (FL-004).
+				"secret",
 				"jobs", "cmd-policy", "approvals", "approve":
 				return enforceToken(cmd, configDir, tokenID)
 			}
@@ -82,6 +85,10 @@ func NewRootCommand() *cobra.Command {
 				// token subcommands (create/list/revoke) only touch tokens.json, so
 				// they work before full init (FL-030).
 				case "token":
+					return enforceToken(cmd, configDir, tokenID)
+				// secret subcommands (set/list/rotate/rm) only touch secrets.json in
+				// the config dir, so they work before full init (FL-004).
+				case "secret":
 					return enforceToken(cmd, configDir, tokenID)
 				}
 			}
@@ -151,6 +158,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newAutocompleteCommand())
 	root.AddCommand(newTagCommand(&configDir))
 	root.AddCommand(newTokenCommand(&configDir))
+	root.AddCommand(newSecretCommand(&configDir))
 	root.AddCommand(newInventoryCommand(&configDir))
 	root.AddCommand(newServiceStatusCommand(&configDir))
 	root.AddCommand(newJournalCommand(&configDir))
@@ -1988,6 +1996,7 @@ func newExecCommand(configDir *string) *cobra.Command {
 		confirm        bool
 		requireApprove bool
 		idempotencyKey string
+		secretSpecs    []string
 	)
 	cmd := &cobra.Command{
 		Use:   "exec <server> <command>",
@@ -2040,12 +2049,69 @@ Examples:
 			idemStore := core.NewIdempotencyStore(*configDir)
 			tagStore := core.NewTagStore(*configDir)
 
-			// redact applies the configured output redaction (no-op when unset).
-			redact := func(s string) string {
-				if redactor == nil {
-					return s
+			// FL-004: resolve --secret VAR=@name (or VAR=literal) up front. Each
+			// resolved value is injected as an environment variable for the remote
+			// command AND registered for redaction so it can NEVER appear in
+			// stdout/stderr, the echoed/dry-run command, or any error message. The
+			// caller only ever passes the safe `@name` reference.
+			var secrets []resolvedSecret
+			if len(secretSpecs) > 0 {
+				secretStore := core.NewSecretStore(*configDir)
+				for _, spec := range secretSpecs {
+					rs, perr := parseSecretSpec(spec, secretStore)
+					if perr != nil {
+						return perr
+					}
+					secrets = append(secrets, rs)
 				}
-				return redactor.Redact(s)
+			}
+
+			// redact applies the configured output redaction AND scrubs every
+			// resolved secret value. The secret scrub is independent of the
+			// file-based redactor (which is nil when no policy.json exists), so a
+			// secret value is always removed from output even with no policy set.
+			redact := func(s string) string {
+				if redactor != nil {
+					s = redactor.Redact(s)
+				}
+				for _, sec := range secrets {
+					if sec.value != "" {
+						s = strings.ReplaceAll(s, sec.value, core.RedactPlaceholder)
+					}
+				}
+				return s
+			}
+
+			// secretEnvPrefix builds the environment assignment prefix prepended to
+			// the remote command for actual execution: `VAR1=<quoted v1> ... `. The
+			// values are shell-quoted with the package shellQuote so arbitrary bytes
+			// are safe. This string contains secret VALUES and must NEVER be printed,
+			// echoed, or logged — only handed to app.ExecCommand.
+			secretEnvPrefix := func() string {
+				if len(secrets) == 0 {
+					return ""
+				}
+				var b strings.Builder
+				for _, sec := range secrets {
+					b.WriteString(sec.name)
+					b.WriteString("=")
+					b.WriteString(shellQuote(sec.value))
+					b.WriteString(" ")
+				}
+				return b.String()
+			}
+
+			// secretDisplayPrefix builds the SAFE assignment prefix for echo/dry-run:
+			// `VAR1=@name1 ... `. It never contains a secret value.
+			secretDisplayPrefix := func() string {
+				if len(secrets) == 0 {
+					return ""
+				}
+				parts := make([]string, len(secrets))
+				for i, sec := range secrets {
+					parts[i] = sec.display
+				}
+				return strings.Join(parts, " ") + " "
 			}
 
 			// agentPortFor resolves a server's agent SSH port for the safety guard,
@@ -2067,8 +2133,13 @@ Examples:
 			}
 
 			// runOnce applies the optional controller-side timeout to a single attempt.
+			// It prepends the secret env prefix (VALUES, shell-quoted) ONLY here, at
+			// the point of execution — the prefixed string never escapes this scope,
+			// so values cannot leak into echoes/policy/audit. The original `command`
+			// is used everywhere else (policy, echo, dry-run, the on-fail prefix).
 			// TODO: agent-side kill so the remote process also stops on timeout.
 			runOnce := func(server, command string) (proto.ExecResult, bool, error) {
+				command = secretEnvPrefix() + command
 				if timeout <= 0 {
 					r, e := app.ExecCommand(server, command)
 					return r, false, e
@@ -2172,9 +2243,10 @@ Examples:
 						return execJSON{Server: server, Stdout: redact(cached)}, true, nil
 					}
 				}
-				// dry-run: print the resolved command and skip execution.
+				// dry-run: print the resolved command and skip execution. The secret
+				// DISPLAY prefix (VAR=@name) is shown, NEVER the resolved value.
 				if dryRun {
-					fmt.Fprintf(cmd.OutOrStdout(), "would run: %s [%s]\n", command, server)
+					fmt.Fprintf(cmd.OutOrStdout(), "would run: %s%s [%s]\n", secretDisplayPrefix(), command, server)
 					return execJSON{Server: server}, true, nil
 				}
 				// run, then redact, then handle on-fail.
@@ -2321,7 +2393,60 @@ Examples:
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a command flagged confirm-required by cmd-policy")
 	cmd.Flags().BoolVar(&requireApprove, "require-approval", false, "stage the command for approval instead of running it")
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "return the cached result for KEY instead of re-running")
+	cmd.Flags().StringArrayVar(&secretSpecs, "secret", nil, "inject a secret as an env var: VAR=@name (resolve a stored secret) or VAR=literal; values are redacted from all output")
 	return cmd
+}
+
+// resolvedSecret is a single --secret binding after resolution: the env VAR, the
+// resolved value (kept out of all output), and the safe display reference shown
+// in echoes/dry-run/audit (e.g. "VAR=@name", or "VAR=***" for a literal).
+type resolvedSecret struct {
+	name    string // env var name (VAR)
+	value   string // resolved value — NEVER printed/echoed/logged
+	display string // safe reference for echo/dry-run, never the value
+}
+
+// parseSecretSpec parses one --secret token. The safe form is `VAR=@name`, which
+// resolves the stored secret `name` via the SecretStore. `VAR=literal` is also
+// accepted (the value is taken verbatim) but is displayed as `VAR=***` so the
+// literal never appears in echoes/dry-run. Both forms keep the value out of the
+// returned display string.
+func parseSecretSpec(spec string, store *core.SecretStore) (resolvedSecret, error) {
+	name, rhs, ok := strings.Cut(spec, "=")
+	name = strings.TrimSpace(name)
+	if !ok || name == "" {
+		return resolvedSecret{}, fmt.Errorf("invalid --secret %q: expected VAR=@name or VAR=literal", spec)
+	}
+	if err := validateEnvVarName(name); err != nil {
+		return resolvedSecret{}, err
+	}
+	if strings.HasPrefix(rhs, "@") {
+		secretName := strings.TrimSpace(strings.TrimPrefix(rhs, "@"))
+		value, err := store.Get(secretName)
+		if err != nil {
+			return resolvedSecret{}, err
+		}
+		return resolvedSecret{name: name, value: value, display: name + "=@" + secretName}, nil
+	}
+	// Literal value: accepted, but masked in every display path.
+	return resolvedSecret{name: name, value: rhs, display: name + "=***"}, nil
+}
+
+// validateEnvVarName ensures VAR is a safe POSIX-ish environment variable name
+// so it can be prefixed onto the remote command without quoting surprises.
+func validateEnvVarName(name string) error {
+	for i, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return fmt.Errorf("invalid env var name %q in --secret (use [A-Za-z_][A-Za-z0-9_]*)", name)
+		}
+	}
+	if name == "" {
+		return fmt.Errorf("empty env var name in --secret")
+	}
+	return nil
 }
 
 // printExecHuman renders a single exec result in human mode, mirroring the
