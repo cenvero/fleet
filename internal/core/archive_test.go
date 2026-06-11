@@ -211,3 +211,23 @@ func TestExtractZipNativeExtractsSafeArchive(t *testing.T) {
 		t.Fatalf("extracted content mismatch: %q", got)
 	}
 }
+
+func TestArchiveListingHasUnsafeType(t *testing.T) {
+	safe := "-rw-r--r-- u/g 11 2026-01-01 file.txt\ndrwxr-xr-x u/g 0 2026-01-01 dir/\n"
+	if unsafe, _ := archiveListingHasUnsafeType(safe); unsafe {
+		t.Error("a regular-files-and-dirs listing must be safe")
+	}
+	symlink := "-rw-r--r-- u/g 11 2026-01-01 ok.txt\nlrwxrwxrwx u/g 0 2026-01-01 x -> /etc/cron.d\n"
+	if unsafe, line := archiveListingHasUnsafeType(symlink); !unsafe {
+		t.Error("a symlink member must be flagged unsafe")
+	} else if !strings.Contains(line, "->") {
+		t.Errorf("flagged the wrong line: %q", line)
+	}
+	if unsafe, _ := archiveListingHasUnsafeType("hrw-r--r-- u/g 0 2026-01-01 hl link to target\n"); !unsafe {
+		t.Error("a hardlink member must be flagged unsafe")
+	}
+	withHeader := "Archive:  x.zip\n-rw-r--r--  3.0 unx 11 tx defN file.txt\n1 file, 11 bytes\n"
+	if unsafe, _ := archiveListingHasUnsafeType(withHeader); unsafe {
+		t.Error("zipinfo header/footer lines must not be flagged")
+	}
+}

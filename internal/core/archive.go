@@ -420,18 +420,77 @@ func (a *App) validateRemoteArchiveMembers(server, archivePath string) error {
 	if res.ExitCode != 0 {
 		return fmt.Errorf("list archive members: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	return rejectUnsafeMembers(parse(res.Stdout))
+	if err := rejectUnsafeMembers(parse(res.Stdout)); err != nil {
+		return err
+	}
+	// A name-only check cannot see member TYPE: a symlink/hardlink member (e.g.
+	// "x" -> "/etc/cron.d") followed by a regular member written THROUGH it
+	// ("x/evil") escapes the destination even though both names are
+	// traversal-free, because tar/unzip follow the planted link on extract. List
+	// members verbosely and refuse any non-regular/dir member.
+	vres, err := a.ExecCommand(server, verboseListMembersCmd(archivePath))
+	if err != nil {
+		return err
+	}
+	if vres.ExitCode != 0 {
+		return fmt.Errorf("list archive members (verbose): exit %d: %s", vres.ExitCode, strings.TrimSpace(vres.Stderr))
+	}
+	if unsafe, line := archiveListingHasUnsafeType(vres.Stdout); unsafe {
+		return fmt.Errorf("refusing to extract archive: it contains a non-regular member (symlink/hardlink/special) that can write outside the destination: %q", strings.TrimSpace(line))
+	}
+	return nil
+}
+
+// verboseListMembersCmd builds the shell command (path shell-quoted) that lists
+// an archive's members WITH ls-style type+permission info so a symlink/hardlink
+// member can be detected. zip uses `unzip -Z`, the tar family `tar -tvf`.
+func verboseListMembersCmd(archivePath string) string {
+	a := shellQuote(archivePath)
+	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
+		return fmt.Sprintf("unzip -Z %s", a)
+	}
+	return fmt.Sprintf("tar -tvf %s", a)
+}
+
+// archiveListingHasUnsafeType reports whether a verbose `tar -tvf` / `unzip -Z`
+// listing contains a member that is not a regular file or directory — i.e. a
+// symlink, hardlink, or device/fifo/socket — any of which lets an extractor
+// follow a planted link and write OUTSIDE the destination. It keys off the
+// leading ls-style type character of each member line; header/summary lines
+// (which never begin with one of these type chars) are ignored.
+func archiveListingHasUnsafeType(verbose string) (bool, string) {
+	for _, raw := range strings.Split(verbose, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		switch line[0] {
+		case 'l', 'h', 'c', 'b', 'p', 's':
+			return true, line
+		}
+	}
+	return false, ""
 }
 
 // validateTarXZMembers lists a local tar.xz's members via the constant-tool tar
-// (no shell) and refuses extraction if any member escapes.
+// (no shell) and refuses extraction if any member escapes by name OR is a
+// non-regular (symlink/hardlink/special) member.
 func validateTarXZMembers(archivePath string) error {
-	cmd := exec.Command("tar", "-tf", archivePath) // #nosec G204 -- constant tool, archive path is an argument, no shell
-	out, err := cmd.Output()
+	namesOut, err := exec.Command("tar", "-tf", archivePath).Output() // #nosec G204 -- constant tool, archive path is an argument, no shell
 	if err != nil {
 		return fmt.Errorf("list archive members: %w", err)
 	}
-	return rejectUnsafeMembers(splitMemberLines(string(out)))
+	if err := rejectUnsafeMembers(splitMemberLines(string(namesOut))); err != nil {
+		return err
+	}
+	typesOut, err := exec.Command("tar", "-tvf", archivePath).Output() // #nosec G204 -- constant tool, archive path is an argument, no shell
+	if err != nil {
+		return fmt.Errorf("list archive members (verbose): %w", err)
+	}
+	if unsafe, line := archiveListingHasUnsafeType(string(typesOut)); unsafe {
+		return fmt.Errorf("refusing to extract archive: it contains a non-regular member (symlink/hardlink/special): %q", strings.TrimSpace(line))
+	}
+	return nil
 }
 
 // rejectUnsafeMembers returns an error naming the first member that would escape

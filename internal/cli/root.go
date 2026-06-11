@@ -375,6 +375,18 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		os.Exit(1)
 	}
 
+	// FAIL-CLOSED backstop: a server-scoped token may run ONLY a recognized
+	// server-scoped command (scope-checked here) or a known safe local command.
+	// Anything else — a controller-management command (config/key/backup/…), an
+	// interactive multi-server UI (dashboard/files/ai), or a server-targeting
+	// command not yet listed in serverArgCommands — is DENIED. This converts the
+	// previous fail-OPEN default (unclassified command → scope check skipped) into
+	// fail-closed, so a missed command can never bypass scoping again.
+	if serverScoped && !serverArgCommands[top] && top != "inventory" && !scopedLocalCommands[top] {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run %q — it is neither a scoped server command nor an allowed local command (RBAC v1)\n", strings.TrimSpace(top))
+		os.Exit(1)
+	}
+
 	var allServerNames []string
 	if core.IsInitialized(configDir) && len(token.Groups) > 0 {
 		if app, aerr := openApp(configDir); aerr == nil {
@@ -447,6 +459,7 @@ func commandPositionalArgs(cmd *cobra.Command) []string {
 var serverArgCommands = map[string]bool{
 	// top-level, server is first positional
 	"exec":    true,
+	"ssh":     true,
 	"journal": true,
 	"guard":   true,
 	"drift":   true,
@@ -454,6 +467,8 @@ var serverArgCommands = map[string]bool{
 	"tunnel":  true,
 	"sync":    true,
 	"cron":    true,
+	"tag":     true,
+	"doctor":  true,
 	// subcommand commands, server is first leaf positional (sub already consumed)
 	"server":   true,
 	"service":  true,
@@ -461,6 +476,24 @@ var serverArgCommands = map[string]bool{
 	"firewall": true,
 	"fw":       true,
 	"port":     true,
+	"template": true,
+}
+
+// scopedLocalCommands are the only NON server-targeting top-level commands a
+// server-scoped token may run: read-only/self/local helpers that never act on a
+// specific (possibly out-of-scope) server. Everything not here and not in
+// serverArgCommands is denied fail-closed for a server-scoped token, so a
+// server-targeting command that is ever added but forgotten cannot silently
+// bypass scoping.
+var scopedLocalCommands = map[string]bool{
+	"status":       true,
+	"version":      true,
+	"context":      true,
+	"autocomplete": true,
+	"shell-init":   true,
+	"completion":   true,
+	"help":         true,
+	"":             true, // bare `fleet` (root help)
 }
 
 // bestEffortTargetServer extracts the targeted server name for a command, if it

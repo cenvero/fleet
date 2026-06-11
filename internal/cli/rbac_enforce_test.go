@@ -139,6 +139,19 @@ func TestEnforceTokenDeniesOutOfScope(t *testing.T) {
 		{"cron list out-of-scope", []string{"cron", "list", "db-01"}},
 		{"tunnel out-of-scope", []string{"tunnel", "db-01", "8080:80"}},
 		{"sync out-of-scope", []string{"sync", "db-01", "./a", "/b"}},
+		// ssh/tag/doctor/template were ALSO missing from serverArgCommands (round 2
+		// of the audit): ssh opened a root shell on any server, tag retagged any
+		// server. They must be scope-denied out of scope now.
+		{"ssh out-of-scope", []string{"ssh", "db-01"}},
+		{"tag set out-of-scope", []string{"tag", "db-01", "role=admin"}},
+		{"doctor out-of-scope", []string{"doctor", "db-01"}},
+		{"template apply out-of-scope", []string{"template", "apply", "db-01", "hardening"}},
+		// FAIL-CLOSED backstop: a controller-management / interactive command that
+		// is neither a scoped server command nor an allowed local command must be
+		// denied for a server-scoped token (it could reach out-of-scope servers).
+		{"backup denied fail-closed", []string{"backup"}},
+		{"dashboard denied fail-closed", []string{"dashboard"}},
+		{"config show denied fail-closed", []string{"config", "show"}},
 		// fan-out exec denied for a server-scoped token
 		{"exec --all", []string{"exec", "--all", "uptime"}},
 		{"exec --group", []string{"exec", "--group", "role=web", "uptime"}},

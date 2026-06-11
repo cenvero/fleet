@@ -407,3 +407,18 @@ func TestOperatorAttributionNotForgeable(t *testing.T) {
 		t.Fatalf("operator() = %q, want token:ci (the programmatic acting operator)", got)
 	}
 }
+
+func TestTagDestructiveClassification(t *testing.T) {
+	// `tag <server> key=value` WRITES tags (destructive); `tag` / `tag <server>`
+	// only READ. The command is flat (sub is always ""), so classification keys
+	// off a key=value arg.
+	if !IsDestructiveCommand("tag", "", []string{"web-01", "role=web"}) {
+		t.Error("tag <server> key=value must be destructive")
+	}
+	if IsDestructiveCommand("tag", "", []string{"web-01"}) {
+		t.Error("tag <server> (read) must NOT be destructive")
+	}
+	if IsDestructiveCommand("tag", "", nil) {
+		t.Error("bare tag (read) must NOT be destructive")
+	}
+}

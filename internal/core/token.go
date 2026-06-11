@@ -315,13 +315,15 @@ func IsReadCommand(topCommand string) bool {
 // For "key", every mutating sub is destructive; only the read sub
 // "fingerprint" is exempted via keyReadSubs below.
 var destructiveCommands = map[string]map[string]bool{
-	"server":     {"remove": true},
-	"file":       {"rm": true},
-	"firewall":   {"enable": true},
-	"fw":         {"enable": true},
-	"guard":      {"*": true},
-	"revert":     {"*": true},
-	"tag":        {"set": true},
+	"server":   {"remove": true},
+	"file":     {"rm": true},
+	"firewall": {"enable": true},
+	"fw":       {"enable": true},
+	"guard":    {"*": true},
+	"revert":   {"*": true},
+	// NOTE: `tag` is special-cased in IsDestructiveCommand (it is a flat command
+	// with key=value positionals, not a sub), so it is intentionally not listed
+	// here.
 	"port":       {"open": true, "close": true},
 	"cron":       {"add": true, "rm": true},
 	"cmd-policy": {"set": true},
@@ -373,6 +375,17 @@ func IsDestructiveCommand(topCommand, sub string, args []string) bool {
 	// `config`: any mutating subcommand is destructive (read subs exempted).
 	if topCommand == "config" {
 		return sub != "" && !configReadSubs[sub]
+	}
+	// `tag` is a FLAT command (no cobra subcommand, so sub is always ""):
+	// `tag <server> key=value...` WRITES tags (destructive) while `tag` and
+	// `tag <server>` only READ. Classify by the presence of a key=value arg.
+	if topCommand == "tag" {
+		for _, a := range args {
+			if strings.Contains(a, "=") {
+				return true
+			}
+		}
+		return false
 	}
 
 	subs, ok := destructiveCommands[topCommand]
