@@ -88,6 +88,10 @@ func unifiedDiff(labelA, labelB, a, b string) string {
 	}
 	linesA := splitLines(a)
 	linesB := splitLines(b)
+	if len(linesA) > maxDiffLines || len(linesB) > maxDiffLines {
+		return fmt.Sprintf("--- %s\n+++ %s\n@@ files differ; too large for a line-by-line diff (%d vs %d lines) @@\n",
+			labelA, labelB, len(linesA), len(linesB))
+	}
 	ops := diffLines(linesA, linesB)
 
 	const context = 3
@@ -140,8 +144,25 @@ type diffOp struct {
 
 // diffLines computes a line-level diff of a and b via a classic LCS dynamic
 // program, emitting equal/delete/insert ops in order.
+// maxDiffLines bounds the O(n*m) LCS table so two very large files cannot blow
+// up controller memory (and satisfies the allocation-size-overflow check by
+// bounding the allocation sizes before the make).
+const maxDiffLines = 20000
+
 func diffLines(a, b []string) []diffOp {
 	n, m := len(a), len(b)
+	if n > maxDiffLines || m > maxDiffLines {
+		// Too large for an in-memory LCS table — fall back to a linear
+		// whole-file replace instead of an O(n*m) allocation.
+		ops := make([]diffOp, 0, n+m)
+		for _, line := range a {
+			ops = append(ops, diffOp{opDelete, line})
+		}
+		for _, line := range b {
+			ops = append(ops, diffOp{opInsert, line})
+		}
+		return ops
+	}
 	// lcs[i][j] = length of the LCS of a[i:] and b[j:].
 	lcs := make([][]int, n+1)
 	for i := range lcs {
