@@ -309,7 +309,7 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 				return err
 			}
 
-			if err := openInEditor(cmd, tmpPath); err != nil {
+			if err := openInEditor(cmd, *configDir, tmpPath); err != nil {
 				return err
 			}
 
@@ -337,12 +337,29 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
+// editorShellMetachars are characters whose presence in $EDITOR means the string
+// is more than a "program [args]" invocation — it is a shell snippet (e.g.
+// EDITOR='sh -c payload #', or chaining/redirection/expansion). We split $EDITOR
+// on whitespace and exec it directly (no shell), so a metacharacter can only be an
+// attempt to smuggle a shell payload past the cmd-policy gate; reject it.
+const editorShellMetachars = "|&;<>()$`\\\"'*?[]{}~!#\n\r\t"
+
 // openInEditor opens path in the operator's editor: $EDITOR (then $VISUAL),
 // falling back to vi then nano. stdin/stdout/stderr are wired to the terminal so
 // full-screen editors work.
-func openInEditor(cmd *cobra.Command, path string) error {
+//
+// SECURITY: $EDITOR is exec'd locally on the controller, so it is an unpoliced
+// code-execution path (EDITOR='sh -c payload' would run arbitrary commands that
+// never cross the cmd-policy gate exec/guard/cron honor). We (1) reject an $EDITOR
+// carrying shell metacharacters — it can only be an attempt to smuggle a shell
+// payload — and (2) route the resolved editor invocation through the SAME
+// cmd-policy deny/confirm gate. A built-in fallback (vi/nano) is trusted and not
+// re-gated.
+func openInEditor(cmd *cobra.Command, configDir, path string) error {
+	fromEnv := true
 	editor := firstNonEmpty(os.Getenv("EDITOR"), os.Getenv("VISUAL"))
 	if editor == "" {
+		fromEnv = false
 		for _, candidate := range []string{"vi", "nano"} {
 			if _, err := exec.LookPath(candidate); err == nil {
 				editor = candidate
@@ -353,9 +370,20 @@ func openInEditor(cmd *cobra.Command, path string) error {
 	if editor == "" {
 		return fmt.Errorf("no editor found: set $EDITOR (or install vi/nano)")
 	}
+	if fromEnv {
+		if strings.ContainsAny(editor, editorShellMetachars) {
+			return fmt.Errorf("refusing to run $EDITOR %q: it contains shell metacharacters (set $EDITOR to a plain `program [args]` invocation)", editor)
+		}
+		// Gate the resolved editor command through the cmd-policy deny/confirm gate,
+		// just like exec/guard/cron — `file edit` has no --confirm flag, so a
+		// confirm-required pattern blocks it (fail-safe).
+		if err := enforceCmdPolicy(configDir, editor, false); err != nil {
+			return err
+		}
+	}
 	// The editor string may carry arguments (e.g. "code --wait"); split on spaces.
 	parts := strings.Fields(editor)
-	c := exec.Command(parts[0], append(parts[1:], path)...) // #nosec G204 -- operator-controlled $EDITOR
+	c := exec.Command(parts[0], append(parts[1:], path)...) // #nosec G204 -- $EDITOR validated above (no shell metachars) and cmd-policy-gated
 	c.Stdin = os.Stdin
 	c.Stdout = cmd.OutOrStdout()
 	c.Stderr = cmd.ErrOrStderr()
@@ -721,6 +749,11 @@ func newFileServerMoveCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
+// maxCompressItems caps the number of items a single `file compress` may include.
+// Each item is interpolated as an argument into the remote archive command, so an
+// unbounded list is a remote argv/DoS amplifier; the cap is generous for real use.
+const maxCompressItems = 1024
+
 func newFileCompressCommand(configDir *string) *cobra.Command {
 	var format string
 	cmd := &cobra.Command{
@@ -738,12 +771,24 @@ func newFileCompressCommand(configDir *string) *cobra.Command {
 			}
 			defer app.Close()
 			server, archive, items := args[0], args[1], args[2:]
+			// Bound the item count: every item becomes an argument on the remote
+			// archive command line, so an unbounded list is a remote arg/DoS amplifier.
+			if len(items) > maxCompressItems {
+				return fmt.Errorf("too many items (%d): compress accepts at most %d in one call", len(items), maxCompressItems)
+			}
 			f := format
 			if f == "" {
 				f = core.FormatFromName(archive)
 			}
 			names := make([]string, len(items))
 			for i, it := range items {
+				// Items live in the SAME directory as <archive> (path.Dir(archive)); an
+				// item that names a different directory or escapes via `..` is not a
+				// sibling and must be rejected rather than silently base-named into the
+				// archive dir.
+				if it != path.Base(it) || it == ".." || it == "." || strings.Contains(it, "/") {
+					return fmt.Errorf("invalid item %q: items must be plain names in the archive's directory (no path separators or '..')", it)
+				}
 				names[i] = path.Base(it)
 			}
 			if err := app.CompressPaths(server, path.Dir(archive), names, path.Base(archive), f); err != nil {
