@@ -1949,6 +1949,24 @@ func newKeyCommand(configDir *string) *cobra.Command {
 	return keyCmd
 }
 
+// describeStaleAgents summarizes managed agents whose last-observed version
+// differs from the controller, for a `fleet sync-agent` nudge. Returns "" when
+// none are stale.
+func describeStaleAgents(stale []core.AgentVersionMismatch) string {
+	switch len(stale) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf("1 managed agent is on a different version: %s (%s).", stale[0].Server, stale[0].AgentVersion)
+	default:
+		names := make([]string, 0, len(stale))
+		for _, s := range stale {
+			names = append(names, s.Server)
+		}
+		return fmt.Sprintf("%d managed agents are on a different version: %s.", len(stale), strings.Join(names, ", "))
+	}
+}
+
 func newUpdateCommand(configDir *string) *cobra.Command {
 	updateCmd := &cobra.Command{Use: "update", Short: "Manage self-update configuration"}
 	updateCmd.AddCommand(&cobra.Command{
@@ -1969,18 +1987,26 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			if core.RuntimeIsHomebrewInstall() {
-				fmt.Fprintf(cmd.OutOrStdout(), "Current version : %s\n", version.Canonical(version.Version))
-				fmt.Fprintf(cmd.OutOrStdout(), "Latest version  : %s\n", version.Canonical(latestVersion))
+				out := cmd.OutOrStdout()
+				fmt.Fprintf(out, "Current version : %s\n", version.Canonical(version.Version))
+				fmt.Fprintf(out, "Latest version  : %s\n", version.Canonical(latestVersion))
 				if version.Canonical(latestVersion) != version.Canonical(version.Version) {
-					fmt.Fprintln(cmd.OutOrStdout())
-					fmt.Fprintln(cmd.OutOrStdout(), "A newer version is available. To update, run:")
-					fmt.Fprintln(cmd.OutOrStdout())
-					fmt.Fprintln(cmd.OutOrStdout(), "  brew update && brew upgrade cenvero-fleet")
-					fmt.Fprintln(cmd.OutOrStdout())
-					fmt.Fprintln(cmd.OutOrStdout(), "Agents on managed servers will be updated automatically once")
-					fmt.Fprintln(cmd.OutOrStdout(), "you run fleet update apply after upgrading.")
+					fmt.Fprintln(out)
+					fmt.Fprintln(out, "A newer version is available. To update the controller, run:")
+					fmt.Fprintln(out)
+					fmt.Fprintln(out, "  brew update && brew upgrade cenvero-fleet")
 				} else {
-					fmt.Fprintln(cmd.OutOrStdout(), "You are on the latest version.")
+					fmt.Fprintln(out, "You are on the latest version.")
+				}
+				// Agents are synced explicitly with `fleet sync-agent` (never rolled
+				// out from `update apply` on Homebrew). Surface any that have drifted
+				// from the controller, using versions already on disk.
+				if stale, _ := app.AgentsNeedingSync(); len(stale) > 0 {
+					fmt.Fprintln(out)
+					fmt.Fprintln(out, describeStaleAgents(stale))
+					fmt.Fprintln(out, "To bring them in line with the controller, run:")
+					fmt.Fprintln(out)
+					fmt.Fprintln(out, "  fleet sync-agent")
 				}
 				return nil
 			}
@@ -1994,16 +2020,29 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		Use:   "apply",
 		Short: "Apply the latest controller update and roll it out across managed agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// For Homebrew installs, tell the user how to update the controller
-			// binary, but DO NOT return early — ApplyFleetUpdate skips the
-			// self-update step internally and still rolls out to agents.
+			// On Homebrew the controller binary is brew-managed, and we no longer
+			// roll out agent updates from here — that is `fleet sync-agent`'s job.
+			// So `update apply` is informational only on Homebrew: tell the user
+			// how to update the controller and how to bring agents in line, then
+			// stop. (Only `update check` does real work on Homebrew.)
 			if core.RuntimeIsHomebrewInstall() {
-				fmt.Fprintln(cmd.OutOrStdout(), "Controller is managed by Homebrew — to update the controller binary:")
-				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "  brew update && brew upgrade cenvero-fleet")
-				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "Continuing to roll out the agent update to managed servers...")
-				fmt.Fprintln(cmd.OutOrStdout())
+				out := cmd.OutOrStdout()
+				fmt.Fprintln(out, "Controller is managed by Homebrew — to update the controller binary:")
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "  brew update && brew upgrade cenvero-fleet")
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "Agents are not rolled out from `update apply` on Homebrew. To update them, run:")
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "  fleet sync-agent")
+				// Best-effort: name any agents that have drifted from the controller.
+				if app, err := openApp(*configDir); err == nil {
+					if stale, _ := app.AgentsNeedingSync(); len(stale) > 0 {
+						fmt.Fprintln(out)
+						fmt.Fprintln(out, describeStaleAgents(stale))
+					}
+					_ = app.Close()
+				}
+				return nil
 			}
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -2114,13 +2153,27 @@ func newSelfUninstallCommand(configDir *string) *cobra.Command {
 		Long: `Removes the fleet binary from its install location and deletes
 the local config directory (servers, keys, logs, etc.).
 
+On Homebrew installs the binary is managed by Homebrew, so it is left in
+place; this command removes the config directory and then offers to run
+'brew uninstall cenvero-fleet' for you.
+
 All managed agents on remote servers are left untouched.
 Run 'fleet server remove <name>' first if you want to tear those down.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			homebrew := core.RuntimeIsHomebrewInstall()
 			if !yes {
 				fmt.Fprintln(cmd.OutOrStdout(), "This will remove:")
-				fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet binary from its install location")
-				fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet config directory (servers, keys, logs, etc.)")
+				if homebrew {
+					fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet config directory (servers, keys, logs, etc.)")
+					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(cmd.OutOrStdout(), "The fleet binary is managed by Homebrew and is NOT removed by this")
+					fmt.Fprintln(cmd.OutOrStdout(), "command. After clearing the config you'll be offered to run:")
+					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(cmd.OutOrStdout(), "  brew uninstall cenvero-fleet")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet binary from its install location")
+					fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet config directory (servers, keys, logs, etc.)")
+				}
 				fmt.Fprintln(cmd.OutOrStdout())
 				fmt.Fprintln(cmd.OutOrStdout(), "Remote agents on managed servers are NOT affected.")
 				fmt.Fprintln(cmd.OutOrStdout())
@@ -2132,11 +2185,42 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 				*configDir = core.DefaultConfigDir("")
 			}
 
-			// Remove config directory
+			// Remove config directory (both install methods).
 			if err := os.RemoveAll(*configDir); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove config dir %s: %v\n", *configDir, err)
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "Removed config directory: %s\n", *configDir)
+			}
+
+			// On Homebrew the binary belongs to brew — never delete it ourselves.
+			// Offer to run `brew uninstall` instead, and only with the operator's
+			// explicit ok. On a non-interactive run, just print the command.
+			if homebrew {
+				out := cmd.OutOrStdout()
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "The fleet binary is managed by Homebrew. To remove it, run:")
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "  brew uninstall cenvero-fleet")
+				if term.IsTerminal(int(os.Stdin.Fd())) {
+					fmt.Fprint(out, "\nRun that now? [y/N]: ")
+					answer := strings.ToLower(strings.TrimSpace(transport.ReadLine(bufio.NewReader(os.Stdin))))
+					if answer == "y" || answer == "yes" {
+						brewPath, lookErr := exec.LookPath("brew")
+						if lookErr != nil {
+							fmt.Fprintln(cmd.ErrOrStderr(), "warning: 'brew' not found on PATH; run the command above manually")
+							return nil
+						}
+						uninstall := exec.Command(brewPath, "uninstall", "cenvero-fleet")
+						uninstall.Stdout = out
+						uninstall.Stderr = cmd.ErrOrStderr()
+						if runErr := uninstall.Run(); runErr != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "warning: brew uninstall failed: %v\n", runErr)
+							return nil
+						}
+						fmt.Fprintln(out, "Fleet uninstalled.")
+					}
+				}
+				return nil
 			}
 
 			// Find and remove the fleet binary
