@@ -75,7 +75,15 @@ func (a *App) CopyFile(srcServer, srcPath, dstServer, dstPath string, opts FileT
 	if err != nil {
 		return res, fmt.Errorf("relay upload: %w", err)
 	}
-	if res.SHA256 != "" && res.SHA256 != relaySum {
+	// The relay is only verified end-to-end if the destination returns a non-empty
+	// finalize digest that MATCHES the controller-side bytes. Treating an empty or
+	// missing digest as a pass would let a malicious destination silently store
+	// different bytes while the controller reports success, so require a real
+	// matching digest and fail closed otherwise.
+	if res.SHA256 == "" {
+		return res, fmt.Errorf("relay integrity check failed: destination returned no finalize digest (cannot confirm %d bytes hashed %s landed intact)", size, relaySum)
+	}
+	if res.SHA256 != relaySum {
 		return res, fmt.Errorf("relay integrity check failed: source bytes hashed %s but destination finalized %s", relaySum, res.SHA256)
 	}
 	if progress != nil {
