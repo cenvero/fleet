@@ -942,7 +942,7 @@ fleet update channel beta</pre>
       </div>
       <p>Channels: <code>stable</code>, <code>beta</code>, <code>alpha</code>. All artifacts are signature-verified before applying.</p>
       <div class="callout">
-        <strong>Homebrew installs</strong> — <code>fleet update apply</code> skips self-update when installed via Homebrew and shows the correct <code>brew upgrade cenvero-fleet</code> hint. Agents are still updated regardless.
+        <strong>Homebrew installs</strong> — the controller binary is <code>brew</code>-managed, so <code>fleet update apply</code> is informational only: it shows the <code>brew upgrade cenvero-fleet</code> hint and does <strong>not</strong> roll out agents. Only <code>fleet update check</code> works on Homebrew (<code>apply</code>, <code>channel</code>, <code>rollback</code> are blocked); update agents with <code>fleet sync-agent</code>. Likewise <code>fleet self-uninstall</code> clears the config and offers to run <code>brew uninstall cenvero-fleet</code> rather than deleting the brew-managed binary.
       </div>
     </section>
 
