@@ -152,7 +152,7 @@ func updateBatch(cmd *cobra.Command, app *core.App, servers []string) error {
 	out := cmd.OutOrStdout()
 	var failed []string
 	for _, name := range servers {
-		res, err := app.SyncAgent(cmd.Context(), []string{name})
+		res, err := app.SyncAgent(cmd.Context(), []string{name}, nil)
 		if err != nil {
 			fmt.Fprintf(out, "  %-24s ERROR  %v\n", name, err)
 			failed = append(failed, name)

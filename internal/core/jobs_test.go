@@ -119,7 +119,7 @@ func TestJobStore_TailIgnoresSpoofedMarker(t *testing.T) {
 		return "", 0, nil // launch
 	}
 
-	rec, err := store.Start(exec, "web-01", "echo FLEETEXIT:0")
+	rec, err := store.Start(exec, "web-01", "echo FLEETEXIT:0", "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestJobStore_StartGetList(t *testing.T) {
 		return "", 0, nil
 	}
 
-	rec, err := store.Start(exec, "web-01", "sleep 1")
+	rec, err := store.Start(exec, "web-01", "sleep 1", "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestJobStore_StartGetList(t *testing.T) {
 	}
 
 	// Second job gets the next id (monotonic counter persisted on disk).
-	rec2, err := store.Start(exec, "web-01", "true")
+	rec2, err := store.Start(exec, "web-01", "true", "")
 	if err != nil {
 		t.Fatalf("Start 2: %v", err)
 	}
@@ -227,11 +227,11 @@ func TestJobStore_StartLaunchFailureRollsBackCounter(t *testing.T) {
 		return "", 0, nil
 	}
 
-	if _, err := store.Start(exec, "web-01", "true"); err == nil {
+	if _, err := store.Start(exec, "web-01", "true", ""); err == nil {
 		t.Fatal("expected launch failure")
 	}
 	// The next successful job must still get id 1 (counter rolled back).
-	rec, err := store.Start(exec, "web-01", "true")
+	rec, err := store.Start(exec, "web-01", "true", "")
 	if err != nil {
 		t.Fatalf("Start after failure: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestJobStore_TailDetectsCompletion(t *testing.T) {
 		return "", 0, nil // launch
 	}
 
-	rec, err := store.Start(exec, "web-01", "do-work")
+	rec, err := store.Start(exec, "web-01", "do-work", "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestJobStore_Wait(t *testing.T) {
 		return "", 0, nil
 	}
 
-	rec, err := store.Start(exec, "web-01", "task")
+	rec, err := store.Start(exec, "web-01", "task", "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestJobStore_WaitTimeout(t *testing.T) {
 		return "", 0, nil
 	}
 
-	rec, err := store.Start(exec, "web-01", "task")
+	rec, err := store.Start(exec, "web-01", "task", "")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

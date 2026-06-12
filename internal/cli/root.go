@@ -2929,10 +2929,28 @@ Servers already running the correct version are skipped.`,
 				return err
 			}
 			defer app.Close()
-			result, err := app.SyncAgent(cmd.Context(), targetServers)
+			// Stream per-server progress to stderr as each server (synced
+			// concurrently) starts/finishes, so the operator sees instant feedback
+			// instead of waiting silently for one big result. stdout stays clean
+			// JSON for piping. The callback is invoked serially by SyncAgent.
+			errOut := cmd.ErrOrStderr()
+			fmt.Fprintln(errOut, "Syncing agents across the fleet (in parallel)...")
+			result, err := app.SyncAgent(cmd.Context(), targetServers, func(p core.SyncAgentProgress) {
+				switch p.State {
+				case "start":
+					fmt.Fprintf(errOut, "  → %s: checking/updating...\n", p.Server)
+				case "updated":
+					fmt.Fprintf(errOut, "  ✓ %s: updated %s → %s\n", p.Server, p.From, p.To)
+				case "uptodate":
+					fmt.Fprintf(errOut, "  • %s: already up to date (%s)\n", p.Server, p.From)
+				case "error":
+					fmt.Fprintf(errOut, "  ✗ %s: %s\n", p.Server, p.Err)
+				}
+			})
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(errOut, "Done: %d updated, %d up to date, %d failed.\n", result.Synced, result.AlreadyUpToDate, result.Failed)
 			return writeJSON(cmd, result)
 		},
 	}

@@ -87,6 +87,7 @@ func newJobsListCommand(configDir *string) *cobra.Command {
 
 func newJobRunCommand(configDir *string) *cobra.Command {
 	var asJSON bool
+	var name string
 	cmd := &cobra.Command{
 		Use:          "run <server> <command>",
 		Short:        "Start a detached background job on a server",
@@ -107,19 +108,24 @@ func newJobRunCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			store := core.NewJobStore(*configDir)
-			rec, err := store.Start(appExec(app), args[0], command)
+			rec, err := store.Start(appExec(app), args[0], command, name)
 			if err != nil {
 				return err
 			}
 			if asJSON {
 				return writeJSON(cmd, rec)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "started job %d on %s (log: %s)\n", rec.ID, rec.Server, rec.Logfile)
+			label := ""
+			if rec.Name != "" {
+				label = " \"" + rec.Name + "\""
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "started job %d%s on %s (log: %s)\n", rec.ID, label, rec.Server, rec.Logfile)
 			fmt.Fprintf(cmd.OutOrStdout(), "track it with: fleet job status %d\n", rec.ID)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output the job record as JSON")
+	cmd.Flags().StringVar(&name, "name", "", "optional label for the job (shown in 'fleet jobs')")
 	return cmd
 }
 
@@ -258,7 +264,7 @@ func newJobLogsCommand(configDir *string) *cobra.Command {
 // writeJobsTable renders job records as an aligned table.
 func writeJobsTable(cmd *cobra.Command, jobs []core.JobRecord) error {
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "ID\tSERVER\tSTATUS\tEXIT\tSTARTED\tCOMMAND"); err != nil {
+	if _, err := fmt.Fprintln(w, "ID\tNAME\tSERVER\tSTATUS\tEXIT\tSTARTED\tCOMMAND"); err != nil {
 		return err
 	}
 	for _, j := range jobs {
@@ -266,9 +272,13 @@ func writeJobsTable(cmd *cobra.Command, jobs []core.JobRecord) error {
 		if j.Status == core.JobDone {
 			exit = strconv.Itoa(j.ExitCode)
 		}
+		name := j.Name
+		if name == "" {
+			name = "-"
+		}
 		started := j.Started.Local().Format("2006-01-02 15:04:05")
-		if _, err := fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
-			j.ID, j.Server, j.Status, exit, started, truncateCommand(j.Command)); err != nil {
+		if _, err := fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			j.ID, name, j.Server, j.Status, exit, started, truncateCommand(j.Command)); err != nil {
 			return err
 		}
 	}

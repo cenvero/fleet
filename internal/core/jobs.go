@@ -62,6 +62,7 @@ func newJobNonce() (string, error) {
 // JobRecord is a single background job tracked in the on-disk store.
 type JobRecord struct {
 	ID      int    `json:"id"`
+	Name    string `json:"name,omitempty"` // optional operator-supplied label
 	Server  string `json:"server"`
 	Command string `json:"command"`
 	Logfile string `json:"logfile"`
@@ -202,7 +203,7 @@ func buildJobLaunch(command, logfile, nonce string) string {
 // Start records a new job and launches it on the server via exec. The returned
 // record is the persisted job (status running). The exec call is expected to
 // return promptly because the remote launcher detaches the work.
-func (s *JobStore) Start(exec ExecFunc, server, command string) (JobRecord, error) {
+func (s *JobStore) Start(exec ExecFunc, server, command, name string) (JobRecord, error) {
 	if exec == nil {
 		return JobRecord{}, fmt.Errorf("exec function is required")
 	}
@@ -227,6 +228,7 @@ func (s *JobStore) Start(exec ExecFunc, server, command string) (JobRecord, erro
 	logfile := JobLogfile(id, nonce)
 	rec := JobRecord{
 		ID:      id,
+		Name:    strings.TrimSpace(name),
 		Server:  server,
 		Command: command,
 		Logfile: logfile,

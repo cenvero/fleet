@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenvero/fleet/internal/logs"
@@ -349,10 +351,30 @@ type FleetSyncAgentResult struct {
 	Failed            int               `json:"failed"`
 }
 
+// syncAgentParallelism bounds how many servers SyncAgent updates concurrently.
+const syncAgentParallelism = 8
+
+// SyncAgentProgress is one streamed status update for a single server during a
+// SyncAgent run. State is one of: "start", "updated", "uptodate", "error".
+type SyncAgentProgress struct {
+	Server string
+	State  string
+	From   string // current agent version
+	To     string // wanted (controller) version
+	Err    string
+}
+
 // SyncAgent checks whether each managed server's agent version matches the
-// controller version and, if not, triggers an update + service restart.
-// Pass serverNames=nil to target every registered server.
-func (a *App) SyncAgent(ctx context.Context, serverNames []string) (FleetSyncAgentResult, error) {
+// controller version and, if not, triggers an update + service restart. Pass
+// serverNames=nil to target every registered server.
+//
+// Servers are synced CONCURRENTLY (bounded by syncAgentParallelism) so a large
+// fleet updates in parallel rather than one-at-a-time — but SYNCHRONOUSLY: the
+// call waits for every server before returning, so there are no detached or
+// orphaned updates and the caller always gets the complete result. The optional
+// progress callback streams per-server status as each server starts/finishes;
+// it is invoked serially (never concurrently), so callers need no locking.
+func (a *App) SyncAgent(ctx context.Context, serverNames []string, progress func(SyncAgentProgress)) (FleetSyncAgentResult, error) {
 	targets, err := a.updateTargets(serverNames)
 	if err != nil {
 		return FleetSyncAgentResult{}, err
@@ -363,18 +385,58 @@ func (a *App) SyncAgent(ctx context.Context, serverNames []string) (FleetSyncAge
 		Agents:            make([]SyncAgentResult, 0, len(targets)),
 	}
 
-	for _, server := range targets {
-		r := a.syncAgentOne(ctx, server)
-		result.Agents = append(result.Agents, r)
-		switch {
-		case r.Error != "":
-			result.Failed++
-		case r.AlreadySynced:
-			result.AlreadyUpToDate++
-		default:
-			result.Synced++
+	var (
+		mu         sync.Mutex // guards result aggregation
+		progressMu sync.Mutex // serializes progress callbacks
+		wg         sync.WaitGroup
+		sem        = make(chan struct{}, syncAgentParallelism)
+	)
+	emit := func(p SyncAgentProgress) {
+		if progress == nil {
+			return
 		}
+		progressMu.Lock()
+		progress(p)
+		progressMu.Unlock()
 	}
+
+	for _, server := range targets {
+		wg.Add(1)
+		go func(server ServerRecord) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			emit(SyncAgentProgress{Server: server.Name, State: "start"})
+			r := a.syncAgentOne(ctx, server)
+
+			mu.Lock()
+			result.Agents = append(result.Agents, r)
+			switch {
+			case r.Error != "":
+				result.Failed++
+			case r.AlreadySynced:
+				result.AlreadyUpToDate++
+			default:
+				result.Synced++
+			}
+			mu.Unlock()
+
+			p := SyncAgentProgress{Server: server.Name, From: r.AgentVersion, To: r.WantedVersion}
+			switch {
+			case r.Error != "":
+				p.State, p.Err = "error", r.Error
+			case r.AlreadySynced:
+				p.State = "uptodate"
+			default:
+				p.State = "updated"
+			}
+			emit(p)
+		}(server)
+	}
+	wg.Wait()
+	// The goroutines append out of order; sort by server for deterministic output.
+	sort.Slice(result.Agents, func(i, j int) bool { return result.Agents[i].Server < result.Agents[j].Server })
 	return result, nil
 }
 
