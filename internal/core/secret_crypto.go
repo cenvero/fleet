@@ -174,7 +174,10 @@ func deriveSecretKey(configDir string) ([]byte, error) {
 	}
 	// The dedicated file already holds 32 random bytes; run it through HKDF too
 	// so both paths share one derivation shape and info-string binding.
-	return hkdfKey(raw, []byte("dedicated-key-file")), nil
+	key := hkdfKey(raw, []byte("dedicated-key-file"))
+	// Defense-in-depth: zero the raw key-file bytes once the derived key is in hand.
+	wipe(raw)
+	return key, nil
 }
 
 // deriveFromPinnedSource derives the key from EXACTLY the recorded source, or
@@ -186,7 +189,10 @@ func deriveFromPinnedSource(keysDir, pinned string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("secret key source %q unavailable; cannot decrypt: %w", pinned, err)
 		}
-		return hkdfKey(raw, []byte("dedicated-key-file")), nil
+		key := hkdfKey(raw, []byte("dedicated-key-file"))
+		// Defense-in-depth: zero the raw key-file bytes once derivation is done.
+		wipe(raw)
+		return key, nil
 	}
 	name, ok := strings.CutPrefix(pinned, "controller:")
 	if !ok || validateSafeName(name) != nil {
@@ -244,6 +250,10 @@ func loadOneControllerKey(keysDir, name string) (seed []byte, ok bool) {
 	if err != nil {
 		return nil, false
 	}
+	// Defense-in-depth: the file buffer holds the raw private-key material; zero it
+	// once parsing is done. rawPrivateKeyBytes copies the bytes it needs, so the
+	// returned seed is unaffected.
+	defer wipe(data)
 	raw, err := ssh.ParseRawPrivateKey(data)
 	if err != nil {
 		// Passphrase-protected or unparseable: core cannot unlock it here.
@@ -372,6 +382,32 @@ func loadOrCreateSecretKeyFile(keysDir string) ([]byte, error) {
 
 // encryptValue seals plaintext with AES-256-GCM under key, returning the
 // base64(nonce||ciphertext) string stored on the record.
+//
+// SECURITY — nonce strategy and its bound: this uses a fresh 96-bit RANDOM nonce
+// (no monotonic counter). With random nonces under a single AES-GCM key, the
+// birthday bound says a nonce collision becomes likely only after ~2^32 seals;
+// NIST SP 800-38D therefore recommends staying well under 2^32 invocations per
+// key. A repeated (nonce, key) pair is a real GCM break (it leaks the XOR of two
+// plaintexts and the GHASH auth key), which is why this matters.
+//
+// Why a random nonce is acceptable HERE: the key is the controller's per-store
+// HKDF-derived secret key, and seals happen only on a human-driven secret
+// Set/Generate/Rotate or a full-store Rekey across a key rotation — on the order
+// of hundreds to thousands of writes over a deployment's life, dozens of orders
+// of magnitude below 2^32. The realistic collision probability is negligible.
+//
+// Why this was NOT changed to a per-record salted subkey: the obvious hardening
+// (mix a fresh random salt into HKDF per record, store the salt in the record so
+// a nonce collision across different records is harmless) would require adding a
+// salt field to the on-disk secretRecord and threading it through sealRecord /
+// openRecord / Rekey in secret.go. The existing on-disk format is exactly
+// base64(nonce||ciphertext) with no salt, and decryptValue is handed only that
+// blob (the marker lives on the record). Introducing a salt without a per-record
+// format discriminator would be ambiguous against already-stored ciphertexts and
+// risk bricking their decryption — so we keep AES-GCM with a random nonce and
+// document the (comfortably-met) bound instead. If the write volume ever
+// approached 2^32 per key, switch to salted per-record subkeys behind a new
+// record marker so legacy records still decrypt under the old path.
 func encryptValue(key []byte, plaintext string) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
