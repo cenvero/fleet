@@ -608,3 +608,86 @@ func TestApplyRefusesDowngrade(t *testing.T) {
 		t.Fatal("expected the downgrade to apply under AllowDowngrade")
 	}
 }
+
+// TestAssertSignedComment exercises the minisign trusted-comment version/target
+// binding added on top of the byte-level signature check. A signed comment that
+// names a version/target must match the manifest's claim (assert-when-present),
+// while older releases whose comment carries no version are accepted with a note
+// (forward-compatible).
+func TestAssertSignedComment(t *testing.T) {
+	t.Helper()
+	_, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	payload := []byte("fleet-archive-bytes")
+	target := runtime.GOOS + "-" + runtime.GOARCH
+
+	sign := func(trusted string) []byte {
+		return minisign.SignWithComments(priv, payload, trusted, "untrusted")
+	}
+
+	t.Run("matching version and target asserts clean", func(t *testing.T) {
+		sig := sign("fleet v1.4.0 " + target)
+		note, err := assertSignedComment(sig, "1.4.0", target)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if note != "" {
+			t.Fatalf("unexpected note for a fully-bound comment: %q", note)
+		}
+	})
+
+	t.Run("matching version with leading v in manifest", func(t *testing.T) {
+		sig := sign("v1.4.0")
+		if note, err := assertSignedComment(sig, "v1.4.0", target); err != nil || note != "" {
+			t.Fatalf("note=%q err=%v, want clean", note, err)
+		}
+	})
+
+	t.Run("mismatched version is rejected", func(t *testing.T) {
+		sig := sign("fleet v0.9.0 " + target) // genuine OLD signed release
+		_, err := assertSignedComment(sig, "1.4.0", target)
+		if err == nil {
+			t.Fatal("expected a mismatch error when the signed version differs from the manifest claim")
+		}
+		if !strings.Contains(err.Error(), "does not match manifest version") {
+			t.Fatalf("error = %v, want a version-mismatch message", err)
+		}
+	})
+
+	t.Run("mismatched target is rejected", func(t *testing.T) {
+		sig := sign("fleet v1.4.0 linux-arm64")
+		// Only assert a target conflict when the comment's target is a recognized
+		// pair AND differs from the expected one.
+		_, err := assertSignedComment(sig, "1.4.0", "linux-amd64")
+		if err == nil {
+			t.Fatal("expected a target-mismatch error")
+		}
+		if !strings.Contains(err.Error(), "does not match expected target") {
+			t.Fatalf("error = %v, want a target-mismatch message", err)
+		}
+	})
+
+	t.Run("no version token yields a forward-compat note", func(t *testing.T) {
+		sig := sign("built by ci on tuesday") // no version, no target
+		note, err := assertSignedComment(sig, "1.4.0", target)
+		if err != nil {
+			t.Fatalf("a comment without a version must NOT hard-fail (forward-compat): %v", err)
+		}
+		if note == "" {
+			t.Fatal("expected a note recording that the version was not bound")
+		}
+	})
+
+	t.Run("empty trusted comment yields a forward-compat note", func(t *testing.T) {
+		sig := sign("")
+		note, err := assertSignedComment(sig, "1.4.0", target)
+		if err != nil {
+			t.Fatalf("an empty comment must NOT hard-fail (forward-compat): %v", err)
+		}
+		if note == "" {
+			t.Fatal("expected a note recording that the version was not bound")
+		}
+	})
+}
