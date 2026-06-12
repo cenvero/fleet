@@ -45,6 +45,15 @@ type ReverseHub struct {
 	mu           sync.RWMutex
 	sessions     map[string]*reverseSession
 	controlToken string
+	// enrollMu serializes the read-pin → verify-token → write-pin → clear-token
+	// enrollment sequence in authorizeAgent. Without it, two connections racing
+	// the FIRST enrollment with the same one-time token can both read "no pin",
+	// both pass the ConstantTimeCompare, and both write a key — last-writer-wins
+	// the pin (and a stolen one-time token could be consumed twice). Holding this
+	// across the whole read→verify→write→clear makes token consumption atomic so
+	// exactly one connection can enroll. Enrollment is rare and the section is
+	// cheap, so a single hub-wide lock is sufficient.
+	enrollMu sync.Mutex
 }
 
 type reverseControlRequest struct {
@@ -126,7 +135,9 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 
 	config := &ssh.ServerConfig{
 		Config: ssh.Config{
-			Ciphers: transport.SupportedCiphers(),
+			Ciphers:      transport.SupportedCiphers(),
+			KeyExchanges: transport.SupportedKEX(),
+			MACs:         transport.SupportedMACs(),
 		},
 		PublicKeyCallback: h.authorizeAgent,
 	}
@@ -404,8 +415,19 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 	}
 
 	path := filepath.Join(h.app.ConfigDir, "keys", "agents", serverName+".pub")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("create reverse agent key directory: %w", err)
+
+	// Serialize the whole read-pin → verify-token → write-pin → clear-token
+	// sequence so two connections racing the SAME one-time enrollment token can't
+	// both observe "no pin", both pass the token compare, and both write a key
+	// (last-writer-wins). The lock makes token consumption atomic: exactly one
+	// connection enrolls; the loser sees the freshly written pin (key match) or a
+	// consumed token (mismatch). Re-read the server record under the lock so the
+	// EnrollSecret seen here can't be stale relative to a concurrent enrollment.
+	h.enrollMu.Lock()
+	defer h.enrollMu.Unlock()
+
+	if fresh, ferr := h.app.GetServer(serverName); ferr == nil {
+		server = fresh
 	}
 
 	data, readErr := os.ReadFile(path)
@@ -422,12 +444,17 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 	case os.IsNotExist(readErr):
 		// First contact: require a valid one-time enrollment token BEFORE pinning,
 		// so a rogue agent that merely knows the server name and can reach the
-		// listener cannot win the key-pin race.
+		// listener cannot win the key-pin race. These checks (and the directory
+		// creation) run only after a name passes the cheap GetServer/mode gate,
+		// so an unknown or ineligible name does no enrollment disk work.
 		if server.EnrollSecret == "" {
 			return nil, fmt.Errorf("server %q has no pending enrollment token — mint one with 'fleet server enroll-token %s' and start the agent with --enroll-token", serverName, serverName)
 		}
 		if subtle.ConstantTimeCompare([]byte(secret), []byte(server.EnrollSecret)) != 1 {
 			return nil, fmt.Errorf("invalid enrollment token for %s", serverName)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, fmt.Errorf("create reverse agent key directory: %w", err)
 		}
 		if err := os.WriteFile(path, ssh.MarshalAuthorizedKey(key), 0o644); err != nil { // #nosec G306 -- public key is intentionally world-readable
 			return nil, fmt.Errorf("pin reverse agent key for %s: %w", serverName, err)
