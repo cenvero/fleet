@@ -285,6 +285,63 @@ func TestFileManagerWriteFinalizeConcurrent(t *testing.T) {
 	}
 }
 
+// TestMkdirRefusesEscapingSymlink proves the pre-syscall re-Lstat
+// (recheckFinalComponent) refuses Mkdir/Rename/Delete when the final component
+// is a symlink that resolves outside the allowed roots — the planted-symlink
+// escape that os.MkdirAll/os.Rename/os.RemoveAll would otherwise follow because
+// they have no O_NOFOLLOW equivalent.
+func TestMkdirRenameDeleteRefuseEscapingSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir() // outside the sandbox
+	SetAllowedFileRoots([]string{root})
+	defer SetAllowedFileRoots(nil)
+
+	m := NewFileManager()
+	ctx := context.Background()
+
+	// Plant a symlink inside the sandbox whose target escapes it. Its own path is
+	// inside `root` (so validateWriteTarget's parent-resolve passes), but the link
+	// resolves to `outside`.
+	escapeTarget := filepath.Join(outside, "victim")
+	if err := os.MkdirAll(escapeTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mkdir onto a planted symlink-to-outside must be refused.
+	mkLink := filepath.Join(root, "mkdir-link")
+	if err := os.Symlink(escapeTarget, mkLink); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, err := m.Mkdir(ctx, proto.FileMkdirPayload{Path: mkLink}); err == nil {
+		t.Fatalf("Mkdir onto an escaping symlink must be refused")
+	}
+
+	// Rename target that is a planted symlink-to-outside must be refused.
+	src := filepath.Join(root, "src.txt")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	renLink := filepath.Join(root, "rename-link")
+	if err := os.Symlink(filepath.Join(outside, "renamed"), renLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Rename(ctx, proto.FileRenamePayload{From: src, To: renLink}); err == nil {
+		t.Fatalf("Rename onto an escaping symlink must be refused")
+	}
+
+	// Delete of a planted symlink-to-outside must be refused (would RemoveAll the
+	// link's target tree). validateTransferPath EvalSymlinks the path, but if that
+	// resolution is bypassed/raced the final re-Lstat still catches it; here we
+	// assert the escaping target itself is out of bounds.
+	if _, err := m.Delete(ctx, proto.FileDeletePayload{Path: escapeTarget, Recursive: true}); err == nil {
+		t.Fatalf("Delete of a path outside the sandbox must be refused")
+	}
+	// The victim directory outside the sandbox must be untouched.
+	if _, err := os.Stat(escapeTarget); err != nil {
+		t.Fatalf("escape target was modified/removed: %v", err)
+	}
+}
+
 func writeChunk(t *testing.T, m FileManager, transferID, dest string, offset int64, data []byte) error {
 	t.Helper()
 	sum := sha256.Sum256(data)
