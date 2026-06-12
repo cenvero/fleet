@@ -25,6 +25,8 @@ fleet sync-agent --server web-01 # or just one (repeatable)
 
 `fleet update apply` updates the controller first and then rolls updates across managed agents. Partial agent failures are reported instead of bricking the whole rollout.
 
+On **Homebrew** installs the controller binary is `brew`-managed, so `update apply` does **not** roll out agents — it is informational only (it prints the `brew upgrade` command and points you to `fleet sync-agent`). Only `fleet update check` does real work on Homebrew; `apply`, `channel`, and `rollback` are blocked there. Update agents with `fleet sync-agent`; `update check` will also name any agents that have drifted from the controller.
+
 `fleet sync-agent` brings managed agents up to the controller's version. It syncs servers **in parallel** (bounded concurrency) and streams **per-server progress** as each finishes — `→ checking`, `✓ updated X → Y`, `• up to date`, `✗ error` — followed by a one-line summary, while `stdout` stays clean JSON for scripting. It runs **synchronously** (it waits for every server before returning), so there are no detached, orphaned, half-updated agents. Limit it to one or more servers with `--server <name>` (repeatable).
 
 ### Update notice
