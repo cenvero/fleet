@@ -239,6 +239,18 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, nil, fmt.Errorf("create database directory: %w", err)
 		}
+		// Pre-create the db file (and its WAL/SHM/journal sidecars) at 0600
+		// BEFORE the driver opens them. The SQLite driver otherwise creates
+		// these with umask-default perms (often world-readable) and we only
+		// tighten them with restrictSQLitePerms() AFTER open — leaving a brief
+		// window where secrets/state could be read. Opening an existing 0600
+		// file (O_CREATE without O_EXCL) means the driver never creates it with
+		// the loose default, closing that window portably (syscall.Umask is
+		// Unix-only; this works on Windows too). An empty/zero-length WAL/SHM is
+		// valid and SQLite re-initializes them; a stale -journal is harmless.
+		if err := precreateSQLiteFiles(path); err != nil {
+			return nil, nil, err
+		}
 		dialector = sqlite.Open(path)
 	case BackendPostgres:
 		dialector = postgres.Open(cfg.Postgres.DSN)
@@ -281,12 +293,44 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 	return db, sqlDB, nil
 }
 
+// sqliteFileSuffixes are the on-disk sidecars SQLite may create alongside the
+// main database file. Pre-creating and re-tightening all of them keeps perms
+// owner-only regardless of which journal mode is active.
+var sqliteFileSuffixes = []string{"", "-wal", "-shm", "-journal"}
+
+// precreateSQLiteFiles creates the SQLite database file and its WAL/SHM/journal
+// sidecars at 0600 BEFORE the driver opens the database, so the driver opens
+// pre-existing owner-only files instead of creating them with umask-default
+// (typically world-readable) perms. This closes the brief readable window that
+// restrictSQLitePerms() alone leaves (it only tightens AFTER open). O_CREATE
+// (not O_EXCL) so re-opening an existing database is a no-op; an existing file
+// that is already 0600 is left as-is. We do not loosen perms on a file that
+// already exists with tighter bits.
+func precreateSQLiteFiles(path string) error {
+	for _, suffix := range sqliteFileSuffixes {
+		p := path + suffix
+		f, err := os.OpenFile(p, os.O_RDONLY|os.O_CREATE, 0o600) // #nosec G304 -- path derived from validated config
+		if err != nil {
+			return fmt.Errorf("pre-create sqlite file %s: %w", p, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("pre-create sqlite file %s: %w", p, err)
+		}
+		// Defend against a pre-existing file created earlier under a loose umask
+		// (e.g. by an older fleet version): tighten it before the driver opens.
+		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restrict sqlite file permissions: %w", err)
+		}
+	}
+	return nil
+}
+
 // restrictSQLitePerms tightens the SQLite database file and its WAL/SHM sidecars
 // to 0600 (owner-only), since the driver creates them with umask-default perms
 // that are typically world-readable. Missing sidecars are ignored.
 func restrictSQLitePerms(path string) error {
-	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+	for _, suffix := range sqliteFileSuffixes {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("restrict sqlite file permissions: %w", err)
 		}
 	}
