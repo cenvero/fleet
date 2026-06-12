@@ -219,7 +219,7 @@ func semverCompare(a, b string) int {
 	return 0
 }
 
-func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
+func (a *App) ApplyUpdate(ctx context.Context, allowUnsigned, allowDowngrade bool) (update.ApplyResult, error) {
 	apply := a.ControllerUpdater
 	if apply == nil {
 		apply = update.Apply
@@ -230,6 +230,8 @@ func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 		ConfigDir:      a.ConfigDir,
 		ExecutablePath: a.ExecutablePath,
 		CurrentVersion: version.Version,
+		AllowUnsigned:  allowUnsigned,
+		AllowDowngrade: allowDowngrade,
 	})
 	if err != nil {
 		return update.ApplyResult{}, err
@@ -247,7 +249,7 @@ func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
 	return result, nil
 }
 
-func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string) (FleetUpdateResult, error) {
+func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string, allowUnsigned, allowDowngrade bool) (FleetUpdateResult, error) {
 	var controllerResult update.ApplyResult
 
 	executablePath := a.ExecutablePath
@@ -264,7 +266,7 @@ func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string) (Fleet
 		}
 	} else {
 		var err error
-		controllerResult, err = a.ApplyUpdate(ctx)
+		controllerResult, err = a.ApplyUpdate(ctx, allowUnsigned, allowDowngrade)
 		if err != nil {
 			return FleetUpdateResult{}, err
 		}
