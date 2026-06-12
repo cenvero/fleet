@@ -227,6 +227,7 @@ Updates:
 - `fleet update apply`
 - `fleet update rollback`
 - `fleet update channel stable|beta`
+- `fleet sync-agent [--server <name>]` — bring managed agents up to the controller version (parallel, with streamed per-server progress)
 
 File manager and transfers (**new in v2**):
 
@@ -267,7 +268,7 @@ Structured remote execution:
 
 Access and safety:
 
-- `fleet token create --name … [--servers … | --group EXPR] [--allow …] [--deny …] [--destructive]` — mint a scoped RBAC token; present it with `--token <id>` or `FLEET_TOKEN`. Enforcement is controller-side and fails closed.
+- `fleet token create --name … [--servers … | --group EXPR] [--allow …] [--deny …] [--allow-secret <name>] [--read-only-default] [--destructive]` — mint a scoped RBAC token; present it with `--token <id>` or `FLEET_TOKEN`. Enforcement is controller-side and **fails closed**: a server-scoped token may run only an in-scope server command or a small safe-local set (controller management, fan-out reads, and cross-server transfers are denied), it can never mint or modify tokens, and it can inject only the secrets in its `--allow-secret` list. Token IDs are stored hashed at rest and denied attempts are audit-logged.
 - `fleet secret set|list|rotate|rm <name>` — named secrets, never echoed; referenced as `@name` from `exec --secret`
 - `fleet guard <server> <cmd> --revert-after 2m --revert-cmd '<undo>'` — dead-man's-switch: auto-reverts unless you `fleet confirm <id>`; `fleet revert <id>` undoes now
 - `fleet cmd-policy set deny|confirm <patterns>` — deny or confirm-gate dangerous commands
@@ -380,7 +381,7 @@ fleet update apply
 fleet update rollback
 ```
 
-Release artifacts are minisign-signed, and both the installers and the updater verify checksums and signatures before swapping binaries. All non-dev channels require at least a SHA-256 checksum in the manifest; a bare manifest entry is rejected.
+Release artifacts are minisign-signed, and both the installers and the updater verify signatures and checksums before swapping binaries. Signature verification is **fail-closed on every channel**: a manifest entry with no minisign signature is refused (a SHA-256 checksum alone is never accepted in its place). Updates are also **anti-rollback protected** — the updater refuses a target older than the running version or below the channel's `min_supported` floor — and downloads are confined to an `https`-only scheme allowlist with size/decompression bounds.
 
 For repo-side release hardening, use:
 

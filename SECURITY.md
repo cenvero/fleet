@@ -54,14 +54,19 @@ Please avoid public disclosure before a fix or mitigation is available unless th
 
 The current repository already includes several core protections:
 
-- Ed25519 is the default controller key algorithm
-- SSH transport is limited to AEAD ciphers
-- host keys are TOFU-pinned and mismatches are treated as critical failures
+- Ed25519 is the default controller key algorithm (RSA-4096 also available)
+- SSH transport is limited to AEAD ciphers; host keys are TOFU-pinned and mismatches are treated as critical failures
 - controller and agent RPCs use typed payloads instead of shell-string commands
 - controller-owned state stays inside the configured local directory
-- installers and updater flows are built around minisign verification plus checksum verification
+- updates verify a minisign signature **fail-closed on every channel** (a checksum alone is never accepted), enforce **anti-rollback** (no downgrade below the running version or the channel `min_supported`), and confine downloads to an `https`-only scheme allowlist with size/decompression bounds
+- scoped RBAC tokens are **fail-closed**: a server-scoped token may run only an in-scope server command or a small safe-local set; controller-management, fan-out, and cross-server operations are denied, per-token secret access is allowlisted, token IDs are stored hashed at rest, and denied attempts are audit-logged
+- reverse-mode agents must present a one-time enrollment token on first connect before their key is pinned (closes the rogue-agent TOFU race)
+- the agent can be confined with `--file-root` (file operations stay inside allowlisted directories), and file transfers resolve symlinks and block `/proc`, `/sys`, and `/dev`; archive extraction is hardened against zip-slip and symlink escape
+- the localhost file-manager web UI binds loopback only, requires a per-process token, enforces an Origin/CSRF and DNS-rebinding `Host` check, and sets a strict CSP
 - controller key rotation is implemented for both direct and reverse fleets
 - aggregated logs are controller-owned and retained with bounded cache policies
+
+These protections raise the bar against the threats above; they are not a guarantee that the software is free of vulnerabilities. Report anything suspect through the private channel below.
 
 ## Maintainer-Sensitive Material
 
