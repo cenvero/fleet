@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/cenvero/fleet/internal/transport"
@@ -135,5 +136,97 @@ func TestReverseEnrollmentRequiresPendingToken(t *testing.T) {
 	hub := NewReverseHub(app, "")
 	if _, err := hub.authorizeAgent(enrollFakeConn{user: "legacy"}, newReverseTestKey(t)); err == nil {
 		t.Fatal("a reverse server with no pending enrollment token must refuse first contact")
+	}
+}
+
+// TestReverseEnrollmentTokenRaceConsumesOnce proves the enroll-and-pin sequence
+// is atomic: many connections racing the SAME one-time token, each presenting a
+// DIFFERENT key, result in exactly one successful enrollment. Without the
+// serialization, two racers could both observe "no pin", both pass the token
+// compare, and last-writer-wins the pin (and a one-time token consumed twice).
+func TestReverseEnrollmentTokenRaceConsumesOnce(t *testing.T) {
+	t.Parallel()
+
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir:       configDir,
+		Alias:           "fleet",
+		DefaultMode:     transport.ModeReverse,
+		CryptoAlgorithm: "ed25519",
+		UpdateChannel:   "stable",
+		UpdatePolicy:    update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer app.Close()
+
+	const secret = "one-time-enrollment-token"
+	if err := app.AddServer(ServerRecord{Name: "rev", Mode: transport.ModeReverse, EnrollSecret: secret}); err != nil {
+		t.Fatalf("AddServer() error = %v", err)
+	}
+
+	hub := NewReverseHub(app, "")
+
+	const racers = 16
+	keys := make([]ssh.PublicKey, racers)
+	for i := range keys {
+		keys[i] = newReverseTestKey(t)
+	}
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		successes int
+		winnerFP  string
+	)
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		go func(k ssh.PublicKey) {
+			defer wg.Done()
+			perm, err := hub.authorizeAgent(enrollFakeConn{user: "rev:" + secret}, k)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			successes++
+			winnerFP = perm.Extensions["fingerprint"]
+			mu.Unlock()
+		}(keys[i])
+	}
+	wg.Wait()
+
+	if successes != 1 {
+		t.Fatalf("exactly one racer must enroll, got %d successes", successes)
+	}
+
+	// The token must be consumed exactly once.
+	s, err := app.GetServer("rev")
+	if err != nil {
+		t.Fatalf("GetServer() error = %v", err)
+	}
+	if s.EnrollSecret != "" {
+		t.Fatal("enrollment token should be consumed after the race")
+	}
+
+	// The pinned key must be the winner's key, and a fresh (un-presented) key must
+	// now be rejected — no second enrollment is possible.
+	pinPath := filepath.Join(configDir, "keys", "agents", "rev.pub")
+	pinned, err := os.ReadFile(pinPath)
+	if err != nil {
+		t.Fatalf("read pinned key: %v", err)
+	}
+	pinnedKey, _, _, _, err := ssh.ParseAuthorizedKey(pinned)
+	if err != nil {
+		t.Fatalf("parse pinned key: %v", err)
+	}
+	if ssh.FingerprintSHA256(pinnedKey) != winnerFP {
+		t.Fatal("the pinned key must match the single winning racer")
+	}
+	if _, err := hub.authorizeAgent(enrollFakeConn{user: "rev:" + secret}, newReverseTestKey(t)); err == nil {
+		t.Fatal("a new key must be rejected after the token is consumed")
 	}
 }
