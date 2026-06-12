@@ -58,6 +58,21 @@ func (r *replayBuffer) snapshot() []byte {
 	return out
 }
 
+// snapshotAndClear returns the current scrollback and atomically empties the
+// buffer. attach uses this so the missed-output replay is served to a
+// reconnecting client exactly once: a subsequent, possibly unrelated channel
+// from the same key fingerprint (sessionID == key_fp) then sees only output
+// produced after this point, not the whole prior session's scrollback. This
+// preserves resume-after-drop (the reconnecting client still gets what it
+// missed) while removing the cross-connection scrollback auto-replay.
+func (r *replayBuffer) snapshotAndClear() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.data
+	r.data = nil
+	return out
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // persistentSession — one live shell kept alive across network drops.
 // ────────────────────────────────────────────────────────────────────────────
@@ -83,7 +98,13 @@ func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store
 		s.idleTimer = nil
 	}
 	s.activeConn = channel
-	snapshot := s.replay.snapshot()
+	// Drain the scrollback and clear it so it is replayed at most once. A later
+	// channel from the same key fingerprint (the sessionID is just key_fp, so any
+	// new connection from the same controller key resumes this session) must NOT
+	// auto-receive the entire prior session's scrollback — only output produced
+	// after it attaches. Resume-after-drop is preserved: a reconnecting client
+	// still gets exactly the output it missed while disconnected.
+	snapshot := s.replay.snapshotAndClear()
 	s.mu.Unlock()
 
 	// Resize PTY to the new terminal dimensions.
