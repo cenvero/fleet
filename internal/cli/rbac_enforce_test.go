@@ -495,3 +495,208 @@ func TestCmdPolicyCorruptFailsClosed(t *testing.T) {
 		t.Fatalf("job run error %q does not report fail-closed refusal", out)
 	}
 }
+
+// runFleetSubprocess builds the binary once and returns a closure that runs the
+// controller against a fresh initialized config dir, returning combined output +
+// exit code (subprocess, so os.Exit(1) denial paths are observable).
+func runFleetSubprocess(t *testing.T) (dir string, run func(args ...string) (string, int)) {
+	t.Helper()
+	bin := buildFleetBinary(t)
+	dir = initConfigDir(t, bin)
+	run = func(args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+	return dir, run
+}
+
+// TestSSHRefusedUnderCmdPolicy pins finding #1: `ssh` opens an interactive root
+// shell that the cmd-policy deny/confirm gate cannot constrain command-by-command.
+// When ANY cmd-policy (deny OR confirm) is configured, `ssh` must be refused
+// outright (fail-safe) rather than silently bypassing the policy. With NO policy,
+// ssh is allowed (it may still fail later with no live agent, but NOT for a policy
+// reason).
+func TestSSHRefusedUnderCmdPolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess RBAC test skipped in -short mode")
+	}
+	dir, run := runFleetSubprocess(t)
+
+	// With NO cmd-policy, ssh must not be refused for a policy reason (the refusal
+	// message is specific to the policy gate).
+	out, _ := run("ssh", "web-01")
+	if strings.Contains(out, "cannot be command-policy-constrained") {
+		t.Errorf("ssh was policy-refused with no cmd-policy configured: %q", out)
+	}
+
+	// Configure a deny pattern: ssh must now be refused before any agent contact.
+	store, err := core.NewCmdPolicyStore(dir)
+	if err != nil {
+		t.Fatalf("NewCmdPolicyStore: %v", err)
+	}
+	if err := store.SetDenyPatterns([]string{"rm -rf /"}); err != nil {
+		t.Fatalf("SetDenyPatterns: %v", err)
+	}
+	out, code := run("ssh", "web-01")
+	if code == 0 {
+		t.Errorf("ssh ran despite a configured cmd-policy (bypass!); output: %q", out)
+	}
+	if !strings.Contains(out, "cannot be command-policy-constrained") {
+		t.Errorf("ssh refusal %q does not explain the cmd-policy interactive-shell denial", out)
+	}
+}
+
+// TestSvcActionCmdPolicyGate pins finding #2: `svc <server> stop|disable|...`
+// runs systemctl on the server but previously had no cmd-policy gate. A deny
+// pattern matching the action (e.g. "systemctl stop") must refuse it before any
+// agent contact.
+func TestSvcActionCmdPolicyGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess RBAC test skipped in -short mode")
+	}
+	dir, run := runFleetSubprocess(t)
+
+	store, err := core.NewCmdPolicyStore(dir)
+	if err != nil {
+		t.Fatalf("NewCmdPolicyStore: %v", err)
+	}
+	if err := store.SetDenyPatterns([]string{"systemctl stop"}); err != nil {
+		t.Fatalf("SetDenyPatterns: %v", err)
+	}
+
+	// `svc stop web-01 nginx` builds the policy command "systemctl stop nginx",
+	// which matches the deny pattern and must be refused. (cobra structure: the
+	// `stop` subcommand takes <server> <unit> as its two positionals.)
+	out, code := run("svc", "stop", "web-01", "nginx")
+	if code == 0 {
+		t.Errorf("svc stop ran despite a matching cmd-policy deny pattern (bypass!); output: %q", out)
+	}
+	if !strings.Contains(out, "cmd-policy deny pattern") {
+		t.Errorf("svc stop refusal %q does not mention the cmd-policy deny pattern", out)
+	}
+
+	// A different action (`restart`) does not match "systemctl stop" and must pass
+	// the gate (it may still fail later with no live agent, but NOT for a policy
+	// reason).
+	out, _ = run("svc", "restart", "web-01", "nginx")
+	if strings.Contains(out, "cmd-policy deny pattern") {
+		t.Errorf("svc restart was wrongly blocked by the 'systemctl stop' deny pattern: %q", out)
+	}
+}
+
+// TestTunnelTargetScopedToLoopback pins finding #4: enforceToken scope-checks the
+// tunnel SERVER, but the dialed targetHost was never checked, so a server-scoped
+// token could forward to ANY host the jump server routes to. A server-scoped token
+// must be refused a non-loopback target and allowed a loopback one.
+func TestTunnelTargetScopedToLoopback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess RBAC test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+
+	store := core.NewTokenStore(dir)
+	scoped, err := store.Create(core.Token{Name: "scoped", Servers: []string{"web-01"}})
+	if err != nil {
+		t.Fatalf("create scoped token: %v", err)
+	}
+
+	run := func(args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir, "--token", scoped.ID}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+
+	// In-scope server (web-01) but an ARBITRARY target host (an internal DB) must
+	// be refused: the server-scoped token may not forward off the server itself.
+	out, code := run("tunnel", "web-01", "15432:10.0.0.2:5432")
+	if code != 1 {
+		t.Errorf("tunnel to a non-loopback target: exit %d, want 1 (output: %q)", code, out)
+	}
+	if !strings.Contains(strings.ToLower(out), "denied") || !strings.Contains(out, "loopback") {
+		t.Errorf("tunnel target refusal %q does not report the loopback restriction", out)
+	}
+
+	// A loopback target (the `<localPort>:<port>` shorthand → localhost on the
+	// server) is the legit localhost-forward and must NOT be target-scope-denied.
+	out, _ = run("tunnel", "web-01", "8080:80")
+	if strings.Contains(out, "may only tunnel to a loopback target") {
+		t.Errorf("a loopback tunnel target was wrongly scope-denied: %q", out)
+	}
+}
+
+// TestCommandOnlyTokenBackstop pins finding #7: the fail-closed backstop must
+// apply to ANY scoped token (IsScoped), not only a server-scoped one. A token
+// scoped ONLY read-only (no Servers/Groups, no AllowCommands) must still be
+// confined to the scoped-server-or-safe-local surface, so it cannot run
+// dashboard/files/ai/config etc.
+func TestCommandOnlyTokenBackstop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess RBAC test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+
+	store := core.NewTokenStore(dir)
+	// Scoped ONLY by read-only default: IsScoped() is true, but serverScoped is
+	// false. Before the fix this token skipped the backstop and could open the
+	// dashboard / browse files.
+	roToken, err := store.Create(core.Token{Name: "ro", ReadOnlyDefault: true})
+	if err != nil {
+		t.Fatalf("create read-only token: %v", err)
+	}
+
+	run := func(args ...string) (string, int) {
+		full := append([]string{"--config-dir", dir, "--token", roToken.ID}, args...)
+		cmd := exec.Command(bin, full...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			code = -1
+		}
+		return string(out), code
+	}
+
+	// Each of these is neither a scoped server command nor an allowed local command,
+	// so the backstop must deny them for a command-only scoped token.
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"dashboard", []string{"dashboard"}},
+		{"files", []string{"files"}},
+		{"config show", []string{"config", "show"}},
+	} {
+		out, code := run(c.args...)
+		if code != 1 {
+			t.Errorf("%s: exit %d, want 1 (output: %q)", c.name, code, out)
+		}
+		if !strings.Contains(strings.ToLower(out), "denied") {
+			t.Errorf("%s: output %q does not contain 'denied'", c.name, out)
+		}
+	}
+
+	// Positive control: `status` is an allowed safe-local command and must NOT be
+	// denied by the backstop.
+	out, _ := run("status")
+	if strings.Contains(strings.ToLower(out), "scoped token cannot run") {
+		t.Errorf("read-only token was wrongly backstop-denied 'status': %q", out)
+	}
+}
