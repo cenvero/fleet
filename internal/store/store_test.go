@@ -108,3 +108,41 @@ func TestSQLiteFilesAreOwnerOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestPrecreateSQLiteFilesAreOwnerOnly verifies that the database file and its
+// WAL/SHM/journal sidecars are created 0600 BEFORE the driver opens them. This
+// closes the brief world-readable window that existed when the files were
+// created with umask-default perms and only chmod'd to 0600 after open. Opening
+// with an explicit 0600 mode is umask-safe: a umask can only CLEAR permission
+// bits, and 0600 carries no group/other bits for it to clear, so the file is
+// born owner-only regardless of the process umask.
+func TestPrecreateSQLiteFilesAreOwnerOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "secrets.db")
+
+	if err := precreateSQLiteFiles(dbPath); err != nil {
+		t.Fatalf("precreateSQLiteFiles: %v", err)
+	}
+
+	for _, suffix := range sqliteFileSuffixes {
+		p := dbPath + suffix
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s created with perms %o, want 0600 (readable window not closed)", p, perm)
+		}
+	}
+
+	// Re-running is a no-op and must not loosen an already-tight file.
+	if err := precreateSQLiteFiles(dbPath); err != nil {
+		t.Fatalf("precreateSQLiteFiles (re-run): %v", err)
+	}
+	if fi, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("stat after re-run: %v", err)
+	} else if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("db perms after re-run = %o, want 0600", perm)
+	}
+}
