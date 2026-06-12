@@ -72,7 +72,7 @@ func newCronAddCommand(configDir *string) *cobra.Command {
 				Schedule: schedule,
 				Command:  command,
 			})
-			if err := writeCrontab(app, args[0], updated); err != nil {
+			if err := writeCrontab(app, *configDir, args[0], updated); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "scheduled job %q on %s: %s %s\n", name, args[0], schedule, command)
@@ -164,7 +164,7 @@ func newCronRemoveCommand(configDir *string) *cobra.Command {
 				return fmt.Errorf("no managed job named %q on %s", name, args[0])
 			}
 			updated := core.RemoveManagedCron(current, name)
-			if err := writeCrontab(app, args[0], updated); err != nil {
+			if err := writeCrontab(app, *configDir, args[0], updated); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "removed scheduled job %q from %s\n", name, args[0])
@@ -190,12 +190,23 @@ func readCrontab(app *core.App, server string) (string, error) {
 // writeCrontab replaces the server's user crontab with content. An empty
 // content clears the crontab (`crontab -r`); otherwise it is piped via a quoted
 // heredoc so nothing in the schedule or command is shell-expanded.
-func writeCrontab(app *core.App, server, content string) error {
+//
+// SECURITY: this is the single crontab MUTATION chokepoint for both `cron add`
+// and `cron rm`. `cron add` already runs the job command through the cmd-policy
+// gate (enforceCommandPolicyForLeaf), but `cron rm` of the last job clears the
+// whole crontab (`crontab -r`) with no gate, and the heredoc body write is a
+// state change too. Route the resolved crontab command through the SAME cmd-policy
+// deny/confirm gate so a deny pattern (e.g. `crontab -r`, `crontab`) can refuse it;
+// cron has no --confirm flag, so a confirm-required pattern blocks it (fail-safe).
+func writeCrontab(app *core.App, configDir, server, content string) error {
 	cmd := core.CronWriteCommand(content)
 	if strings.TrimSpace(content) == "" {
 		// Nothing left to manage: remove the crontab entirely (ignore "no
 		// crontab" errors so clearing an already-empty crontab succeeds).
 		cmd = "crontab -r 2>/dev/null || true"
+	}
+	if err := enforceCmdPolicy(configDir, cmd, false); err != nil {
+		return err
 	}
 	result, err := app.ExecCommand(server, cmd)
 	if err != nil {
