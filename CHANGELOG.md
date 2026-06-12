@@ -36,6 +36,39 @@ Omit sections that have no entries for that release.
 
 _Nothing yet — changes for the next release land here._
 
+## [v2.2.1] — 2026-06-12 (stable)
+
+Homebrew install ergonomics: agent updates are now driven solely by
+`fleet sync-agent`, and the `update` / `self-uninstall` commands defer the
+controller-binary lifecycle to Homebrew.
+
+### Changed
+
+- **Homebrew: `fleet update apply` no longer rolls out agents.** On Homebrew
+  installs the controller binary is `brew`-managed, and agent updates are now
+  driven exclusively by `fleet sync-agent`. `update apply` on Homebrew is
+  informational only — it prints the `brew upgrade` command and points to
+  `fleet sync-agent` (naming any agents whose stored version has drifted from
+  the controller). Only `fleet update check` does real work on Homebrew;
+  `apply`, `channel`, and `rollback` are blocked there.
+- **Homebrew: `fleet self-uninstall` defers the binary to Homebrew.** It removes
+  the config directory, then offers to run `brew uninstall cenvero-fleet`
+  instead of trying to delete the brew-managed binary itself.
+- **`fleet update check` on Homebrew surfaces drifted agents** and points to
+  `fleet sync-agent` to bring them in line with the controller.
+
+### Added
+
+- **`App.AgentsNeedingSync`** — reports managed agents whose last-observed
+  version differs from the controller (from versions already on disk; no network
+  calls), powering the `sync-agent` nudges above.
+
+### Fixed
+
+- **`-race` test flake** — `TestCatRemoteFileAbortsWithoutEOF` no longer runs
+  under `t.Parallel()` while mutating the package-global `maxCatRemoteBytes`
+  that a concurrent test reads (test-only; no runtime change).
+
 ## [v2.2.0] — 2026-06-12 (stable)
 
 A large security-hardening campaign (a full-codebase audit plus four follow-up
