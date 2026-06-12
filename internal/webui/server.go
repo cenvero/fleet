@@ -287,6 +287,38 @@ func cleanLocalPath(p string) (string, error) {
 	return filepath.Clean(p), nil
 }
 
+// resolveLocalWritePath canonicalizes a local write/create target so an attacker
+// cannot use a symlinked INTERMEDIATE directory to redirect the create/truncate
+// outside the path the user actually named. O_NOFOLLOW only guards the FINAL
+// component: an open of "/pane/sub/file" still TRAVERSES a symlinked "sub", so a
+// symlink planted (or swapped in via TOCTOU) on the parent chain could land the
+// write somewhere else entirely while the final-component O_NOFOLLOW check still
+// passes.
+//
+// We mirror the agent's validateWriteTarget approach: resolve the PARENT
+// directory's symlinks with EvalSymlinks and rejoin the final component onto the
+// canonical real parent, so the bytes are written at the deterministic resolved
+// location rather than wherever a symlink swapped in mid-flight points. This
+// deliberately does NOT reject legitimate OS-level symlinks in the chain (e.g.
+// macOS "/var" -> "/private/var", or "/tmp"): those resolve to a stable real
+// directory, which is exactly what we open. The caller still passes oNoFollow on
+// the final open so a symlinked final component is refused and the last hop has
+// no TOCTOU gap.
+//
+// `clean` must be an absolute, filepath.Clean-ed path (from cleanLocalPath or a
+// filepath.Join of validated inputs). If the parent does not yet exist (so its
+// symlinks can't be resolved), the lexical parent is used unchanged — there is
+// no existing symlink there to follow, and the subsequent open will create or
+// fail against plain components.
+func resolveLocalWritePath(clean string) string {
+	parent := filepath.Dir(clean)
+	realParent := parent
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		realParent = resolved
+	}
+	return filepath.Join(realParent, filepath.Base(clean))
+}
+
 // listLocalDir reads a directory on the controller and returns it in the same
 // JSON shape as a remote listing, so the frontend renders Local and server panes
 // identically. Dotfiles are hidden unless showHidden is set.
@@ -501,10 +533,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// A Local destination pane writes the uploaded bytes straight to disk on the
 	// controller — no spooling or agent round-trip needed.
 	if server == "" {
-		localPath := filepath.Join(filepath.Clean(dir), name)
+		// Resolve the parent's symlinks so a symlinked INTERMEDIATE directory in
+		// `dir` can't redirect the write outside the path the user named; O_NOFOLLOW
+		// only guards the final component.
+		localPath := resolveLocalWritePath(filepath.Join(filepath.Clean(dir), name))
 		// O_NOFOLLOW so a symlink planted at the destination can't redirect the
 		// truncating write to an arbitrary file; a symlinked target is rejected.
-		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- dir validated absolute above, O_NOFOLLOW set
+		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- dir validated absolute above, parent symlinks resolved + final O_NOFOLLOW
 		if err != nil {
 			writeError(w, symlinkClobberError(localPath, err))
 			return
@@ -734,9 +769,13 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		// Resolve the parent's symlinks so a symlinked intermediate directory can't
+		// redirect this truncating write outside the named path; O_NOFOLLOW below
+		// only guards the final component.
+		clean = resolveLocalWritePath(clean)
 		// O_NOFOLLOW so an attacker-planted symlink at the edit target can't
 		// redirect this truncating write elsewhere; a symlinked target errors out.
-		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- path validated by cleanLocalPath, O_NOFOLLOW set
+		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- path validated by cleanLocalPath, parent symlinks resolved + final O_NOFOLLOW
 		if err != nil {
 			writeError(w, symlinkClobberError(clean, err))
 			return
@@ -791,7 +830,11 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path validated
+		// Resolve the parent's symlinks so a symlinked intermediate directory can't
+		// redirect the create outside the named path; O_EXCL guards the final
+		// component against clobbering an existing file/symlink.
+		clean = resolveLocalWritePath(clean)
+		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path validated, parent symlinks resolved, O_EXCL on final
 		if err != nil {
 			writeError(w, err)
 			return
