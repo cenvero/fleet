@@ -74,7 +74,9 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 
 	config := &ssh.ServerConfig{
 		Config: ssh.Config{
-			Ciphers: transport.SupportedCiphers(),
+			Ciphers:      transport.SupportedCiphers(),
+			KeyExchanges: transport.SupportedKEX(),
+			MACs:         transport.SupportedMACs(),
 		},
 		// Identifies this port as a Cenvero Fleet agent to anyone who scans it.
 		// Standard SSH clients cannot open sessions anyway — they don't know the
@@ -137,7 +139,9 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 	}
 	config := &ssh.ServerConfig{
 		Config: ssh.Config{
-			Ciphers: transport.SupportedCiphers(),
+			Ciphers:      transport.SupportedCiphers(),
+			KeyExchanges: transport.SupportedKEX(),
+			MACs:         transport.SupportedMACs(),
 		},
 		ServerVersion: "SSH-2.0-cenvero-fleet-agent",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
