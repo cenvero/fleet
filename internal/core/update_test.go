@@ -110,7 +110,7 @@ func TestApplyFleetUpdateRollsAcrossAgentsAndKeepsFailuresIsolated(t *testing.T)
 		return clientConn, nil
 	}
 
-	result, err := app.ApplyFleetUpdate(context.Background(), nil)
+	result, err := app.ApplyFleetUpdate(context.Background(), nil, false, false)
 	if err != nil {
 		t.Fatalf("ApplyFleetUpdate() error = %v", err)
 	}
@@ -167,7 +167,7 @@ func TestApplyFleetUpdateSkipsControllerForHomebrewInstall(t *testing.T) {
 		return update.ApplyResult{}, nil
 	}
 
-	result, err := app.ApplyFleetUpdate(context.Background(), nil)
+	result, err := app.ApplyFleetUpdate(context.Background(), nil, false, false)
 	if err != nil {
 		t.Fatalf("ApplyFleetUpdate() error = %v", err)
 	}
@@ -222,7 +222,7 @@ func TestApplyFleetUpdateCanTargetSubset(t *testing.T) {
 		t.Fatalf("AddServer() error = %v", err)
 	}
 
-	if _, err = app.ApplyFleetUpdate(context.Background(), []string{"missing-node"}); err == nil {
+	if _, err = app.ApplyFleetUpdate(context.Background(), []string{"missing-node"}, false, false); err == nil {
 		t.Fatalf("expected ApplyFleetUpdate() to fail for a missing targeted server")
 	}
 }
