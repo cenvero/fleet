@@ -678,6 +678,7 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	go func() { errCh <- hub.Serve(ctx, reverseListener) }()
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()
 	go a.runMetricsPoller(ctx)
+	go a.runUpdateChecker(ctx)
 
 	select {
 	case <-ctx.Done():

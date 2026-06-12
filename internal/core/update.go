@@ -66,24 +66,42 @@ type homebrewHintCache struct {
 	Latest    string    `json:"latest"`
 }
 
-// HomebrewUpdateHint returns a non-empty latest version string when a newer stable
-// release is available and the user has not disabled update notifications.
-// It caches the manifest result for 10 minutes to avoid hammering the CDN on every command.
-func HomebrewUpdateHint(configDir, manifestURL string, policy update.Policy) string {
+// updateCheckInterval is how often the daemon refreshes the cached "is a newer
+// release available" result — and the TTL the CLI honors for the same cache, so
+// neither hammers the CDN.
+const updateCheckInterval = 10 * time.Minute
+
+const (
+	ansiYellow = "\033[33m"
+	ansiReset  = "\033[0m"
+)
+
+// UpdateAvailable returns the latest version for the CONFIGURED channel when it is
+// strictly newer than the running binary, or "" if up to date, disabled, a
+// dev/unversioned build, or the manifest is unreachable. The manifest result is
+// cached for updateCheckInterval (data/update-available.json).
+func UpdateAvailable(configDir, manifestURL, channel string, policy update.Policy) string {
 	if policy == update.PolicyDisabled {
 		return ""
 	}
-	cacheFile := filepath.Join(configDir, "data", "homebrew-update.json")
+	cur := strings.TrimSpace(version.Version)
+	if cur == "" || cur == "dev" {
+		return "" // a dev/unversioned build is never "out of date"
+	}
+	if strings.TrimSpace(channel) == "" {
+		channel = "stable"
+	}
+	cacheFile := filepath.Join(configDir, "data", "update-available.json")
 	var cache homebrewHintCache
 	if data, err := os.ReadFile(cacheFile); err == nil {
 		_ = json.Unmarshal(data, &cache)
 	}
-	if time.Since(cache.CheckedAt) > 10*time.Minute {
+	if time.Since(cache.CheckedAt) > updateCheckInterval {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		manifest, err := update.Fetch(ctx, manifestURL)
 		if err == nil {
-			if ch, ok := manifest.Channels["stable"]; ok {
+			if ch, ok := manifest.Channels[channel]; ok {
 				cache = homebrewHintCache{CheckedAt: time.Now().UTC(), Latest: ch.Version}
 				if data, err := json.Marshal(cache); err == nil {
 					_ = os.WriteFile(cacheFile, data, 0o600)
@@ -95,6 +113,66 @@ func HomebrewUpdateHint(configDir, manifestURL string, policy update.Policy) str
 		return cache.Latest
 	}
 	return ""
+}
+
+// UpgradeCommand returns the correct upgrade command for how this binary was
+// installed: Homebrew vs a self-managed `fleet update apply`.
+func UpgradeCommand() string {
+	if RuntimeIsHomebrewInstall() {
+		return "brew update && brew upgrade cenvero-fleet"
+	}
+	return "fleet update apply"
+}
+
+// UpdateNotice returns a ready-to-print update notice (with the correct upgrade
+// command for the install method) when a newer release is available on the
+// configured channel, or "" otherwise. When color is true it is wrapped in ANSI
+// yellow.
+func UpdateNotice(configDir, manifestURL, channel string, policy update.Policy, color bool) string {
+	latest := UpdateAvailable(configDir, manifestURL, channel, policy)
+	if latest == "" {
+		return ""
+	}
+	msg := fmt.Sprintf("⬆  Update your fleet — Cenvero Fleet %s is available (you have %s). Upgrade with:\n     %s",
+		latest, version.Canonical(version.Version), UpgradeCommand())
+	if color {
+		return ansiYellow + msg + ansiReset
+	}
+	return msg
+}
+
+// runUpdateChecker periodically refreshes the cached "newer release available"
+// result on the user's configured channel, so the daemon keeps it warm and any
+// CLI command (or the next dashboard render) can surface the yellow update
+// notice even with no interactive activity. It logs once per newly-seen version.
+func (a *App) runUpdateChecker(ctx context.Context) {
+	if a.Config.Updates.Policy == update.PolicyDisabled {
+		return
+	}
+	var lastSeen string
+	check := func() {
+		latest := UpdateAvailable(a.ConfigDir, a.Config.ManifestURL, a.Config.Updates.Channel, a.Config.Updates.Policy)
+		if latest != "" && latest != lastSeen {
+			lastSeen = latest
+			_ = a.AuditLog.Append(logs.AuditEntry{
+				Action:   "update.available",
+				Target:   "controller",
+				Operator: a.operator(),
+				Details:  fmt.Sprintf("%s available on channel %q (running %s); upgrade: %s", latest, a.Config.Updates.Channel, version.Version, UpgradeCommand()),
+			})
+		}
+	}
+	check()
+	ticker := time.NewTicker(updateCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			check()
+		}
+	}
 }
 
 // isNewerVersion returns true if candidate is strictly newer than current.

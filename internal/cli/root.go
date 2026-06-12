@@ -132,11 +132,12 @@ func NewRootCommand() *cobra.Command {
 				if hint := core.AdjustInitHint(cfg); hint != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
 				}
-				// Background Homebrew update hint.
-				if core.RuntimeIsHomebrewInstall() {
-					if hint := core.HomebrewUpdateHint(configDir, cfg.ManifestURL, cfg.Updates.Policy); hint != "" {
-						fmt.Fprintf(cmd.ErrOrStderr(), "\nUpdate available (%s). To upgrade:\n\n  brew update && brew upgrade cenvero-fleet\n\n", hint)
-					}
+				// Update notice (any install method): shows the latest version on the
+				// configured channel + the correct upgrade command (brew vs
+				// `fleet update apply`), in yellow on a terminal. Backed by the same
+				// 10-minute cache the daemon's update checker keeps warm.
+				if notice := core.UpdateNotice(configDir, cfg.ManifestURL, cfg.Updates.Channel, cfg.Updates.Policy, term.IsTerminal(int(os.Stderr.Fd()))); notice != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "\n%s\n\n", notice)
 				}
 				// Stamp last-seen version so 'fleet recover' can detect mismatches.
 				core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
