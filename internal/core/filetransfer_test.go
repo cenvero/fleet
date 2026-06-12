@@ -256,6 +256,8 @@ type instrumentedFileManager struct {
 	writes         int
 	failAfter      int
 	truncateReadBy int64
+	neverEOFData   []byte // when set, Read returns this data with EOF never true
+	blankFinalize  bool   // when set, Finalize returns an empty SHA256 digest
 }
 
 func (m *instrumentedFileManager) setFailAfter(n int) {
@@ -271,6 +273,37 @@ func (m *instrumentedFileManager) setTruncateReadBy(n int64) {
 	m.mu.Lock()
 	m.truncateReadBy = n
 	m.mu.Unlock()
+}
+
+// setNeverEOF makes every Read return data (with a matching SHA) and EOF=false
+// forever, simulating a malicious agent that streams without ever signalling
+// end-of-file so the controller's read loop would never terminate on its own.
+func (m *instrumentedFileManager) setNeverEOF(data []byte) {
+	m.mu.Lock()
+	m.neverEOFData = data
+	m.mu.Unlock()
+}
+
+// setBlankFinalize makes Finalize report an empty SHA256 while still writing the
+// real bytes, simulating a destination agent that withholds its finalize digest.
+func (m *instrumentedFileManager) setBlankFinalize(b bool) {
+	m.mu.Lock()
+	m.blankFinalize = b
+	m.mu.Unlock()
+}
+
+func (m *instrumentedFileManager) Finalize(ctx context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
+	res, err := m.FileManager.Finalize(ctx, p)
+	if err != nil {
+		return res, err
+	}
+	m.mu.Lock()
+	blank := m.blankFinalize
+	m.mu.Unlock()
+	if blank {
+		res.SHA256 = ""
+	}
+	return res, nil
 }
 
 func (m *instrumentedFileManager) writeCount() int {
@@ -292,6 +325,19 @@ func (m *instrumentedFileManager) Write(ctx context.Context, p proto.FileWritePa
 }
 
 func (m *instrumentedFileManager) Read(ctx context.Context, p proto.FileReadPayload) (proto.FileReadResult, error) {
+	m.mu.Lock()
+	never := m.neverEOFData
+	m.mu.Unlock()
+	if never != nil {
+		sum := sha256.Sum256(never)
+		return proto.FileReadResult{
+			Offset: p.Offset,
+			Length: int64(len(never)),
+			Data:   never,
+			SHA256: hex.EncodeToString(sum[:]),
+			EOF:    false, // never signals end-of-file
+		}, nil
+	}
 	res, err := m.FileManager.Read(ctx, p)
 	if err != nil {
 		return res, err
