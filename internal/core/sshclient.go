@@ -90,9 +90,15 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 	// inside each runSSHOnce call so that reconnect attempts re-read the
 	// current known_hosts file and don't re-pin already-known hosts.
 	clientConfig := &ssh.ClientConfig{
-		User:    user,
-		Auth:    []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		Timeout: 15 * time.Second,
+		Config: ssh.Config{
+			Ciphers:      transport.SupportedCiphers(),
+			KeyExchanges: transport.SupportedKEX(),
+			MACs:         transport.SupportedMACs(),
+		},
+		User:              user,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyAlgorithms: transport.SupportedHostKeyAlgos(),
+		Timeout:           15 * time.Second,
 	}
 
 	for attempt := 0; attempt <= sshMaxRetries; attempt++ {
