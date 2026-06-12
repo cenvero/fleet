@@ -32,6 +32,69 @@ Omit sections that have no entries for that release.
 
 <!-- releases appended below by the release workflow -->
 
+## [Unreleased]
+
+A large security-hardening campaign (a full-codebase audit plus three follow-up
+re-audit rounds) alongside a new automation/RBAC command surface, encrypted
+secrets, signed anti-rollback updates, and operability improvements.
+
+### Added
+
+- **Automation command surface.** A broad batch of operator/automation commands:
+  - `exec` enhancements — `--json`, `--timeout`, `--retry`, `--propagate-exit`,
+    plus exec-time enforcement (dry-run, on-fail, group, guard, command policy,
+    approval, idempotency, output redaction).
+  - Stored automations with a shell-init loader and shell autocomplete.
+  - Tags and inventory; service / `journal` / `top` views; `file edit`/`diff`,
+    `cp`.
+  - `notify`/webhooks, cron schedules, drift detection, policy/redaction, agent
+    version reporting.
+  - Playbooks, a dead-man's-switch, `doctor`, `jobs`, command policy, `health`,
+    firewall (`fw`), approvals, and idempotency keys.
+  - FL-028 SSH tunnels, FL-031 auto-firing notifications, FL-033 rolling
+    updates, and FL-026 group diff.
+- **Secrets (FL-004).** `secrets store` plus `exec --secret VAR=@name` to inject
+  named secrets into the command environment, with values redacted from output.
+- **RBAC scoped tokens (FL-030).** Controller-side enforcement of per-token
+  scopes, with audited actions attributed to the active token.
+- **Custom job names** and a **parallel `sync-agent`** with live progress.
+- **Periodic update check.** A background version check that surfaces a yellow
+  "update available" notice regardless of how Fleet was installed.
+
+### Changed
+
+- Secrets are now encrypted at rest with AES-256-GCM, keyed from the
+  controller key.
+- Refreshed README, SECURITY, the public site, and the agent/AI context docs to
+  describe fail-closed RBAC, per-token secrets, anti-rollback updates,
+  `sync-agent` progress, and named jobs.
+
+### Security
+
+- **Full-codebase vulnerability audit remediation** across the agent sandbox,
+  transport, file transfer, update flow, RBAC, secrets, and web UI.
+- **Reverse-mode enrollment tokens** close the rogue-agent TOFU race in
+  reverse-connect onboarding (HIGH).
+- **Fail-closed RBAC** — re-audit round 2 made authorization deny-by-default and
+  extended scope checks to `ssh`/`tag`/`doctor`/`template`; destructive `tag`
+  operations and archive symlink handling were hardened (CRITICAL/HIGH). Token
+  enforcement was extended to the `automation`, `autocomplete`, and `update`
+  subcommands.
+- **Re-audit round 2 mediums** — agent DoS bounds, transfer write-overflow,
+  bootstrap MITM, firewall fail-open, `run` command-policy gaps, and per-token
+  secret authorization.
+- **Re-audit round 3** — update anti-rollback (refuse downgrade below the
+  current/`min_supported` version), reverse-listener DoS cap with a post-auth
+  timeout, file-diff memory bounds (8 MiB read cap + lower LCS bound), write
+  `O_NOFOLLOW` and archive validate/extract TOCTOU fixes, probe allocation cap,
+  job logfiles at `0600` with unpredictable names, plus round-3 low findings
+  (permissions, DoS bounds, DNS-rebind, atomic key writes, SSRF, input
+  validation).
+- Earlier audit waves: exec gate, key-rotation, job sentinel, and tunnel fixes;
+  option-injection, firewall fail-open, deny-rule anchoring, and agent-error
+  redaction; and a bounded file-diff LCS table (CodeQL
+  `go/allocation-size-overflow`).
+
 ## [v2.1.0] — 2026-06-09 (stable)
 
 A major file-manager release: an in-app editor, archives, more operations, and
@@ -134,3 +197,87 @@ faster directory transfers — across the CLI, the terminal UI, and the web UI.
 ### Fixed
 
 - Guard against an `index out of range` panic in the dashboard log view when a cached log is marked available but has no lines.
+
+## [v1.6.6] — 2026-06-06 (stable)
+
+### Changed
+
+- Updated `golang.org/x/crypto` to 0.52.0.
+
+## [v1.6.5] — 2026-05-14 (stable)
+
+### Changed
+
+- Updated `golang.org/x/crypto` to 0.51.0.
+
+## [v1.6.4] — 2026-05-06 (stable)
+
+Promotion of `v1.6.4-beta.1` to stable.
+
+### Changed
+
+- Updated `golang.org/x/crypto` to 0.50.0.
+
+## [v1.6.4-beta.1] — 2026-05-06 (beta)
+
+### Fixed
+
+- Fixed several `fleet update` edge cases.
+
+## [v1.6.3] — 2026-04-26 (stable)
+
+### Changed
+
+- Routine dependency and CI-action bumps (`pgx/v5`, `actions/checkout`,
+  `actions/download-artifact`, `goreleaser/goreleaser-action`).
+
+<!--
+Older stable releases (v1.6.2 and earlier) are pruned per the retention policy
+(10 most recent stable). v1.6.3 is also the current min_supported stable.
+Full history: https://github.com/cenvero/fleet/releases
+-->
+
+## [v1.3.3-beta.1] — 2026-04-15 (beta)
+
+### Changed
+
+- Use `HOMEBREW_TOKEN` for the `homebrew-fleet` formula push.
+
+## [v0.1.0-alpha.1] — 2026-04-15 (alpha)
+
+The initial public pre-release of Cenvero Fleet — a self-hosted,
+operator-owned fleet manager for Linux, macOS, and Windows, with no cloud
+dependency in the core runtime.
+
+### Added
+
+- **Controller (`fleet`) and agent (`fleet-agent`) binaries.** A Cobra CLI with
+  a Bubble Tea terminal dashboard (multi-panel, mouse + keyboard), and an agent
+  supporting both direct and reverse SSH transport.
+- **Encrypted SSH-based control channel** with TOFU host-key pinning, for both
+  direct-mode and reverse-mode sessions.
+- **Core operator command groups:** `server`, `service`, `logs`, `firewall`,
+  `port`, `alerts`, `database`, `template`, `key`, `update`, and `config`, plus
+  `fleet init` to lay out config, keys, databases, and audit paths.
+- **`fleet ssh` and `fleet exec`** for interactive shells and remote command
+  execution over the agent's own channel.
+- **Live RPCs** for services, logs, metrics, firewall, and ports; metrics
+  polling with alerting, suppression, acknowledgement, and desktop
+  notifications.
+- **Automatic agent install and teardown** on `server add`/`remove`, with an
+  install preview, interactive server add, password auth, and a `--no-agent`
+  flag.
+- **Linux-first service management, firewall control, and remote bootstrap;**
+  controller-owned cached service logs with size/count/age retention.
+- **Managed database backends** for SQLite, PostgreSQL, MySQL, and MariaDB.
+- **Controller key rotation** with rollout support for direct and reverse
+  fleets, and a controller/agent **update flow with rollback**.
+- **Release/distribution tooling:** signed (minisign) release assets, a
+  generated update manifest, a docs site under `public/`, and CI / CodeQL /
+  Goreleaser pipelines.
+
+### Security
+
+- Fixed a race between `SaveServer`/`GetServer` on concurrent reverse connects.
+- Resolved gofmt and gosec findings (G115/G302/G306) and a data race in the
+  `memConn` test helper.
