@@ -5,9 +5,40 @@ package core
 
 import (
 	"bytes"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestCatRemoteFileAbortsWithoutEOF confirms CatRemoteFile refuses to stream
+// forever from a malicious agent that returns data but never sets EOF. Without
+// the iteration/byte cap this would loop until the controller ran out of time
+// or the writer's disk; with it, the loop aborts with an error.
+func TestCatRemoteFileAbortsWithoutEOF(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	// Lower the byte ceiling so the abort fires after a few round-trips instead of
+	// the hundreds the production 4 GiB cap would need (an envelope can't carry
+	// more than ~11 MiB, so each chunk is small). Restore it after.
+	prev := maxCatRemoteBytes
+	maxCatRemoteBytes = 20 * 1024 * 1024 // 20 MiB
+	defer func() { maxCatRemoteBytes = prev }()
+	// Every Read returns ~8 MiB (under the envelope ceiling) with EOF never set.
+	rig.fileMgr.setNeverEOF(bytes.Repeat([]byte("A"), 8*1024*1024))
+
+	_, err := rig.app.CatRemoteFile("loopback", "/whatever", io.Discard)
+	if err == nil {
+		t.Fatal("CatRemoteFile must abort when the agent never sets EOF")
+	}
+	if !strings.Contains(err.Error(), "aborting remote read") {
+		t.Fatalf("expected an abort error, got: %v", err)
+	}
+}
 
 func TestFileOpsStatCatAndRecursive(t *testing.T) {
 	t.Parallel()
