@@ -72,6 +72,24 @@ func parseTunnelSpec(spec string) (tunnelSpec, error) {
 	return out, nil
 }
 
+// isLoopbackTunnelTarget reports whether host names the server's own loopback —
+// the only target a SERVER-SCOPED token may forward to (a `<localPort>:<port>`
+// shorthand resolves to "localhost", and an explicit 127.0.0.1/::1 is equivalent).
+// A bare hostname like "localhost" is matched by name; an IP is matched by
+// net.IP.IsLoopback so 127.0.0.0/8 and ::1 are all covered. Anything else (a
+// routable IP or another hostname) is out of scope.
+func isLoopbackTunnelTarget(host string) bool {
+	h := strings.TrimSpace(host)
+	h = strings.Trim(h, "[]") // tolerate a bracketed IPv6 literal
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 func parsePort(s, label string) (int, error) {
 	s = strings.TrimSpace(s)
 	p, err := strconv.Atoi(s)
@@ -108,6 +126,21 @@ func newTunnelCommand(configDir *string) *cobra.Command {
 			spec, err := parseTunnelSpec(args[1])
 			if err != nil {
 				return err
+			}
+
+			// FL-030 tunnel-target scoping: enforceToken (PersistentPreRunE) already
+			// scope-checks the SERVER (args[0]), but the dialed targetHost:targetPort is
+			// dialed FROM that server and was never checked — a SERVER-SCOPED token could
+			// forward to ANY host the jump server routes to (an internal DB,
+			// 169.254.169.254, another VPC host). Confine a server-scoped token to a
+			// LOOPBACK target on the server itself (the legit localhost-forward use). An
+			// unscoped/command-only token is unaffected.
+			tok, terr := currentVerifiedToken(cmd, *configDir)
+			if terr != nil {
+				return terr
+			}
+			if tok != nil && (len(tok.Servers) > 0 || len(tok.Groups) > 0) && !isLoopbackTunnelTarget(spec.targetHost) {
+				return fmt.Errorf("denied: a server-scoped token may only tunnel to a loopback target on the server (got %q); forwarding to arbitrary hosts is out of scope in RBAC v1", spec.targetHost)
 			}
 
 			app, err := openApp(*configDir)
