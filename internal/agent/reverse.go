@@ -93,6 +93,14 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 
 	for {
 		err := runReverseSession(ctx, opts, server)
+		// --accept-new-host-key authorizes a one-time re-pin of the controller's
+		// host key on the FIRST connection attempt only. Clearing it afterwards
+		// means every later reconnect uses strict pinning, so a MITM who shows up
+		// at some future reconnect cannot silently swap the controller key —
+		// re-trusting a changed key then requires a fresh operator action.
+		// (First-use TOFU pinning, when no pin exists yet, happens regardless of
+		// this flag, so clearing it never blocks a legitimate initial enrollment.)
+		opts.AcceptNewHostKey = false
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -125,12 +133,15 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 
 	config := &ssh.ClientConfig{
 		Config: ssh.Config{
-			Ciphers: transport.SupportedCiphers(),
+			Ciphers:      transport.SupportedCiphers(),
+			KeyExchanges: transport.SupportedKEX(),
+			MACs:         transport.SupportedMACs(),
 		},
-		User:            reverseAuthUser(opts.ServerName, opts.EnrollToken),
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+		User:              reverseAuthUser(opts.ServerName, opts.EnrollToken),
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: transport.SupportedHostKeyAlgos(),
+		Timeout:           10 * time.Second,
 	}
 
 	var rawConn net.Conn
