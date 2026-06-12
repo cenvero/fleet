@@ -43,6 +43,13 @@ import (
 // written to the environment, which would be forgeable.
 var actingOperator string
 
+// minRedactLen is the shortest secret value the exec output-scrub will redact. A
+// 1-3 char value (a flag, a digit, "on") would match all over benign output and
+// mass-redact it into ***REDACTED*** noise — corruption, not a leak — so values
+// below this length are skipped. A genuine secret is far longer and a 1-3 char
+// value carries negligible entropy to leak.
+const minRedactLen = 4
+
 // tokenNamePattern is the strict charset allowed for a token name used in audit
 // attribution: letters, digits, dot, underscore and hyphen, 1-64 chars. It
 // excludes whitespace and control characters so a token name can never inject a
@@ -312,6 +319,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 	// a constrained credential escalate its own (or others') scope.
 	if top == "token" && (sub == "create" || sub == "revoke") {
 		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'token %s'\n", sub)
+		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("token %s (scoped token may not mint/modify tokens)", sub))
 		os.Exit(1)
 	}
 
@@ -326,17 +334,21 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		switch {
 		case top == "secret" && (sub == "set" || sub == "rotate" || sub == "rm"):
 			fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'secret %s'\n", sub)
+			AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("secret %s (scoped token may not mutate secrets)", sub))
 			os.Exit(1)
 		case top == "policy" && sub == "set":
 			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'policy set'")
+			AuditDeniedHardExit(configDir, token.Name, "policy set (scoped token may not change policy)")
 			os.Exit(1)
 		case top == "cmd-policy" && sub == "set":
 			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'cmd-policy set'")
+			AuditDeniedHardExit(configDir, token.Name, "cmd-policy set (scoped token may not change cmd-policy)")
 			os.Exit(1)
 		case top == "token":
 			// Any token mutation beyond create/revoke (already handled above).
 			if sub != "" && sub != "list" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'token %s'\n", sub)
+				AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("token %s (scoped token may not mutate tokens)", sub))
 				os.Exit(1)
 			}
 		}
@@ -359,6 +371,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		groupSet, _ := cmd.Flags().GetString("group")
 		if allSet || strings.TrimSpace(groupSet) != "" {
 			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a fan-out exec (--all/--group) in RBAC v1")
+			AuditDeniedHardExit(configDir, token.Name, "exec fan-out (--all/--group) denied for server-scoped token")
 			os.Exit(1)
 		}
 	}
@@ -370,6 +383,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 	// DENIED `run` outright (fail-closed) rather than allowed to slip past scoping.
 	if serverScoped && top == "run" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a playbook (multi-server targets cannot be vetted) in RBAC v1")
+		AuditDeniedHardExit(configDir, token.Name, "run playbook denied for server-scoped token (multi-server targets unvettable)")
 		os.Exit(1)
 	}
 
@@ -384,11 +398,13 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		switch top {
 		case "top", "health":
 			fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run the fleet-wide read %q (it would probe out-of-scope servers) in RBAC v1\n", top)
+			AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("%s fleet-wide read denied for server-scoped token", top))
 			os.Exit(1)
 		case "inventory":
 			// A bare `inventory` (no positional server) fans out to all servers.
 			if strings.TrimSpace(bestEffortInventoryServer(args)) == "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run a fleet-wide 'inventory' (it would probe out-of-scope servers); target a single in-scope server instead")
+				AuditDeniedHardExit(configDir, token.Name, "bare inventory fleet-wide read denied for server-scoped token")
 				os.Exit(1)
 			}
 		}
@@ -401,6 +417,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 	if serverScoped &&
 		(top == "cp" || (top == "file" && (sub == "copy" || sub == "move" || sub == "diff"))) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run cross-server %q in RBAC v1\n", strings.TrimSpace(top+" "+sub))
+		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("cross-server %s denied for server-scoped token", strings.TrimSpace(top+" "+sub)))
 		os.Exit(1)
 	}
 
@@ -410,18 +427,26 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 	// otherwise a missing/odd-shaped positional would silently bypass scoping.
 	if serverScoped && serverArgCommands[top] && strings.TrimSpace(targetServer) == "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token must target a server in scope for %q (none resolved)\n", strings.TrimSpace(top+" "+sub))
+		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("%s denied for server-scoped token (no target server resolved)", strings.TrimSpace(top+" "+sub)))
 		os.Exit(1)
 	}
 
-	// FAIL-CLOSED backstop: a server-scoped token may run ONLY a recognized
-	// server-scoped command (scope-checked here) or a known safe local command.
-	// Anything else — a controller-management command (config/key/backup/…), an
-	// interactive multi-server UI (dashboard/files/ai), or a server-targeting
-	// command not yet listed in serverArgCommands — is DENIED. This converts the
-	// previous fail-OPEN default (unclassified command → scope check skipped) into
-	// fail-closed, so a missed command can never bypass scoping again.
-	if serverScoped && !serverArgCommands[top] && top != "inventory" && !scopedLocalCommands[top] {
-		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a server-scoped token cannot run %q — it is neither a scoped server command nor an allowed local command (RBAC v1)\n", strings.TrimSpace(top))
+	// FAIL-CLOSED backstop: ANY scoped token may run ONLY a recognized
+	// server-scoped command (scope-checked here / by Authorize) or a known safe
+	// local command. Anything else — a controller-management command
+	// (config/key/backup/…), an interactive multi-server UI (dashboard/files/ai),
+	// or a server-targeting command not yet listed in serverArgCommands — is DENIED.
+	//
+	// This keys on IsScoped(), not serverScoped: a token scoped ONLY by
+	// --allow/--deny/--read-only (no Servers/Groups) is still a constrained
+	// credential, but it would otherwise skip this backstop and could run
+	// dashboard/files/ai (which Authorize's read/command checks don't catch for a
+	// read-only- or deny-only-scoped token). Confining a command-only token to the
+	// same scoped-server-or-safe-local surface closes that bypass. An entirely
+	// UNSCOPED token (the admin-equivalent) is unaffected.
+	if token.IsScoped() && !serverArgCommands[top] && top != "inventory" && !scopedLocalCommands[top] {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run %q — it is neither a scoped server command nor an allowed local command (RBAC v1)\n", strings.TrimSpace(top))
+		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("%s (backstop: not a scoped server or allowed local command)", strings.TrimSpace(top+" "+sub)))
 		os.Exit(1)
 	}
 
@@ -444,6 +469,17 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// AuditDeniedHardExit records a hard-denial (os.Exit(1)) RBAC refusal to the
+// controller audit log so the early fail-closed denials in enforceToken — fan-out
+// exec/run, cross-server, fleet-wide reads, the empty-target and fail-closed
+// backstop, and the sensitive-local-mutation denials — leave the same audit trail
+// the Authorize() failure path already does (root.go:441), rather than exiting
+// silently. operator is the (already validated) token name; it is prefixed with
+// "token:" to match the Authorize-path attribution. Best-effort.
+func AuditDeniedHardExit(configDir, tokenName, detail string) {
+	core.AuditDeniedAccess(configDir, "token:"+tokenName, detail)
 }
 
 // topLevelCommand walks cmd up to the first-level command under root and returns
@@ -1952,6 +1988,8 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		},
 	})
 	var targetServers []string
+	var allowUnsigned bool
+	var allowDowngrade bool
 	applyCmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Apply the latest controller update and roll it out across managed agents",
@@ -1985,7 +2023,7 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			result, err := app.ApplyFleetUpdate(cmd.Context(), targetServers)
+			result, err := app.ApplyFleetUpdate(cmd.Context(), targetServers, allowUnsigned, allowDowngrade)
 			if err != nil {
 				return err
 			}
@@ -1993,6 +2031,8 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		},
 	}
 	applyCmd.Flags().StringArrayVar(&targetServers, "server", nil, "limit the rollout to one or more specific servers")
+	applyCmd.Flags().BoolVar(&allowUnsigned, "allow-unsigned", false, "apply an update whose manifest entry has no minisign signature (INSECURE; for local/ad-hoc builds only)")
+	applyCmd.Flags().BoolVar(&allowDowngrade, "allow-downgrade", false, "permit installing a version older than the running one or below the channel's min_supported")
 	updateCmd.AddCommand(applyCmd)
 	updateCmd.AddCommand(&cobra.Command{
 		Use:   "rollback",
@@ -2466,12 +2506,18 @@ Examples:
 			// resolved secret value. The secret scrub is independent of the
 			// file-based redactor (which is nil when no policy.json exists), so a
 			// secret value is always removed from output even with no policy set.
+			//
+			// A very short secret value (1-3 chars, e.g. a flag or a counter) would
+			// match all over benign output and mass-redact it into noise — that is
+			// corruption, not a leak. Skip the scrub for values below minRedactLen; a
+			// real secret is far longer, and a tiny value carries little entropy to
+			// leak anyway. The file-based redactor (regex patterns) is unaffected.
 			redact := func(s string) string {
 				if redactor != nil {
 					s = redactor.Redact(s)
 				}
 				for _, sec := range secrets {
-					if sec.value != "" {
+					if len(sec.value) >= minRedactLen {
 						s = strings.ReplaceAll(s, sec.value, core.RedactPlaceholder)
 					}
 				}
@@ -2962,10 +3008,21 @@ Servers already running the correct version are skipped.`,
 
 func newSSHCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "ssh <server>",
-		Short: "Open an interactive root shell on a server",
-		Args:  cobra.ExactArgs(1),
+		Use:          "ssh <server>",
+		Short:        "Open an interactive root shell on a server",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// `ssh` opens an INTERACTIVE root shell: no individual command crosses the
+			// transport, so the cmd-policy deny/confirm gate that protects `exec`,
+			// `guard`, `cron add`, etc. cannot constrain anything typed inside it. A
+			// configured cmd-policy (ANY deny OR confirm pattern) is therefore an
+			// explicit operator intent to restrict commands, and `ssh` would silently
+			// bypass it. Fail safe: when a non-empty cmd-policy is configured, refuse
+			// `ssh` outright. (A corrupt policy also refuses, via fail-closed load.)
+			if err := refuseSSHUnderCmdPolicy(*configDir); err != nil {
+				return err
+			}
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
@@ -2974,6 +3031,25 @@ func newSSHCommand(configDir *string) *cobra.Command {
 			return app.RunSSHSession(args[0], cmd.OutOrStdout())
 		},
 	}
+}
+
+// refuseSSHUnderCmdPolicy denies `fleet ssh` whenever a non-empty command policy
+// is configured. An interactive shell cannot be policy-checked command-by-command,
+// so a configured deny/confirm policy — the operator's intent to constrain what
+// may run — must not be bypassable by opening a shell. A MISSING policy allows ssh
+// (returns nil); a CORRUPT policy fails closed (refuses) via the fail-closed load.
+func refuseSSHUnderCmdPolicy(configDir string) error {
+	policy, err := loadCmdPolicyOrFailClosed(configDir)
+	if err != nil {
+		return err
+	}
+	if policy == nil {
+		return nil
+	}
+	if len(policy.DenyPatterns()) > 0 || len(policy.ConfirmPatterns()) > 0 {
+		return fmt.Errorf("refusing to open an interactive shell: a cmd-policy is configured and `ssh` cannot be command-policy-constrained (use `fleet exec`/`guard`, which are gated)")
+	}
+	return nil
 }
 
 func newRecoverCommand(configDir *string) *cobra.Command {
