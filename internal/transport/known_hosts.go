@@ -222,7 +222,38 @@ func RemoveKnownHost(path, address string) error {
 	if content != "" && !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
-	return os.WriteFile(path, []byte(content), 0o600)
+	return atomicWriteKnownHosts(path, []byte(content))
+}
+
+// atomicWriteKnownHosts replaces path's contents atomically: it writes a temp
+// file in the same directory and rename()s it over path. A rename within a
+// directory is atomic on POSIX and replace-on-Windows, so a crash mid-write can
+// never leave a truncated known_hosts (which would silently drop every pin and
+// reopen the whole fleet to first-use MITM on the next reconnect). Mirrors the
+// temp+publish pattern used by EnsureEd25519Signer.
+func atomicWriteKnownHosts(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".known_hosts-*")
+	if err != nil {
+		return fmt.Errorf("create known_hosts temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// Best-effort cleanup if we bail before the rename; a no-op once renamed.
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod known_hosts temp: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write known_hosts temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("flush known_hosts temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename known_hosts into place: %w", err)
+	}
+	return nil
 }
 
 func appendKnownHost(path, address string, key ssh.PublicKey) error {
@@ -284,7 +315,7 @@ func replaceKnownHost(path, address string, key ssh.PublicKey) error {
 	if content != "" {
 		content += "\n"
 	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := atomicWriteKnownHosts(path, []byte(content)); err != nil {
 		return fmt.Errorf("rewrite known_hosts: %w", err)
 	}
 	return nil
