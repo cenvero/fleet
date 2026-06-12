@@ -16,7 +16,10 @@ import (
 // the iteration/byte cap this would loop until the controller ran out of time
 // or the writer's disk; with it, the loop aborts with an error.
 func TestCatRemoteFileAbortsWithoutEOF(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel: this test mutates the package-global maxCatRemoteBytes,
+	// which CatRemoteFile reads — running it concurrently with other CatRemoteFile
+	// tests (e.g. TestFileOpsStatCatAndRecursive) is a data race. Keeping it serial
+	// guarantees no other test runs while the global is lowered/restored.
 	rig := newTransferRig(t)
 	go func() {
 		for range rig.errCh {
