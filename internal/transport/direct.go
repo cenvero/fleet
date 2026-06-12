@@ -17,6 +17,52 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// SupportedKEX returns the curated key-exchange algorithms pinned on every
+// fleet SSH config (client and server). Pinning these alongside the AEAD cipher
+// list means a downgrade attacker cannot steer the handshake onto a weak/legacy
+// KEX (e.g. SHA-1 or 1024-bit DH groups) that the Go default set still offers
+// for interop. All fleet peers run golang.org/x/crypto/ssh, which supports this
+// modern set, so the pin never breaks a fleet-to-fleet handshake.
+func SupportedKEX() []string {
+	return []string{
+		"curve25519-sha256",
+		"curve25519-sha256@libssh.org",
+		"ecdh-sha2-nistp256",
+		"ecdh-sha2-nistp384",
+		"ecdh-sha2-nistp521",
+		"diffie-hellman-group16-sha512",
+		"diffie-hellman-group14-sha256",
+	}
+}
+
+// SupportedMACs returns the curated MAC algorithms pinned on every fleet SSH
+// config. The pinned ciphers are AEAD (chacha20-poly1305 / aes256-gcm) and
+// supply their own integrity, so a MAC is not even negotiated with them; this
+// list exists purely as defense in depth so that if the cipher set is ever
+// widened, integrity cannot be downgraded to SHA-1. Encrypt-then-MAC variants
+// are preferred over the plain (encrypt-and-MAC) constructions.
+func SupportedMACs() []string {
+	return []string{
+		"hmac-sha2-256-etm@openssh.com",
+		"hmac-sha2-512-etm@openssh.com",
+		"hmac-sha2-256",
+		"hmac-sha2-512",
+	}
+}
+
+// SupportedHostKeyAlgos returns the host-key signature algorithms a fleet client
+// will accept from a fleet peer. Every fleet host key is Ed25519 (see
+// EnsureEd25519Signer / GenerateKeySet), so constraining this prevents a MITM
+// from negotiating a weaker host-key type. RSA SHA-2 variants are included only
+// for the optional RSA-4096 controller key offered for legacy interop.
+func SupportedHostKeyAlgos() []string {
+	return []string{
+		ssh.KeyAlgoED25519,
+		ssh.KeyAlgoRSASHA512,
+		ssh.KeyAlgoRSASHA256,
+	}
+}
+
 const RPCChannelType = "fleet-rpc"
 
 // ShellChannelType is the SSH channel type used for interactive shell sessions
@@ -54,12 +100,15 @@ func (c Connector) DialContext(ctx context.Context, target ServerTarget) (*Sessi
 	address := net.JoinHostPort(target.Address, strconv.Itoa(target.Port))
 	config := &ssh.ClientConfig{
 		Config: ssh.Config{
-			Ciphers: SupportedCiphers(),
+			Ciphers:      SupportedCiphers(),
+			KeyExchanges: SupportedKEX(),
+			MACs:         SupportedMACs(),
 		},
-		User:            username,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+		User:              username,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: SupportedHostKeyAlgos(),
+		Timeout:           10 * time.Second,
 	}
 
 	var rawConn net.Conn
