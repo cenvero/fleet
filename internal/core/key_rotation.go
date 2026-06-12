@@ -86,6 +86,11 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	if err != nil {
 		return KeyRotationResult{}, fmt.Errorf("derive pre-rotation secret key: %w", err)
 	}
+	// Defense-in-depth: zero the raw AES key material before this function returns,
+	// so the rotated-out and rotated-in secret keys do not linger in the heap longer
+	// than necessary. Deferred wipes run after any rollback closure (which still uses
+	// these keys) has executed as part of the return, so behavior is unchanged.
+	defer wipe(oldSecretKey)
 
 	directTargets, reverseTargets, skipped := rotationTargets(a, servers)
 	stagedDirect := make([]ServerRecord, 0, len(directTargets))
@@ -161,6 +166,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	if err != nil {
 		return KeyRotationResult{}, rollbackAfterPromote(fmt.Errorf("derive post-rotation secret key: %w", err))
 	}
+	defer wipe(newSecretKey)
 	if err := NewSecretStore(a.ConfigDir).Rekey(oldSecretKey, newSecretKey); err != nil {
 		return KeyRotationResult{}, rollbackAfterPromote(fmt.Errorf("re-encrypt secrets across key rotation: %w", err))
 	}
@@ -197,11 +203,24 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	slices.Sort(verifiedNames)
 	slices.Sort(skipped)
 
+	// Retention: rotated-out controller keys are archived under keys/rotations/<ts>/
+	// and were previously kept forever, so every prior controller key — and via HKDF
+	// every prior derived secret key — accumulated on disk indefinitely, widening the
+	// blast radius of a controller-dir compromise. Prune older rotation dirs now that
+	// this rotation has fully succeeded, keeping only the most recent
+	// keyRotationRetention snapshots (enough for rollback). Best-effort: a prune
+	// failure must not fail an otherwise-successful rotation.
+	pruned, pruneErr := pruneOldRotations(filepath.Join(a.ConfigDir, "keys", "rotations"), keyRotationRetention)
+
+	auditDetails := fmt.Sprintf("rotation_dir=%s direct=%d reverse=%d skipped=%d pruned=%d", rotationDir, len(directTargets), len(reverseTargets), len(skipped), len(pruned))
+	if pruneErr != nil {
+		auditDetails += fmt.Sprintf(" prune_error=%q", pruneErr.Error())
+	}
 	if err := a.AuditLog.Append(logs.AuditEntry{
 		Action:   "key.rotate",
 		Target:   a.Config.Crypto.PrimaryKey,
 		Operator: a.operator(),
-		Details:  fmt.Sprintf("rotation_dir=%s direct=%d reverse=%d skipped=%d", rotationDir, len(directTargets), len(reverseTargets), len(skipped)),
+		Details:  auditDetails,
 	}); err != nil {
 		return KeyRotationResult{}, err
 	}
@@ -257,6 +276,58 @@ func rotationTargets(a *App, servers []ServerRecord) ([]ServerRecord, []ServerRe
 		}
 	}
 	return directTargets, reverseTargets, skipped
+}
+
+// keyRotationRetention is the number of most-recent rotation snapshots kept under
+// keys/rotations/. Older snapshots are pruned after a successful rotation. The
+// bound is small but leaves enough history for a rollback to a recent key while
+// preventing every historical controller key (and its HKDF-derived secret key)
+// from accumulating on disk forever.
+const keyRotationRetention = 5
+
+// pruneOldRotations removes all but the newest `keep` snapshot directories under
+// rotationsRoot, returning the paths it removed. Snapshot dirs are named with a
+// UTC timestamp (2006-01-02-150405) so a lexicographic sort is chronological;
+// the newest `keep` are retained. Non-directory entries and any name that is not
+// a plausible snapshot are left untouched. It is best-effort: the first removal
+// error is returned, but earlier successful removals still count. A missing
+// rotationsRoot is not an error (nothing to prune).
+func pruneOldRotations(rotationsRoot string, keep int) ([]string, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	entries, err := os.ReadDir(rotationsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) <= keep {
+		return nil, nil
+	}
+	// Sort ascending (oldest first); the timestamp name makes this chronological.
+	slices.Sort(names)
+	toRemove := names[:len(names)-keep]
+	var removed []string
+	var firstErr error
+	for _, name := range toRemove {
+		dir := filepath.Join(rotationsRoot, name)
+		if err := os.RemoveAll(dir); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed = append(removed, dir)
+	}
+	return removed, firstErr
 }
 
 func archiveKeyFiles(sourceDir, rotationDir string) ([]string, error) {
