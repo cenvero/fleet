@@ -6,10 +6,46 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cenvero/fleet/internal/transport"
 )
+
+// TestCopyFileRejectsBlankFinalizeDigest confirms the relay integrity check
+// fails closed: a destination agent that writes the file but returns an EMPTY
+// finalize digest must be treated as a verification FAILURE, not a silent pass.
+func TestCopyFileRejectsBlankFinalizeDigest(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	// The single in-memory agent backs both servers; make its Finalize blank out
+	// the digest so the destination leg returns no SHA.
+	rig.fileMgr.setBlankFinalize(true)
+	if err := rig.app.AddServer(ServerRecord{
+		Name: "loopback2", Address: "127.0.0.1", Port: 2222, Mode: transport.ModeDirect, User: "cenvero-agent",
+	}); err != nil {
+		t.Fatalf("AddServer loopback2: %v", err)
+	}
+
+	base := t.TempDir()
+	src := filepath.Join(base, "src.txt")
+	if err := os.WriteFile(src, []byte("integrity-or-bust"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(base, "dst.txt")
+
+	_, err := rig.app.CopyFile("loopback", src, "loopback2", dst, FileTransferOptions{}, nil)
+	if err == nil {
+		t.Fatal("CopyFile must fail when the destination returns no finalize digest")
+	}
+	if !strings.Contains(err.Error(), "no finalize digest") {
+		t.Fatalf("expected a blank-digest failure, got: %v", err)
+	}
+}
 
 // TestServerToServerCopyMove exercises the relay copy/move between two servers
 // (both backed by the in-memory agent's real filesystem in the rig).
