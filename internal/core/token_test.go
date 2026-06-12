@@ -203,6 +203,23 @@ func TestIsDestructiveCommand(t *testing.T) {
 		{"svc", "start", []string{"web-01", "nginx"}, true},
 		{"svc", "status", []string{"web-01", "nginx"}, false},
 		{"svc", "", []string{"web-01"}, false},
+		// firewall/fw disable is a lock-out / exposure vector and must be gated too.
+		{"firewall", "disable", []string{"web-01"}, true},
+		{"fw", "disable", []string{"web-01"}, true},
+		// sync / bootstrap are FLAT commands (resolved sub is ""); whole command is
+		// destructive via the "*" wildcard.
+		{"sync", "", []string{"web-01", "./site", "/var/www"}, true},
+		{"bootstrap", "", []string{"web-01"}, true},
+		// template apply mutates the server; list is read.
+		{"template", "apply", []string{"web-01", "nginx"}, true},
+		{"template", "list", nil, false},
+		// update apply/rollback swap the controller binary; check is read.
+		{"update", "apply", nil, true},
+		{"update", "rollback", nil, true},
+		{"update", "check", nil, false},
+		// agent update pushes a new agent binary; agent version is read.
+		{"agent", "update", nil, true},
+		{"agent", "version", nil, false},
 		// config: mutating subs destructive, read subs exempt
 		{"config", "set", nil, true},
 		{"config", "edit", nil, true},
@@ -320,6 +337,49 @@ func TestAuthorizeDestructive(t *testing.T) {
 	// Non-destructive op is unaffected by DestructiveAllowed=false.
 	if err := Authorize(tok, "exec", "web-01", false, nil, nil); err != nil {
 		t.Fatalf("non-destructive op should pass: %v", err)
+	}
+}
+
+// TestAuthorizeNewlyClassifiedDestructive confirms the newly-classified
+// state-mutating commands (firewall/fw disable, sync, bootstrap, template apply,
+// update apply/rollback, agent update) are gated behind DestructiveAllowed end to
+// end: IsDestructiveCommand classifies them, and Authorize denies a
+// DestructiveAllowed=false token but allows a DestructiveAllowed=true one.
+func TestAuthorizeNewlyClassifiedDestructive(t *testing.T) {
+	cases := []struct {
+		top  string
+		sub  string
+		args []string
+	}{
+		{"firewall", "disable", []string{"web-01"}},
+		{"fw", "disable", []string{"web-01"}},
+		{"sync", "", []string{"web-01", "./site", "/var/www"}},
+		{"bootstrap", "", []string{"web-01"}},
+		{"template", "apply", []string{"web-01", "nginx"}},
+		{"update", "apply", nil},
+		{"update", "rollback", nil},
+		{"agent", "update", nil},
+	}
+	denyTok := Token{Name: "ci"} // not unscoped: carries no destructive grant via flag below
+	denyTok.ReadOnlyDefault = false
+	// Make the token scoped (so IsScoped()==true) without granting destructive,
+	// matching how a real least-privilege token is shaped.
+	denyTok.AllowCommands = []string{"firewall", "fw", "sync", "bootstrap", "template", "update", "agent"}
+	allowTok := denyTok
+	allowTok.DestructiveAllowed = true
+
+	for _, c := range cases {
+		isDestructive := IsDestructiveCommand(c.top, c.sub, c.args)
+		if !isDestructive {
+			t.Errorf("IsDestructiveCommand(%q,%q) = false, want true", c.top, c.sub)
+			continue
+		}
+		if err := Authorize(denyTok, c.top, "", isDestructive, nil, nil); err == nil {
+			t.Errorf("Authorize(%q,%q) should be DENIED without DestructiveAllowed", c.top, c.sub)
+		}
+		if err := Authorize(allowTok, c.top, "", isDestructive, nil, nil); err != nil {
+			t.Errorf("Authorize(%q,%q) should be ALLOWED with DestructiveAllowed: %v", c.top, c.sub, err)
+		}
 	}
 }
 
