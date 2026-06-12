@@ -400,6 +400,19 @@ func TestRulesetAllowsPort(t *testing.T) {
 		{"ports: 2222 443", 2222, true},
 		{"-P INPUT DROP", 2222, false},
 		{"443/tcp ALLOW IN", 2222, false},
+		// A DENY/reject/drop rule that MENTIONS the port must NOT count as
+		// "allowed" — otherwise the fail-closed lockout guard is weakened.
+		{"-A INPUT -p tcp --dport 2222 -j DROP", 2222, false},
+		{"-A INPUT -p tcp --dport 2222 -j REJECT", 2222, false},
+		{"tcp dport 2222 drop", 2222, false},
+		{"2222/tcp                   DENY IN", 2222, false},
+		// The bare space-delimited column form must require an allow action: a
+		// number surrounded by spaces with no allow/accept verb is not a positive
+		// allow (e.g. a comment or a deny rule mentioning the port).
+		{"reject inbound on port 2222 by policy", 2222, false},
+		{"deny from any to any port 2222", 2222, false},
+		// ufw "v6" allow row in column form still matches in an allow context.
+		{"2222                       ALLOW IN    Anywhere", 2222, true},
 	}
 	for i, tc := range cases {
 		if got := rulesetAllowsPort(tc.dump, tc.port); got != tc.want {
