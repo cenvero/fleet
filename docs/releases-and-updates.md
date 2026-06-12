@@ -19,9 +19,13 @@ fleet update apply
 fleet update rollback
 fleet update channel stable
 fleet update channel beta
+fleet sync-agent                 # bring every agent up to the controller version
+fleet sync-agent --server web-01 # or just one (repeatable)
 ```
 
 `fleet update apply` updates the controller first and then rolls updates across managed agents. Partial agent failures are reported instead of bricking the whole rollout.
+
+`fleet sync-agent` brings managed agents up to the controller's version. It syncs servers **in parallel** (bounded concurrency) and streams **per-server progress** as each finishes — `→ checking`, `✓ updated X → Y`, `• up to date`, `✗ error` — followed by a one-line summary, while `stdout` stays clean JSON for scripting. It runs **synchronously** (it waits for every server before returning), so there are no detached, orphaned, half-updated agents.
 
 ### Auto-update policy
 
@@ -38,11 +42,13 @@ The release design uses:
 
 Checksums alone are not enough. If both the artifact and the manifest were tampered with together, a checksum-only model could still pass. The pinned minisign public key is what proves the release was signed by the project.
 
-All non-development channels require at least a SHA-256 checksum in the manifest. A manifest entry with neither a checksum nor a signature is rejected — the binary will not be applied. The `dev` channel is exempt so that local ad-hoc builds can be tested without a full signing pipeline.
+Signature verification is **fail-closed on every channel** (including `dev`): an update whose manifest entry carries no minisign signature is **refused**. A SHA-256 checksum alone is never accepted as a substitute, because a manifest-level attacker can rewrite both the binary and its checksum together; only the pinned minisign key proves authenticity. The single, explicit escape hatch is the `--allow-unsigned` flag — required to apply an unsigned local/ad-hoc build, and never the silent default.
 
-## Minimum Supported Version
+## Minimum Supported Version and Anti-Rollback
 
-The manifest tracks `min_supported` per channel. Fleet keeps a rolling window of the 10 most recent releases; the minimum supported version is always the oldest in that window. Agents or controllers older than `min_supported` should be updated before operating alongside newer counterparts.
+The manifest tracks `min_supported` per channel. Fleet keeps a rolling window of the 10 most recent releases; the minimum supported version is always the oldest in that window.
+
+Updates are **anti-rollback protected**: `fleet update apply` refuses to install a target version **older than the currently-running version**, or **below the channel's `min_supported`** — so a replayed or stale (but validly signed) manifest cannot downgrade the binary to a known-vulnerable release. A deliberate downgrade requires the explicit `--allow-downgrade` flag. (Note: this is distinct from `fleet update rollback`, which restores the last backup binary and is the supported way to revert a bad update.)
 
 ## Rollback
 

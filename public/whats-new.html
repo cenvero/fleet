@@ -69,7 +69,7 @@
   <div class="grid cols-2">
     <div class="card"><div class="ic"><i data-lucide="file-search"></i></div><h3>Inspect remote files</h3><p><code>fleet file stat</code>, <code>cat</code> (checksum-verified to stdout), and <code>tail</code> for quick remote inspection — plus <code>-r</code> recursive upload and download of whole directory trees.</p></div>
     <div class="card"><div class="ic"><i data-lucide="mouse-pointer-click"></i></div><h3>Real mouse support</h3><p>Content-anchored mouse zones (bubblezone) across the dashboard and the file manager — click tabs and rows, drag files between panes.</p></div>
-    <div class="card"><div class="ic"><i data-lucide="shield-check"></i></div><h3>Security hardening</h3><p>The controller no longer trusts agent-supplied paths for local writes, the agent can be confined with <code>--file-root</code>, updates require signed binaries, and log reads are memory-bounded.</p></div>
+    <div class="card"><div class="ic"><i data-lucide="shield-check"></i></div><h3>Hardened across the board</h3><p>A multi-round security audit of the whole codebase: <strong>fail-closed</strong> scoped RBAC tokens (per-server and per-secret, hashed at rest), reverse-mode agents that enroll with one-time join tokens, <strong>signed + anti-rollback</strong> updates, an agent <code>--file-root</code> sandbox, and host-key-pinned transport throughout.</p></div>
     <div class="card"><div class="ic"><i data-lucide="settings-2"></i></div><h3>Transfer defaults</h3><p>Per-server and global defaults for remote directory, parallel streams, and chunk size — seeded on first connection and tunable any time.</p></div>
   </div>
 </section>

@@ -292,8 +292,11 @@ const contextConcepts = "## Concepts\n\n" +
 	"local JSON store under the config dir. Everything is operator-controlled.\n" +
 	"- Tags & groups: `fleet tag <server> key=value` labels a server; commands that take `--group EXPR` " +
 	"(e.g. `role=web,env=prod`, comma = AND) target every server matching the tag expression.\n" +
-	"- RBAC: scoped tokens (`fleet token`) are enforced controller-side. A token can be limited to named servers " +
-	"or a tag group, to an allow/deny list of top-level commands, and to whether destructive operations are permitted.\n" +
+	"- RBAC: scoped tokens (`fleet token`) are enforced controller-side and **fail closed** — a server-scoped token may " +
+	"run only an in-scope server command or a small set of safe local commands, can inject only the secrets in its " +
+	"`--allow-secret` list, and can never mint/modify tokens or run controller-management/fan-out commands. A token can " +
+	"be limited to named servers or a tag group, an allow/deny list of top-level commands, and whether destructive ops " +
+	"are permitted; token IDs are stored hashed at rest.\n" +
 	"- Safety state: secrets (`fleet secret`), command policy (`fleet cmd-policy`), output redaction (`fleet policy`), " +
 	"the approval queue (`fleet approvals`/`approve`), and dead-man's-switch guards (`fleet guard`/`confirm`/`revert`) " +
 	"are all local to the controller and apply before anything touches a server.\n" +

@@ -270,10 +270,14 @@ FLEET_TOKEN=<id> fleet exec web-01 "./deploy.sh"
 ```
 
 Token flags: `--servers` (named servers), `--group EXPR` (tag scope), `--allow` / `--deny`
-(top-level commands), `--read-only-default` (deny non-read commands unless allowed), and
-`--destructive` (permit destructive operations). Enforcement is **controller-side and fails
-closed**: out-of-scope, destructive, or cross-server calls a server-scoped token can't fully
-vet are denied, and a scoped token can never mint or modify tokens.
+(top-level commands), `--allow-secret <name>` (repeatable — secrets this token may inject),
+`--read-only-default` (deny non-read commands unless allowed), and `--destructive` (permit
+destructive operations). Enforcement is **controller-side and fails closed**: a server-scoped
+token may run **only** an in-scope server command or a small set of safe local commands —
+anything else (controller management like `config`/`key`/`backup`, interactive multi-server
+UIs, fan-out reads, or cross-server transfers it can't fully vet) is denied, it can never mint
+or modify tokens, and it can inject **only** the secrets in its `--allow-secret` list (an
+unscoped admin token is unrestricted). Token IDs are stored hashed at rest.
 
 ### Named secrets
 
@@ -354,12 +358,16 @@ Run and track detached background jobs (they keep running on the server independ
 session):
 
 ```bash
-fleet job run web-01 "./long-import.sh"        # prints a job id (--json for the record)
-fleet jobs                                     # list tracked jobs
+fleet job run web-01 "./long-import.sh" --name nightly-import   # optional --name label
+fleet jobs                                     # list tracked jobs (ID, NAME, server, status…)
 fleet job status <id>                          # detects completion + exit code
 fleet job logs   <id> --follow                 # stream captured output
 fleet job wait   <id> --timeout 30m            # block until it finishes
 ```
+
+The optional `--name` label is shown in the `NAME` column of `fleet jobs` so a long-running
+job is easy to recognize. Captured output goes to a `0600`, per-job unpredictably-named
+logfile on the server (not world-readable).
 
 ## Port Tunnels
 
