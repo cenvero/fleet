@@ -137,6 +137,16 @@ parses systemctl/journalctl directly over the live agent transport.
 				if err := validUnitName(unit); err != nil {
 					return err
 				}
+				// `svc start|stop|restart|enable|disable` runs systemctl on the server —
+				// an arbitrary state change that lives outside exec's preflight. Route the
+				// resulting command through the SAME cmd-policy deny/confirm gate exec uses
+				// so e.g. a deny pattern of `systemctl stop` (or `* nginx`) blocks it.
+				// svc has no --confirm flag, so a confirm-required pattern blocks it
+				// (fail-safe) until the operator amends the policy.
+				policyCmd := fmt.Sprintf("systemctl %s %s", action, unit)
+				if err := enforceCmdPolicy(*configDir, policyCmd, false); err != nil {
+					return err
+				}
 				app, err := openApp(*configDir)
 				if err != nil {
 					return err
