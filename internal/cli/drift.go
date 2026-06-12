@@ -52,6 +52,15 @@ func newBaselineCaptureCommand(configDir *string) *cobra.Command {
 			if len(cleaned) == 0 {
 				return fmt.Errorf("--paths is required (comma-separated absolute paths)")
 			}
+			// Each path is read with `cat -- <path>` on the server; require an
+			// ABSOLUTE path so a flag-shaped entry ("-n", "--help") or a relative
+			// path can never be captured into a baseline (defense in depth alongside
+			// the `--` end-of-options guard in readRemoteFile).
+			for _, p := range cleaned {
+				if !strings.HasPrefix(p, "/") {
+					return fmt.Errorf("invalid --paths entry %q: paths must be absolute (start with '/')", p)
+				}
+			}
 			return runBaselineCapture(cmd, *configDir, args[0], cleaned)
 		},
 	}
@@ -159,9 +168,12 @@ func runDrift(cmd *cobra.Command, configDir, server string) error {
 }
 
 // readRemoteFile fetches the content of a path on a server via `cat`. The path
-// is single-quote shell-escaped so spaces or metacharacters are safe.
+// is single-quote shell-escaped so spaces or metacharacters are safe, AND it is
+// passed after a `--` end-of-options marker so a flag-shaped path (e.g. "--help",
+// "-n") cannot be parsed by `cat` as an OPTION — shell-quoting prevents word
+// splitting, not option parsing, so the `--` guard is what actually contains it.
 func readRemoteFile(app *core.App, server, path string) (string, error) {
-	res, err := app.ExecCommand(server, "cat "+shellQuote(path))
+	res, err := app.ExecCommand(server, "cat -- "+shellQuote(path))
 	if err != nil {
 		return "", err
 	}
