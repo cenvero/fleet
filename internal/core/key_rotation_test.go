@@ -622,3 +622,91 @@ func (m *failingControllerKnownHostsManager) Update(ctx context.Context, payload
 		EntryCount: len(lines),
 	}, nil
 }
+
+// TestPruneOldRotationsKeepsNewest verifies the rotation-retention bound: only
+// the newest `keep` snapshot dirs survive, older ones are removed, and the
+// removed paths are returned. Snapshot dir names are UTC timestamps, so a
+// lexicographic sort is chronological.
+func TestPruneOldRotationsKeepsNewest(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "rotations")
+
+	// Create 6 timestamp-named snapshot dirs, oldest first, each holding a key file.
+	names := []string{
+		"2026-01-01-000000",
+		"2026-02-01-000000",
+		"2026-03-01-000000",
+		"2026-04-01-000000",
+		"2026-05-01-000000",
+		"2026-06-01-000000",
+	}
+	for _, n := range names {
+		dir := filepath.Join(root, n)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", n, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "id_ed25519"), []byte("k"), 0o600); err != nil {
+			t.Fatalf("write key in %s: %v", n, err)
+		}
+	}
+
+	removed, err := pruneOldRotations(root, 3)
+	if err != nil {
+		t.Fatalf("pruneOldRotations: %v", err)
+	}
+	if len(removed) != 3 {
+		t.Fatalf("removed %d dirs, want 3: %v", len(removed), removed)
+	}
+
+	// The 3 newest must remain; the 3 oldest must be gone.
+	for _, n := range names[3:] {
+		if _, err := os.Stat(filepath.Join(root, n)); err != nil {
+			t.Fatalf("newest snapshot %s should be kept: %v", n, err)
+		}
+	}
+	for _, n := range names[:3] {
+		if _, err := os.Stat(filepath.Join(root, n)); !os.IsNotExist(err) {
+			t.Fatalf("oldest snapshot %s should be pruned (stat err=%v)", n, err)
+		}
+	}
+}
+
+// TestPruneOldRotationsNoOpCases covers the boundary cases: a missing root is not
+// an error and prunes nothing; a root with <= keep dirs prunes nothing; a keep
+// of 0 is clamped to 1.
+func TestPruneOldRotationsNoOpCases(t *testing.T) {
+	t.Parallel()
+
+	// Missing root.
+	removed, err := pruneOldRotations(filepath.Join(t.TempDir(), "does-not-exist"), 3)
+	if err != nil {
+		t.Fatalf("missing root should not error: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("missing root should prune nothing, got %v", removed)
+	}
+
+	// Fewer dirs than keep: nothing pruned.
+	root := filepath.Join(t.TempDir(), "rotations")
+	for _, n := range []string{"2026-01-01-000000", "2026-02-01-000000"} {
+		if err := os.MkdirAll(filepath.Join(root, n), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	removed, err = pruneOldRotations(root, 5)
+	if err != nil {
+		t.Fatalf("under-keep prune: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("under-keep should prune nothing, got %v", removed)
+	}
+
+	// keep=0 is clamped to 1: with 2 dirs, exactly 1 is pruned.
+	removed, err = pruneOldRotations(root, 0)
+	if err != nil {
+		t.Fatalf("keep=0 prune: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("keep=0 (clamped to 1) with 2 dirs should prune 1, got %d: %v", len(removed), removed)
+	}
+}
