@@ -38,6 +38,40 @@ func ParseAlgorithm(v string) (Algorithm, error) {
 	}
 }
 
+// writeNewKeyFile writes a freshly generated key to path atomically and
+// exclusively: it creates a temp file in the same directory, then publishes it
+// with os.Link, which fails if path already exists. O_EXCL on the temp create
+// and the Link-fails-on-exist guarantee mean we never follow or overwrite a
+// pre-planted file or symlink at path — a local attacker cannot redirect a
+// private-key write to clobber another file or trick us into trusting a planted
+// key. Mirrors the temp+Link publish used by EnsureEd25519Signer in ssh.go.
+//
+// If path already exists the write fails (os.IsExist), because key generation
+// must never silently overwrite an existing key pair.
+func writeNewKeyFile(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".keygen-*")
+	if err != nil {
+		return fmt.Errorf("create key temp for %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // no-op after a successful link
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod key temp for %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write key temp for %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("flush key temp for %s: %w", path, err)
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		return fmt.Errorf("publish key %s: %w", path, err)
+	}
+	return nil
+}
+
 func GenerateKeySet(dir string, algorithm Algorithm, passphrase []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create key directory: %w", err)
@@ -114,14 +148,17 @@ func generateEd25519(dir string, passphrase []byte) error {
 	if err != nil {
 		return fmt.Errorf("marshal ed25519 private key: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "id_ed25519"), pem.EncodeToMemory(block), 0o600); err != nil {
+	if err := writeNewKeyFile(filepath.Join(dir, "id_ed25519"), pem.EncodeToMemory(block), 0o600); err != nil {
 		return fmt.Errorf("write ed25519 private key: %w", err)
 	}
 	pub, err := ssh.NewPublicKey(priv.Public())
 	if err != nil {
 		return fmt.Errorf("create ed25519 public key: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, "id_ed25519.pub"), ssh.MarshalAuthorizedKey(pub), 0o644) // #nosec G306 -- public key is intentionally world-readable
+	if err := writeNewKeyFile(filepath.Join(dir, "id_ed25519.pub"), ssh.MarshalAuthorizedKey(pub), 0o644); err != nil { // #nosec G306 -- public key is intentionally world-readable
+		return fmt.Errorf("write ed25519 public key: %w", err)
+	}
+	return nil
 }
 
 // NOTE: ed25519 is the default and recommended key algorithm (see
@@ -148,12 +185,15 @@ func generateRSA4096(dir string, passphrase []byte) error {
 	} else {
 		block = &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "id_rsa4096"), pem.EncodeToMemory(block), 0o600); err != nil {
+	if err := writeNewKeyFile(filepath.Join(dir, "id_rsa4096"), pem.EncodeToMemory(block), 0o600); err != nil {
 		return fmt.Errorf("write rsa private key: %w", err)
 	}
 	pub, err := ssh.NewPublicKey(priv.Public())
 	if err != nil {
 		return fmt.Errorf("create rsa public key: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, "id_rsa4096.pub"), ssh.MarshalAuthorizedKey(pub), 0o644) // #nosec G306 -- public key is intentionally world-readable
+	if err := writeNewKeyFile(filepath.Join(dir, "id_rsa4096.pub"), ssh.MarshalAuthorizedKey(pub), 0o644); err != nil { // #nosec G306 -- public key is intentionally world-readable
+		return fmt.Errorf("write rsa public key: %w", err)
+	}
+	return nil
 }
