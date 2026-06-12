@@ -561,12 +561,19 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 	}
 	result := proto.FileProbeResult{Exists: true, CurrentSize: info.Size()}
 	if len(p.Ranges) > 0 {
+		// Bound the number of ranges hashed per probe so a hostile request can't
+		// drive unbounded read/CPU amplification (a transfer has far fewer chunks).
+		const maxProbeRanges = 65536
+		ranges := p.Ranges
+		if len(ranges) > maxProbeRanges {
+			ranges = ranges[:maxProbeRanges]
+		}
 		file, err := os.Open(probePath)
 		if err != nil {
 			return proto.FileProbeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
 		}
 		defer file.Close()
-		for _, r := range p.Ranges {
+		for _, r := range ranges {
 			// Overflow-safe: avoid r.Offset+r.Length which can wrap for hostile
 			// near-MaxInt64 values. Equivalent to r.Offset+r.Length > size. The
 			// MaxRawChunkBytes cap bounds the per-range allocation below: a probe

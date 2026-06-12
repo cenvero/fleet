@@ -276,6 +276,14 @@ func archiveMemberSafe(name string) bool {
 	if name == "" {
 		return false
 	}
+	// Reject newlines / control characters: a member name carrying them could
+	// inject a spoofed line into the verbose `tar -tvf` / `unzip -Z` listing that
+	// the type-check parser reads. Legitimate filenames never contain them.
+	for _, r := range name {
+		if r == '\n' || r == '\r' || r < 0x20 {
+			return false
+		}
+	}
 	// Normalise separators: tar uses "/" but a crafted name may embed "\".
 	slashed := strings.ReplaceAll(name, "\\", "/")
 	if path.IsAbs(slashed) || strings.HasPrefix(slashed, "/") {

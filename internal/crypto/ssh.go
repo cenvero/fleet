@@ -88,8 +88,32 @@ func EnsureEd25519Signer(path string) (ssh.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal ed25519 host key: %w", err)
 	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+	// Write the full key to a temp file first, then publish it atomically AND
+	// exclusively with os.Link: Link fails if path already exists, so a concurrent
+	// process that generated the key first wins and we load theirs — no clobber of
+	// a live host key, and no half-written key left by a crash mid-write.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".hostkey-*")
+	if err != nil {
+		return nil, fmt.Errorf("create host key temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op after a successful link
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
 		return nil, fmt.Errorf("write host key %s: %w", path, err)
+	}
+	if _, err := tmp.Write(pem.EncodeToMemory(block)); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("write host key %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("write host key %s: %w", path, err)
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		if os.IsExist(err) {
+			return LoadPrivateKeySigner(path, nil) // a concurrent process won the race
+		}
+		return nil, fmt.Errorf("publish host key %s: %w", path, err)
 	}
 
 	return LoadPrivateKeySigner(path, nil)

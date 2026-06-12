@@ -491,7 +491,7 @@ func extractZipBinary(archive []byte, targets []string) ([]byte, os.FileMode, er
 				return nil, 0, err
 			}
 			defer rc.Close()
-			data, err := io.ReadAll(rc)
+			data, err := readBoundedBinary(rc)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -499,6 +499,23 @@ func extractZipBinary(archive []byte, targets []string) ([]byte, os.FileMode, er
 		}
 	}
 	return nil, 0, fmt.Errorf("binary payload not found in zip archive")
+}
+
+// maxExtractedBinaryBytes bounds a single decompressed archive member so a
+// decompression bomb (a small artifact that inflates to gigabytes) can't exhaust
+// memory during extraction. A controller/agent binary is well under this.
+const maxExtractedBinaryBytes = 512 << 20 // 512 MiB
+
+// readBoundedBinary reads r fully but refuses more than maxExtractedBinaryBytes.
+func readBoundedBinary(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxExtractedBinaryBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxExtractedBinaryBytes {
+		return nil, fmt.Errorf("extracted binary exceeds %d bytes (possible decompression bomb)", maxExtractedBinaryBytes)
+	}
+	return data, nil
 }
 
 func extractTarGzBinary(archive []byte, targets []string) ([]byte, os.FileMode, error) {
@@ -523,7 +540,7 @@ func extractTarGzBinary(archive []byte, targets []string) ([]byte, os.FileMode, 
 			if filepath.Base(header.Name) != target {
 				continue
 			}
-			data, err := io.ReadAll(tr)
+			data, err := readBoundedBinary(tr)
 			if err != nil {
 				return nil, 0, err
 			}

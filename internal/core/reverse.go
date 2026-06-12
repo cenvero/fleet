@@ -389,6 +389,12 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 	if serverName == "" {
 		return nil, fmt.Errorf("reverse agent must provide a server name as the SSH username")
 	}
+	// The (attacker-controlled) SSH username becomes a filesystem path
+	// (keys/agents/<name>.pub) and a server lookup, so reject path separators /
+	// traversal up front — defense in depth beyond the GetServer lookup below.
+	if err := validateSafeName(serverName); err != nil {
+		return nil, fmt.Errorf("invalid reverse server name: %w", err)
+	}
 	server, err := h.app.GetServer(serverName)
 	if err != nil {
 		return nil, fmt.Errorf("reverse server %q is not registered: %w", serverName, err)

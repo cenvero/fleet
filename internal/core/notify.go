@@ -312,12 +312,16 @@ func parseIndex(s string) (int, error) {
 // credentials, so it is hard-blocked ALWAYS — even for allow-internal targets.
 var cloudMetadataIP = net.IPv4(169, 254, 169, 254)
 
+// cloudMetadataIPv6 is the IPv6 cloud-metadata endpoint (AWS fd00:ec2::254),
+// hard-blocked exactly like the IPv4 one so allow-internal can't reach it.
+var cloudMetadataIPv6 = net.ParseIP("fd00:ec2::254")
+
 // isBlockedSSRFIP reports whether ip must never be reached (true) given the
-// target's allow-internal flag. 169.254.169.254 is always blocked. When
-// allowInternal is false, loopback, link-local, and private (RFC1918 / ULA)
-// ranges are also blocked. Public addresses are allowed.
+// target's allow-internal flag. The cloud-metadata endpoints (IPv4 and IPv6) are
+// always blocked. When allowInternal is false, loopback, link-local, and private
+// (RFC1918 / ULA) ranges are also blocked. Public addresses are allowed.
 func isBlockedSSRFIP(ip net.IP, allowInternal bool) bool {
-	if ip.Equal(cloudMetadataIP) {
+	if ip.Equal(cloudMetadataIP) || ip.Equal(cloudMetadataIPv6) {
 		return true // cloud metadata: always blocked
 	}
 	if allowInternal {

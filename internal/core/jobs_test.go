@@ -113,7 +113,7 @@ func TestJobStore_TailIgnoresSpoofedMarker(t *testing.T) {
 	// wrong-nonce variant) while it is still running.
 	logContent := "starting work\nFLEETEXIT:0\nFLEETEXIT:guess123:0\nstill working\n"
 	exec := func(server, command string) (string, int, error) {
-		if strings.HasPrefix(command, "cat ") {
+		if strings.HasPrefix(command, "tail ") {
 			return logContent, 0, nil
 		}
 		return "", 0, nil // launch
@@ -246,7 +246,7 @@ func TestJobStore_TailDetectsCompletion(t *testing.T) {
 
 	logContent := "running...\n"
 	exec := func(server, command string) (string, int, error) {
-		if strings.HasPrefix(command, "cat ") {
+		if strings.HasPrefix(command, "tail ") {
 			return logContent, 0, nil
 		}
 		return "", 0, nil // launch
@@ -302,7 +302,7 @@ func TestJobStore_Wait(t *testing.T) {
 	tails := 0
 	var nonce string
 	exec := func(server, command string) (string, int, error) {
-		if strings.HasPrefix(command, "cat ") {
+		if strings.HasPrefix(command, "tail ") {
 			tails++
 			if tails >= 3 {
 				return "out\n" + jobExitMarker + nonce + ":0\n", 0, nil
@@ -336,7 +336,7 @@ func TestJobStore_WaitTimeout(t *testing.T) {
 	store := NewJobStore(dir)
 
 	exec := func(server, command string) (string, int, error) {
-		if strings.HasPrefix(command, "cat ") {
+		if strings.HasPrefix(command, "tail ") {
 			return "still going\n", 0, nil // never completes
 		}
 		return "", 0, nil

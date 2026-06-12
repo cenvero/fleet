@@ -38,7 +38,7 @@ func (a *AuditLog) Append(entry AuditEntry) error {
 		entry.Timestamp = time.Now().UTC()
 	}
 
-	if err := os.MkdirAll(filepath.Dir(a.path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(a.path), 0o700); err != nil {
 		return fmt.Errorf("create audit log directory: %w", err)
 	}
 

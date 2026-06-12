@@ -178,7 +178,7 @@ func ReadLine(r *bufio.Reader) string {
 }
 
 func ensureKnownHostsFile(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create known_hosts directory: %w", err)
 	}
 	if _, err := os.Stat(path); err == nil {

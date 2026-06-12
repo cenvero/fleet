@@ -439,6 +439,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 	tags := core.NewTagStore(configDir)
 
 	if authErr := core.Authorize(token, top, targetServer, isDestructive, allServerNames, tags); authErr != nil {
+		core.AuditDeniedAccess(configDir, "token:"+token.Name, fmt.Sprintf("%s on %q: %s", strings.TrimSpace(top+" "+sub), targetServer, authErr.Error()))
 		fmt.Fprintln(cmd.ErrOrStderr(), authErr.Error())
 		os.Exit(1)
 	}

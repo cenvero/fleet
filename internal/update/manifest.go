@@ -68,6 +68,12 @@ func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
 	if manifestURL == "" {
 		manifestURL = DefaultManifestURL
 	}
+	// Same scheme allowlist as artifact downloads: https only (http only for a
+	// loopback mirror). Rejects file://, ftp://, etc. so a poisoned config can't
+	// point the manifest fetch at a local file or an odd scheme.
+	if err := validateDownloadScheme(manifestURL); err != nil {
+		return Manifest{}, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if err != nil {

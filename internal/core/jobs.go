@@ -169,6 +169,10 @@ func (s *JobStore) reserve(doc *jobsDocument) int {
 	return doc.Counter
 }
 
+// maxJobLogBytes bounds how much of a job's remote logfile Tail reads into memory
+// (the tail end, where the completion marker lives).
+const maxJobLogBytes = 4 << 20 // 4 MiB
+
 // JobLogfile returns the remote logfile path for a job. The per-job nonce is
 // included so the path is UNPREDICTABLE (another local user on the remote host
 // can't guess it from the sequential id), and buildJobLaunch creates it 0600
@@ -363,8 +367,11 @@ func (s *JobStore) Tail(exec ExecFunc, id int) (rec JobRecord, output string, er
 	if err != nil {
 		return JobRecord{}, "", err
 	}
-	// cat the logfile; an empty/missing file just yields empty output.
-	raw, _, execErr := exec(rec.Server, "cat "+shellQuote(rec.Logfile)+" 2>/dev/null")
+	// Read the logfile bounded to the last maxJobLogBytes so a runaway job whose
+	// output grew huge can't force the controller to slurp an unbounded file into
+	// memory. The completion marker (FLEETEXIT…) is the final line, so reading the
+	// tail still detects completion; the only loss is older output on a giant log.
+	raw, _, execErr := exec(rec.Server, "tail -c "+strconv.Itoa(maxJobLogBytes)+" "+shellQuote(rec.Logfile)+" 2>/dev/null")
 	if execErr != nil {
 		return rec, "", fmt.Errorf("read job %d log: %w", id, execErr)
 	}

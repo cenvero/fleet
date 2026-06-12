@@ -172,6 +172,13 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "forbidden: loopback only", http.StatusForbidden)
 			return
 		}
+		// Anti-DNS-rebinding: even on a loopback connection, the browser's target
+		// Host must be localhost / a loopback IP — not an attacker domain that
+		// resolved to 127.0.0.1.
+		if !hostHeaderOK(r) {
+			http.Error(w, "forbidden: bad host header", http.StatusForbidden)
+			return
+		}
 		if !s.tokenOK(r) {
 			http.Error(w, "unauthorized: missing or bad token", http.StatusUnauthorized)
 			return
@@ -642,13 +649,22 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 			writeError(w, fmt.Errorf("cannot edit a directory"))
 			return
 		}
-		if info.Size() > maxEditBytes {
-			writeError(w, fmt.Errorf("file too large to edit (%s); limit is 2 MiB", humanBytes(info.Size())))
+		// Read bounded via an explicit open + LimitReader instead of trusting the
+		// stat size: a file that grows between the stat and the read can't slip past
+		// the cap (TOCTOU), and O_NOFOLLOW refuses a symlinked target.
+		f, oerr := os.OpenFile(clean, os.O_RDONLY|oNoFollow, 0) // #nosec G304 -- path validated by cleanLocalPath; O_NOFOLLOW set
+		if oerr != nil {
+			writeError(w, oerr)
 			return
 		}
-		data, err = os.ReadFile(clean) // #nosec G304 -- path validated by cleanLocalPath
+		data, err = io.ReadAll(io.LimitReader(f, maxEditBytes+1))
+		_ = f.Close()
 		if err != nil {
 			writeError(w, err)
+			return
+		}
+		if int64(len(data)) > maxEditBytes {
+			writeError(w, fmt.Errorf("file too large to edit; limit is 2 MiB"))
 			return
 		}
 	} else {
@@ -1263,6 +1279,22 @@ func isLoopbackRequest(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// hostHeaderOK guards against DNS-rebinding: the browser's target Host must be
+// localhost or a loopback IP, never an attacker-controlled domain that happens
+// to resolve to 127.0.0.1.
+func hostHeaderOK(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(host, ".")
+	if strings.EqualFold(host, "localhost") {
+		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()

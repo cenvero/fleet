@@ -175,22 +175,41 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 
+	// Cap concurrent RPC/shell channels per connection so a peer can't fork-bomb
+	// the agent with unbounded channel opens (direct-tcpip has its own tunnelSlots
+	// cap). Each handler releases its slot when it returns.
+	const maxChannelsPerConn = 128
+	chanSlots := make(chan struct{}, maxChannelsPerConn)
 	for newChannel := range chans {
 		switch newChannel.ChannelType() {
 		case transport.RPCChannelType:
+			select {
+			case chanSlots <- struct{}{}:
+			default:
+				_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent channels")
+				continue
+			}
 			channel, requests, err := newChannel.Accept()
 			if err != nil {
+				<-chanSlots
 				continue
 			}
 			go ssh.DiscardRequests(requests)
-			go s.serveRPC(channel)
+			go func() { defer func() { <-chanSlots }(); s.serveRPC(channel) }()
 		case transport.ShellChannelType:
+			select {
+			case chanSlots <- struct{}{}:
+			default:
+				_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent channels")
+				continue
+			}
 			channel, requests, err := newChannel.Accept()
 			if err != nil {
+				<-chanSlots
 				continue
 			}
 			sessionID := conn.Permissions.Extensions["key_fp"]
-			go serveShell(channel, requests, sessionID)
+			go func() { defer func() { <-chanSlots }(); serveShell(channel, requests, sessionID) }()
 		case directTCPIPChannelType:
 			go serveDirectTCPIP(newChannel)
 		default:

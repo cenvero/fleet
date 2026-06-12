@@ -11,10 +11,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cenvero/fleet/internal/logs"
 )
 
 // TokenStore is a standalone JSON store of scoped RBAC tokens, persisted as a
@@ -165,9 +168,22 @@ func newTokenID() (string, error) {
 // store; any caller-supplied values for those fields are ignored. Only the Hash
 // and Prefix are written to disk — the cleartext ID never is. The returned token
 // carries the in-memory ID so the caller can show the bearer secret exactly once.
+// tokenNamePattern restricts token names to a safe label charset — the name
+// flows into audit attribution (the acting-operator field), so it must carry no
+// shell or control characters. Validated at Create time, not only at use.
+var tokenNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// ValidateTokenName reports whether name is a safe token label.
+func ValidateTokenName(name string) error {
+	if !tokenNamePattern.MatchString(name) {
+		return fmt.Errorf("token name %q must be 1-64 chars of letters, digits, '.', '_' or '-'", name)
+	}
+	return nil
+}
+
 func (s *TokenStore) Create(t Token) (Token, error) {
-	if strings.TrimSpace(t.Name) == "" {
-		return Token{}, fmt.Errorf("token name is required")
+	if err := ValidateTokenName(t.Name); err != nil {
+		return Token{}, err
 	}
 	id, err := newTokenID()
 	if err != nil {
@@ -322,8 +338,11 @@ func IsReadCommand(topCommand string) bool {
 // For "key", every mutating sub is destructive; only the read sub
 // "fingerprint" is exempted via keyReadSubs below.
 var destructiveCommands = map[string]map[string]bool{
-	"server":   {"remove": true},
-	"file":     {"rm": true},
+	"server": {"remove": true},
+	// All data-modifying file subcommands are destructive — not just delete:
+	// move/rename can overwrite or remove, extract overwrites, and upload/compress
+	// write to the server.
+	"file":     {"rm": true, "mv": true, "move": true, "extract": true, "compress": true, "upload": true},
 	"firewall": {"enable": true},
 	"fw":       {"enable": true},
 	"guard":    {"*": true},
@@ -538,4 +557,16 @@ func Authorize(t Token, topCommand, targetServer string, isDestructive bool, all
 	}
 
 	return nil
+}
+
+// AuditDeniedAccess records a denied RBAC authorization attempt to the controller
+// audit log so refused access is observable, not silent. Best-effort.
+func AuditDeniedAccess(configDir, operator, detail string) {
+	log := logs.NewAuditLog(filepath.Join(configDir, "logs", "_audit.log"))
+	_ = log.Append(logs.AuditEntry{
+		Action:   "rbac.denied",
+		Target:   "controller",
+		Operator: operator,
+		Details:  detail,
+	})
 }
