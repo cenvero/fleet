@@ -154,6 +154,36 @@ func validateWriteTarget(path string) (string, *RPCError) {
 	return real, nil
 }
 
+// recheckFinalComponent re-validates a path's final component immediately before
+// a destructive/creating syscall that itself follows symlinks (os.MkdirAll,
+// os.Rename, os.Remove*). validateWriteTarget/validateTransferPath already Lstat
+// the final component, but a local attacker can swap a benign target for a
+// symlink in the window between that check and the syscall (a TOCTOU). The
+// upload write path closes this with O_NOFOLLOW; MkdirAll/Rename/RemoveAll have
+// no such flag, so we re-Lstat here and refuse if the final component is now a
+// symlink that resolves outside the allowed roots (or into a blocked prefix).
+//
+// This shrinks the TOCTOU window to the few instructions between this Lstat and
+// the syscall; it does not eliminate it, but it removes the practical, planted-
+// symlink-at-rest escape that the one-time validate misses. A symlink that
+// stays inside the sandbox is left alone (legitimate intra-sandbox links).
+func recheckFinalComponent(real string) *RPCError {
+	info, err := os.Lstat(real)
+	if err != nil {
+		// Doesn't exist (normal for a fresh mkdir/rename target) or not
+		// stat-able — nothing planted to follow, let the syscall proceed/fail.
+		return nil
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil // not a symlink — no escape via the final component
+	}
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		return &RPCError{Code: "invalid_path", Message: "target symlink could not be resolved"}
+	}
+	return checkBlockedTransferPath(resolved)
+}
+
 func checkBlockedTransferPath(real string) *RPCError {
 	for _, blocked := range blockedTransferPrefixes {
 		if real == strings.TrimSuffix(blocked, "/") || strings.HasPrefix(real, blocked) {
@@ -606,6 +636,15 @@ func (m *fileManager) Mkdir(_ context.Context, p proto.FileMkdirPayload) (proto.
 	if mode == 0 {
 		mode = 0o755
 	}
+	// Re-validate the final component right before MkdirAll. validateWriteTarget
+	// resolved the parent's symlinks, but MkdirAll follows a symlink planted AT
+	// `real` (or swapped in after that check) and would create/return a directory
+	// outside the sandbox. recheckFinalComponent refuses a final symlink that
+	// escapes the allowed roots, shrinking the TOCTOU window MkdirAll can't close
+	// itself (it has no O_NOFOLLOW equivalent).
+	if rerr := recheckFinalComponent(real); rerr != nil {
+		return proto.FileOpResult{}, rerr
+	}
 	if err := os.MkdirAll(real, os.FileMode(mode)); err != nil {
 		return proto.FileOpResult{}, &RPCError{Code: "mkdir_failed", Message: err.Error()}
 	}
@@ -615,6 +654,13 @@ func (m *fileManager) Mkdir(_ context.Context, p proto.FileMkdirPayload) (proto.
 func (m *fileManager) Delete(_ context.Context, p proto.FileDeletePayload) (proto.FileOpResult, error) {
 	real, rerr := validateTransferPath(p.Path)
 	if rerr != nil {
+		return proto.FileOpResult{}, rerr
+	}
+	// Re-Lstat the final component immediately before the delete: between
+	// validateTransferPath and here a local process can swap `real` for a symlink
+	// pointing outside the sandbox, and os.RemoveAll follows the final symlink's
+	// target when recursing. Refuse if it became an escaping symlink.
+	if rerr := recheckFinalComponent(real); rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
 	var err error
@@ -636,6 +682,12 @@ func (m *fileManager) Rename(_ context.Context, p proto.FileRenamePayload) (prot
 	}
 	to, rerr := validateWriteTarget(p.To)
 	if rerr != nil {
+		return proto.FileOpResult{}, rerr
+	}
+	// Re-Lstat the destination's final component just before the rename. A
+	// symlink swapped in at `to` after validateWriteTarget would let the move
+	// land outside the sandbox; refuse if it now escapes the allowed roots.
+	if rerr := recheckFinalComponent(to); rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
 	if err := os.Rename(from, to); err != nil {
