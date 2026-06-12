@@ -254,12 +254,21 @@ func (a *App) extractLocal(archivePath, destDir string) error {
 	case strings.HasSuffix(low, ".zip"):
 		return extractZipNative(archivePath, destDir)
 	case strings.HasSuffix(low, ".tar.xz"):
-		// No stdlib xz reader: list members via tar, refuse any escape, then
-		// extract with the constant-tool path (no shell).
-		if err := validateTarXZMembers(archivePath); err != nil {
+		// No stdlib xz reader, so we must shell out to tar twice (list to
+		// validate, then extract). Running both against the ORIGINAL path is a
+		// validate-then-extract TOCTOU: a local attacker could swap the file
+		// between the member-check and the extraction. Stage a private 0700 copy
+		// (mirroring the remote path's stageRemoteArchiveCopy) and bind both
+		// operations to that agent-private, unpredictably-named file instead.
+		staged, cleanup, err := stageLocalArchiveCopy(archivePath)
+		if err != nil {
 			return err
 		}
-		tool, args := extractArgv(archivePath, destDir)
+		defer cleanup()
+		if err := validateTarXZMembers(staged); err != nil {
+			return err
+		}
+		tool, args := extractArgv(staged, destDir)
 		return runLocalTool("", tool, args)
 	default:
 		// tar, tar.gz/.tgz, tar.bz2 — all handled by streaming readers.
@@ -313,6 +322,7 @@ func extractZipNative(archivePath, destDir string) error {
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer zr.Close()
+	lim := newExtractLimiter()
 	for _, f := range zr.File {
 		target, err := SafeLocalJoin(destDir, f.Name)
 		if err != nil {
@@ -330,6 +340,11 @@ func extractZipNative(archivePath, destDir string) error {
 		if !info.Mode().IsRegular() {
 			continue
 		}
+		// Aggregate cap: refuse once the archive exceeds the whole-archive member
+		// count, before opening/creating yet another file.
+		if err := lim.member(); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return err
 		}
@@ -337,7 +352,7 @@ func extractZipNative(archivePath, destDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := writeArchiveFile(target, rc, info.Mode().Perm()); err != nil {
+		if err := writeArchiveFile(target, rc, info.Mode().Perm(), lim); err != nil {
 			_ = rc.Close()
 			return err
 		}
@@ -370,6 +385,7 @@ func extractTarNative(archivePath, destDir string) error {
 	}
 
 	tr := tar.NewReader(src)
+	lim := newExtractLimiter()
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -388,10 +404,15 @@ func extractTarNative(archivePath, destDir string) error {
 				return err
 			}
 		case tar.TypeReg:
+			// Aggregate cap: refuse once the archive exceeds the whole-archive
+			// member count, before opening/creating yet another file.
+			if err := lim.member(); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 				return err
 			}
-			if err := writeArchiveFile(target, tr, os.FileMode(hdr.Mode&0o7777).Perm()); err != nil { // #nosec G115 -- masked to 0o7777
+			if err := writeArchiveFile(target, tr, os.FileMode(hdr.Mode&0o7777).Perm(), lim); err != nil { // #nosec G115 -- masked to 0o7777
 				return err
 			}
 		default:
@@ -404,29 +425,130 @@ func extractTarNative(archivePath, destDir string) error {
 }
 
 // writeArchiveFile copies one archive member's bytes to target with the given
-// perm. The copy is bounded by maxExtractedFileBytes so a decompression bomb (a
-// member that inflates enormously) cannot exhaust the controller's disk.
-func writeArchiveFile(target string, r io.Reader, perm os.FileMode) error {
+// perm. The copy is bounded by maxExtractedFileBytes (per member) and, via lim,
+// by the whole-archive byte budget so a decompression bomb (one giant member or
+// many large members) cannot exhaust the controller's disk.
+func writeArchiveFile(target string, r io.Reader, perm os.FileMode, lim *extractLimiter) error {
 	if perm == 0 {
 		perm = 0o600
 	}
-	// Never follow an existing symlink at target (defense in depth alongside the
-	// symlink-skip above); O_EXCL is too strict because directories may pre-exist
-	// but the file itself should be created fresh.
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- target validated via SafeLocalJoin
+	// O_NOFOLLOW makes the open fail (ELOOP) if target's final component is an
+	// existing symlink, so a symlink pre-planted in the operator-chosen
+	// destination cannot redirect this write outside the destination directory.
+	// This backs up the symlink-member skip in the extractors (which only stops
+	// links carried *inside* the archive). O_EXCL is too strict because parent
+	// directories may pre-exist; the file itself is created fresh and truncated.
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, perm) // #nosec G304 -- target validated via SafeLocalJoin; O_NOFOLLOW refuses a symlinked target
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	if _, err := io.Copy(out, io.LimitReader(r, maxExtractedFileBytes)); err != nil {
+	// Per-member cap plus the remaining whole-archive budget: copy at most the
+	// smaller of the two so neither a single bomb member nor the aggregate can
+	// overflow.
+	limit := maxExtractedFileBytes
+	if rem := lim.remainingBytes(); rem < limit {
+		limit = rem
+	}
+	n, err := io.Copy(out, io.LimitReader(r, limit+1))
+	if err != nil {
 		return err
 	}
+	if n > limit {
+		return fmt.Errorf("refusing to extract archive: %w", errExtractBudgetExceeded)
+	}
+	lim.addBytes(n)
 	return nil
 }
 
 // maxExtractedFileBytes caps a single extracted member's size to bound a
 // decompression bomb. 16 GiB is generous for real archives while still finite.
 const maxExtractedFileBytes = int64(16) * 1024 * 1024 * 1024
+
+// Aggregate extraction caps spanning the WHOLE archive: a per-member size cap
+// alone does not stop a many-member or many-large-member archive from filling
+// the controller's disk, so the total extracted bytes and the member count are
+// bounded too. 64 GiB / 100k members is generous for any legitimate archive.
+const (
+	maxExtractedTotalBytes = int64(64) * 1024 * 1024 * 1024
+	maxExtractedMembers    = 100_000
+)
+
+var errExtractBudgetExceeded = fmt.Errorf("archive exceeds the %d GiB total / %d member extraction limit (possible archive bomb)",
+	maxExtractedTotalBytes/(1024*1024*1024), maxExtractedMembers)
+
+// extractLimiter tracks the running total of extracted regular-file members and
+// bytes for one archive and refuses extraction once either aggregate cap is hit.
+// It is used single-threaded (one extractor loop), so it needs no locking.
+type extractLimiter struct {
+	members int
+	bytes   int64
+}
+
+func newExtractLimiter() *extractLimiter { return &extractLimiter{} }
+
+// member records one more regular-file member and errors if the whole-archive
+// member count is exceeded. Call it before creating each member's file.
+func (l *extractLimiter) member() error {
+	l.members++
+	if l.members > maxExtractedMembers {
+		return fmt.Errorf("refusing to extract archive: %w", errExtractBudgetExceeded)
+	}
+	return nil
+}
+
+// remainingBytes is the whole-archive byte budget not yet consumed (never
+// negative).
+func (l *extractLimiter) remainingBytes() int64 {
+	rem := maxExtractedTotalBytes - l.bytes
+	if rem < 0 {
+		return 0
+	}
+	return rem
+}
+
+// addBytes credits n bytes against the whole-archive budget.
+func (l *extractLimiter) addBytes(n int64) { l.bytes += n }
+
+// stageLocalArchiveCopy copies archivePath into a fresh 0700 temp dir on the
+// controller (preserving the base name so extension-based format detection still
+// works) and returns the copy's path plus a cleanup func. Validating + extracting
+// the COPY closes the validate/extract TOCTOU on the local filesystem: both tar
+// invocations read this private, unpredictably-named 0600 file, so a local
+// attacker cannot swap the archive between the member-check and the extraction.
+func stageLocalArchiveCopy(archivePath string) (staged string, cleanup func(), err error) {
+	dir, err := os.MkdirTemp("", "fleet-extract-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- directory needs the owner execute bit
+		cleanup()
+		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
+	}
+	src, err := os.Open(archivePath) // #nosec G304 -- operator-chosen archive path
+	if err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
+	}
+	defer src.Close()
+	staged = filepath.Join(dir, filepath.Base(archivePath))
+	dst, err := os.OpenFile(staged, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+	if err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
+	}
+	return staged, cleanup, nil
+}
 
 // stageRemoteArchiveCopy copies archivePath into a fresh 0700 temp dir on the
 // server (preserving the base name so format detection by extension still works)
