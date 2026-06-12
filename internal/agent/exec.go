@@ -32,6 +32,20 @@ const maxExecOutputBytes = 16 << 20 // 16 MiB
 // output was cut rather than ending naturally.
 const truncationMarker = "\n[output truncated: exceeded 16 MiB limit]"
 
+// maxConcurrentExecs bounds how many shell.exec commands may run at once across
+// the whole agent. Each in-flight exec buffers up to maxExecOutputBytes for
+// stdout AND stderr (≈32 MiB worst case), so without an aggregate cap the
+// 128-channel limit lets a peer pin ≈4 GiB of heap. Capping concurrency to a
+// small number bounds total exec output memory to maxConcurrentExecs * 2 *
+// maxExecOutputBytes (≈256 MiB here). Excess execs queue on execSlots rather
+// than failing — the command still runs, just after a slot frees — so existing
+// behavior (every exec eventually runs and returns its output) is preserved.
+const maxConcurrentExecs = 8
+
+// execSlots is a counting semaphore: a token is acquired before an exec runs and
+// released when it returns, bounding aggregate exec output buffers process-wide.
+var execSlots = make(chan struct{}, maxConcurrentExecs)
+
 // cappedBuffer is an io.Writer that retains at most max bytes. Once full it
 // discards further writes (but keeps counting via truncated) so a runaway
 // command cannot grow the agent's heap without bound. It is written to only from
@@ -66,6 +80,25 @@ func (c *cappedBuffer) String() string {
 }
 
 func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecResult, error) {
+	// Acquire a concurrency slot before allocating output buffers so aggregate
+	// exec memory across all channels stays bounded (see execSlots). Prefer a
+	// non-blocking acquire so an immediately-available slot proceeds straight to
+	// the normal run path (preserving existing behavior, including the watchdog
+	// killing a command whose context is already cancelled). Only when all slots
+	// are in use do we wait — and there, bail out on cancellation so a cancelled
+	// request doesn't queue behind a backlog.
+	select {
+	case execSlots <- struct{}{}:
+		defer func() { <-execSlots }()
+	default:
+		select {
+		case execSlots <- struct{}{}:
+			defer func() { <-execSlots }()
+		case <-ctx.Done():
+			return proto.ExecResult{}, ctx.Err()
+		}
+	}
+
 	// Derive a timeout-bounded context so a runaway command is killed. We manage
 	// the kill ourselves (process group) rather than relying on
 	// CommandContext's single-process kill, which would leave the child's own
