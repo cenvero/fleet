@@ -660,3 +660,42 @@ func TestLocalWriteRefusesSymlink(t *testing.T) {
 		t.Fatalf("symlink target was clobbered: %q", b)
 	}
 }
+
+// TestResolveLocalWritePathCanonicalizesParent confirms that a symlinked
+// INTERMEDIATE directory in the path is resolved to its canonical real location
+// before the open, so the write lands at a deterministic path rather than
+// wherever a symlink swapped in on the parent chain points. O_NOFOLLOW only
+// guards the final component, so this closes the intermediate-symlink hole.
+func TestResolveLocalWritePathCanonicalizesParent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	// real/ is the canonical directory; link/ is a symlink to it. A write through
+	// link/ must resolve to real/ so the parent symlink can't redirect the bytes.
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got := resolveLocalWritePath(filepath.Join(link, "file.txt"))
+	// EvalSymlinks also canonicalizes the tmp root (e.g. macOS /var -> /private/var),
+	// so compare against the resolved real directory rather than the raw root.
+	realResolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatalf("eval real: %v", err)
+	}
+	want := filepath.Join(realResolved, "file.txt")
+	if got != want {
+		t.Fatalf("resolveLocalWritePath through symlinked parent = %q, want %q", got, want)
+	}
+
+	// A non-existent parent is returned lexically (nothing to resolve, no panic).
+	missing := filepath.Join(root, "does-not-exist", "f.txt")
+	if got := resolveLocalWritePath(missing); got != missing {
+		t.Fatalf("resolveLocalWritePath(missing parent) = %q, want %q", got, missing)
+	}
+}
