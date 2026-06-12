@@ -313,8 +313,8 @@ func IsReadCommand(topCommand string) bool {
 //	server    remove                     tears down/forgets a managed server
 //	file      rm                         deletes a remote file/dir
 //	key       (any mutating sub)         rotates/regenerates controller keys
-//	firewall  enable                     changes live firewall state (lock-out risk)
-//	fw        enable                     alias of firewall enable (if present)
+//	firewall  enable/disable             changes live firewall state (lock-out risk)
+//	fw        enable/disable             safe-firewall variant of the same
 //	guard     (any)                      arms/triggers the dead-man guard
 //	revert    (any)                      reverts servers to a prior state
 //	tag       set                        rewrites server tags (group membership)
@@ -326,6 +326,11 @@ func IsReadCommand(topCommand string) bool {
 //	policy    set                        rewrites policy
 //	svc       restart/stop/disable/      changes live systemd unit state
 //	          enable/start
+//	sync      (any)                      live-mirrors and DELETES files on a target
+//	bootstrap (any)                      installs/configures an agent on a host
+//	template  apply                      applies a template (mutates the server)
+//	update    apply/rollback             changes the installed controller binary
+//	agent     update                     pushes a new agent binary to servers
 //
 // Notes:
 //   - drift is read-only (it reports divergence; it does not change anything),
@@ -333,6 +338,12 @@ func IsReadCommand(topCommand string) bool {
 //   - exec cannot be classified from here (we can't see what the remote command
 //     does), so exec is treated as NON-destructive by default; operators scope
 //     it via DenyCommands/AllowCommands and the server set instead.
+//   - sync and bootstrap are FLAT commands (no cobra subcommand, so the resolved
+//     sub is always ""); they are marked whole-command destructive via "*".
+//   - cron exposes only add/list/rm (no edit/enable/disable subcommands), so the
+//     add/rm pair already covers every mutating cron sub; list is read-only.
+//   - `update check` and `agent version` are read-only and intentionally omitted,
+//     so only the mutating subs (apply/rollback, update) are gated.
 //
 // A subcommand value of "*" means the whole top-level command is destructive.
 // For "key", every mutating sub is destructive; only the read sub
@@ -342,9 +353,11 @@ var destructiveCommands = map[string]map[string]bool{
 	// All data-modifying file subcommands are destructive — not just delete:
 	// move/rename can overwrite or remove, extract overwrites, and upload/compress
 	// write to the server.
-	"file":     {"rm": true, "mv": true, "move": true, "extract": true, "compress": true, "upload": true},
-	"firewall": {"enable": true},
-	"fw":       {"enable": true},
+	"file": {"rm": true, "mv": true, "move": true, "extract": true, "compress": true, "upload": true},
+	// Both enable AND disable change live firewall state. `disable` is a lock-out /
+	// exposure vector (it drops the firewall), so it must be gated just like enable.
+	"firewall": {"enable": true, "disable": true},
+	"fw":       {"enable": true, "disable": true},
 	"guard":    {"*": true},
 	"revert":   {"*": true},
 	// NOTE: `tag` is special-cased in IsDestructiveCommand (it is a flat command
@@ -358,6 +371,20 @@ var destructiveCommands = map[string]map[string]bool{
 	// svc control mutates live systemd state and must clear the --destructive
 	// gate; only `svc status` (read) is exempt by omission.
 	"svc": {"restart": true, "stop": true, "disable": true, "enable": true, "start": true},
+	// sync and bootstrap are flat commands (resolved sub is always ""): sync live-
+	// mirrors a directory and DELETES extra files on the target by default;
+	// bootstrap installs and configures an agent on a host. Both clearly mutate a
+	// managed server, so the whole command is destructive.
+	"sync":      {"*": true},
+	"bootstrap": {"*": true},
+	// template apply mutates the target server; `template list` (read) is exempt.
+	"template": {"apply": true},
+	// update apply/rollback swap the installed controller binary; `update check`
+	// (read) is exempt.
+	"update": {"apply": true, "rollback": true},
+	// `agent update` pushes a new agent binary to servers; `agent version` (read)
+	// is exempt.
+	"agent": {"update": true},
 }
 
 // keyReadSubs are the read-only subcommands of `key`. Every other `key`
