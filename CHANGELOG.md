@@ -34,7 +34,11 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
-A large security-hardening campaign (a full-codebase audit plus three follow-up
+_Nothing yet — changes for the next release land here._
+
+## [v2.2.0] — 2026-06-12 (stable)
+
+A large security-hardening campaign (a full-codebase audit plus four follow-up
 re-audit rounds) alongside a new automation/RBAC command surface, encrypted
 secrets, signed anti-rollback updates, and operability improvements.
 
@@ -57,9 +61,15 @@ secrets, signed anti-rollback updates, and operability improvements.
   named secrets into the command environment, with values redacted from output.
 - **RBAC scoped tokens (FL-030).** Controller-side enforcement of per-token
   scopes, with audited actions attributed to the active token.
-- **Custom job names** and a **parallel `sync-agent`** with live progress.
+- **Custom job names** (`job run --name`) and a **parallel `sync-agent`** with
+  live per-server progress.
 - **Periodic update check.** A background version check that surfaces a yellow
   "update available" notice regardless of how Fleet was installed.
+- **`update apply --allow-unsigned` / `--allow-downgrade`** — explicit, opt-in
+  overrides for an unsigned local build or a deliberate downgrade (fail-closed by
+  default).
+- **`fleet server enroll-token <name>`** to (re)mint a reverse-mode enrollment
+  token.
 
 ### Changed
 
@@ -90,6 +100,16 @@ secrets, signed anti-rollback updates, and operability improvements.
   job logfiles at `0600` with unpredictable names, plus round-3 low findings
   (permissions, DoS bounds, DNS-rebind, atomic key writes, SSRF, input
   validation).
+- **Re-audit round 4** — verify-and-fix of the final audit pass: a lock around
+  the reverse-enrollment verify-pin sequence (TOCTOU); SSH **KEX/MAC/host-key
+  algorithm pinning** everywhere; `--accept-new-host-key` is first-connect-only;
+  atomic `known_hosts`; an **audit-log SHA-256 hash chain** (tamper-evidence);
+  update **version-binding** (assert the version in the signed minisign trusted
+  comment); key-rotation **retention + secure-wipe**; cmd-policy gating of
+  `ssh`/`svc`/`file edit`/crontab and **loopback-only tunnel targets** for scoped
+  tokens; wider destructive-command classification; aggregate archive-extract
+  caps and local `tar.xz` staging; and the remaining low findings (more
+  `O_NOFOLLOW`, SQLite perms, IPv6 SSRF, atomic key writes, DoS bounds).
 - Earlier audit waves: exec gate, key-rotation, job sentinel, and tunnel fixes;
   option-injection, firewall fail-open, deny-rule anchoring, and agent-error
   redaction; and a bounded file-diff LCS table (CodeQL
