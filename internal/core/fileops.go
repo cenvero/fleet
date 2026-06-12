@@ -106,6 +106,15 @@ func (a *App) StatRemoteFile(serverName, remotePath string) (proto.FileStatResul
 	return proto.DecodePayload[proto.FileStatResult](resp.Payload)
 }
 
+// maxCatRemoteBytes bounds the total bytes CatRemoteFile will stream from one
+// remote file. EOF is agent-controlled, so a malicious agent could return
+// non-empty data forever without ever setting EOF; this ceiling (and the
+// derived iteration cap below) forces the loop to terminate. 4 GiB is far
+// larger than anything this "view a file" path is meant for — use DownloadFile,
+// which is size-driven by the file's stat, for bulk transfer. A var (not a
+// const) only so tests can lower it; production code never reassigns it.
+var maxCatRemoteBytes = int64(4) * 1024 * 1024 * 1024
+
 // CatRemoteFile streams a remote file to w, verifying each chunk's SHA-256. It
 // returns the number of bytes written. Sequential (single channel) — intended
 // for viewing, not bulk transfer; use DownloadFile for large files.
@@ -114,8 +123,16 @@ func (a *App) CatRemoteFile(serverName, remotePath string, w io.Writer) (int64, 
 	if err != nil {
 		return 0, err
 	}
+	// Bound the number of round-trips too: a malicious agent could dribble back
+	// tiny (even 1-byte) chunks to stay under the byte ceiling for a very long
+	// time. Allow enough iterations to stream maxCatRemoteBytes at the protocol's
+	// max chunk size, plus generous slack, then refuse.
+	maxIters := int(maxCatRemoteBytes/proto.MaxRawChunkBytes) + 16
 	var offset int64
-	for {
+	for iter := 0; ; iter++ {
+		if iter >= maxIters {
+			return offset, fmt.Errorf("aborting remote read of %q after %d chunks without EOF (possible misbehaving agent)", remotePath, iter)
+		}
 		resp, err := a.callRPC(server, proto.Envelope{
 			Action:  proto.ActionFileRead,
 			Payload: proto.FileReadPayload{Path: remotePath, Offset: offset, Length: proto.MaxRawChunkBytes},
@@ -131,6 +148,11 @@ func (a *App) CatRemoteFile(serverName, remotePath string, w io.Writer) (int64, 
 			return offset, err
 		}
 		if len(res.Data) > 0 {
+			// Refuse once the total would exceed the ceiling, before writing more:
+			// EOF is agent-controlled and cannot be trusted to ever arrive.
+			if offset+int64(len(res.Data)) > maxCatRemoteBytes {
+				return offset, fmt.Errorf("aborting remote read of %q: exceeds %d-byte limit without EOF (possible misbehaving agent)", remotePath, maxCatRemoteBytes)
+			}
 			if res.SHA256 != "" {
 				sum := sha256.Sum256(res.Data)
 				if hex.EncodeToString(sum[:]) != res.SHA256 {
