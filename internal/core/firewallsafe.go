@@ -545,29 +545,77 @@ func rulesetAllowsPort(dump string, port int) bool {
 	// Each pattern is split into a prefix and an optional suffix that must surround
 	// the exact port token. containsPortToken enforces that the digits immediately
 	// before/after the port are non-digits (word boundary), so 22 != 2222.
-	patterns := []struct{ prefix, suffix string }{
-		{"dport ", " accept"}, // nft: "tcp dport 2222 accept"
-		{"--dport ", ""},      // iptables: "--dport 2222 -j ACCEPT"
-		{"", "/tcp"},          // ufw / firewalld port form "2222/tcp"
-		{"", "/udp"},
-		{"port=", ""},   // firewalld: "port=2222"
-		{"ports: ", ""}, // firewalld: "ports: 2222 443"
-		{" ", " "},      // ufw column form "443  ALLOW ..."
+	patterns := []struct {
+		prefix, suffix string
+		// requireAllow restricts the match to a line whose ACTION is allow/accept.
+		// The bare space-delimited column form (" "+port+" ") matches the port
+		// anywhere on a line, so a whole-dump substring scan would FALSELY report
+		// the port as allowed when it merely appears inside a DENY/reject rule or
+		// a comment — weakening the fail-closed positive confirmation. Pinning that
+		// form to an allow-context line keeps a deny rule mentioning the port from
+		// satisfying "port is allowed". The other forms are either self-evident
+		// allow rules (nft "... accept", iptables "--dport ... -j ACCEPT") or only
+		// appear in allow-lists (firewalld "ports:"/"port="); the per-line deny
+		// skip below additionally guards those against a deny rule reusing the form.
+		requireAllow bool
+	}{
+		{prefix: "dport ", suffix: " accept"}, // nft: "tcp dport 2222 accept"
+		{prefix: "--dport ", suffix: ""},      // iptables: "--dport 2222 -j ACCEPT"
+		{prefix: "", suffix: "/tcp"},          // ufw / firewalld port form "2222/tcp"
+		{prefix: "", suffix: "/udp"},
+		{prefix: "port=", suffix: ""},                  // firewalld: "port=2222"
+		{prefix: "ports: ", suffix: ""},                // firewalld: "ports: 2222 443" (the zone's allow-list)
+		{prefix: " ", suffix: " ", requireAllow: true}, // ufw column form "443  ALLOW ..."
 	}
-	for _, pat := range patterns {
-		if containsPortToken(low, pat.prefix, p, pat.suffix) {
+	// The iptables "--dport N" and firewalld "port=N" / "N/tcp" forms are emitted
+	// in BOTH accept and drop/reject rules, so confirm the matching line is not a
+	// deny rule before trusting it. We scan line-by-line so the allow/deny context
+	// is evaluated against the SAME rule the port appears in, not the whole dump.
+	for _, line := range strings.Split(low, "\n") {
+		if lineDeniesTraffic(line) {
+			continue // a deny/reject/drop rule never confirms "allowed"
+		}
+		lineAllows := lineAllowsTraffic(line)
+		for _, pat := range patterns {
+			if pat.requireAllow && !lineAllows {
+				continue
+			}
+			if containsPortToken(line, pat.prefix, p, pat.suffix) {
+				return true
+			}
+		}
+		// ufw prints "443/tcp ALLOW" or "443 ALLOW IN"; catch the leading-token form.
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			token := strings.SplitN(fields[0], "/", 2)[0]
+			if token == p && lineAllows {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// lineDeniesTraffic reports whether a (lower-cased) ruleset line is a
+// deny/reject/drop rule. Such a line must never be read as confirming a port is
+// allowed, even if it mentions the port — that would weaken the fail-closed
+// positive confirmation EnableSafe relies on.
+func lineDeniesTraffic(line string) bool {
+	for _, verb := range []string{"deny", "reject", "drop"} {
+		if strings.Contains(line, verb) {
 			return true
 		}
 	}
-	// ufw prints "443/tcp ALLOW" or "443 ALLOW IN"; catch the leading-token form.
-	for _, line := range strings.Split(low, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		token := fields[0]
-		token = strings.SplitN(token, "/", 2)[0]
-		if token == p && strings.Contains(line, "allow") {
+	return false
+}
+
+// lineAllowsTraffic reports whether a (lower-cased) ruleset line carries an
+// allow/accept action verb. Used to pin the ambiguous port forms (bare column
+// form, firewalld "ports:" list) to an actual allow rule rather than any line
+// that happens to contain the port.
+func lineAllowsTraffic(line string) bool {
+	for _, verb := range []string{"allow", "accept"} {
+		if strings.Contains(line, verb) {
 			return true
 		}
 	}
