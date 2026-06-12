@@ -6,8 +6,12 @@ package core
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -209,6 +213,183 @@ func TestExtractZipNativeExtractsSafeArchive(t *testing.T) {
 	}
 	if string(got) != "bravo" {
 		t.Fatalf("extracted content mismatch: %q", got)
+	}
+}
+
+// TestExtractLimiterMemberCap confirms the whole-archive member-count cap fires
+// once the archive exceeds maxExtractedMembers, so a many-member archive bomb is
+// refused even when every individual member is tiny.
+func TestExtractLimiterMemberCap(t *testing.T) {
+	lim := newExtractLimiter()
+	for i := 0; i < maxExtractedMembers; i++ {
+		if err := lim.member(); err != nil {
+			t.Fatalf("member %d should be within the cap: %v", i, err)
+		}
+	}
+	if err := lim.member(); err == nil {
+		t.Fatal("the member past the cap must be refused")
+	} else if !errors.Is(err, errExtractBudgetExceeded) {
+		t.Fatalf("expected the budget-exceeded error, got: %v", err)
+	}
+}
+
+// TestWriteArchiveFileAggregateByteCap confirms writeArchiveFile refuses a member
+// whose bytes would push the WHOLE-archive total past maxExtractedTotalBytes,
+// even though that member is individually under the per-member cap.
+func TestWriteArchiveFileAggregateByteCap(t *testing.T) {
+	dir := t.TempDir()
+	lim := newExtractLimiter()
+	// Pretend the archive has already extracted all but 8 bytes of the budget.
+	lim.addBytes(maxExtractedTotalBytes - 8)
+
+	// 8 bytes fit exactly in the remaining budget.
+	if err := writeArchiveFile(filepath.Join(dir, "fits.bin"), bytes.NewReader(bytes.Repeat([]byte("x"), 8)), 0o600, lim); err != nil {
+		t.Fatalf("a member within the remaining budget must extract: %v", err)
+	}
+	// Budget is now exhausted; one more byte must be refused.
+	err := writeArchiveFile(filepath.Join(dir, "over.bin"), bytes.NewReader([]byte("y")), 0o600, lim)
+	if err == nil {
+		t.Fatal("a member exceeding the aggregate byte budget must be refused")
+	}
+	if !errors.Is(err, errExtractBudgetExceeded) {
+		t.Fatalf("expected the budget-exceeded error, got: %v", err)
+	}
+}
+
+// TestWriteArchiveFileRefusesSymlinkTarget confirms O_NOFOLLOW stops a member
+// from being written THROUGH a symlink pre-planted at its target path (which a
+// local attacker could place in the operator-chosen destination), so the bytes
+// cannot land outside the destination directory.
+func TestWriteArchiveFileRefusesSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("O_NOFOLLOW is a no-op on this platform")
+	}
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside.txt")
+	if err := os.WriteFile(outside, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(root, "dest")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dest, "member.txt")
+	if err := os.Symlink(outside, target); err != nil {
+		t.Fatal(err)
+	}
+
+	err := writeArchiveFile(target, bytes.NewReader([]byte("pwned")), 0o600, newExtractLimiter())
+	if err == nil {
+		t.Fatal("writing through a symlinked target must be refused (O_NOFOLLOW)")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "original" {
+		t.Fatalf("symlink target was followed and overwritten: %q", got)
+	}
+}
+
+// TestStageLocalArchiveCopyPrivate confirms the local staging helper produces an
+// independent 0600 copy (preserving the base name for extension detection) in a
+// private 0700 dir, and that its cleanup removes everything.
+func TestStageLocalArchiveCopyPrivate(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "data.tar.xz")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staged, cleanup, err := stageLocalArchiveCopy(src)
+	if err != nil {
+		t.Fatalf("stageLocalArchiveCopy: %v", err)
+	}
+	if filepath.Base(staged) != "data.tar.xz" {
+		t.Fatalf("staged copy must preserve the base name, got %q", staged)
+	}
+	if got, _ := os.ReadFile(staged); string(got) != "payload" {
+		t.Fatalf("staged copy content mismatch: %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, _ := os.Stat(staged); fi.Mode().Perm() != 0o600 {
+			t.Errorf("staged file perm = %o, want 0600", fi.Mode().Perm())
+		}
+		if fi, _ := os.Stat(filepath.Dir(staged)); fi.Mode().Perm() != 0o700 {
+			t.Errorf("staged dir perm = %o, want 0700", fi.Mode().Perm())
+		}
+	}
+	cleanup()
+	if _, err := os.Stat(filepath.Dir(staged)); !os.IsNotExist(err) {
+		t.Fatal("cleanup must remove the staging directory")
+	}
+}
+
+// TestExtractLocalTarXZRoundTrip confirms the tar.xz path still extracts a
+// well-formed archive correctly after being routed through the private staged
+// copy (no regression), and leaves the original archive in place.
+func TestExtractLocalTarXZRoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("xz"); err != nil {
+		t.Skip("xz not available")
+	}
+	app := &App{}
+	dest := t.TempDir()
+	archivePath := filepath.Join(dest, "ok.tar.xz")
+	writeTarXZ(t, archivePath, map[string]string{"a.txt": "alpha", "sub/b.txt": "bravo"})
+
+	if err := app.extractLocal(archivePath, dest); err != nil {
+		t.Fatalf("safe tar.xz should extract: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dest, "sub", "b.txt")); string(got) != "bravo" {
+		t.Fatalf("extracted content mismatch: %q", got)
+	}
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("the original archive must remain after extraction: %v", err)
+	}
+}
+
+// TestExtractLocalTarXZRefusesTraversal confirms a traversal member in a tar.xz
+// is still refused (validation runs against the staged copy).
+func TestExtractLocalTarXZRefusesTraversal(t *testing.T) {
+	if _, err := exec.LookPath("xz"); err != nil {
+		t.Skip("xz not available")
+	}
+	app := &App{}
+	root := t.TempDir()
+	dest := filepath.Join(root, "dest")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(dest, "evil.tar.xz")
+	writeTarXZ(t, archivePath, map[string]string{"../evil.txt": "pwned"})
+
+	if err := app.extractLocal(archivePath, dest); err == nil {
+		t.Fatal("a traversal member in tar.xz must be refused")
+	}
+	if _, err := os.Stat(filepath.Join(root, "evil.txt")); err == nil {
+		t.Fatal("tar.xz traversal wrote a file outside the destination directory")
+	}
+}
+
+// writeTarXZ builds a .tar.xz at path from name->content, shelling out to xz for
+// the compression layer (no stdlib xz writer).
+func writeTarXZ(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for name, content := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("xz", "-z", "-c")
+	cmd.Stdin = &buf
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("xz compress: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
