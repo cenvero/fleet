@@ -124,6 +124,42 @@ func UpgradeCommand() string {
 	return "fleet update apply"
 }
 
+// AgentVersionMismatch names a managed server whose last-observed agent version
+// differs from this controller's version.
+type AgentVersionMismatch struct {
+	Server       string `json:"server"`
+	AgentVersion string `json:"agent_version"`
+}
+
+// AgentsNeedingSync returns the managed servers whose last-observed agent
+// version differs from the controller's, so the caller can nudge the operator
+// to run `fleet sync-agent`. It reads only the versions already stored from
+// prior connections — no network calls. Servers we have never observed a
+// version for (empty AgentVersion) are skipped: we can't claim they're stale.
+// When the controller itself is a "dev" build, every comparison is noise, so it
+// returns nil. Versions compare canonically (leading-v / whitespace-insensitive).
+func (a *App) AgentsNeedingSync() ([]AgentVersionMismatch, error) {
+	controller := version.Canonical(version.Version)
+	if version.Version == "dev" || controller == "" {
+		return nil, nil
+	}
+	servers, err := a.ListServers()
+	if err != nil {
+		return nil, err
+	}
+	var out []AgentVersionMismatch
+	for _, s := range servers {
+		av := strings.TrimSpace(s.Observed.AgentVersion)
+		if av == "" {
+			continue
+		}
+		if version.Canonical(av) != controller {
+			out = append(out, AgentVersionMismatch{Server: s.Name, AgentVersion: av})
+		}
+	}
+	return out, nil
+}
+
 // UpdateNotice returns a ready-to-print update notice (with the correct upgrade
 // command for the install method) when a newer release is available on the
 // configured channel, or "" otherwise. When color is true it is wrapped in ANSI
