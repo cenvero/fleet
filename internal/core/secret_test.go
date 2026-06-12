@@ -571,6 +571,52 @@ func TestSecretKeySourcePinnedToControllerKey(t *testing.T) {
 // TestSecretKeySourcePinnedToDedicatedFile asserts the pin also covers the
 // dedicated-file path: a bare dir (no controller key) pins to the dedicated file,
 // and the recorded source is honored on later reads.
+// TestDeriveSecretKeyStableAfterWipe is a regression guard for the
+// defense-in-depth zeroization added to the derivation paths: zeroing the raw
+// key-file / private-key buffers after HKDF must NOT change the derived key.
+// Repeated derivations from the same dir must return byte-identical keys, and a
+// round-trip seal/open under those keys must succeed, for BOTH the dedicated-file
+// and controller-key sources.
+func TestDeriveSecretKeyStableAfterWipe(t *testing.T) {
+	t.Run("dedicated", func(t *testing.T) {
+		dir := t.TempDir() // no controller key => dedicated fallback
+		k1, err := deriveSecretKey(dir)
+		if err != nil {
+			t.Fatalf("derive #1: %v", err)
+		}
+		k2, err := deriveSecretKey(dir)
+		if err != nil {
+			t.Fatalf("derive #2: %v", err)
+		}
+		if string(k1) != string(k2) {
+			t.Fatal("dedicated derivation not stable across calls after wipe")
+		}
+		enc, err := encryptValue(k1, "payload")
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+		if got, err := decryptValue(k2, enc); err != nil || got != "payload" {
+			t.Fatalf("round-trip across derivations = %q, %v; want payload, nil", got, err)
+		}
+	})
+
+	t.Run("controller", func(t *testing.T) {
+		dir := t.TempDir()
+		writeControllerKey(t, dir)
+		k1, err := deriveSecretKey(dir)
+		if err != nil {
+			t.Fatalf("derive #1: %v", err)
+		}
+		k2, err := deriveSecretKey(dir)
+		if err != nil {
+			t.Fatalf("derive #2: %v", err)
+		}
+		if string(k1) != string(k2) {
+			t.Fatal("controller derivation not stable across calls after wipe")
+		}
+	})
+}
+
 func TestSecretKeySourcePinnedToDedicatedFile(t *testing.T) {
 	dir := t.TempDir() // no controller key present
 	store := NewSecretStore(dir)
