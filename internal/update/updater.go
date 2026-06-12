@@ -179,6 +179,27 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("verify minisign signature: %w", err)
 		}
 		result.SignatureVerified = true
+		// minisign.Verify above only proves the signature matches the archive
+		// BYTES — it does NOT bind those bytes to the version/target the manifest
+		// CLAIMS. A tampered manifest could therefore point a channel at a genuine,
+		// validly-signed OLD release while advertising a fake-high version, slipping
+		// past the byte-level check. Minisign's TRUSTED COMMENT is signed (part of
+		// the comment signature) and tamper-proof, so if the release pipeline embeds
+		// the version (and os-arch target) there, we can ASSERT the signed comment
+		// matches the manifest's claim and close that gap.
+		//
+		// FORWARD-COMPATIBLE: older releases whose trusted comment carries no
+		// version/target token are NOT rejected — we only assert when a token is
+		// present. The release pipeline MUST embed the version in the minisign
+		// trusted comment (e.g. `minisign -S -c '' -t 'fleet vX.Y.Z linux-amd64'`)
+		// for this binding to be fully enforced; until then a note records that the
+		// signed comment did not bind the version.
+		target := runtime.GOOS + "-" + runtime.GOARCH
+		if note, err := assertSignedComment(signature, version, target); err != nil {
+			return ApplyResult{}, fmt.Errorf("verify minisign signature: %w", err)
+		} else if note != "" {
+			result.Note = appendNote(result.Note, note)
+		}
 	}
 	if hasHash {
 		actual := sha256.Sum256(archive)
@@ -645,4 +666,114 @@ func hasConfiguredSigningKey(publicKeyText string) bool {
 		return false
 	}
 	return !strings.Contains(trimmed, "REPLACE_WITH_MINISIGN_PUBLIC_KEY")
+}
+
+// knownGoOS / knownGoArch are the os/arch tokens we recognize inside a minisign
+// trusted comment so we can tell an intended "goos-goarch" target token apart
+// from arbitrary comment text. This list need not be exhaustive â an unknown
+// pair simply isn't treated as a target token (forward-compat, no false reject).
+var (
+	knownGoOS   = map[string]bool{"linux": true, "darwin": true, "windows": true, "freebsd": true, "openbsd": true, "netbsd": true}
+	knownGoArch = map[string]bool{"amd64": true, "arm64": true, "arm": true, "386": true, "ppc64le": true, "s390x": true, "riscv64": true}
+)
+
+// assertSignedComment inspects a minisign signature's TRUSTED COMMENT (already
+// cryptographically authenticated by a successful minisign.Verify of the same
+// signature) and, IF the comment carries a version and/or os-arch target token,
+// asserts they match the manifest's claimed wantVersion / wantTarget. This binds
+// the signed bytes to the manifest's claim so a tampered manifest cannot point a
+// channel at a genuine OLD signed release under a fake-high version.
+//
+// FORWARD-COMPATIBLE: a comment with no recognizable version or target token is
+// NOT an error â older releases predate this convention. In that case it returns
+// a non-empty note (and nil error) so the caller can record that the signed
+// comment did not bind the version. An error is returned ONLY on a positive
+// MISMATCH (the comment names a different version, or a different recognized
+// os-arch target than expected).
+//
+// The release pipeline MUST embed the version (and ideally the os-arch target)
+// in the minisign trusted comment for this binding to be fully enforced, e.g.:
+//
+//	minisign -S -m fleet.tar.gz -t 'fleet v1.4.0 linux-amd64'
+func assertSignedComment(signature []byte, wantVersion, wantTarget string) (string, error) {
+	var sig minisign.Signature
+	if err := sig.UnmarshalText(signature); err != nil {
+		return "", fmt.Errorf("parse signature trusted comment: %w", err)
+	}
+	comment := strings.ToLower(strings.TrimSpace(sig.TrustedComment))
+	if comment == "" {
+		return "signed comment carried no version (cannot bind version/target; update release pipeline to embed it)", nil
+	}
+
+	wantVersionNorm := trimVersionPrefix(wantVersion)
+	wantTargetNorm := strings.ToLower(strings.TrimSpace(wantTarget))
+
+	var sawVersionToken bool
+	for _, tok := range strings.Fields(comment) {
+		if isVersionToken(tok) {
+			sawVersionToken = true
+			if !sameVersion(tok, wantVersion) && !strings.EqualFold(trimVersionPrefix(tok), wantVersionNorm) {
+				return "", fmt.Errorf(
+					"signed version %q does not match manifest version %q (possible manifest tampering)",
+					tok, wantVersion)
+			}
+		}
+		if isTargetToken(tok) {
+			if wantTargetNorm != "" && tok != wantTargetNorm {
+				return "", fmt.Errorf(
+					"signed target %q does not match expected target %q (possible manifest tampering)",
+					tok, wantTargetNorm)
+			}
+		}
+	}
+
+	if !sawVersionToken {
+		return "signed comment carried no version token (cannot fully bind version; update release pipeline to embed it)", nil
+	}
+	return "", nil
+}
+
+// isVersionToken reports whether tok looks like a dotted version (optionally with
+// a leading v/V and a pre-release/build suffix), e.g. "v1.4.0" or "1.4.0-rc1".
+// It must contain at least one '.' between digit groups so a bare word or an
+// os-arch token isn't mistaken for a version.
+func isVersionToken(tok string) bool {
+	v := trimVersionPrefix(tok)
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	if !strings.Contains(v, ".") {
+		return false
+	}
+	for _, part := range strings.Split(v, ".") {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isTargetToken reports whether tok is a recognized "goos-goarch" target pair.
+func isTargetToken(tok string) bool {
+	parts := strings.SplitN(tok, "-", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	return knownGoOS[parts[0]] && knownGoArch[parts[1]]
+}
+
+// appendNote joins update notes with "; " so multiple advisories survive.
+func appendNote(existing, add string) string {
+	if strings.TrimSpace(existing) == "" {
+		return add
+	}
+	if strings.TrimSpace(add) == "" {
+		return existing
+	}
+	return existing + "; " + add
 }
