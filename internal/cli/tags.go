@@ -21,8 +21,9 @@ import (
 func newTagCommand(configDir *string) *cobra.Command {
 	var list bool
 	cmd := &cobra.Command{
-		Use:   "tag [<server> [key=value...]]",
-		Short: "Tag servers with key=value labels and group them",
+		Use:               "tag [<server> [key=value...]]",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Tag servers with key=value labels and group them",
 		Long: "Attach arbitrary key=value tags to servers and use them to group and filter.\n" +
 			"Tags are stored locally in the controller config dir (tags.json); they don't\n" +
 			"touch the managed servers.\n\n" +

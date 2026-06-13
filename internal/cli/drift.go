@@ -23,8 +23,9 @@ import (
 // diff) / missing, exiting non-zero if any drift is detected.
 func newDriftCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "drift <server>",
-		Short: "Detect config drift of captured paths against a stored baseline",
+		Use:               "drift <server>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Detect config drift of captured paths against a stored baseline",
 		Long: "Compare a server's tracked config files against a previously captured baseline.\n\n" +
 			"First capture a baseline of the files you care about:\n\n" +
 			"  fleet drift capture web-01 --paths /etc/ssh/sshd_config,/etc/fstab\n\n" +

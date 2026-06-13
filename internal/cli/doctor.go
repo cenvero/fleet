@@ -38,8 +38,9 @@ func doctorExecAdapter(app *core.App, server string) func(command string) (core.
 func newDoctorCommand(configDir *string) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "doctor <server>",
-		Short: "Run a health checklist against a server (agent, ports, disk, swap, reboot, clock)",
+		Use:               "doctor <server>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Run a health checklist against a server (agent, ports, disk, swap, reboot, clock)",
 		Long: "Run a fixed set of health checks against a managed server over the agent\n" +
 			"channel and report each as ok/warn/fail:\n\n" +
 			"  • agent online        a trivial remote command succeeds\n" +

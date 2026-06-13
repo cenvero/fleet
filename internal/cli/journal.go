@@ -36,8 +36,9 @@ func newJournalCommand(configDir *string) *cobra.Command {
 	var follow bool
 
 	cmd := &cobra.Command{
-		Use:   "journal <server> --unit <name>",
-		Short: "Page or follow the systemd journal for a unit",
+		Use:               "journal <server> --unit <name>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Page or follow the systemd journal for a unit",
 		Long: `Read journalctl -u <unit> from a server over the live agent transport.
 
   fleet journal web-01 --unit nginx

@@ -22,8 +22,9 @@ func newSyncCommand(configDir *string) *cobra.Command {
 	var parallel int
 	var from string
 	cmd := &cobra.Command{
-		Use:   "sync <server> <local-dir> <remote-dir>",
-		Short: "Live mirror a directory between local and a server (writer → replica)",
+		Use:               "sync <server> <local-dir> <remote-dir>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Live mirror a directory between local and a server (writer → replica)",
 		Long: "Keep a local directory and a server directory mirrored, live, until you stop\n" +
 			"it with Ctrl-C.\n\n" +
 			"One side is the writer (the source of truth) and the other is a read-only\n" +

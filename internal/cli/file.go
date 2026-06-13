@@ -60,9 +60,10 @@ func newFileCommand(configDir *string) *cobra.Command {
 
 func newFileListCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "list <server> [path]",
-		Short: "List a directory on a managed server",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:               "list <server> [path]",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "List a directory on a managed server",
+		Args:              cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -87,8 +88,9 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 	var chunkSize string
 	var recursive bool
 	cmd := &cobra.Command{
-		Use:   "upload <server> <local> [remote]",
-		Short: "Upload a local file (or directory with -r) to a server (chunked, parallel, resumable)",
+		Use:               "upload <server> <local> [remote]",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Upload a local file (or directory with -r) to a server (chunked, parallel, resumable)",
 		Long: "Upload <local> to <remote> on <server>. If <remote> is omitted (or ends in '/')\n" +
 			"the file lands in the server's default remote directory under its base name.\n" +
 			"The transfer is chunked, run over --parallel concurrent channels, SHA-256\n" +
@@ -144,8 +146,9 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 	var chunkSize string
 	var recursive bool
 	cmd := &cobra.Command{
-		Use:   "download <server> <remote> [local] | <server:remote> [local]",
-		Short: "Download a file (or directory with -r) from a server (chunked, parallel, resumable)",
+		Use:               "download <server> <remote> [local] | <server:remote> [local]",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Download a file (or directory with -r) from a server (chunked, parallel, resumable)",
 		Long: "Download <remote> from <server> into <local> (defaults to the remote base name\n" +
 			"in the current directory; a local directory is allowed and the base name is\n" +
 			"appended). Same engine as upload: chunked, parallel, SHA-256 verified, and\n" +
@@ -202,9 +205,10 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 
 func newFileStatCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "stat <server> <path>",
-		Short: "Show metadata (size, mode, mtime, type) for a remote path",
-		Args:  cobra.ExactArgs(2),
+		Use:               "stat <server> <path>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Show metadata (size, mode, mtime, type) for a remote path",
+		Args:              cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -222,9 +226,10 @@ func newFileStatCommand(configDir *string) *cobra.Command {
 
 func newFileCatCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "cat <server> <path>",
-		Short: "Stream a remote file to stdout (each chunk checksum-verified)",
-		Args:  cobra.ExactArgs(2),
+		Use:               "cat <server> <path>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Stream a remote file to stdout (each chunk checksum-verified)",
+		Args:              cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -241,9 +246,10 @@ func newFileTailCommand(configDir *string) *cobra.Command {
 	var lines int
 	var search string
 	cmd := &cobra.Command{
-		Use:   "tail <server> <path>",
-		Short: "Show the last lines of a remote text file",
-		Args:  cobra.ExactArgs(2),
+		Use:               "tail <server> <path>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Show the last lines of a remote text file",
+		Args:              cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -824,9 +830,10 @@ func newFileExtractCommand(configDir *string) *cobra.Command {
 
 func newFileMkdirCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "mkdir <server> <path>",
-		Short: "Create a directory on a managed server",
-		Args:  cobra.ExactArgs(2),
+		Use:               "mkdir <server> <path>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Create a directory on a managed server",
+		Args:              cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -845,9 +852,10 @@ func newFileMkdirCommand(configDir *string) *cobra.Command {
 func newFileRemoveCommand(configDir *string) *cobra.Command {
 	var recursive bool
 	cmd := &cobra.Command{
-		Use:   "rm <server> <path>",
-		Short: "Remove a file or directory on a managed server",
-		Args:  cobra.ExactArgs(2),
+		Use:               "rm <server> <path>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Remove a file or directory on a managed server",
+		Args:              cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {

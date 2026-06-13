@@ -1079,9 +1079,10 @@ func newServerCommand(configDir *string) *cobra.Command {
 	list.Flags().StringVar(&listFormat, "format", "table", "output format: table or json")
 	serverCmd.AddCommand(list)
 	serverCmd.AddCommand(&cobra.Command{
-		Use:   "show <name>",
-		Short: "Show a server definition",
-		Args:  cobra.ExactArgs(1),
+		Use:               "show <name>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Show a server definition",
+		Args:              cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -1096,9 +1097,10 @@ func newServerCommand(configDir *string) *cobra.Command {
 		},
 	})
 	serverCmd.AddCommand(&cobra.Command{
-		Use:   "metrics <name>",
-		Short: "Collect a live metrics snapshot from a server",
-		Args:  cobra.ExactArgs(1),
+		Use:               "metrics <name>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Collect a live metrics snapshot from a server",
+		Args:              cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -1113,8 +1115,9 @@ func newServerCommand(configDir *string) *cobra.Command {
 		},
 	})
 	removeCmd := &cobra.Command{
-		Use:   "remove <name>",
-		Short: "Remove a server (and tear down its agent if managed)",
+		Use:               "remove <name>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Remove a server (and tear down its agent if managed)",
 		Long: `Removes a server from the fleet.
 
 If the agent is managed, fleet will SSH to the server using the stored login
@@ -1192,9 +1195,10 @@ If the server is unreachable or credentials have changed, use one of:
 	removeCmd.Flags().Int("login-port", 0, "SSH port for teardown (--via-ssh, default 22)")
 	serverCmd.AddCommand(removeCmd)
 	reconnect := &cobra.Command{
-		Use:   "reconnect <name>",
-		Short: "Reconnect to a server and optionally accept a new host key",
-		Args:  cobra.ExactArgs(1),
+		Use:               "reconnect <name>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Reconnect to a server and optionally accept a new host key",
+		Args:              cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			accept, _ := cmd.Flags().GetBool("accept-new-host-key")
 			app, err := openApp(*configDir)
@@ -1215,9 +1219,10 @@ If the server is unreachable or credentials have changed, use one of:
 	reconnect.Flags().Bool("accept-new-host-key", false, "accept a replacement host key after manual verification")
 	serverCmd.AddCommand(reconnect)
 	serverCmd.AddCommand(&cobra.Command{
-		Use:   "mode <name> <mode>",
-		Short: "Change the transport mode for a server",
-		Args:  cobra.ExactArgs(2),
+		Use:               "mode <name> <mode>",
+		ValidArgsFunction: serverNameCompAt(configDir, 0),
+		Short:             "Change the transport mode for a server",
+		Args:              cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -2504,8 +2509,9 @@ func newExecCommand(configDir *string) *cobra.Command {
 		secretSpecs    []string
 	)
 	cmd := &cobra.Command{
-		Use:   "exec <server> <command>",
-		Short: "Run a shell command on one server or all servers",
+		Use:               "exec <server> <command>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Run a shell command on one server or all servers",
 		Long: `Run a shell command on a managed server via the fleet agent.
 
 Flags:
@@ -3092,10 +3098,11 @@ Servers already running the correct version are skipped.`,
 
 func newSSHCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
-		Use:          "ssh <server>",
-		Short:        "Open an interactive root shell on a server",
-		Args:         cobra.ExactArgs(1),
-		SilenceUsage: true,
+		Use:               "ssh <server>",
+		ValidArgsFunction: serverNameComp(configDir),
+		Short:             "Open an interactive root shell on a server",
+		Args:              cobra.ExactArgs(1),
+		SilenceUsage:      true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// `ssh` opens an INTERACTIVE root shell: no individual command crosses the
 			// transport, so the cmd-policy deny/confirm gate that protects `exec`,
