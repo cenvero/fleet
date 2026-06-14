@@ -712,6 +712,7 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()
 	go a.runMetricsPoller(ctx)
 	go a.runUpdateChecker(ctx)
+	go a.runJobLogPruner(ctx)
 
 	select {
 	case <-ctx.Done():

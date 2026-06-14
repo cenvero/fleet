@@ -169,6 +169,41 @@ func (s *JobStore) reserve(doc *jobsDocument) int {
 	return doc.Counter
 }
 
+// Prune removes finished job records whose Finished time is older than cutoff,
+// best-effort deleting each one's remote logfile (rm -f) through exec. Running
+// jobs are never reaped — a long-running job's log must not be deleted out from
+// under it; the agent-side mtime sweep (see App.PruneJobLogs) catches truly
+// stale files. Remote deletion failures are ignored (an unreachable server just
+// leaves its /var/tmp file for the sweep). Returns the number of records removed.
+func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc, err := s.read()
+	if err != nil {
+		return 0, err
+	}
+	var kept []JobRecord
+	removed := 0
+	for _, j := range doc.Jobs {
+		if j.Status == JobDone && !j.Finished.IsZero() && j.Finished.Before(cutoff) {
+			removed++
+			if exec != nil && j.Logfile != "" {
+				_, _, _ = exec(j.Server, "rm -f "+shellQuote(j.Logfile))
+			}
+			continue
+		}
+		kept = append(kept, j)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	doc.Jobs = kept
+	if err := s.write(doc); err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
 // maxJobLogBytes bounds how much of a job's remote logfile Tail reads into memory
 // (the tail end, where the completion marker lives).
 const maxJobLogBytes = 4 << 20 // 4 MiB
