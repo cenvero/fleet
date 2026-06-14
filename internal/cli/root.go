@@ -1748,6 +1748,49 @@ func newConfigCommand(configDir *string) *cobra.Command {
 		},
 	})
 	configCmd.AddCommand(&cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Change a runtime setting after init (job-log-retention, session-grace)",
+		Long: "Change a configurable runtime setting at any time. Supported keys:\n\n" +
+			"  job-log-retention   how long detached job logs are kept before they're\n" +
+			"                      auto-deleted on the controller + servers (e.g. 7d, 30d,\n" +
+			"                      12h; 0/off/never disables pruning)\n" +
+			"  session-grace       how long a session stays alive after an unexpected\n" +
+			"                      disconnect so you can reconnect (e.g. 10m, 5m, 1h)\n\n" +
+			"Examples:\n" +
+			"  fleet config set job-log-retention 30d\n" +
+			"  fleet config set session-grace 15m",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key, value := strings.ToLower(strings.TrimSpace(args[0])), strings.TrimSpace(args[1])
+			cfg, err := core.LoadConfig(core.ConfigPath(*configDir))
+			if err != nil {
+				return err
+			}
+			switch key {
+			case "job-log-retention", "job_log_retention", "job-logs", "jobs-retention":
+				if err := core.ValidateRetention(value); err != nil {
+					return fmt.Errorf("invalid job-log-retention %q: %w", value, err)
+				}
+				cfg.Runtime.JobLogRetention = value
+			case "session-grace", "session-reconnect-grace", "session_reconnect_grace":
+				if _, err := core.ParseFlexDuration(value); err != nil {
+					return fmt.Errorf("invalid session-grace %q: %w", value, err)
+				}
+				cfg.Runtime.SessionReconnectGrace = value
+			default:
+				return fmt.Errorf("unknown key %q (supported: job-log-retention, session-grace)", args[0])
+			}
+			if err := cfg.Validate(); err != nil {
+				return err
+			}
+			if err := core.SaveConfig(core.ConfigPath(*configDir), cfg); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s\n", key, value)
+			return nil
+		},
+	})
+	configCmd.AddCommand(&cobra.Command{
 		Use:   "validate",
 		Short: "Validate the current configuration",
 		RunE: func(cmd *cobra.Command, _ []string) error {
