@@ -86,6 +86,20 @@ type persistentSession struct {
 	mu         sync.Mutex
 	activeConn ssh.Channel // nil when no client is connected
 	idleTimer  *time.Timer
+	// grace is how long this session is kept alive after a disconnect before the
+	// shell is SIGHUP'd. 0 means "use sessionIdleTimeout" (the 10-minute default).
+	// It is set from the controller's configured reconnect grace, sent per-session
+	// as the FLEET_SESSION_GRACE env var when the shell is opened.
+	grace time.Duration
+}
+
+// idleGrace returns the keep-alive window for this session: the per-session grace
+// when set, otherwise the package default.
+func (s *persistentSession) idleGrace() time.Duration {
+	if s.grace > 0 {
+		return s.grace
+	}
+	return sessionIdleTimeout
 }
 
 // attach wires a new SSH channel to this session.
@@ -139,9 +153,9 @@ func (s *persistentSession) detach(channel ssh.Channel, store *sessionStore, id 
 	}
 	s.activeConn = nil
 
-	// Start idle countdown. If nobody reconnects within the timeout,
+	// Start idle countdown. If nobody reconnects within the grace window,
 	// send SIGHUP to the shell and remove the session.
-	s.idleTimer = time.AfterFunc(sessionIdleTimeout, func() {
+	s.idleTimer = time.AfterFunc(s.idleGrace(), func() {
 		store.kill(id)
 	})
 }

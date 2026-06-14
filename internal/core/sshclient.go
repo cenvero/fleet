@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,14 @@ type windowChangePayload struct {
 	Rows    uint32
 	Width   uint32
 	Height  uint32
+}
+
+// envRequestPayload is the SSH "env" channel request (RFC 4254 §6.4): a single
+// name/value pair. The controller uses it to pass FLEET_SESSION_GRACE so the
+// agent keeps a dropped session alive for the configured reconnect window.
+type envRequestPayload struct {
+	Name  string
+	Value string
 }
 
 // RunSSHSession opens an interactive shell through the fleet agent's own SSH
@@ -224,6 +233,18 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 		}
 
 		go watchWindowResize(channel, fd, done)
+	}
+
+	// Tell the agent how long to keep this session alive after an unexpected
+	// disconnect (the configured reconnect grace), so the operator's value takes
+	// effect on the next connection with no agent re-bootstrap. Fire-and-forget:
+	// older agents ignore an unknown env var, so this is backward-compatible.
+	if grace := a.Config.SessionReconnectGraceDuration(); grace > 0 {
+		envPayload := ssh.Marshal(envRequestPayload{
+			Name:  "FLEET_SESSION_GRACE",
+			Value: strconv.Itoa(int(grace.Seconds())),
+		})
+		_, _ = channel.SendRequest("env", false, envPayload)
 	}
 
 	ok, err := channel.SendRequest("shell", true, nil)

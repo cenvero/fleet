@@ -12,9 +12,11 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
@@ -89,7 +91,8 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request, sessionID str
 
 		case "shell", "exec":
 			shellPath := userShell()
-			env := buildEnv(termType, shellPath, extraEnv)
+			grace, cleanedEnv := extractSessionGrace(extraEnv)
+			env := buildEnv(termType, shellPath, cleanedEnv)
 
 			if req.Type == "exec" {
 				// Non-persistent: exec requests run a one-shot command.
@@ -111,13 +114,38 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request, sessionID str
 			// If not, create a new one. The session survives disconnects for up to
 			// sessionIdleTimeout (10 min) before the shell is sent SIGHUP.
 			replyReq(req, true)
-			runPersistentShell(channel, requests, shellPath, env, cols, rows, sessionID)
+			runPersistentShell(channel, requests, shellPath, env, cols, rows, sessionID, grace)
 			return
 
 		default:
 			replyReq(req, false)
 		}
 	}
+}
+
+// sessionGraceEnvVar is the env var the controller sends (as an SSH "env"
+// channel request) to set this session's post-disconnect keep-alive, in seconds.
+// It is consumed by the agent and stripped from the shell's environment.
+const sessionGraceEnvVar = "FLEET_SESSION_GRACE"
+
+// extractSessionGrace pulls FLEET_SESSION_GRACE (seconds) out of the client env,
+// returning the parsed duration (0 when absent/invalid → the caller falls back
+// to the default) and the env with that variable removed, so it never leaks into
+// the user's shell.
+func extractSessionGrace(env []string) (time.Duration, []string) {
+	var grace time.Duration
+	prefix := sessionGraceEnvVar + "="
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			if secs, err := strconv.Atoi(strings.TrimPrefix(kv, prefix)); err == nil && secs > 0 {
+				grace = time.Duration(secs) * time.Second
+			}
+			continue
+		}
+		out = append(out, kv)
+	}
+	return grace, out
 }
 
 // buildEnv builds the session environment identically to OpenSSH:
@@ -146,7 +174,7 @@ func buildEnv(termType, shellPath string, extra []string) []string {
 // the current channel to it. On network drops the shell keeps running and the
 // replay buffer accumulates output. On reconnect the buffer is sent first so
 // the user sees what happened while disconnected.
-func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shellPath string, env []string, cols, rows uint32, sessionID string) {
+func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shellPath string, env []string, cols, rows uint32, sessionID string, grace time.Duration) {
 	session, isNew, err := globalStore.getOrCreate(sessionID, func() (*persistentSession, error) {
 		ptm, pts, err := pty.Open()
 		if err != nil {
@@ -182,6 +210,7 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 			cmd:    cmd,
 			replay: &replayBuffer{},
 			done:   make(chan struct{}),
+			grace:  grace,
 		}, nil
 	})
 	if err != nil {
