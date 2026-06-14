@@ -751,7 +751,7 @@ fleet server add web-01 192.0.2.10 <span class="flag">--no-agent</span></pre>
       </div>
       <p>Connects to the agent's SSH port (default 2222) using the fleet controller key — no separate SSH credential management needed. The host fingerprint is shown only on the first connect; subsequent connects are silent unless the key changes.</p>
       <div class="callout">
-        <strong>Persistent sessions</strong> — shell sessions survive network drops. If the connection is lost, fleet prints a reconnect notice and retries automatically (3 attempts, 5 s gap). Typing <code>exit</code> ends the session cleanly with no retry loop.
+        <strong>Persistent sessions</strong> — shell sessions survive network drops. If the connection is lost, fleet prints a reconnect notice and retries automatically (3 attempts, 5 s gap). On the server the session is kept alive for the configurable <strong>reconnect grace</strong> (default 10 min — <code>fleet config set session-grace 15m</code>) so a reconnect re-attaches to the same live shell. Typing <code>exit</code> ends the session cleanly with no retry loop.
       </div>
     </section>
 

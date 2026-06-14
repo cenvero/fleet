@@ -58,6 +58,17 @@ Connection lost. Reconnecting in 5s... (1/3)
 
 Typing `exit` ends the session cleanly with no retry.
 
+On the **server** side the session is kept alive after an unexpected disconnect (internet drop,
+crash) for the configured **reconnect grace** (default `10m`) so a reconnect re-attaches to the
+same live shell and replays what you missed. The controller sends this value per-connection, so
+changing it takes effect on the next connect with no agent re-bootstrap:
+
+```bash
+fleet config set session-grace 15m             # keep dropped sessions alive 15 minutes
+```
+
+It is asked during `fleet init` (and offered to existing installs via `fleet adjust-init`).
+
 Run a one-off command on a single server:
 
 ```bash
@@ -369,6 +380,17 @@ The optional `--name` label is shown in the `NAME` column of `fleet jobs` so a l
 job is easy to recognize. Captured output goes to a `0600`, per-job unpredictably-named
 logfile on the server (not world-readable).
 
+**Job-log retention.** Detached-job logs are auto-deleted once they pass the configured
+retention window (default `7d`) — a background pruner on the controller removes the finished
+job records and their remote `/var/tmp/fleet-job-*.log` files on each server, plus an mtime
+sweep that cleans up orphans. Change it any time:
+
+```bash
+fleet config set job-log-retention 30d         # keep job logs 30 days (7d/30d/12h… or 0=never)
+```
+
+It is also asked during `fleet init` (and offered to existing installs via `fleet adjust-init`).
+
 ## Port Tunnels
 
 Forward a local (loopback-only) port to a host:port reachable from a server:
@@ -398,8 +420,14 @@ Store named shell scripts and load the latest into every new terminal:
 fleet automation set deploy --file ./deploy.sh # or pipe via stdin
 fleet automation list
 fleet shell-init --install                     # append the loader snippet to your shell rc
-fleet autocomplete install                     # enable tab-completion
+fleet autocomplete install                     # cached tab-completion (no per-shell fleet fork)
 ```
+
+`fleet autocomplete install` writes a completion file your shell loads **once** (a `_fleet`
+function in zsh's `$fpath`, a fish completions file, or a sourced bash file) rather than
+re-running `fleet completion` on every new shell. Completion includes **live server names** —
+`fleet exec <tab>`, `fleet ssh <tab>`, `fleet file list <tab>`, etc. suggest the servers in
+your fleet (with their address and transport mode).
 
 ## Templates
 

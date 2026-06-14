@@ -36,6 +36,40 @@ Omit sections that have no entries for that release.
 
 _Nothing yet — changes for the next release land here._
 
+## [v2.3.0] — 2026-06-14 (stable)
+
+Shell-completion overhaul, plus two new operator-configurable lifecycle settings
+(job-log retention and session reconnect grace) prompted at init / adjust-init
+and changeable at any time.
+
+### Added
+
+- **Dynamic server-name tab-completion.** `fleet exec/ssh/server show|remove|
+  mode|reconnect|metrics / tag / journal / drift / doctor / sync / file …` now
+  complete real server names (with `address · mode` descriptions). Backed by
+  `core.ServerCompletions`, a disk-only read of `servers/*.toml` (no App/DB open)
+  so it stays fast on every `<tab>`.
+- **Cached completion install.** `fleet autocomplete install` now writes a cached
+  completion file your shell loads ONCE — `_fleet` in a zsh `$fpath`
+  site-functions dir, `~/.config/fish/completions/fleet.fish`, or a sourced bash
+  file — instead of `source <(fleet completion zsh)`, which forked `fleet` on
+  every new shell. It migrates the old live-source line and clears stale
+  `~/.zcompdump`. `--shell` works on the subcommand.
+- **Job-log retention.** A new `runtime.job_log_retention` setting (default `7d`)
+  controls how long detached-job logs are kept. A background pruner deletes
+  expired job records and their remote `/var/tmp/fleet-job-*.log` files on BOTH
+  the controller and the managed servers (with an mtime sweep for orphans).
+- **Configurable session reconnect grace.** `runtime.session_reconnect_grace`
+  (default `10m`) controls how long the agent keeps a session alive after an
+  unexpected disconnect so you can reconnect. The controller sends it per-session
+  (`FLEET_SESSION_GRACE`), so changes take effect on the next connection with no
+  agent re-bootstrap; older agents fall back to the 10-minute default.
+- **`fleet config set <key> <value>`** to change `job-log-retention` /
+  `session-grace` at any time after init. Both are also prompted in the init
+  wizard (now Step 7 of 7) and offered to existing installs via `adjust-init`
+  (init schema v2 → v3). Durations accept friendly forms (`7d`, `30d`, `12h`,
+  `10m`; `0`/`off`/`never` disables job-log pruning).
+
 ## [v2.2.1] — 2026-06-12 (stable)
 
 Homebrew install ergonomics: agent updates are now driven solely by

@@ -120,6 +120,15 @@ The current runtime config keys are:
 - `aggregated_log_max_size`
 - `aggregated_log_max_files`
 - `aggregated_log_max_age`
+- `job_log_retention` — how long detached-job logs are kept before the background
+  pruner deletes them on the controller and the servers (default `7d`; `7d`/`30d`/
+  `12h`… or `0`/`off`/`never` to disable). Change with `fleet config set job-log-retention <d>`.
+- `session_reconnect_grace` — how long the agent keeps a session alive after an
+  unexpected disconnect so you can reconnect (default `10m`). Change with
+  `fleet config set session-grace <d>`.
+
+Both are prompted in the `fleet init` wizard and offered to existing installs via
+`fleet adjust-init` (init schema v3).
 
 ## Backup and Restore
 
