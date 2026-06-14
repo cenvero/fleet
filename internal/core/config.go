@@ -83,6 +83,8 @@ func DefaultConfig(configDir string) Config {
 			AlertNotifyCooldown:   "6h",
 			MetricsPollInterval:   "1m",
 			DesktopNotifications:  true,
+			JobLogRetention:       DefaultJobLogRetention,
+			SessionReconnectGrace: DefaultSessionReconnectGrace,
 			FileTransfer: FileTransferDefaults{
 				ParallelStreams: DefaultParallelStreams,
 				ChunkSizeBytes:  DefaultChunkSizeBytes,
@@ -134,6 +136,12 @@ func withRuntimeDefaults(cfg RuntimeConfig, defaults RuntimeConfig) RuntimeConfi
 	}
 	if cfg.MetricsPollInterval == "" {
 		cfg.MetricsPollInterval = defaults.MetricsPollInterval
+	}
+	if cfg.JobLogRetention == "" {
+		cfg.JobLogRetention = defaults.JobLogRetention
+	}
+	if cfg.SessionReconnectGrace == "" {
+		cfg.SessionReconnectGrace = defaults.SessionReconnectGrace
 	}
 	return cfg
 }
@@ -192,6 +200,20 @@ func (c Config) Validate() error {
 	if c.Runtime.MetricsPollInterval != "" {
 		if _, err := time.ParseDuration(c.Runtime.MetricsPollInterval); err != nil {
 			return fmt.Errorf("runtime metrics poll interval: %w", err)
+		}
+	}
+	if v := strings.TrimSpace(c.Runtime.JobLogRetention); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "off", "never", "disabled": // explicit "no pruning" — valid
+		default:
+			if _, err := ParseFlexDuration(v); err != nil {
+				return fmt.Errorf("runtime job log retention: %w", err)
+			}
+		}
+	}
+	if c.Runtime.SessionReconnectGrace != "" {
+		if _, err := ParseFlexDuration(c.Runtime.SessionReconnectGrace); err != nil {
+			return fmt.Errorf("runtime session reconnect grace: %w", err)
 		}
 	}
 	if err := c.Database.Validate(); err != nil {

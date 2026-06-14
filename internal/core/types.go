@@ -64,6 +64,16 @@ type RuntimeConfig struct {
 	AlertNotifyCooldown   string `toml:"alert_notify_cooldown" json:"alert_notify_cooldown"`
 	MetricsPollInterval   string `toml:"metrics_poll_interval" json:"metrics_poll_interval"`
 	DesktopNotifications  bool   `toml:"desktop_notifications" json:"desktop_notifications"`
+	// JobLogRetention is how long detached-job logs are kept before the pruner
+	// deletes them — both the controller's job records (jobs.json) and the remote
+	// /var/tmp/fleet-job-*.log files on each agent. Flexible duration string
+	// ("7d", "30d", "12h"); empty/"0" disables pruning. Default 7d.
+	JobLogRetention string `toml:"job_log_retention,omitempty" json:"job_log_retention,omitempty"`
+	// SessionReconnectGrace is how long the agent keeps an interactive/background
+	// session alive after an unexpected disconnect (internet drop, crash) so the
+	// controller can reconnect and re-attach, instead of tearing it down at once.
+	// Flexible duration string ("10m", "5m", "1h"); empty falls back to 10m.
+	SessionReconnectGrace string `toml:"session_reconnect_grace,omitempty" json:"session_reconnect_grace,omitempty"`
 	// FileTransfer holds the fleet-wide defaults for file uploads/downloads.
 	// Per-server overrides live on ServerRecord.FileTransfer.
 	FileTransfer FileTransferDefaults `toml:"file_transfer" json:"file_transfer"`
@@ -208,6 +218,10 @@ type InitOptions struct {
 	ExecutablePath   string
 	DefaultAgentPort int
 	ListenAddress    string
+	// JobLogRetention / SessionReconnectGrace are flexible duration strings
+	// ("7d", "10m"). Empty falls back to the DefaultConfig values.
+	JobLogRetention       string
+	SessionReconnectGrace string
 }
 
 type InitResult struct {

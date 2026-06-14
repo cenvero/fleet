@@ -18,7 +18,7 @@ import (
 // CurrentInitVersion is the init schema version shipped with this binary.
 // Bump this whenever the init wizard gains or loses options so that existing
 // installs know to run 'fleet adjust-init'.
-const CurrentInitVersion = 2
+const CurrentInitVersion = 3
 
 // ─── version-based migration table ──────────────────────────────────────────
 
@@ -69,24 +69,54 @@ var initMigrations = []initMigration{
 			},
 		},
 	},
-	// Template for future migrations:
-	//
-	// {
-	//     FromVersion: 2,
-	//     Changes: []initChange{
-	//         {
-	//             Field: "runtime.metrics_poll_interval",
-	//             Kind:  "added",
-	//             Description: "How often the controller polls metrics from agents.",
-	//             Prompt: func(cfg *Config, reader *bufio.Reader, out io.Writer) error {
-	//                 v, err := prompt(reader, out, "  Metrics poll interval [30s]: ", "30s")
-	//                 if err != nil { return err }
-	//                 cfg.Runtime.MetricsPollInterval = v
-	//                 return nil
-	//             },
-	//         },
-	//     },
-	// },
+	{
+		// v2 → v3: added job-log retention + session reconnect-grace settings.
+		FromVersion: 2,
+		Changes: []initChange{
+			{
+				Field:       "runtime.job_log_retention",
+				Kind:        "added",
+				Description: "How long detached job logs are kept before auto-deletion (controller + servers).",
+				Prompt: func(cfg *Config, reader *bufio.Reader, out io.Writer) error {
+					def := cfg.Runtime.JobLogRetention
+					if def == "" {
+						def = DefaultJobLogRetention
+					}
+					fmt.Fprintln(out, "  Examples: 7d, 30d, 90d, 12h — or 0 to never prune.")
+					v, err := prompt(reader, out, "  Job log retention ["+def+"]: ", def)
+					if err != nil {
+						return err
+					}
+					if err := validateRetentionInput(v); err != nil {
+						return fmt.Errorf("invalid job log retention: %w", err)
+					}
+					cfg.Runtime.JobLogRetention = v
+					return nil
+				},
+			},
+			{
+				Field:       "runtime.session_reconnect_grace",
+				Kind:        "added",
+				Description: "How long a session stays alive after an unexpected disconnect so you can reconnect.",
+				Prompt: func(cfg *Config, reader *bufio.Reader, out io.Writer) error {
+					def := cfg.Runtime.SessionReconnectGrace
+					if def == "" {
+						def = DefaultSessionReconnectGrace
+					}
+					fmt.Fprintln(out, "  Examples: 10m, 5m, 1h.")
+					v, err := prompt(reader, out, "  Session reconnect grace ["+def+"]: ", def)
+					if err != nil {
+						return err
+					}
+					if _, perr := ParseFlexDuration(v); perr != nil {
+						return fmt.Errorf("invalid session reconnect grace: %w", perr)
+					}
+					cfg.Runtime.SessionReconnectGrace = v
+					return nil
+				},
+			},
+		},
+	},
 }
 
 // ─── structural integrity check ──────────────────────────────────────────────

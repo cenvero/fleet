@@ -96,6 +96,12 @@ func Initialize(opts InitOptions) (InitResult, error) {
 	if opts.ListenAddress != "" {
 		cfg.Runtime.ListenAddress = opts.ListenAddress
 	}
+	if opts.JobLogRetention != "" {
+		cfg.Runtime.JobLogRetention = opts.JobLogRetention
+	}
+	if opts.SessionReconnectGrace != "" {
+		cfg.Runtime.SessionReconnectGrace = opts.SessionReconnectGrace
+	}
 
 	algo, err := crypto.ParseAlgorithm(opts.CryptoAlgorithm)
 	if err != nil {
@@ -174,7 +180,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	fmt.Fprintln(out, "└─────────────────────────────────────────────────────────────┘")
 	fmt.Fprintln(out)
 
-	fmt.Fprintln(out, "Step 1 of 6 — Configuration directory")
+	fmt.Fprintln(out, "Step 1 of 7 — Configuration directory")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintf(out, "  [1] %s              (recommended, per-user)\n", defaultDir)
 	fmt.Fprintln(out, "  [2] /etc/cenvero-fleet            (system-wide, requires sudo)")
@@ -200,7 +206,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	alias := "fleet"
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 2 of 6 — Default transport mode")
+	fmt.Fprintln(out, "Step 2 of 7 — Default transport mode")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  [1] Reverse mode (agent connects to you — works behind NAT)")
 	fmt.Fprintln(out, "  [2] Direct mode  (you SSH into the agent — agent must be reachable)")
@@ -218,7 +224,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 3 of 6 — Networking")
+	fmt.Fprintln(out, "Step 3 of 7 — Networking")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	defaultAgentPort := 0
 	listenAddress := ""
@@ -244,7 +250,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 4 of 6 — Cryptography")
+	fmt.Fprintln(out, "Step 4 of 7 — Cryptography")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  Algorithm:")
 	fmt.Fprintln(out, "    [1] Ed25519  (recommended)")
@@ -267,7 +273,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	policy := update.PolicyNotifyOnly
 	if IsHomebrewInstall(executablePath) {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Step 5 of 6 — Update notifications")
+		fmt.Fprintln(out, "Step 5 of 7 — Update notifications")
 		fmt.Fprintln(out, "─────────────────────────────────────")
 		fmt.Fprintln(out, "  Homebrew install detected — updates are managed by Homebrew.")
 		fmt.Fprintln(out, "  Run 'brew upgrade cenvero-fleet' to update when a new version is available.")
@@ -284,7 +290,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		}
 	} else {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Step 5 of 6 — Update channel & policy")
+		fmt.Fprintln(out, "Step 5 of 7 — Update channel & policy")
 		fmt.Fprintln(out, "─────────────────────────────────────")
 		fmt.Fprintln(out, "  Channel:")
 		fmt.Fprintln(out, "    [1] stable (recommended)")
@@ -313,7 +319,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 	}
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Step 6 of 6 — Database backend")
+	fmt.Fprintln(out, "Step 6 of 7 — Database backend")
 	fmt.Fprintln(out, "─────────────────────────────────────")
 	fmt.Fprintln(out, "  [1] SQLite   (recommended, separate local files)")
 	fmt.Fprintln(out, "  [2] PostgreSQL")
@@ -343,20 +349,53 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		}
 	}
 
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Step 7 of 7 — Retention & sessions")
+	fmt.Fprintln(out, "─────────────────────────────────────")
+	fmt.Fprintln(out, "  How long should detached job logs be kept before they're auto-deleted")
+	fmt.Fprintln(out, "  (on the controller AND on each server)?")
+	fmt.Fprintln(out, "  Examples: 7d, 30d, 90d, 12h — or 0 to never prune.")
+	jobLogRetention, err := prompt(reader, out, "  Job log retention ["+DefaultJobLogRetention+"]: ", DefaultJobLogRetention)
+	if err != nil {
+		return InitResult{}, err
+	}
+	if err := validateRetentionInput(jobLogRetention); err != nil {
+		return InitResult{}, fmt.Errorf("invalid job log retention: %w", err)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "  If a connection drops unexpectedly (internet gone, crash), how long")
+	fmt.Fprintln(out, "  should a session stay alive on the server so you can reconnect?")
+	fmt.Fprintln(out, "  Examples: 10m, 5m, 1h.")
+	sessionGrace, err := prompt(reader, out, "  Session reconnect grace ["+DefaultSessionReconnectGrace+"]: ", DefaultSessionReconnectGrace)
+	if err != nil {
+		return InitResult{}, err
+	}
+	if _, perr := ParseFlexDuration(sessionGrace); perr != nil {
+		return InitResult{}, fmt.Errorf("invalid session reconnect grace: %w", perr)
+	}
+
 	return Initialize(InitOptions{
-		ConfigDir:        configDir,
-		Alias:            alias,
-		DefaultMode:      mode,
-		CryptoAlgorithm:  algo,
-		Passphrase:       passphrase,
-		UpdateChannel:    channel,
-		UpdatePolicy:     policy,
-		DatabaseBackend:  backend,
-		DatabaseDSN:      dsn,
-		ExecutablePath:   executablePath,
-		DefaultAgentPort: defaultAgentPort,
-		ListenAddress:    listenAddress,
+		ConfigDir:             configDir,
+		Alias:                 alias,
+		DefaultMode:           mode,
+		CryptoAlgorithm:       algo,
+		Passphrase:            passphrase,
+		UpdateChannel:         channel,
+		UpdatePolicy:          policy,
+		DatabaseBackend:       backend,
+		DatabaseDSN:           dsn,
+		ExecutablePath:        executablePath,
+		DefaultAgentPort:      defaultAgentPort,
+		ListenAddress:         listenAddress,
+		JobLogRetention:       jobLogRetention,
+		SessionReconnectGrace: sessionGrace,
 	})
+}
+
+// validateRetentionInput accepts the disabled sentinels ("0"/"off"/"never"/
+// "disabled") or any value ParseFlexDuration understands.
+func validateRetentionInput(v string) error {
+	return ValidateRetention(v)
 }
 
 func prompt(reader *bufio.Reader, out io.Writer, label, fallback string) (string, error) {
