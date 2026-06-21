@@ -181,13 +181,16 @@ func ensureKnownHostsFile(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create known_hosts directory: %w", err)
 	}
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
+	// O_CREATE without O_TRUNC: create the file only if it is absent, and NEVER
+	// truncate an existing one. The previous Stat-then-WriteFile(nil) was a TOCTOU
+	// race — two callbacks created concurrently could BOTH observe "absent" and the
+	// second's WriteFile would wipe a pin the first had already appended (lost
+	// host-key pin under concurrent first-connections).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- controller-owned known_hosts path
+	if err != nil {
 		return fmt.Errorf("create known_hosts file: %w", err)
 	}
-	return nil
+	return f.Close()
 }
 
 // RemoveKnownHost removes all known_hosts entries for the given address.
