@@ -36,13 +36,24 @@ Omit sections that have no entries for that release.
 
 _Nothing yet — changes for the next release land here._
 
-## [v2.3.0] — 2026-06-14 (stable)
+## [v2.3.0] — 2026-06-21 (stable)
 
-Shell-completion overhaul, plus two new operator-configurable lifecycle settings
+Shell-completion overhaul, two new operator-configurable lifecycle settings
 (job-log retention and session reconnect grace) prompted at init / adjust-init
-and changeable at any time.
+and changeable at any time, and an interactive re-pin path when a server's
+bootstrap host key changes.
 
 ### Added
+
+- **Interactive bootstrap host-key re-pin.** When a server's bootstrap SSH host
+  key no longer matches its pin (a reinstalled / re-keyed box, or a MITM),
+  `fleet server add` and `fleet server bootstrap` now prompt on a terminal —
+  *"host key for X has CHANGED (pinned A → presented B); replace and continue?
+  [y/N]"* — defaulting to No, instead of hard-failing. Answering yes re-pins the
+  new key in `bootstrap_known_hosts` and continues the install. A new
+  `--accept-new-host-key` flag on `server add` re-pins without prompting (for
+  non-interactive use). The fail-closed default is unchanged when neither a TTY
+  nor the flag is present.
 
 - **Dynamic server-name tab-completion.** `fleet exec/ssh/server show|remove|
   mode|reconnect|metrics / tag / journal / drift / doctor / sync / file …` now

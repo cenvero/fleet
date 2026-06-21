@@ -22,6 +22,18 @@ fleet server add web-01 192.0.2.10 --mode direct --login-user root --login-key ~
 
 This SSHes into the server, downloads the correct `fleet-agent` binary, installs it under `/opt/cenvero-fleet/`, and starts it as a systemd service.
 
+**Changed bootstrap host key.** The bootstrap SSH host key is pinned on first install. If a
+later install finds a *different* key (the box was reinstalled or re-keyed — or, rarely, a
+man-in-the-middle), the install does not silently trust it. On a terminal you are prompted —
+`host key for X has CHANGED (pinned A → presented B); replace and continue? [y/N]` (default
+No) — and answering yes re-pins the new key in `bootstrap_known_hosts` and continues. For
+non-interactive use, pass `--accept-new-host-key` (after verifying the new key out of band):
+
+```bash
+fleet server add web-01 192.0.2.10 --login-user root --accept-new-host-key
+fleet server bootstrap web-01 --login-user root --accept-new-host-key   # retry an existing server
+```
+
 Removing a server with a managed agent tears it down on the remote host and removes the stored host-key entry:
 
 ```bash
