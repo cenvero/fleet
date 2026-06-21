@@ -842,6 +842,32 @@ func decideOpenBrowser(cmd *cobra.Command, mode string) bool {
 	return answer == "" || answer == "y" || answer == "yes"
 }
 
+// resolveHostKeyPrompt returns the host-key-changed handler used by the bootstrap
+// flow. With autoAccept (the operator passed --accept-new-host-key after
+// verifying the new key out of band) it re-pins a changed key without asking. On
+// an interactive terminal it returns a y/N prompt that DEFAULTS TO NO and warns
+// about a possible MITM. Non-interactive and without the flag it returns nil,
+// preserving the fail-closed default — a changed host key is refused.
+func resolveHostKeyPrompt(cmd *cobra.Command, autoAccept bool) func(host, oldFP, newFP string) bool {
+	if autoAccept {
+		return func(string, string, string) bool { return true }
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return nil
+	}
+	return func(host, oldFP, newFP string) bool {
+		out := cmd.ErrOrStderr()
+		fmt.Fprintf(out, "\n⚠  Bootstrap SSH host key for %s has CHANGED.\n", host)
+		fmt.Fprintf(out, "     pinned   : %s\n", oldFP)
+		fmt.Fprintf(out, "     presented: %s\n", newFP)
+		fmt.Fprintln(out, "     Usually this means the server was reinstalled or re-keyed — but it could be a")
+		fmt.Fprintln(out, "     man-in-the-middle. Only continue if you have verified the new key out of band.")
+		fmt.Fprint(out, "     Replace the pinned key and continue? [y/N]: ")
+		ans := strings.ToLower(strings.TrimSpace(transport.ReadLine(bufio.NewReader(os.Stdin))))
+		return ans == "y" || ans == "yes"
+	}
+}
+
 // openBrowser opens url in the platform default browser.
 func openBrowser(url string) error {
 	var name string
@@ -870,6 +896,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 	var loginPassword string
 	var useSudo bool
 	var noAgent bool
+	var acceptNewHostKey bool
 
 	add := &cobra.Command{
 		Use:   "add [name] [ip]",
@@ -1026,9 +1053,13 @@ func newServerCommand(configDir *string) *cobra.Command {
 				scanner.Scan()
 
 				fmt.Fprintf(cmd.OutOrStdout(), "\nInstalling agent on %s...\n", name)
+				// If the box was reinstalled/re-keyed since it was last pinned, a
+				// changed bootstrap host key would otherwise hard-fail. With
+				// --accept-new-host-key we re-pin automatically; on a terminal we ask.
+				app.HostKeyChangedPrompt = resolveHostKeyPrompt(cmd, acceptNewHostKey)
 				if err := app.AutoInstallAgent(name, loginUser, loginKey, loginPassword, lp, useSudo); err != nil {
 					return fmt.Errorf("agent install failed (server was added): %w\n"+
-						"Run 'fleet server bootstrap %s --login-user %s' to retry manually", err, name, loginUser)
+						"Run 'fleet server bootstrap %s --login-user %s --accept-new-host-key' to retry manually", err, name, loginUser)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Agent installed and running. Connect with: fleet server reconnect %s\n", name)
 			} else if parsedMode == transport.ModeDirect && (noAgent || loginUser == "") {
@@ -1054,6 +1085,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 	add.Flags().StringVar(&loginPassword, "login-password", "", "SSH password for login (use key auth when possible)")
 	add.Flags().BoolVar(&useSudo, "sudo", false, "use sudo for agent install commands")
 	add.Flags().BoolVar(&noAgent, "no-agent", false, "skip agent auto-install")
+	add.Flags().BoolVar(&acceptNewHostKey, "accept-new-host-key", false, "re-pin a changed bootstrap SSH host key without prompting (after out-of-band verification)")
 
 	serverCmd.AddCommand(add)
 	var listFormat string
@@ -1259,6 +1291,10 @@ If the server is unreachable or credentials have changed, use one of:
 				return err
 			}
 			defer app.Close()
+
+			// A changed bootstrap host key re-pins automatically with
+			// --accept-new-host-key, prompts (y/N) on a terminal, else fail-closed.
+			app.HostKeyChangedPrompt = resolveHostKeyPrompt(cmd, bootstrapAcceptHost)
 
 			result, err := app.BootstrapServer(args[0], core.BootstrapOptions{
 				LoginUser:         bootstrapLoginUser,
