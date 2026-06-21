@@ -51,8 +51,15 @@ type BootstrapRequest struct {
 	Password         string
 	KnownHostsPath   string
 	AcceptNewHostKey bool
-	Uploads          []BootstrapUpload
-	RunCommand       string
+	// HostKeyChangedPrompt, when non-nil, makes the bootstrap host-key check
+	// INTERACTIVE: a never-seen host is still pinned (TOFU), but a host whose key
+	// no longer matches its pin invokes this prompt — returning true re-pins and
+	// continues, false refuses. It takes precedence over AcceptNewHostKey. When
+	// nil, the static AcceptNewHostKey behavior applies (refuse a changed key
+	// unless the flag forces a re-pin).
+	HostKeyChangedPrompt func(host, oldFP, newFP string) bool
+	Uploads              []BootstrapUpload
+	RunCommand           string
 }
 
 type BootstrapUpload struct {
@@ -114,12 +121,13 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 	}
 
 	request := BootstrapRequest{
-		Address:          server.Address,
-		Port:             resolved.loginPort,
-		User:             resolved.loginUser,
-		PrivateKeyPath:   resolved.loginKeyPath,
-		KnownHostsPath:   filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
-		AcceptNewHostKey: resolved.acceptNewHostKey,
+		Address:              server.Address,
+		Port:                 resolved.loginPort,
+		User:                 resolved.loginUser,
+		PrivateKeyPath:       resolved.loginKeyPath,
+		KnownHostsPath:       filepath.Join(a.ConfigDir, "keys", "bootstrap_known_hosts"),
+		AcceptNewHostKey:     resolved.acceptNewHostKey,
+		HostKeyChangedPrompt: a.HostKeyChangedPrompt,
 		Uploads: []BootstrapUpload{
 			{Path: resolved.tempBinaryPath, Mode: 0o700, Content: binaryData},
 			{Path: resolved.tempUnitPath, Mode: 0o600, Content: []byte(serviceUnit)},
@@ -429,7 +437,15 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 		return fmt.Errorf("bootstrap: no authentication method provided (need --login-key or --login-password)")
 	}
 
-	hostKeyCallback, err := transport.NewTOFUHostKeyCallback(req.KnownHostsPath, req.AcceptNewHostKey, &transport.HostKeyState{})
+	var hostKeyCallback ssh.HostKeyCallback
+	var err error
+	if req.HostKeyChangedPrompt != nil {
+		// Interactive: pin a new host (TOFU), but prompt — and only re-pin on an
+		// explicit yes — when an existing pin no longer matches.
+		hostKeyCallback, err = transport.NewInteractiveHostKeyCallback(req.KnownHostsPath, req.HostKeyChangedPrompt, &transport.HostKeyState{})
+	} else {
+		hostKeyCallback, err = transport.NewTOFUHostKeyCallback(req.KnownHostsPath, req.AcceptNewHostKey, &transport.HostKeyState{})
+	}
 	if err != nil {
 		return err
 	}

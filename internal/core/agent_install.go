@@ -117,8 +117,12 @@ func (a *App) AutoInstallAgent(serverName, loginUser, loginKeyPath, loginPasswor
 		// --accept-new-host-key` / `fleet server reconnect --accept-new-host-key`
 		// after out-of-band verification, not this silent install flow.
 		AcceptNewHostKey: false,
-		Uploads:          uploads,
-		RunCommand:       "/bin/sh " + shellQuote(tempScriptPath),
+		// On an interactive `fleet server add`, the CLI sets this so a CHANGED host
+		// key prompts the operator (y/N) instead of hard-failing — an explicit,
+		// non-silent re-pin path. nil keeps the fail-closed default above.
+		HostKeyChangedPrompt: a.HostKeyChangedPrompt,
+		Uploads:              uploads,
+		RunCommand:           "/bin/sh " + shellQuote(tempScriptPath),
 	}
 	if err := executor.Bootstrap(context.Background(), req); err != nil {
 		return fmt.Errorf("agent install: %w", err)
@@ -195,7 +199,8 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 		// never-seen host on first use but REQUIRES a matching key when a pin already
 		// exists, refusing with a MITM warning on mismatch. A deliberate re-pin goes
 		// through the explicit --accept-new-host-key operator path.
-		AcceptNewHostKey: false,
+		AcceptNewHostKey:     false,
+		HostKeyChangedPrompt: a.HostKeyChangedPrompt,
 		Uploads: []BootstrapUpload{
 			{Path: tempTeardownPath, Mode: 0o700, Content: []byte(script)},
 		},

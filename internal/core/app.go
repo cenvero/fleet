@@ -48,6 +48,14 @@ type App struct {
 	ReverseStatusLookup func(string) (ReverseSessionInfo, error)
 	ReverseDisconnect   func(string) error
 
+	// HostKeyChangedPrompt, when set, is consulted by the bootstrap flow when a
+	// server's SSH host key no longer matches its pinned key (a re-keyed/rebuilt
+	// host — or a MITM). Returning true re-pins the new key (after the operator
+	// has verified it out of band) and lets the bootstrap continue; returning
+	// false (or leaving this nil) keeps the fail-closed default of refusing the
+	// changed key. The CLI sets this to an interactive y/N prompt on a terminal.
+	HostKeyChangedPrompt func(host, oldFP, newFP string) bool
+
 	// actingOperator attributes every audited action to a specific operator
 	// (e.g. "token:<name>"). It is set PROGRAMMATICALLY by the CLI only after a
 	// presented --token has been verified — never from the environment, which any
