@@ -482,11 +482,14 @@ func TestDownloadURLRejectsFileScheme(t *testing.T) {
 // loopback http://, which the scheme allowlist permits for local mirrors, so
 // the real downloadURL code path (LimitReader + size check) is exercised.
 func TestDownloadURLRejectsOversizedArtifact(t *testing.T) {
-	t.Parallel()
-
-	if testing.Short() {
-		t.Skip("skipping multi-GiB streaming test in -short mode")
-	}
+	// NOT t.Parallel: this test lowers the package-global maxArtifactBytes that
+	// downloadURL reads, so it must not run concurrently with other downloadURL
+	// tests. Lowering it also keeps the test fast + deterministic — it trips the
+	// limit after a few MiB instead of streaming a real GiB (which timed out under
+	// -race on slow CI before the size check could fire).
+	prev := maxArtifactBytes
+	maxArtifactBytes = 8 << 20 // 8 MiB
+	defer func() { maxArtifactBytes = prev }()
 
 	// Stream just past maxArtifactBytes without allocating it all up front.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

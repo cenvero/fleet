@@ -411,7 +411,10 @@ func readRollbackState(path string) (rollbackState, error) {
 // BEFORE the signature is verified, so a malicious or misconfigured server
 // cannot stream an unbounded body and OOM the host ahead of verification. 1 GiB
 // is generous for any release archive while remaining safely bounded.
-const maxArtifactBytes = 1 << 30 // 1 GiB
+//
+// It is a var (not a const) only so tests can lower it to trip the limit without
+// streaming a real gigabyte through loopback (which times out under -race).
+var maxArtifactBytes int64 = 1 << 30 // 1 GiB
 
 func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
 	if err := validateDownloadScheme(rawURL); err != nil {
