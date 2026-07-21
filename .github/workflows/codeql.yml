@@ -22,7 +22,7 @@ jobs:
         language: [go]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: github/codeql-action/init@v4
