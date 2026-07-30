@@ -101,7 +101,10 @@ jobs:
           FLEET_RELEASE_NOTES_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
           FLEET_REPOSITORY: ${{ github.repository }}
         run: |
-          export FLEET_RELEASE_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Assign then export separately so a date(1) failure is not masked by
+          # export's own exit status.
+          FLEET_RELEASE_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export FLEET_RELEASE_DATE
           ./scripts/update-manifest.sh
       - name: Validate generated manifest
         env:

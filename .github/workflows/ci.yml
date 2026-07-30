@@ -19,7 +19,11 @@ jobs:
         with:
           go-version-file: go.mod
       - name: gofmt check
-        run: test -z "$(gofmt -l $(find . -name '*.go' -print))"
+        run: |
+          # -print0/-0 so paths containing spaces stay one argument, and -r so an
+          # empty match does not leave gofmt reading stdin.
+          unformatted="$(find . -name '*.go' -print0 | xargs -0 -r gofmt -l)"
+          test -z "${unformatted}"
       - name: go vet
         run: go vet ./...
 
