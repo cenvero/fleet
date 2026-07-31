@@ -1,0 +1,12 @@
+# Code owners for repository automation.
+#
+# IMPORTANT: this file on its own only REQUESTS a review — it does not block
+# anything. Enforcement is a repository setting, not a file: on main, enable
+#   Require a pull request before merging
+#   + Require review from Code Owners
+# Without that, a change here can still be pushed straight to main.
+
+# The entire .github directory: workflows, composite actions, dependabot
+# config, issue and PR templates. Everything that can run code in CI or change
+# how the repo is automated.
+/.github/ @cenvero
