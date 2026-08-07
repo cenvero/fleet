@@ -116,6 +116,10 @@ func NotifyPath(configDir string) string {
 	return filepath.Join(configDir, "notify.json")
 }
 
+func (s *NotifyStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
+}
+
 func (s *NotifyStore) read() (notifyDocument, error) {
 	doc := notifyDocument{}
 	data, err := os.ReadFile(s.path)
@@ -221,20 +225,22 @@ func (s *NotifyStore) Add(target NotifyTarget) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	for i := range doc.Targets {
-		if doc.Targets[i].Kind == normalized.Kind && doc.Targets[i].URL == normalized.URL {
-			doc.Targets[i].Events = normalized.Events
-			return s.write(doc)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
 		}
-	}
-	doc.Targets = append(doc.Targets, normalized)
-	return s.write(doc)
+		for i := range doc.Targets {
+			if doc.Targets[i].Kind == normalized.Kind && doc.Targets[i].URL == normalized.URL {
+				doc.Targets[i].Events = normalized.Events
+				return s.write(doc)
+			}
+		}
+		doc.Targets = append(doc.Targets, normalized)
+		return s.write(doc)
+	})
 }
 
 // List returns a copy of all configured targets.
@@ -253,41 +259,45 @@ func (s *NotifyStore) List() ([]NotifyTarget, error) {
 // Remove deletes a target by zero-based index or by exact URL match. It returns
 // the removed target so callers can report what was removed.
 func (s *NotifyStore) Remove(indexOrURL string) (NotifyTarget, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return NotifyTarget{}, err
-	}
-	if len(doc.Targets) == 0 {
-		return NotifyTarget{}, fmt.Errorf("no notification targets configured")
-	}
-	idx := -1
-	// Try index first.
-	if n, convErr := parseIndex(indexOrURL); convErr == nil {
-		if n < 0 || n >= len(doc.Targets) {
-			return NotifyTarget{}, fmt.Errorf("index %d out of range (have %d targets)", n, len(doc.Targets))
+	var removed NotifyTarget
+	err := s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
 		}
-		idx = n
-	} else {
-		// Fall back to URL match.
-		want := strings.TrimSpace(indexOrURL)
-		for i := range doc.Targets {
-			if doc.Targets[i].URL == want {
-				idx = i
-				break
+		if len(doc.Targets) == 0 {
+			return fmt.Errorf("no notification targets configured")
+		}
+		idx := -1
+		// Try index first.
+		if n, convErr := parseIndex(indexOrURL); convErr == nil {
+			if n < 0 || n >= len(doc.Targets) {
+				return fmt.Errorf("index %d out of range (have %d targets)", n, len(doc.Targets))
+			}
+			idx = n
+		} else {
+			// Fall back to URL match.
+			want := strings.TrimSpace(indexOrURL)
+			for i := range doc.Targets {
+				if doc.Targets[i].URL == want {
+					idx = i
+					break
+				}
+			}
+			if idx == -1 {
+				return fmt.Errorf("no target matching %q (use an index from 'fleet notify list' or the exact url)", indexOrURL)
 			}
 		}
-		if idx == -1 {
-			return NotifyTarget{}, fmt.Errorf("no target matching %q (use an index from 'fleet notify list' or the exact url)", indexOrURL)
+		removed = doc.Targets[idx]
+		doc.Targets = append(doc.Targets[:idx], doc.Targets[idx+1:]...)
+		if err := s.write(doc); err != nil {
+			return err
 		}
-	}
-	removed := doc.Targets[idx]
-	doc.Targets = append(doc.Targets[:idx], doc.Targets[idx+1:]...)
-	if err := s.write(doc); err != nil {
-		return NotifyTarget{}, err
-	}
-	return removed, nil
+		return nil
+	})
+	return removed, err
 }
 
 // parseIndex parses a non-negative integer index, rejecting anything that looks

@@ -89,6 +89,10 @@ func SecretsPath(configDir string) string {
 	return filepath.Join(configDir, "secrets.json")
 }
 
+func (s *SecretStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
+}
+
 // encKey lazily derives and caches the store's 32-byte AES key. The caller must
 // hold s.mu. Derivation is deterministic for a config dir, so caching is safe
 // across reads and writes of the same store instance.
@@ -249,22 +253,24 @@ func (s *SecretStore) Set(name, value string) error {
 	if err := ValidateSecretName(name); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	created := time.Now().UTC()
-	if existing, ok := doc.Secrets[name]; ok && !existing.Created.IsZero() {
-		created = existing.Created
-	}
-	rec, err := s.sealRecord(value, created)
-	if err != nil {
-		return err
-	}
-	doc.Secrets[name] = rec
-	return s.upgradeAndWrite(doc)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		created := time.Now().UTC()
+		if existing, ok := doc.Secrets[name]; ok && !existing.Created.IsZero() {
+			created = existing.Created
+		}
+		rec, err := s.sealRecord(value, created)
+		if err != nil {
+			return err
+		}
+		doc.Secrets[name] = rec
+		return s.upgradeAndWrite(doc)
+	})
 }
 
 // secretAlphabet is the alphanumeric charset used by Generate/Rotate. It is
@@ -363,22 +369,24 @@ func (s *SecretStore) Rotate(name string, length int) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	if _, ok := doc.Secrets[name]; !ok {
-		return fmt.Errorf("secret %q not found", name)
-	}
-	// Rotation refreshes both the value and the creation/rotation timestamp.
-	rec, err := s.sealRecord(value, time.Now().UTC())
-	if err != nil {
-		return err
-	}
-	doc.Secrets[name] = rec
-	return s.upgradeAndWrite(doc)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		if _, ok := doc.Secrets[name]; !ok {
+			return fmt.Errorf("secret %q not found", name)
+		}
+		// Rotation refreshes both the value and the creation/rotation timestamp.
+		rec, err := s.sealRecord(value, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		doc.Secrets[name] = rec
+		return s.upgradeAndWrite(doc)
+	})
 }
 
 // Rekey re-seals every stored secret from oldKey to newKey, used when the
@@ -395,54 +403,56 @@ func (s *SecretStore) Rotate(name string, length int) error {
 // of deriveSecretKey — changes across the rotation; this method must not re-derive
 // from disk.
 func (s *SecretStore) Rekey(oldKey, newKey []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	if len(doc.Secrets) == 0 {
-		return nil // nothing to re-seal
-	}
-
-	// Phase 1: decrypt every value under the OLD key into memory. Abort on the
-	// first failure so nothing is written if the old key is wrong.
-	plaintexts := make(map[string]string, len(doc.Secrets))
-	for name, rec := range doc.Secrets {
-		if rec.Enc == "" {
-			// Legacy plaintext: carry the value forward to be sealed under newKey.
-			plaintexts[name] = rec.Value
-			continue
-		}
-		if rec.Enc != secretEncMarker {
-			return fmt.Errorf("rekey secret %q: unsupported encryption format %q", name, rec.Enc)
-		}
-		plain, err := decryptValue(oldKey, rec.Value)
+		doc, err := s.read()
 		if err != nil {
-			return fmt.Errorf("rekey secret %q: decrypt under old key: %w", name, err)
+			return err
 		}
-		plaintexts[name] = plain
-	}
-
-	// Phase 2: re-seal every value under the NEW key, preserving timestamps.
-	for name, plain := range plaintexts {
-		enc, err := encryptValue(newKey, plain)
-		if err != nil {
-			return fmt.Errorf("rekey secret %q: encrypt under new key: %w", name, err)
+		if len(doc.Secrets) == 0 {
+			return nil // nothing to re-seal
 		}
-		rec := doc.Secrets[name]
-		doc.Secrets[name] = secretRecord{Value: enc, Enc: secretEncMarker, Created: rec.Created}
-	}
 
-	// Phase 3: atomic write. Update the cached key so subsequent in-process reads
-	// use the new key (matching what is now on disk after promotion).
-	if err := s.write(doc); err != nil {
-		return err
-	}
-	s.key = append([]byte(nil), newKey...)
-	s.keyErr = nil
-	return nil
+		// Phase 1: decrypt every value under the OLD key into memory. Abort on the
+		// first failure so nothing is written if the old key is wrong.
+		plaintexts := make(map[string]string, len(doc.Secrets))
+		for name, rec := range doc.Secrets {
+			if rec.Enc == "" {
+				// Legacy plaintext: carry the value forward to be sealed under newKey.
+				plaintexts[name] = rec.Value
+				continue
+			}
+			if rec.Enc != secretEncMarker {
+				return fmt.Errorf("rekey secret %q: unsupported encryption format %q", name, rec.Enc)
+			}
+			plain, err := decryptValue(oldKey, rec.Value)
+			if err != nil {
+				return fmt.Errorf("rekey secret %q: decrypt under old key: %w", name, err)
+			}
+			plaintexts[name] = plain
+		}
+
+		// Phase 2: re-seal every value under the NEW key, preserving timestamps.
+		for name, plain := range plaintexts {
+			enc, err := encryptValue(newKey, plain)
+			if err != nil {
+				return fmt.Errorf("rekey secret %q: encrypt under new key: %w", name, err)
+			}
+			rec := doc.Secrets[name]
+			doc.Secrets[name] = secretRecord{Value: enc, Enc: secretEncMarker, Created: rec.Created}
+		}
+
+		// Phase 3: atomic write. Update the cached key so subsequent in-process reads
+		// use the new key (matching what is now on disk after promotion).
+		if err := s.write(doc); err != nil {
+			return err
+		}
+		s.key = append([]byte(nil), newKey...)
+		s.keyErr = nil
+		return nil
+	})
 }
 
 // Remove deletes a secret. Removing an unknown secret is an error so callers get
@@ -451,15 +461,17 @@ func (s *SecretStore) Remove(name string) error {
 	if err := ValidateSecretName(name); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	if _, ok := doc.Secrets[name]; !ok {
-		return fmt.Errorf("secret %q not found", name)
-	}
-	delete(doc.Secrets, name)
-	return s.upgradeAndWrite(doc)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		if _, ok := doc.Secrets[name]; !ok {
+			return fmt.Errorf("secret %q not found", name)
+		}
+		delete(doc.Secrets, name)
+		return s.upgradeAndWrite(doc)
+	})
 }

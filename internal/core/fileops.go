@@ -19,7 +19,10 @@ import (
 
 // dirTransferConcurrency bounds how many files a recursive directory transfer
 // moves at once (each file still uses its own per-chunk parallelism).
-const dirTransferConcurrency = 4
+// Increased from 4 to 8 to better saturate high-latency links; each file still
+// streams via its own 8 parallel chunk channels, so the total channel budget
+// scales with file count. Future: make adaptive to NumCPU and RTT.
+const dirTransferConcurrency = 8
 
 func sumSizes(m map[string]fileMeta) int64 {
 	var t int64

@@ -51,12 +51,17 @@ func (a *App) CopyFile(srcServer, srcPath, dstServer, dstPath string, opts FileT
 		total = 1
 	}
 
-	tmp, err := os.CreateTemp("", "fleet-relay-*")
+	relayDir := filepath.Join(a.ConfigDir, "tmp")
+	if err := os.MkdirAll(relayDir, 0o700); err != nil {
+		return proto.FileFinalizeResult{}, fmt.Errorf("create relay dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(relayDir, "fleet-relay-*")
 	if err != nil {
 		return proto.FileFinalizeResult{}, err
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
+	_ = os.Chmod(tmpPath, 0o600)
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := a.DownloadFile(srcServer, srcPath, tmpPath, opts, relayProgress(progress, 0, total)); err != nil {

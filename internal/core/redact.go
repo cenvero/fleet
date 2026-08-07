@@ -66,6 +66,10 @@ func PolicyPath(configDir string) string {
 	return filepath.Join(configDir, "policy.json")
 }
 
+func (s *RedactStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
+}
+
 // load reads and compiles the policy document, replacing in-memory state.
 func (s *RedactStore) load() error {
 	data, err := os.ReadFile(s.path)
@@ -101,10 +105,14 @@ func (s *RedactStore) load() error {
 // compilePatterns compiles each pattern, returning a clear error naming the
 // first bad regex. Empty patterns are skipped.
 func compilePatterns(patterns []string) ([]*regexp.Regexp, error) {
+	const maxPatternLen = 512
 	compiled := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
 		if p == "" {
 			continue
+		}
+		if len(p) > maxPatternLen {
+			return nil, fmt.Errorf("invalid redact pattern %q: pattern too long (max %d)", p, maxPatternLen)
 		}
 		re, err := regexp.Compile(p)
 		if err != nil {
@@ -128,21 +136,25 @@ func (s *RedactStore) SetPatterns(patterns []string) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.patterns = cleaned
-	s.compiled = compiled
-	useDefaults := s.useDefaults
-	s.mu.Unlock()
-	return s.persist(cleaned, useDefaults)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		s.patterns = cleaned
+		s.compiled = compiled
+		useDefaults := s.useDefaults
+		s.mu.Unlock()
+		return s.persist(cleaned, useDefaults)
+	})
 }
 
 // SetDefaults toggles redaction of the known secret-ish default patterns.
 func (s *RedactStore) SetDefaults(enabled bool) error {
-	s.mu.Lock()
-	s.useDefaults = enabled
-	patterns := append([]string(nil), s.patterns...)
-	s.mu.Unlock()
-	return s.persist(patterns, enabled)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		s.useDefaults = enabled
+		patterns := append([]string(nil), s.patterns...)
+		s.mu.Unlock()
+		return s.persist(patterns, enabled)
+	})
 }
 
 // Patterns returns a copy of the configured user patterns.

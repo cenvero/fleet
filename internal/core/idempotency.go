@@ -53,6 +53,10 @@ func IdempotencyPath(configDir string) string {
 	return filepath.Join(configDir, "data", "idempotency.json")
 }
 
+func (s *IdempotencyStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
+}
+
 func (s *IdempotencyStore) read() (idempotencyDocument, error) {
 	doc := idempotencyDocument{Entries: map[string]idempotencyEntry{}}
 	data, err := os.ReadFile(s.path)
@@ -144,23 +148,25 @@ func (s *IdempotencyStore) Put(key, result string, ttl time.Duration) error {
 	if ttl <= 0 {
 		return fmt.Errorf("idempotency ttl must be positive")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	// Opportunistically drop any other expired entries while we hold the lock.
-	for k, e := range doc.Entries {
-		if k != key && s.expired(e) {
-			delete(doc.Entries, k)
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
 		}
-	}
-	doc.Entries[key] = idempotencyEntry{
-		Result:    result,
-		ExpiresAt: time.Now().UTC().Add(ttl),
-	}
-	return s.write(doc)
+		// Opportunistically drop any other expired entries while we hold the lock.
+		for k, e := range doc.Entries {
+			if k != key && s.expired(e) {
+				delete(doc.Entries, k)
+			}
+		}
+		doc.Entries[key] = idempotencyEntry{
+			Result:    result,
+			ExpiresAt: time.Now().UTC().Add(ttl),
+		}
+		return s.write(doc)
+	})
 }
 
 // expired reports whether an entry is at or past its expiry as of now.

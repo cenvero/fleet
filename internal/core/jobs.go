@@ -111,6 +111,10 @@ func JobsPath(configDir string) string {
 	return filepath.Join(configDir, "jobs.json")
 }
 
+func (s *JobStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
+}
+
 func (s *JobStore) read() (jobsDocument, error) {
 	doc := jobsDocument{}
 	data, err := os.ReadFile(s.path)
@@ -176,32 +180,36 @@ func (s *JobStore) reserve(doc *jobsDocument) int {
 // stale files. Remote deletion failures are ignored (an unreachable server just
 // leaves its /var/tmp file for the sweep). Returns the number of records removed.
 func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return 0, err
-	}
-	var kept []JobRecord
-	removed := 0
-	for _, j := range doc.Jobs {
-		if j.Status == JobDone && !j.Finished.IsZero() && j.Finished.Before(cutoff) {
-			removed++
-			if exec != nil && j.Logfile != "" {
-				_, _, _ = exec(j.Server, "rm -f "+shellQuote(j.Logfile))
-			}
-			continue
+	var removed int
+	err := s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
 		}
-		kept = append(kept, j)
-	}
-	if removed == 0 {
-		return 0, nil
-	}
-	doc.Jobs = kept
-	if err := s.write(doc); err != nil {
-		return removed, err
-	}
-	return removed, nil
+		var kept []JobRecord
+		removed = 0
+		for _, j := range doc.Jobs {
+			if j.Status == JobDone && !j.Finished.IsZero() && j.Finished.Before(cutoff) {
+				removed++
+				if exec != nil && j.Logfile != "" {
+					_, _, _ = exec(j.Server, "rm -f "+shellQuote(j.Logfile))
+				}
+				continue
+			}
+			kept = append(kept, j)
+		}
+		if removed == 0 {
+			return nil
+		}
+		doc.Jobs = kept
+		if err := s.write(doc); err != nil {
+			return err
+		}
+		return nil
+	})
+	return removed, err
 }
 
 // maxJobLogBytes bounds how much of a job's remote logfile Tail reads into memory
@@ -253,39 +261,46 @@ func (s *JobStore) Start(exec ExecFunc, server, command, name string) (JobRecord
 		return JobRecord{}, fmt.Errorf("command is required")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return JobRecord{}, err
-	}
-	nonce, err := newJobNonce()
-	if err != nil {
-		return JobRecord{}, err
-	}
-	id := s.reserve(&doc)
-	logfile := JobLogfile(id, nonce)
-	rec := JobRecord{
-		ID:      id,
-		Name:    strings.TrimSpace(name),
-		Server:  server,
-		Command: command,
-		Logfile: logfile,
-		Nonce:   nonce,
-		Status:  JobRunning,
-		Started: time.Now().UTC(),
-	}
+	var rec JobRecord
+	err := s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		nonce, err := newJobNonce()
+		if err != nil {
+			return err
+		}
+		id := s.reserve(&doc)
+		logfile := JobLogfile(id, nonce)
+		rec = JobRecord{
+			ID:      id,
+			Name:    strings.TrimSpace(name),
+			Server:  server,
+			Command: command,
+			Logfile: logfile,
+			Nonce:   nonce,
+			Status:  JobRunning,
+			Started: time.Now().UTC(),
+		}
 
-	if _, _, err := exec(server, buildJobLaunch(command, logfile, nonce)); err != nil {
-		// Do not persist a job we failed to launch; roll the counter back so
-		// the id is reused next time.
-		doc.Counter--
-		_ = s.write(doc)
-		return JobRecord{}, fmt.Errorf("launch job on %s: %w", server, err)
-	}
+		if _, _, err := exec(server, buildJobLaunch(command, logfile, nonce)); err != nil {
+			// Do not persist a job we failed to launch; roll the counter back so
+			// the id is reused next time.
+			doc.Counter--
+			_ = s.write(doc)
+			return fmt.Errorf("launch job on %s: %w", server, err)
+		}
 
-	doc.Jobs = append(doc.Jobs, rec)
-	if err := s.write(doc); err != nil {
+		doc.Jobs = append(doc.Jobs, rec)
+		if err := s.write(doc); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return JobRecord{}, err
 	}
 	return rec, nil
@@ -443,24 +458,26 @@ func (s *JobStore) fireJobFailed(rec JobRecord) {
 
 // update persists a single changed job record in place.
 func (s *JobStore) update(rec JobRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	found := false
-	for i := range doc.Jobs {
-		if doc.Jobs[i].ID == rec.ID {
-			doc.Jobs[i] = rec
-			found = true
-			break
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
 		}
-	}
-	if !found {
-		return fmt.Errorf("job %d not found", rec.ID)
-	}
-	return s.write(doc)
+		found := false
+		for i := range doc.Jobs {
+			if doc.Jobs[i].ID == rec.ID {
+				doc.Jobs[i] = rec
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("job %d not found", rec.ID)
+		}
+		return s.write(doc)
+	})
 }
 
 // Wait polls the job until it finishes (FLEETEXIT observed) or the timeout

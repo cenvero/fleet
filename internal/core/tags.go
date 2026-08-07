@@ -41,6 +41,10 @@ func TagsPath(configDir string) string {
 	return filepath.Join(configDir, "tags.json")
 }
 
+func (s *TagStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
+}
+
 func (s *TagStore) read() (tagsDocument, error) {
 	doc := tagsDocument{Servers: map[string]map[string]string{}}
 	data, err := os.ReadFile(s.path)
@@ -121,29 +125,31 @@ func (s *TagStore) SetTags(server string, kv map[string]string) error {
 			return err
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	tags := doc.Servers[server]
-	if tags == nil {
-		tags = map[string]string{}
-	}
-	for k, v := range kv {
-		if v == "" {
-			delete(tags, k)
-			continue
+	return s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, err := s.read()
+		if err != nil {
+			return err
 		}
-		tags[k] = v
-	}
-	if len(tags) == 0 {
-		delete(doc.Servers, server)
-	} else {
-		doc.Servers[server] = tags
-	}
-	return s.write(doc)
+		tags := doc.Servers[server]
+		if tags == nil {
+			tags = map[string]string{}
+		}
+		for k, v := range kv {
+			if v == "" {
+				delete(tags, k)
+				continue
+			}
+			tags[k] = v
+		}
+		if len(tags) == 0 {
+			delete(doc.Servers, server)
+		} else {
+			doc.Servers[server] = tags
+		}
+		return s.write(doc)
+	})
 }
 
 // GetTags returns a copy of the tags for a server (nil if none).
