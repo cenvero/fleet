@@ -35,6 +35,14 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	if err != nil {
 		return KeyRotationResult{}, err
 	}
+	// Rotation replaces the controller key every pooled connection authenticated
+	// with. Drop them all so subsequent calls re-authenticate with the new key
+	// instead of riding a connection established under the retired one.
+	defer func() {
+		for _, s := range servers {
+			a.dropPooledSession(s.Name)
+		}
+	}()
 	if unsupported := unsupportedRotationServers(servers); len(unsupported) > 0 {
 		return KeyRotationResult{}, fmt.Errorf("key rotation supports only direct or reverse fleets right now; unsupported servers: %s", strings.Join(unsupported, ", "))
 	}

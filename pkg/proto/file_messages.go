@@ -64,15 +64,33 @@ type FileReadPayload struct {
 	Path   string `json:"path"`
 	Offset int64  `json:"offset"`
 	Length int64  `json:"length"`
+	// Binary asks the agent to return the chunk as a binary frame attachment
+	// rather than base64 inside the JSON envelope. The controller sets it only
+	// for agents advertising CapabilityBinaryFrames, so older agents — which
+	// ignore the unknown field — keep replying in the original encoding.
+	Binary bool `json:"binary,omitempty"`
 }
+
+// WantsBinary implements proto.BinaryRequester.
+func (p FileReadPayload) WantsBinary() bool { return p.Binary }
 
 type FileReadResult struct {
 	Offset int64  `json:"offset"`
 	Length int64  `json:"length"`
-	Data   []byte `json:"data"`   // JSON base64-encodes []byte transparently
-	SHA256 string `json:"sha256"` // checksum of this chunk's raw bytes
+	Data   []byte `json:"data,omitempty"` // empty when the bytes travel as a binary frame
+	SHA256 string `json:"sha256"`         // checksum of this chunk's raw bytes
 	EOF    bool   `json:"eof,omitempty"`
 }
+
+// TakeBinary/PutBinary let a chunk's bytes ride as a binary frame attachment
+// instead of base64 inside the JSON envelope. See proto.BinaryCarrier.
+func (r *FileReadResult) TakeBinary() []byte {
+	data := r.Data
+	r.Data = nil
+	return data
+}
+
+func (r *FileReadResult) PutBinary(b []byte) { r.Data = b }
 
 // --- upload (controller ships byte ranges down to the agent) ---
 
@@ -92,9 +110,19 @@ type FileWritePayload struct {
 	TransferID string `json:"transfer_id"`
 	Path       string `json:"path"`
 	Offset     int64  `json:"offset"`
-	Data       []byte `json:"data"`
-	SHA256     string `json:"sha256"` // chunk checksum, verified before WriteAt
+	Data       []byte `json:"data,omitempty"` // empty when the bytes travel as a binary frame
+	SHA256     string `json:"sha256"`         // chunk checksum, verified before WriteAt
 }
+
+// TakeBinary/PutBinary let a chunk's bytes ride as a binary frame attachment
+// instead of base64 inside the JSON envelope. See proto.BinaryCarrier.
+func (p *FileWritePayload) TakeBinary() []byte {
+	data := p.Data
+	p.Data = nil
+	return data
+}
+
+func (p *FileWritePayload) PutBinary(b []byte) { p.Data = b }
 
 type FileWriteResult struct {
 	Offset       int64 `json:"offset"`

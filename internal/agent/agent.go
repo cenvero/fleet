@@ -29,6 +29,13 @@ func DetectCapabilities() []string {
 		"inventory.report",
 		"file.transfer",
 		"file.browse",
+		// Tells the controller it may ship file chunks as raw binary frames
+		// instead of base64 inside the JSON envelope. Controllers that don't
+		// see this capability fall back to the original encoding.
+		proto.CapabilityBinaryFrames,
+		// Reverse connections accept extra fleet-rpc channels from the
+		// controller, so reverse transfers are no longer single-streamed.
+		proto.CapabilityReverseMultiplex,
 	}
 	switch runtime.GOOS {
 	case "linux":

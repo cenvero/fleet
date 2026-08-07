@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +36,100 @@ type ReverseSessionInfo struct {
 	ReplayedMetrics    int                `json:"replayed_metrics,omitempty"`
 }
 
+// maxReverseExtraChannels bounds how many additional fleet-rpc channels the
+// controller will open back to one reverse agent. It must stay at or below the
+// agent's own inbound cap; transfers use far fewer.
+const maxReverseExtraChannels = 16
+
 type reverseSession struct {
-	session *transport.Session
+	session *transport.Session // the channel the agent opened; always usable
+	conn    ssh.Conn           // opens additional channels back to the agent
 	info    ReverseSessionInfo
+
+	// multiplex is set when the agent advertised CapabilityReverseMultiplex.
+	// Without it the controller never attempts an extra channel and every call
+	// serialises on the agent-opened one, exactly as before.
+	multiplex bool
+
+	mu     sync.Mutex
+	idle   []*transport.Session // extra channels free for reuse
+	opened int                  // extra channels created so far
+}
+
+// leaseChannel borrows a channel for one RPC. It prefers an idle extra channel,
+// then opens a new one, and finally falls back to the agent-opened channel. The
+// bool reports whether the caller should return it via releaseChannel; the
+// primary channel is shared and must not be pooled.
+func (rs *reverseSession) leaseChannel() (*transport.Session, bool) {
+	if !rs.multiplex || rs.conn == nil {
+		return rs.session, false
+	}
+	rs.mu.Lock()
+	if n := len(rs.idle); n > 0 {
+		sess := rs.idle[n-1]
+		rs.idle = rs.idle[:n-1]
+		rs.mu.Unlock()
+		return sess, true
+	}
+	if rs.opened >= maxReverseExtraChannels {
+		rs.mu.Unlock()
+		return rs.session, false // at the cap: share the primary channel
+	}
+	rs.opened++
+	rs.mu.Unlock()
+
+	channel, requests, err := rs.conn.OpenChannel(transport.RPCChannelType, nil)
+	if err != nil {
+		// An agent that rejects inbound channels (or a connection on its way
+		// out) drops us back to the single-channel path rather than failing.
+		rs.mu.Lock()
+		if rs.opened > 0 {
+			rs.opened--
+		}
+		rs.mu.Unlock()
+		return rs.session, false
+	}
+	go ssh.DiscardRequests(requests)
+	return &transport.Session{
+		Mode:               transport.ModeReverse,
+		LocalAddr:          rs.session.LocalAddr,
+		RemoteAddr:         rs.session.RemoteAddr,
+		HostKeyFingerprint: rs.session.HostKeyFingerprint,
+		Channel:            channel,
+	}, true
+}
+
+func (rs *reverseSession) releaseChannel(sess *transport.Session, healthy bool) {
+	if sess == nil {
+		return
+	}
+	if !healthy {
+		rs.mu.Lock()
+		// closeExtraChannels may have reset the counter while this call was in
+		// flight, so floor it rather than letting it drift negative.
+		if rs.opened > 0 {
+			rs.opened--
+		}
+		rs.mu.Unlock()
+		_ = sess.Close()
+		return
+	}
+	rs.mu.Lock()
+	rs.idle = append(rs.idle, sess)
+	rs.mu.Unlock()
+}
+
+// closeExtraChannels tears down the pooled channels. The primary channel and the
+// underlying connection are owned by the caller.
+func (rs *reverseSession) closeExtraChannels() {
+	rs.mu.Lock()
+	idle := rs.idle
+	rs.idle = nil
+	rs.opened = 0
+	rs.mu.Unlock()
+	for _, sess := range idle {
+		_ = sess.Close()
+	}
 }
 
 type ReverseHub struct {
@@ -56,17 +148,66 @@ type ReverseHub struct {
 	enrollMu sync.Mutex
 }
 
+// reverseControlRequest is the JSON wrapper a CLI process sends over the local
+// control socket so the daemon can relay it to a connected reverse agent.
+//
+// EnvelopeBinary exists because proto.Envelope.Binary is tagged `json:"-"`: the
+// wire codec carries a binary frame itself, outside the JSON. That is right for
+// the SSH hop but means a plain json.Marshal of the envelope silently discards a
+// file chunk. This hop is a local loopback socket, not the SSH transport, so the
+// attachment is carried here as an explicit field. Without it a reverse-mode
+// transfer against a binary-frame-capable agent ships chunks with no bytes.
 type reverseControlRequest struct {
-	Token    string         `json:"token"`
-	Type     string         `json:"type"`
-	Server   string         `json:"server"`
-	Envelope proto.Envelope `json:"envelope,omitempty"`
+	Token          string         `json:"token"`
+	Type           string         `json:"type"`
+	Server         string         `json:"server"`
+	Envelope       proto.Envelope `json:"envelope,omitempty"`
+	EnvelopeBinary []byte         `json:"envelope_binary,omitempty"`
+}
+
+func newReverseControlRequest(token, kind, server string, env proto.Envelope) reverseControlRequest {
+	return reverseControlRequest{
+		Token:          token,
+		Type:           kind,
+		Server:         server,
+		Envelope:       env,
+		EnvelopeBinary: env.Binary,
+	}
+}
+
+// envelope reattaches the binary frame carried alongside the JSON.
+func (r reverseControlRequest) envelope() proto.Envelope {
+	env := r.Envelope
+	if r.EnvelopeBinary != nil {
+		env.Binary = r.EnvelopeBinary
+	}
+	return env
 }
 
 type reverseControlResponse struct {
-	Response *proto.Envelope     `json:"response,omitempty"`
-	Status   *ReverseSessionInfo `json:"status,omitempty"`
-	Error    *proto.Error        `json:"error,omitempty"`
+	Response       *proto.Envelope     `json:"response,omitempty"`
+	ResponseBinary []byte              `json:"response_binary,omitempty"`
+	Status         *ReverseSessionInfo `json:"status,omitempty"`
+	Error          *proto.Error        `json:"error,omitempty"`
+}
+
+// setResponse stores an envelope and lifts its binary frame into a field that
+// survives JSON encoding — see the note on reverseControlRequest.
+func (r *reverseControlResponse) setResponse(env proto.Envelope) {
+	r.Response = &env
+	r.ResponseBinary = env.Binary
+}
+
+// responseEnvelope returns the stored envelope with its binary frame reattached.
+func (r reverseControlResponse) responseEnvelope() (proto.Envelope, bool) {
+	if r.Response == nil {
+		return proto.Envelope{}, false
+	}
+	env := *r.Response
+	if r.ResponseBinary != nil {
+		env.Binary = r.ResponseBinary
+	}
+	return env, true
 }
 
 func NewReverseHub(app *App, controlToken string) *ReverseHub {
@@ -204,7 +345,7 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 		} else {
 			info.ReplayedMetrics = replayed
 		}
-		h.setSession(serverName, session, info)
+		h.setSession(serverName, session, info, conn)
 
 		go func(name string, session *transport.Session, sshConn *ssh.ServerConn) {
 			_ = sshConn.Wait()
@@ -285,10 +426,23 @@ func (h *ReverseHub) Call(server string, env proto.Envelope) (proto.Envelope, er
 	if current == nil || current.session == nil {
 		return proto.Envelope{}, fmt.Errorf("reverse session for %q is not connected", server)
 	}
-	response, err := current.session.Call(context.Background(), env)
+	// Borrow a channel so concurrent callers do not queue behind one another.
+	// Against an agent without CapabilityReverseMultiplex this returns the
+	// single agent-opened channel and behaves exactly as it always did.
+	sess, pooled := current.leaseChannel()
+	response, err := sess.Call(context.Background(), env)
 	if err != nil {
+		if pooled {
+			current.releaseChannel(sess, false)
+		}
+		// A failure on any channel means the whole connection is suspect — they
+		// all ride one ssh.Conn — so retire the session and let the agent
+		// reconnect, which is what this did before channels were pooled.
 		h.clearSession(server, err.Error(), current.session)
 		return proto.Envelope{}, err
+	}
+	if pooled {
+		current.releaseChannel(sess, true)
 	}
 	return response, nil
 }
@@ -317,6 +471,7 @@ func (h *ReverseHub) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for name, session := range h.sessions {
+		session.closeExtraChannels()
 		if session.session != nil {
 			_ = session.session.Close()
 		}
@@ -363,12 +518,12 @@ func (h *ReverseHub) handleControlConn(conn net.Conn) {
 	var resp reverseControlResponse
 	switch req.Type {
 	case "call":
-		out, err := h.Call(req.Server, req.Envelope)
+		out, err := h.Call(req.Server, req.envelope())
 		if err != nil {
 			resp.Error = &proto.Error{Code: "reverse_call_failed", Message: err.Error()}
 			break
 		}
-		resp.Response = &out
+		resp.setResponse(out)
 	case "status":
 		info, err := h.Status(req.Server)
 		if err != nil {
@@ -485,12 +640,21 @@ func GenerateEnrollSecret() (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
-func (h *ReverseHub) setSession(serverName string, session *transport.Session, info ReverseSessionInfo) {
+func (h *ReverseHub) setSession(serverName string, session *transport.Session, info ReverseSessionInfo, conn ssh.Conn) {
 	h.mu.Lock()
-	if existing := h.sessions[serverName]; existing != nil && existing.session != nil {
-		_ = existing.session.Close()
+	if existing := h.sessions[serverName]; existing != nil {
+		existing.closeExtraChannels()
+		if existing.session != nil {
+			_ = existing.session.Close()
+		}
 	}
-	h.sessions[serverName] = &reverseSession{session: session, info: info}
+	h.sessions[serverName] = &reverseSession{
+		session: session,
+		conn:    conn,
+		info:    info,
+		multiplex: slices.Contains(info.Hello.Capabilities, proto.CapabilityReverseMultiplex) &&
+			conn != nil,
+	}
 	h.mu.Unlock()
 
 	server, err := h.app.GetServer(serverName)
@@ -541,6 +705,7 @@ func (h *ReverseHub) clearSession(serverName, lastError string, expected *transp
 	}
 	delete(h.sessions, serverName)
 	h.mu.Unlock()
+	current.closeExtraChannels()
 
 	server, err := h.app.GetServer(serverName)
 	if err != nil {
@@ -577,12 +742,9 @@ func (a *App) callReverseControl(serverName string, env proto.Envelope) (proto.E
 	if err != nil {
 		return proto.Envelope{}, err
 	}
-	if err := json.NewEncoder(conn).Encode(reverseControlRequest{
-		Token:    token,
-		Type:     "call",
-		Server:   serverName,
-		Envelope: env,
-	}); err != nil {
+	if err := json.NewEncoder(conn).Encode(
+		newReverseControlRequest(token, "call", serverName, env),
+	); err != nil {
 		return proto.Envelope{}, err
 	}
 
@@ -593,10 +755,11 @@ func (a *App) callReverseControl(serverName string, env proto.Envelope) (proto.E
 	if resp.Error != nil {
 		return proto.Envelope{}, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 	}
-	if resp.Response == nil {
+	out, ok := resp.responseEnvelope()
+	if !ok {
 		return proto.Envelope{}, fmt.Errorf("reverse control did not return a response envelope")
 	}
-	return *resp.Response, nil
+	return out, nil
 }
 
 func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {

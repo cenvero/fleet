@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cenvero/fleet/internal/core"
@@ -91,7 +92,87 @@ var (
 // Top-level View
 // ============================================================================
 
+// frameKey is a compact digest of everything the base frame renders from. It is
+// deliberately cheap: pane content is represented by paneState.rev (bumped on
+// every listing/sort/filter/selection change) rather than by walking entries.
+//
+// It is only meaningful when no overlay or drag is active — those carry a lot of
+// transient state (menu geometry, editor buffer, ghost position, mouse
+// coordinates) that would be easy to under-capture, so View skips the cache
+// entirely in those modes rather than risk a stale frame.
+func (m filesModel) frameKey() string {
+	var b strings.Builder
+	b.Grow(192)
+	put := func(vals ...int) {
+		for _, v := range vals {
+			b.WriteString(strconv.Itoa(v))
+			b.WriteByte('|')
+		}
+	}
+	put(m.width, m.height, m.focus, boolInt(m.showHidden), m.hoverSide, m.hoverIndex)
+	b.WriteString(m.status)
+	b.WriteByte('|')
+	for _, p := range []paneState{m.left, m.right} {
+		b.WriteString(p.source)
+		b.WriteByte('\x00')
+		b.WriteString(p.cwd)
+		b.WriteByte('\x00')
+		b.WriteString(p.filter)
+		b.WriteByte('\x00')
+		if p.err != nil {
+			b.WriteString(p.err.Error())
+		}
+		b.WriteByte('|')
+		b.WriteString(strconv.FormatUint(p.rev, 10))
+		b.WriteByte('|')
+		put(p.index, p.scroll, boolInt(p.loading), int(p.view), int(p.sortBy),
+			boolInt(p.sortDesc), len(p.entries), len(p.selected))
+	}
+	for _, t := range m.transfers {
+		put(t.id, int(t.bytesDone), int(t.total), t.streams, boolInt(t.done), boolInt(t.err != nil))
+		// Rate is displayed rounded to whole units; key off the same resolution
+		// so a jittering float doesn't invalidate an otherwise identical frame.
+		put(int(t.rate) / 1024)
+	}
+	return b.String()
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (m filesModel) View() string {
+	// Fast path: nothing the base frame depends on changed since the last
+	// render, so hand back the identical string instead of rebuilding it. This
+	// is what makes idle mouse motion (one event per cursor move under
+	// WithMouseAllMotion) essentially free.
+	cacheable := m.overlay == overlayNone && m.drag == nil && m.frames != nil
+	var key string
+	if cacheable {
+		key = m.frameKey()
+		if m.frames.valid && m.frames.key == key {
+			return m.frames.frame
+		}
+	}
+
+	frame := m.renderFrame()
+
+	if cacheable {
+		m.frames.key = key
+		m.frames.frame = frame
+		m.frames.valid = true
+	} else if m.frames != nil {
+		// An overlay/drag frame was rendered uncached; make sure the next base
+		// frame re-renders rather than restoring a pre-overlay screen.
+		m.frames.valid = false
+	}
+	return frame
+}
+
+func (m filesModel) renderFrame() string {
 	innerW := m.width - 4 // page padding (1,2)
 	if innerW < 48 {
 		innerW = 48

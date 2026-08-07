@@ -177,6 +177,9 @@ func TestScaleSmoke100ReverseAgents(t *testing.T) {
 	cancel()
 	hub.Close()
 	for i := 0; i < agentCount; i++ {
+		// Connections are pooled and reused, so the agent's ServeConn loop only
+		// returns once the controller lets go of them.
+		app.DisconnectPooledSessions()
 		select {
 		case err := <-errCh:
 			if err != nil {

@@ -69,7 +69,7 @@
       {
         "@type": "Question",
         "name": "Does Cenvero Fleet require a cloud account?",
-        "acceptedAnswer": { "@type": "Answer", "text": "No. Cenvero Fleet is fully self-hosted. A single binary is the controller; it connects to your servers over SSH and auto-installs agents. There is no SaaS, no cloud account, and no telemetry in the core runtime." }
+        "acceptedAnswer": { "@type": "Answer", "text": "No. Cenvero Fleet is fully self-hosted. A single binary is the controller; it connects to your servers over an encrypted, host-key-pinned channel and auto-installs agents. Agents can also dial out to the controller, so hosts behind NAT need no inbound access. There is no SaaS, no cloud account, and no telemetry in the core runtime." }
       }
     ]
   }

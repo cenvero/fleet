@@ -217,8 +217,13 @@ func (m filesModel) hitRow(msg tea.MouseMsg) (int, int, bool) {
 		if !zone.Get(paneZoneID(side)).InBounds(msg) {
 			continue
 		}
-		pane := m.paneRefConst(side)
-		for i := range pane.entries {
+		// Only the rows currently on screen were zone.Mark'ed by the renderer, so
+		// scanning the whole listing is pure waste: every probe costs a
+		// fmt.Sprintf for the zone id plus a round trip to bubblezone's manager
+		// goroutine. On a big directory that turned each mouse-motion event into
+		// thousands of allocations. Restrict the scan to the rendered window.
+		lo, hi := m.visibleRange(side)
+		for i := lo; i < hi; i++ {
 			if zone.Get(rowZoneID(side, i)).InBounds(msg) {
 				return side, i, true
 			}
@@ -226,6 +231,30 @@ func (m filesModel) hitRow(msg tea.MouseMsg) (int, int, bool) {
 		return side, -1, true
 	}
 	return -1, -1, false
+}
+
+// visibleRange returns the [lo, hi) entry indices the renderer currently draws
+// for a pane, matching renderListBody/renderGridBody's own windowing.
+func (m filesModel) visibleRange(side int) (int, int) {
+	pane := m.paneRefConst(side)
+	count := len(pane.entries)
+	lo := pane.scroll
+	if lo < 0 {
+		lo = 0
+	}
+	if lo > count {
+		lo = count
+	}
+	span := m.visibleRows()
+	if pane.view == viewGrid {
+		cols, visRows := m.gridDims()
+		span = cols * visRows
+	}
+	hi := lo + span
+	if hi > count {
+		hi = count
+	}
+	return lo, hi
 }
 
 func hitToolbar(msg tea.MouseMsg) (string, bool) {

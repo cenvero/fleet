@@ -89,9 +89,10 @@ func TestReadServiceLogs(t *testing.T) {
 		t.Fatalf("expected 2 log lines, got %d", len(result.Lines))
 	}
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("agent server exited with error: %v", err)
-	}
+	// Connections are pooled and reused, so the agent's ServeConn loop only
+	// returns once the controller lets go of them.
+	app.DisconnectPooledSessions()
+	drainAgentServeErrs(t, errCh)
 }
 
 type fakeLogReader struct {
@@ -219,9 +220,10 @@ func TestFollowServiceLogsEmitsOnlyNewLines(t *testing.T) {
 		t.Fatalf("unexpected followed lines: %v", lines)
 	}
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("agent server exited with error: %v", err)
-	}
+	// Connections are pooled and reused, so the agent's ServeConn loop only
+	// returns once the controller lets go of them.
+	app.DisconnectPooledSessions()
+	drainAgentServeErrs(t, errCh)
 }
 
 func TestReadCachedServiceLogsUsesAggregatedCopy(t *testing.T) {
@@ -314,10 +316,8 @@ func TestReadCachedServiceLogsUsesAggregatedCopy(t *testing.T) {
 		t.Fatalf("unexpected cached lines: %#v", cached.Lines)
 	}
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("agent server exited with error: %v", err)
-	}
-	if err := <-errCh; err != nil {
-		t.Fatalf("agent server exited with error: %v", err)
-	}
+	// Connections are pooled and reused, so the agent's ServeConn loop only
+	// returns once the controller lets go of them.
+	app.DisconnectPooledSessions()
+	drainAgentServeErrs(t, errCh)
 }

@@ -122,9 +122,10 @@ func TestCollectMetricsPersistsSnapshotAndGeneratesAlerts(t *testing.T) {
 		t.Fatalf("expected exactly 1 critical notification, got %d", notifier.Count())
 	}
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("agent server exited with error: %v", err)
-	}
+	// Connections are pooled and reused, so the agent's ServeConn loop only
+	// returns once the controller lets go of them.
+	app.DisconnectPooledSessions()
+	drainAgentServeErrs(t, errCh)
 }
 
 func TestCollectMetricsDoesNotDuplicateCriticalNotifications(t *testing.T) {

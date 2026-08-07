@@ -282,13 +282,13 @@ func TestReverseHubClearSessionIgnoresStaleDisconnect(t *testing.T) {
 		Connected:          true,
 		HostKeyFingerprint: "old",
 		Hello:              proto.HelloPayload{AgentVersion: "v1.2.3"},
-	})
+	}, nil)
 	hub.setSession("reverse-node", newSession, ReverseSessionInfo{
 		Server:             "reverse-node",
 		Connected:          true,
 		HostKeyFingerprint: "new",
 		Hello:              proto.HelloPayload{AgentVersion: "v1.2.3"},
-	})
+	}, nil)
 
 	hub.clearSession("reverse-node", "stale disconnect", oldSession)
 

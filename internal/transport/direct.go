@@ -164,6 +164,19 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 		return proto.Envelope{}, fmt.Errorf("encode rpc request: %w", err)
 	}
 
+	// A context that can never be cancelled (Background/TODO — every call on the
+	// transfer hot path) has nothing to select on, so decode inline. The
+	// goroutine-and-channel below exists only to make the read interruptible;
+	// spawning one per RPC costs a goroutine, a channel and a scheduler handoff
+	// on every chunk of every transfer.
+	if ctx.Done() == nil {
+		resp, err := proto.Decode(s.Channel)
+		if err != nil {
+			return proto.Envelope{}, fmt.Errorf("decode rpc response: %w", err)
+		}
+		return resp, nil
+	}
+
 	type result struct {
 		response proto.Envelope
 		err      error

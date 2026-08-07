@@ -101,11 +101,10 @@ func TestLiveServiceListAndControl(t *testing.T) {
 		t.Fatalf("expected tracked service state to be updated, got %s", record.Services[0].ActiveState)
 	}
 
-	for range 2 {
-		if err := <-errCh; err != nil {
-			t.Fatalf("agent server exited with error: %v", err)
-		}
-	}
+	// Connections are pooled and reused, so the agent's ServeConn loop only
+	// returns once the controller lets go of them.
+	app.DisconnectPooledSessions()
+	drainAgentServeErrs(t, errCh)
 }
 
 type fakeServiceManager struct {

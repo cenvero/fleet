@@ -802,18 +802,29 @@ func handleFileRPC[T any, R any](channel ssh.Channel, request proto.Envelope, fn
 		})
 		return
 	}
+	// A chunk that arrived as a binary frame is carried outside the JSON, so put
+	// it back on the payload before the handler sees it.
+	proto.AttachBinary(&payload, request)
+
 	result, err := fn(context.Background(), payload)
 	if err != nil {
 		_ = proto.Encode(channel, errorEnvelope(request, err))
 		return
 	}
-	_ = proto.Encode(channel, proto.Envelope{
+	response := proto.Envelope{
 		Type:            proto.EnvelopeTypeResponse,
 		ProtocolVersion: proto.CurrentProtocolVersion,
 		RequestID:       request.RequestID,
 		Action:          request.Action,
-		Payload:         result,
-	})
+		Payload:         &result,
+	}
+	// Reply with a binary frame only when the controller has shown it speaks
+	// them — either by framing its own request, or by asking explicitly. An
+	// older controller keeps getting base64 inside the envelope.
+	if proto.PeerWantsBinary(request, payload) {
+		response = proto.DetachBinary(response)
+	}
+	_ = proto.Encode(channel, response)
 }
 
 func controllerIDFromPayload(payload any) string {

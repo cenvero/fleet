@@ -63,6 +63,10 @@ type App struct {
 	actingOperator string
 
 	serverMu sync.RWMutex
+
+	// sessions reuses live SSH connections across control RPCs instead of
+	// handshaking per call. See sessionpool.go.
+	sessions *sessionPool
 }
 
 // SetActingOperator records who is acting for audit attribution. The CLI calls
@@ -107,6 +111,7 @@ func Open(configDir string) (*App, error) {
 		Notifier:       notify.NewDesktopNotifier(cfg.Runtime.DesktopNotifications),
 		StateDB:        stateDB,
 		MetricsDB:      metricsDB,
+		sessions:       newSessionPool(),
 	}
 	// Passphrase-protected keys are recorded in config but the runtime connector
 	// does not yet pass the passphrase through. Warn early so the operator knows
@@ -122,6 +127,7 @@ func (a *App) Close() error {
 		return nil
 	}
 	var firstErr error
+	a.sessions.closeAllServers()
 	if a.StateDB != nil {
 		if err := a.StateDB.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -367,6 +373,10 @@ func (a *App) RemoveServerWithOptions(name string, opts RemoveOptions) error {
 	if err != nil {
 		return err
 	}
+	// Never leave a pooled connection behind for a server being removed: the
+	// record (and possibly its credentials) is about to disappear, and a cached
+	// connection must not outlive it.
+	defer a.dropPooledSession(name)
 	if server.Agent.Managed && !opts.Force {
 		// Apply SSH credential overrides if requested
 		if opts.OverrideSSH {
@@ -1035,12 +1045,7 @@ func applyFirewallInfo(server *ServerRecord, info proto.FirewallInfo) {
 func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	switch server.Mode {
 	case transport.ModeDirect:
-		session, _, err := a.openDirectSession(server, false)
-		if err != nil {
-			return proto.Envelope{}, err
-		}
-		defer session.Close()
-		return session.Call(context.Background(), env)
+		return a.callDirectPooled(server, env)
 	case transport.ModeReverse:
 		if a.ReverseRPC != nil {
 			return a.ReverseRPC(server.Name, env)
@@ -1049,6 +1054,80 @@ func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, 
 	default:
 		return proto.Envelope{}, fmt.Errorf("transport mode %q is not implemented for live actions", server.Mode)
 	}
+}
+
+// callDirectPooled runs one control RPC over a pooled SSH connection, dialling
+// only when nothing reusable is cached.
+//
+// A pooled connection can die between calls without either side noticing (agent
+// restart, NAT eviction, idle timeout). Rather than surface that as an error the
+// operator has to retry by hand, a failure on a reused connection tears the
+// connection down and transparently retries once on a fresh one. A failure on a
+// connection we just dialled is a real failure and is returned as-is, so genuine
+// unreachability still reports promptly instead of looping.
+func (a *App) callDirectPooled(server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+	if l, ok := a.sessions.acquire(server.Name); ok {
+		resp, err := l.session().Call(context.Background(), env)
+		if err == nil {
+			l.release()
+			return resp, nil
+		}
+		l.discard()
+	}
+
+	l, err := a.dialPooled(server)
+	if err != nil {
+		return proto.Envelope{}, err
+	}
+	resp, err := l.session().Call(context.Background(), env)
+	if err != nil {
+		l.discard()
+		return proto.Envelope{}, err
+	}
+	l.release()
+	return resp, nil
+}
+
+// dialPooled establishes the pooled connection for a server, or borrows one that
+// another caller established while this one was waiting. The per-server dial
+// lock is held only across connection setup — never across the RPC — so callers
+// serialise on connecting but still run their requests concurrently afterwards.
+func (a *App) dialPooled(server ServerRecord) (*lease, error) {
+	dialMu := a.sessions.dialLock(server.Name)
+	dialMu.Lock()
+	defer dialMu.Unlock()
+
+	// Re-check: whoever held the lock before us has just published a connection.
+	if l, ok := a.sessions.acquire(server.Name); ok {
+		return l, nil
+	}
+	session, _, err := a.openDirectSession(server, false)
+	if err != nil {
+		return nil, err
+	}
+	return a.sessions.adopt(server.Name, session), nil
+}
+
+// DisconnectPooledSessions closes every reused SSH connection without shutting
+// the App down; the next call to a server redials. Useful when connections
+// should not be held open across an idle period, and for tests that assert on an
+// agent's connection lifecycle.
+func (a *App) DisconnectPooledSessions() {
+	if a == nil {
+		return
+	}
+	a.sessions.disconnectAll()
+}
+
+// dropPooledSession discards any cached connection to a server. Call whenever
+// the connection's identity or credentials change underneath us — a rotated key,
+// a re-pinned host key, or a removed server — so the next call re-verifies from
+// scratch instead of riding a connection authenticated with stale material.
+func (a *App) dropPooledSession(serverName string) {
+	if a == nil {
+		return
+	}
+	a.sessions.evict(serverName)
 }
 
 func (a *App) operator() string {

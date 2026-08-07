@@ -62,6 +62,7 @@ func RunFiles(configDir string, servers ...string) error {
 		hoverSide:  -1,
 		hoverIndex: -1,
 		showHidden: false,
+		frames:     &frameCache{},
 	}
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion()).Run()
 	return err
@@ -163,7 +164,16 @@ type paneState struct {
 	sortBy   sortKey
 	sortDesc bool
 	filter   string // case-insensitive name substring; "" = no filter
+
+	// rev changes whenever anything this pane renders from changes (listing,
+	// sort, filter, selection). The frame cache keys off it instead of hashing
+	// the entry slice on every frame — see frameCache.
+	rev uint64
 }
+
+// touch marks the pane's rendered content as changed, invalidating the frame
+// cache. Call from every site that mutates entries/allItems/selected.
+func (p *paneState) touch() { p.rev++ }
 
 // label is the human source name for headers/menus.
 func (p paneState) label() string {
@@ -278,6 +288,23 @@ func (s sortKey) label() string {
 	}
 }
 
+// frameCache memoises the last rendered frame. It is a pointer field on
+// filesModel so the cache survives Bubble Tea's value-copy of the model between
+// Update and View.
+//
+// This exists because the program runs with tea.WithMouseAllMotion: the
+// terminal emits a motion event per cursor movement, Bubble Tea calls View
+// after every message, and a full frame costs ~1 ms and ~2.25 MB (71% of it in
+// zone.Scan walking the whole screen to strip zone markers). Moving the mouse
+// therefore generated tens of MB/s of garbage and kept the GC hot for frames
+// that were usually pixel-identical. Re-rendering only when something the frame
+// depends on actually changed makes idle mouse movement free.
+type frameCache struct {
+	key   string
+	frame string
+	valid bool
+}
+
 type filesModel struct {
 	app           *core.App
 	servers       []core.ServerRecord
@@ -289,6 +316,7 @@ type filesModel struct {
 	nextID        int
 	chans         map[int]*transferChans
 	showHidden    bool
+	frames        *frameCache
 
 	// mouse / drag
 	drag       *dragState
@@ -474,6 +502,7 @@ func loadRemoteCmd(side int, app *core.App, server, cwd string, showHidden bool)
 // listing stays consistent without re-fetching from disk/network.
 func (m *filesModel) reapplyPane(side int) {
 	pane := m.paneRef(side)
+	pane.touch()
 
 	filtered := make([]fileItem, 0, len(pane.allItems))
 	needle := strings.ToLower(strings.TrimSpace(pane.filter))
@@ -853,6 +882,7 @@ func (m filesModel) enterParent(side int) (tea.Model, tea.Cmd) {
 	pane.index, pane.scroll = 0, 0
 	pane.loading = true
 	pane.selected = map[int]bool{}
+	pane.touch()
 	return m, m.loadCmd(side, pane.source, parent)
 }
 
@@ -871,6 +901,7 @@ func (m filesModel) activate(side int) (tea.Model, tea.Cmd) {
 		pane.index, pane.scroll = 0, 0
 		pane.loading = true
 		pane.selected = map[int]bool{}
+		pane.touch()
 		return m, m.loadCmd(side, pane.source, next)
 	}
 	// A file: show its properties (open == inspect; transfers are explicit).
@@ -901,6 +932,7 @@ func (m *filesModel) toggleSelect(side int) {
 	} else {
 		pane.selected[pane.index] = true
 	}
+	pane.touch()
 	m.movePane(side, 1) // advance like a real file manager
 }
 

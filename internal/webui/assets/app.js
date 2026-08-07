@@ -979,28 +979,85 @@ async function moveIntoFolder(i, items, destName) {
 async function uploadFiles(i, fileList) {
   const p = pane(i);
   for (const file of fileList) {
-    let resp;
-    try {
-      const res = await fetch(api("/api/upload", { server: p.server, dir: p.path, name: file.name }), {
-        method: "POST",
-        headers: { "X-Fleet-Token": TOKEN },
-        body: file,
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-      resp = await res.json();
-    } catch (e) {
-      toast("Upload failed (" + file.name + "): " + e.message, "error");
-      continue;
-    }
-    // A server upload returns a progress id to track; a Local upload writes the
-    // bytes straight to disk and finishes synchronously (no id, no progress).
-    if (resp.id) {
-      watchTransfer(resp.id, "Upload " + file.name, "upload", () => loadListing(i));
-    } else {
+    await uploadOneFile(i, p, file);
+  }
+}
+
+let uploadSeq = 0;
+
+// uploadOneFile sends a single file and reports both legs of its journey.
+//
+// An upload to a managed server is two transfers, not one: the browser ships the
+// bytes to the controller, and only then does the controller run the chunked
+// transfer out to the agent. The progress card used to be created after the
+// first leg finished — and fetch() cannot report upload progress at all — so a
+// large file showed no card, no bar and no dock entry for the entire time it was
+// being sent to the controller. It looked like nothing had started. The card is
+// now created before a single byte goes out, XHR drives it through the first
+// leg, and the server's progress stream drives it through the second.
+function uploadOneFile(i, p, file) {
+  return new Promise((resolve) => {
+    const toServer = !!p.server;
+    const handle = createTransferCard("Upload " + file.name, "upload");
+    const localKey = "upload-" + ++uploadSeq;
+    transfers.set(localKey, handle.card);
+    updateDockCount();
+    handle.setMeta(toServer ? "Sending to controller…" : "Writing…");
+
+    const finish = () => {
+      transfers.delete(localKey);
+      updateDockCount();
+      resolve();
+    };
+    const fail = (msg) => {
+      handle.setError(msg);
+      toast("Upload failed (" + file.name + "): " + msg, "error");
+      finish();
+    };
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", api("/api/upload", { server: p.server, dir: p.path, name: file.name }).toString());
+    xhr.setRequestHeader("X-Fleet-Token", TOKEN);
+
+    // For a server destination the browser→controller leg is the first half of
+    // the bar and the controller→agent leg is the second, so the bar always
+    // reflects real end-to-end progress rather than jumping.
+    const firstLegShare = toServer ? 50 : 100;
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      handle.setPercent((e.loaded / e.total) * firstLegShare);
+      handle.setMeta(
+        (toServer ? "Sending to controller · " : "Writing · ") +
+        humanSize(e.loaded) + " / " + humanSize(e.total));
+    };
+    xhr.onerror = () => fail("network error");
+    xhr.onabort = () => fail("aborted");
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        fail(xhr.responseText || xhr.statusText || ("HTTP " + xhr.status));
+        return;
+      }
+      let resp = {};
+      try { resp = JSON.parse(xhr.responseText || "{}"); } catch { /* Local upload returns a bare path */ }
+      // A server upload hands back a progress id for the second leg; a Local
+      // upload has already written the bytes to disk and is done.
+      if (resp.id) {
+        handle.setPercent(firstLegShare);
+        handle.setMeta("Transferring to " + p.server + "…");
+        transfers.delete(localKey);
+        transfers.set(resp.id, handle.card);
+        updateDockCount();
+        attachProgressStream(resp.id, handle, firstLegShare, () => loadListing(i));
+        resolve();
+        return;
+      }
+      handle.setDone("Done · " + humanSize(file.size));
       toast("Uploaded " + file.name, "success");
       loadListing(i);
-    }
-  }
+      finish();
+    };
+    xhr.send(file);
+  });
 }
 
 // ----------------------------------------------------------------- transfers dock
@@ -1008,7 +1065,10 @@ async function uploadFiles(i, fileList) {
 const transfers = new Map();
 let dockExpandedByUser = true;
 
-function watchTransfer(id, label, kind, onDone) {
+// createTransferCard builds a dock entry and returns handles for driving it.
+// Split out of watchTransfer so an upload can show a card while its first leg is
+// still in flight, before any server-side progress id exists.
+function createTransferCard(label, kind) {
   expandDock();
   const card = document.createElement("div");
   card.className = "transfer";
@@ -1047,27 +1107,45 @@ function watchTransfer(id, label, kind, onDone) {
   const empty = list.querySelector(".empty");
   if (empty) empty.remove();
   list.prepend(card);
-  transfers.set(id, card);
-  updateDockCount();
 
+  return {
+    card,
+    setPercent(p) {
+      const v = Math.max(0, Math.min(100, p));
+      fill.style.width = v + "%";
+      pct.textContent = Math.round(v) + "%";
+    },
+    setMeta(text) { meta.textContent = text; },
+    setError(msg) { card.classList.add("error"); meta.textContent = "Error: " + msg; },
+    setDone(text) {
+      card.classList.add("done");
+      fill.style.width = "100%";
+      pct.textContent = "100%";
+      meta.textContent = text;
+    },
+  };
+}
+
+// attachProgressStream drives a card from the server's SSE progress feed.
+// offset is how much of the bar an earlier phase already consumed, so an upload
+// that already shipped its bytes to the controller continues from the halfway
+// mark instead of snapping back to zero.
+function attachProgressStream(id, handle, offset, onDone) {
+  const base = offset || 0;
+  const span = 100 - base;
   const es = new EventSource(api("/api/progress", { id }).toString());
   es.onmessage = (ev) => {
     let pr;
     try { pr = JSON.parse(ev.data); } catch { return; }
-    fill.style.width = (pr.percent || 0) + "%";
-    pct.textContent = (pr.percent || 0) + "%";
+    handle.setPercent(base + ((pr.percent || 0) / 100) * span);
     if (pr.error) {
-      card.classList.add("error");
-      meta.textContent = "Error: " + pr.error;
+      handle.setError(pr.error);
     } else if (pr.done) {
-      card.classList.add("done");
-      fill.style.width = "100%";
-      pct.textContent = "100%";
-      meta.textContent = "Done · " + humanSize(pr.total_bytes);
+      handle.setDone("Done · " + humanSize(pr.total_bytes));
     } else {
       const rate = pr.rate_per_sec > 0 ? humanSize(pr.rate_per_sec) + "/s" : "…";
       const streams = pr.active_streams ? " · " + pr.active_streams + " streams" : "";
-      meta.textContent = `${humanSize(pr.bytes_done)} / ${humanSize(pr.total_bytes)} · ${rate}${streams}`;
+      handle.setMeta(`${humanSize(pr.bytes_done)} / ${humanSize(pr.total_bytes)} · ${rate}${streams}`);
     }
     if (pr.done) {
       es.close();
@@ -1077,6 +1155,13 @@ function watchTransfer(id, label, kind, onDone) {
     }
   };
   es.onerror = () => es.close();
+}
+
+function watchTransfer(id, label, kind, onDone) {
+  const handle = createTransferCard(label, kind);
+  transfers.set(id, handle.card);
+  updateDockCount();
+  attachProgressStream(id, handle, 0, onDone);
 }
 
 function activeTransferCount() { return transfers.size; }

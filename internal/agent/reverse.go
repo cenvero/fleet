@@ -162,6 +162,18 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
 
+	// Accept extra fleet-rpc channels the controller opens back to us before
+	// opening our own, so none is missed in between.
+	//
+	// SSH channels can be opened from either end. A reverse agent used to open
+	// exactly one and serve only that, so every RPC the controller made — every
+	// chunk of a file transfer included — had to queue behind one serialised
+	// channel. Serving inbound channels lets a reverse transfer use as many
+	// streams as a direct-mode one. Rejecting them, as an older agent does,
+	// simply leaves the controller on the single-channel path.
+	inbound := client.HandleChannelOpen(transport.RPCChannelType)
+	go serveReverseInboundChannels(inbound, server)
+
 	channel, requests, err := client.OpenChannel(transport.RPCChannelType, nil)
 	if err != nil {
 		return fmt.Errorf("open %s channel: %w", transport.RPCChannelType, err)
@@ -182,6 +194,41 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 		return nil
 	case err := <-done:
 		return err
+	}
+}
+
+// maxReverseInboundChannels caps how many controller-opened fleet-rpc channels a
+// reverse agent will serve at once. The controller is authenticated and pinned,
+// so this is a resource guard rather than a trust boundary — it keeps a buggy or
+// runaway controller from spawning unbounded goroutines on the agent. It sits
+// comfortably above any transfer's stream count.
+const maxReverseInboundChannels = 32
+
+// serveReverseInboundChannels serves fleet-rpc channels opened by the controller
+// over an established reverse connection. It returns when the channel-open feed
+// closes, which happens when the connection goes away.
+func serveReverseInboundChannels(inbound <-chan ssh.NewChannel, server Server) {
+	if inbound == nil {
+		return // another handler is already registered for this type
+	}
+	slots := make(chan struct{}, maxReverseInboundChannels)
+	for newChannel := range inbound {
+		select {
+		case slots <- struct{}{}:
+		default:
+			_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent channels")
+			continue
+		}
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			<-slots
+			continue
+		}
+		go ssh.DiscardRequests(requests)
+		go func() {
+			defer func() { <-slots }()
+			server.serveRPC(channel)
+		}()
 	}
 }
 

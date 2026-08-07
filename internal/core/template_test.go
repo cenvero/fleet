@@ -139,11 +139,10 @@ action = "start"
 		t.Fatalf("expected 4 firewall actions, got %#v", firewallManager.actions)
 	}
 
-	for range 4 + 2 {
-		if err := <-errCh; err != nil {
-			t.Fatalf("agent server exited with error: %v", err)
-		}
-	}
+	// Connections are pooled and reused, so the agent's ServeConn loop only
+	// returns once the controller lets go of them.
+	app.DisconnectPooledSessions()
+	drainAgentServeErrs(t, errCh)
 }
 
 func TestLoadTemplateRejectsUnsupportedServiceAction(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,18 +23,39 @@ import (
 )
 
 const (
-	// DefaultParallelStreams is the fallback number of concurrent fleet-rpc
-	// channels a direct-mode transfer opens when nothing else is configured.
-	DefaultParallelStreams = 4
-	// DefaultChunkSizeBytes is the fallback raw chunk size (pre-base64).
-	DefaultChunkSizeBytes = 4 * 1024 * 1024 // 4 MiB
+	// sshChannelWindowBytes mirrors the flow-control window golang.org/x/crypto
+	// gives every SSH channel (64 packets x 32 KiB). It is not configurable, and
+	// it is the ceiling on how many bytes one channel can have in flight before
+	// it must stop and wait for the peer to acknowledge. Transfer defaults are
+	// chosen against it.
+	sshChannelWindowBytes = 2 * 1024 * 1024 // 2 MiB
+
+	// DefaultParallelStreams is the number of concurrent fleet-rpc channels a
+	// direct-mode transfer opens when nothing else is configured.
+	//
+	// This is the main lever on a long link. Each channel has its own 2 MiB
+	// window, so bytes in flight is streams x window and throughput on a
+	// latency-bound path is roughly (streams x 2 MiB) / round-trip time. At the
+	// previous default of 4 that capped a 100 ms path near 80 MB/s no matter how
+	// much bandwidth was available; 8 channels double the ceiling for the same
+	// total buffer memory, because the chunk size below halved.
+	DefaultParallelStreams = 8
+
+	// DefaultChunkSizeBytes is the raw chunk size for one file.read/file.write.
+	//
+	// Matched to the channel window on purpose. A chunk larger than the window
+	// cannot be written in one go: the sender fills the window, stalls, and waits
+	// for the peer to drain it, so an oversized chunk buys no extra bytes in
+	// flight and only adds latency and per-worker memory. Chunks now travel as
+	// raw binary frames rather than base64, so this is also the true wire size.
+	DefaultChunkSizeBytes = sshChannelWindowBytes
 
 	// maxTransferChunks caps the number of chunks a single transfer may plan.
 	// The chunk plan is sized from a size the *remote agent reports* (download)
 	// or the local file (upload); without a ceiling a malicious/buggy agent that
 	// reports an absurd size would make buildChunks allocate an unbounded slice
-	// and OOM the controller. At the 4 MiB default chunk size this still permits
-	// a ~1 TiB transfer, which is far beyond any realistic single-file move.
+	// and OOM the controller. At the 2 MiB default chunk size this still permits
+	// a ~512 GiB transfer, which is far beyond any realistic single-file move.
 	maxTransferChunks = 1 << 18 // 262144
 	// maxTransferFileBytes is a hard ceiling on a single transfer's size,
 	// independent of chunk size, so a tiny chunk size can't be combined with a
@@ -104,13 +126,20 @@ func (a *App) resolveTransferOptions(server ServerRecord, opts FileTransferOptio
 	if resolved.ChunkSize > proto.MaxRawChunkBytes {
 		resolved.ChunkSize = proto.MaxRawChunkBytes
 	}
-	if server.Mode == transport.ModeReverse {
-		// The reverse hub holds a single mutex-serialized channel — parallel
-		// streams are impossible without protocol multiplexing. Transfers stay
-		// chunked + resumable + checksummed, just single-stream.
+	if server.Mode == transport.ModeReverse && !serverSupportsReverseMultiplex(server) {
+		// An agent that cannot accept controller-opened channels leaves the hub
+		// with one mutex-serialised channel, so parallel streams are impossible.
+		// Transfers stay chunked, resumable and checksummed — just single-stream.
 		resolved.Parallel = 1
 	}
 	return resolved
+}
+
+// serverSupportsReverseMultiplex reports whether a reverse agent accepts extra
+// fleet-rpc channels opened by the controller, which is what allows a reverse
+// transfer to run more than one stream.
+func serverSupportsReverseMultiplex(server ServerRecord) bool {
+	return slices.Contains(server.Capabilities, proto.CapabilityReverseMultiplex)
 }
 
 // ---- simple lightweight RPC browsing (one-shot, no channel pool) ----
@@ -201,6 +230,15 @@ func buildChunks(total, chunkSize int64) []chunkSpec {
 
 type senderFunc func(proto.Envelope) (proto.Envelope, error)
 
+// serverSupportsBinaryFrames reports whether an agent has advertised that it can
+// carry file chunks as raw binary frames rather than base64 inside JSON. The
+// capability list is recorded from the agent's hello on every connect, so a
+// fleet with mixed agent versions transparently uses the best encoding each one
+// understands.
+func serverSupportsBinaryFrames(server ServerRecord) bool {
+	return slices.Contains(server.Capabilities, proto.CapabilityBinaryFrames)
+}
+
 // transferConn abstracts the RPC surface for a transfer. For direct mode it
 // wraps a pool of N fleet-rpc channels on a single SSH client; for reverse mode
 // it is a single serialized caller over the reverse hub. reopen mints a
@@ -210,27 +248,52 @@ type transferConn struct {
 	senders []senderFunc
 	reopen  func() (senderFunc, error)
 	closeFn func()
+	// binaryFrames records whether this connection's peer can carry chunks as
+	// raw binary frames. It is taken from the live hello where one is available,
+	// rather than the persisted record, so the very first transfer to a freshly
+	// added server already gets the fast encoding.
+	binaryFrames bool
 }
 
 func (a *App) openTransferConn(server ServerRecord, parallel int) (*transferConn, error) {
 	if server.Mode == transport.ModeReverse {
-		var mu sync.Mutex
+		// The reverse hub has no per-transfer hello, so fall back to the
+		// capabilities recorded when the agent connected.
+		reverseConn := &transferConn{
+			closeFn:      func() {},
+			binaryFrames: serverSupportsBinaryFrames(server),
+		}
 		send := func(env proto.Envelope) (proto.Envelope, error) {
+			return a.callRPC(server, env)
+		}
+		if serverSupportsReverseMultiplex(server) {
+			// Each worker calls independently; the hub leases a distinct channel
+			// per concurrent call, so no serialisation is needed here. Requests
+			// reach the hub over their own control connections, which the daemon
+			// already handles concurrently.
+			for range max(parallel, 1) {
+				reverseConn.senders = append(reverseConn.senders, send)
+			}
+			reverseConn.reopen = func() (senderFunc, error) { return send, nil }
+			return reverseConn, nil
+		}
+		// Older agent: one shared channel, so serialise explicitly.
+		var mu sync.Mutex
+		serialized := func(env proto.Envelope) (proto.Envelope, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			return a.callRPC(server, env)
 		}
-		return &transferConn{
-			senders: []senderFunc{send},
-			reopen:  func() (senderFunc, error) { return send, nil },
-			closeFn: func() {},
-		}, nil
+		reverseConn.senders = []senderFunc{serialized}
+		reverseConn.reopen = func() (senderFunc, error) { return serialized, nil }
+		return reverseConn, nil
 	}
 
-	root, _, err := a.openDirectSession(server, false)
+	root, hello, err := a.openDirectSession(server, false)
 	if err != nil {
 		return nil, err
 	}
+	binaryFrames := slices.Contains(hello.Capabilities, proto.CapabilityBinaryFrames)
 	pool := []*transport.Session{root}
 	for i := 1; i < parallel; i++ {
 		child, err := root.OpenChannelSession()
@@ -251,7 +314,8 @@ func (a *App) openTransferConn(server ServerRecord, parallel int) (*transferConn
 	var extraMu sync.Mutex
 	var extra []*transport.Session
 	return &transferConn{
-		senders: senders,
+		senders:      senders,
+		binaryFrames: binaryFrames,
 		reopen: func() (senderFunc, error) {
 			child, err := root.OpenChannelSession()
 			if err != nil {
@@ -310,7 +374,13 @@ func decodeResult[R any](resp proto.Envelope, err error) (R, error) {
 	if resp.Error != nil {
 		return zero, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 	}
-	return proto.DecodePayload[R](resp.Payload)
+	out, derr := proto.DecodePayload[R](resp.Payload)
+	if derr != nil {
+		return zero, derr
+	}
+	// A chunk returned as a binary frame travels beside the JSON, not in it.
+	proto.AttachBinary(&out, resp)
+	return out, nil
 }
 
 // UploadFile uploads localPath to remotePath on serverName, chunked, parallel
@@ -343,13 +413,24 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 	if err := validateTransferSize(totalSize, resolved.ChunkSize); err != nil {
 		return proto.FileFinalizeResult{}, fmt.Errorf("refusing to upload %s: %w", localPath, err)
 	}
-	wholeSum, err := streamSHA256(lf)
-	if err != nil {
-		return proto.FileFinalizeResult{}, err
-	}
+
+	// Hash the whole file alongside the transfer instead of ahead of it.
+	//
+	// This used to run to completion before anything else happened, so a large
+	// upload sat at "0 bytes, no progress" for an entire pass over the file
+	// before a single byte moved — which reads as "the transfer never started".
+	// The digest is only needed at finalize, so it overlaps with the transfer and
+	// costs nothing on any network-bound upload.
+	hashDone := startWholeFileHash(localPath)
 
 	chunks := buildChunks(totalSize, resolved.ChunkSize)
-	transferID := transferIDFor(target, totalSize, wholeSum)
+	// The transfer id ties the remote temp file to this transfer across channels
+	// and across a resumed run. It is derived from the file's identity rather
+	// than its content so it is available immediately: a modified file gets a
+	// different mtime and therefore a different temp, and finalize still verifies
+	// the assembled bytes against the real digest, so a stale temp can never be
+	// silently accepted.
+	transferID := transferIDFor(target, totalSize, fileIdentity(info))
 
 	conn, err := a.openTransferConn(server, resolved.Parallel)
 	if err != nil {
@@ -421,6 +502,12 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		wg.Add(1)
 		go func(send senderFunc) {
 			defer wg.Done()
+			// One buffer per worker, reused for every chunk it sends. Allocating
+			// per chunk turned a large upload into gigabytes of garbage — a 10 GB
+			// file is thousands of multi-megabyte allocations — and kept the GC
+			// busy for no reason. Reuse is safe because send() writes the bytes
+			// to the wire synchronously before returning.
+			buf := make([]byte, resolved.ChunkSize)
 			for idx := range jobs {
 				mu.Lock()
 				if firstErr != nil {
@@ -431,12 +518,12 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 				mu.Unlock()
 
 				c := chunks[idx]
-				buf := make([]byte, c.length)
-				if _, err := lf.ReadAt(buf, c.offset); err != nil && err != io.EOF {
+				chunk := buf[:c.length]
+				if _, err := lf.ReadAt(chunk, c.offset); err != nil && err != io.EOF {
 					recordErr(fmt.Errorf("read local chunk: %w", err))
 					return
 				}
-				sum := sha256Hex(buf)
+				sum := sha256Hex(chunk)
 
 				var werr error
 				for attempt := 0; attempt <= sshMaxRetries; attempt++ {
@@ -446,16 +533,23 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 							send = ns
 						}
 					}
-					_, werr = decodeResult[proto.FileWriteResult](send(proto.Envelope{
+					req := proto.Envelope{
 						Action: proto.ActionFileWrite,
-						Payload: proto.FileWritePayload{
+						Payload: &proto.FileWritePayload{
 							TransferID: transferID,
 							Path:       target,
 							Offset:     c.offset,
-							Data:       buf,
+							Data:       chunk,
 							SHA256:     sum,
 						},
-					}))
+					}
+					if conn.binaryFrames {
+						// Ship the chunk verbatim after the envelope instead of
+						// base64 inside it: no +33% inflation, no base64 pass,
+						// and no multi-megabyte intermediate on either side.
+						req = proto.DetachBinary(req)
+					}
+					_, werr = decodeResult[proto.FileWriteResult](send(req))
 					if werr == nil {
 						break
 					}
@@ -480,6 +574,14 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 	if firstErr != nil {
 		emit(false, firstErr)
 		return proto.FileFinalizeResult{}, firstErr
+	}
+
+	// Join the background hash. On any network-bound transfer it finished long
+	// ago; on a fast local link this is the only place its cost can show up.
+	wholeSum, err := hashDone()
+	if err != nil {
+		emit(false, err)
+		return proto.FileFinalizeResult{}, err
 	}
 
 	result, err := decodeResult[proto.FileFinalizeResult](conn.callRetry(0, proto.ActionFileFinalize, proto.FileFinalizePayload{
@@ -664,8 +766,14 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 						}
 					}
 					res, rerr = decodeResult[proto.FileReadResult](send(proto.Envelope{
-						Action:  proto.ActionFileRead,
-						Payload: proto.FileReadPayload{Path: remotePath, Offset: c.offset, Length: c.length},
+						Action: proto.ActionFileRead,
+						Payload: proto.FileReadPayload{
+							Path: remotePath, Offset: c.offset, Length: c.length,
+							// Ask for the bytes as a binary frame when the agent
+							// supports it; older agents ignore the field and
+							// reply with base64 inside the envelope as before.
+							Binary: conn.binaryFrames,
+						},
 					}))
 					// Reject a chunk whose payload is not exactly the range we
 					// asked for: a short/over-long chunk would otherwise be
@@ -815,6 +923,47 @@ func resolveUploadRemotePath(remoteDir, remotePath, localPath string) (string, e
 	default:
 		return remotePath, nil
 	}
+}
+
+// startWholeFileHash begins hashing a local file in the background and returns a
+// join function that yields the digest (blocking only if hashing is still in
+// flight). It opens its own descriptor because it seeks, and the transfer's
+// workers are concurrently issuing ReadAt on the caller's handle.
+func startWholeFileHash(localPath string) func() (string, error) {
+	type outcome struct {
+		sum string
+		err error
+	}
+	ch := make(chan outcome, 1) // buffered: the goroutine never blocks, even on an aborted transfer
+	go func() {
+		f, err := os.Open(localPath) // #nosec G304 -- operator-supplied local path, already opened by the caller
+		if err != nil {
+			ch <- outcome{err: fmt.Errorf("hash local file: %w", err)}
+			return
+		}
+		defer f.Close()
+		sum, err := streamSHA256(f)
+		if err != nil {
+			err = fmt.Errorf("hash local file: %w", err)
+		}
+		ch <- outcome{sum: sum, err: err}
+	}()
+	var (
+		once sync.Once
+		res  outcome
+	)
+	return func() (string, error) {
+		once.Do(func() { res = <-ch })
+		return res.sum, res.err
+	}
+}
+
+// fileIdentity is a cheap stand-in for "these bytes are the same bytes": size
+// plus modification time at nanosecond resolution. It is used only to name the
+// remote temp file for resume, never as an integrity check — finalize still
+// verifies the assembled file against its real SHA-256.
+func fileIdentity(info os.FileInfo) string {
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 }
 
 func transferIDFor(remotePath string, size int64, wholeSum string) string {
