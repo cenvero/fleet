@@ -45,7 +45,7 @@ func LoadPrivateKeySigner(path string, passphrase []byte) (ssh.Signer, error) {
 		return nil, err
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is controller/operator-selected key material and is validated by the key loader
 	if err != nil {
 		return nil, fmt.Errorf("read private key %s: %w", path, err)
 	}

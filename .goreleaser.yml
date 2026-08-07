@@ -2,117 +2,83 @@ version: 2
 
 project_name: fleet
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: fleet
     main: ./cmd/fleet
     binary: fleet
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
-    goarm:
-      - "7"
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
     ignore:
-      - goos: darwin
-        goarm: "7"
-      - goos: windows
-        goarm: "7"
+      - {goos: darwin, goarch: arm}
+      - {goos: windows, goarch: arm}
     ldflags:
       - -s -w -X github.com/cenvero/fleet/internal/version.Version={{.Version}}
-    flags:
-      - -trimpath
+    flags: [-trimpath]
 
   - id: fleet-agent
     main: ./cmd/fleet-agent
     binary: fleet-agent
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
-    goarm:
-      - "7"
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
     ignore:
-      - goos: darwin
-        goarm: "7"
-      - goos: windows
-        goarm: "7"
+      - {goos: darwin, goarch: arm}
+      - {goos: windows, goarch: arm}
     ldflags:
       - -s -w -X github.com/cenvero/fleet/internal/version.Version={{.Version}}
-    flags:
-      - -trimpath
+    flags: [-trimpath]
 
 archives:
   - id: fleet-archive
-    ids:
-      - fleet
-    formats:
-      - tar.gz
+    ids: [fleet]
+    formats: [tar.gz]
     format_overrides:
-      - goos: windows
-        format: zip
+      - {goos: windows, formats: [zip]}
     name_template: "fleet_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"arm\" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}"
 
   - id: fleet-agent-archive
-    ids:
-      - fleet-agent
-    formats:
-      - tar.gz
+    ids: [fleet-agent]
+    formats: [tar.gz]
     format_overrides:
-      - goos: windows
-        format: zip
+      - {goos: windows, formats: [zip]}
     name_template: "fleet-agent_{{ .Version }}_{{ .Os }}_{{ if eq .Arch \"arm\" }}armv{{ .Arm }}{{ else }}{{ .Arch }}{{ end }}"
 
 checksum:
-  name_template: "checksums.txt"
+  name_template: checksums.txt
   algorithm: sha256
 
 signs:
-  - artifacts: archive
-    cmd: minisign
+  - id: bound-archive-signatures
+    artifacts: archive
+    cmd: ./scripts/sign-release-artifact.sh
     signature: "${artifact}.minisig"
     stdin: "{{ .Env.MINISIGN_PASSWORD }}"
     args:
-      - -Sm
       - "${artifact}"
-      - -s
-      - "{{ .Env.MINISIGN_KEY_FILE }}"
-      - -x
       - "${signature}"
+      - "{{ .Env.MINISIGN_KEY_FILE }}"
 
-brews:
+homebrew_casks:
   - name: cenvero-fleet
-    ids:
-      - fleet-archive
+    ids: [fleet-archive]
+    binaries: [fleet]
     repository:
       owner: cenvero
       name: homebrew-fleet
       token: "{{ .Env.HOMEBREW_TOKEN }}"
-    homepage: "https://fleet.cenvero.org"
-    description: "Self-hosted decentralized fleet management platform"
-    license: "AGPL-3.0-or-later"
-    directory: Formula
+    homepage: https://fleet.cenvero.org
+    description: Self-hosted decentralized fleet management platform
+    license: AGPL-3.0-or-later
+    directory: Casks
     skip_upload: auto
     commit_author:
       name: cenvero-bot
       email: 276044322+cenvero-bot@users.noreply.github.com
-    install: |
-      bin.install "fleet"
-    test: |
-      assert_match version.to_s, shell_output("#{bin}/fleet --version")
 
 release:
   draft: false

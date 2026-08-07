@@ -389,7 +389,7 @@ func openInEditor(cmd *cobra.Command, configDir, path string) error {
 	}
 	// The editor string may carry arguments (e.g. "code --wait"); split on spaces.
 	parts := strings.Fields(editor)
-	c := exec.Command(parts[0], append(parts[1:], path)...) // #nosec G204 -- $EDITOR validated above (no shell metachars) and cmd-policy-gated
+	c := exec.Command(parts[0], append(parts[1:], path)...) // #nosec G204,G702 -- validated plain argv; no shell; cmd-policy-gated
 	c.Stdin = os.Stdin
 	c.Stdout = cmd.OutOrStdout()
 	c.Stderr = cmd.ErrOrStderr()

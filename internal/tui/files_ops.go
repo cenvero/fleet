@@ -5,9 +5,7 @@ package tui
 
 import (
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -1011,55 +1009,18 @@ func localFileCopyMove(srcPath, dstPath string, kind dirTransferKind, progress c
 			return nil
 		}
 	}
-	in, err := os.Open(srcPath)
+	info, err := os.Lstat(srcPath)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.Create(dstPath)
-	if err != nil {
+	if err := core.CopyLocalFileAtomic(srcPath, dstPath, info.Mode()); err != nil {
 		return err
 	}
-	if err := copyStream(in, out, progress); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
-		return err
+	if progress != nil {
+		progress(core.ProgressUpdate{BytesDone: info.Size(), TotalBytes: info.Size(), Done: true})
 	}
 	if kind == dtMove {
 		return os.Remove(srcPath)
-	}
-	return nil
-}
-
-func copyStream(in *os.File, out *os.File, progress core.ProgressFunc) error {
-	var total int64
-	if fi, err := in.Stat(); err == nil {
-		total = fi.Size()
-	}
-	buf := make([]byte, 1<<20)
-	var done int64
-	for {
-		n, rerr := in.Read(buf)
-		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			done += int64(n)
-			if progress != nil {
-				progress(core.ProgressUpdate{BytesDone: done, TotalBytes: total})
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return rerr
-		}
-	}
-	if progress != nil {
-		progress(core.ProgressUpdate{BytesDone: done, TotalBytes: total, Done: true})
 	}
 	return nil
 }
@@ -1214,33 +1175,7 @@ func localDirCopyMove(srcPath, dstPath string, kind dirTransferKind, progress co
 			return nil
 		}
 	}
-	err := filepath.WalkDir(srcPath, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, rerr := filepath.Rel(srcPath, p)
-		if rerr != nil {
-			return rerr
-		}
-		target := filepath.Join(dstPath, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o750)
-		}
-		in, oerr := os.Open(p)
-		if oerr != nil {
-			return oerr
-		}
-		defer in.Close()
-		out, cerr := os.Create(target)
-		if cerr != nil {
-			return cerr
-		}
-		if cperr := copyStream(in, out, nil); cperr != nil {
-			_ = out.Close()
-			return cperr
-		}
-		return out.Close()
-	})
+	err := core.CopyLocalTreeAtomic(srcPath, dstPath)
 	if err != nil {
 		return err
 	}

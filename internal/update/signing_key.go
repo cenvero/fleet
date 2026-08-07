@@ -11,3 +11,9 @@ import _ "embed"
 //
 //go:embed signing.pub
 var embeddedSigningPublicKey string
+
+// SigningPublicKey returns the embedded release verification key. It is exposed
+// for controller-side verification of fleet-agent archives before SSH upload.
+func SigningPublicKey() string {
+	return embeddedSigningPublicKey
+}

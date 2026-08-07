@@ -5,6 +5,8 @@ package agent
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +17,7 @@ import (
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/transport"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // reverseAuthUser encodes the SSH username the reverse agent presents: just the
@@ -29,8 +32,10 @@ func reverseAuthUser(serverName, enrollToken string) string {
 
 type ReverseOptions struct {
 	ControllerAddress      string
+	ControllerFingerprint  string
 	ServerName             string
 	EnrollToken            string
+	EnrollTokenPath        string
 	KnownHostsPath         string
 	AcceptNewHostKey       bool
 	MinRetryDelay          time.Duration
@@ -67,6 +72,25 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 	if opts.KnownHostsPath == "" {
 		opts.KnownHostsPath = DefaultControllerKnownHostsPath()
 	}
+	if opts.EnrollToken == "" && opts.EnrollTokenPath != "" {
+		info, err := os.Lstat(opts.EnrollTokenPath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read enrollment token file metadata: %w", err)
+		}
+		if err == nil {
+			if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+				return fmt.Errorf("enrollment token file %s must be a regular owner-only file (mode 0600)", opts.EnrollTokenPath)
+			}
+			data, err := os.ReadFile(opts.EnrollTokenPath)
+			if err != nil {
+				return fmt.Errorf("read enrollment token file: %w", err)
+			}
+			opts.EnrollToken = strings.TrimSpace(string(data))
+			if opts.EnrollToken == "" {
+				return fmt.Errorf("enrollment token file %s is empty", opts.EnrollTokenPath)
+			}
+		}
+	}
 	if opts.MinRetryDelay <= 0 {
 		opts.MinRetryDelay = time.Second
 	}
@@ -92,7 +116,18 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 	backoff := opts.MinRetryDelay
 
 	for {
-		err := runReverseSession(ctx, opts, server)
+		authenticated, err := runReverseSession(ctx, opts, server)
+		if authenticated {
+			// The controller accepted this agent identity. Never present the one-use
+			// credential on later reconnects, and remove the bootstrap file so it is
+			// not retained in service argv, unit text, or on disk indefinitely.
+			opts.EnrollToken = ""
+			if opts.EnrollTokenPath != "" {
+				if removeErr := os.Remove(opts.EnrollTokenPath); removeErr != nil && !os.IsNotExist(removeErr) {
+					return fmt.Errorf("remove consumed enrollment token file: %w", removeErr)
+				}
+			}
+		}
 		// --accept-new-host-key authorizes a one-time re-pin of the controller's
 		// host key on the FIRST connection attempt only. Clearing it afterwards
 		// means every later reconnect uses strict pinning, so a MITM who shows up
@@ -120,15 +155,15 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 	}
 }
 
-func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) error {
+func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) (bool, error) {
 	signer, err := fleetcrypto.EnsureEd25519Signer(server.HostKeyPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	hostKeyCallback, err := transport.NewTOFUHostKeyCallback(opts.KnownHostsPath, opts.AcceptNewHostKey, &transport.HostKeyState{})
+	hostKeyCallback, err := verifiedControllerHostKeyCallback(opts.KnownHostsPath, opts.ControllerFingerprint, opts.AcceptNewHostKey)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	config := &ssh.ClientConfig{
@@ -151,13 +186,30 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 		rawConn, err = (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", opts.ControllerAddress)
 	}
 	if err != nil {
-		return fmt.Errorf("dial controller %s: %w", opts.ControllerAddress, err)
+		return false, fmt.Errorf("dial controller %s: %w", opts.ControllerAddress, err)
 	}
 	defer rawConn.Close()
 
+	handshakeDeadline := time.Now().Add(config.Timeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	if err := rawConn.SetDeadline(handshakeDeadline); err != nil {
+		return false, fmt.Errorf("set reverse ssh handshake deadline: %w", err)
+	}
 	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, opts.ControllerAddress, config)
 	if err != nil {
-		return fmt.Errorf("establish reverse ssh connection to controller %s: %w", opts.ControllerAddress, err)
+		return false, fmt.Errorf("establish reverse ssh connection to controller %s: %w", opts.ControllerAddress, err)
+	}
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
+		_ = sshConn.Close()
+		return true, fmt.Errorf("clear reverse ssh handshake deadline: %w", err)
+	}
+	if opts.EnrollTokenPath != "" && opts.EnrollToken != "" {
+		if err := os.Remove(opts.EnrollTokenPath); err != nil && !os.IsNotExist(err) {
+			_ = sshConn.Close()
+			return true, fmt.Errorf("remove consumed enrollment token file: %w", err)
+		}
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
@@ -176,7 +228,7 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 
 	channel, requests, err := client.OpenChannel(transport.RPCChannelType, nil)
 	if err != nil {
-		return fmt.Errorf("open %s channel: %w", transport.RPCChannelType, err)
+		return true, fmt.Errorf("open %s channel: %w", transport.RPCChannelType, err)
 	}
 	go ssh.DiscardRequests(requests)
 
@@ -191,10 +243,46 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 	case <-ctx.Done():
 		_ = client.Close()
 		<-done
-		return nil
+		return true, nil
 	case err := <-done:
-		return err
+		return true, err
 	}
+}
+
+// verifiedControllerHostKeyCallback preserves strict reconnects to an existing
+// pin, but refuses to create a first pin unless the presented controller key
+// matches an out-of-band fingerprint provisioned by the controller. This closes
+// the reverse enrollment MITM window that plain TOFU leaves open.
+func verifiedControllerHostKeyCallback(path, expectedFingerprint string, forceReplace bool) (ssh.HostKeyCallback, error) {
+	tofu, err := transport.NewTOFUHostKeyCallback(path, forceReplace, &transport.HostKeyState{})
+	if err != nil {
+		return nil, err
+	}
+	known, err := knownhosts.New(path)
+	if err != nil {
+		return nil, fmt.Errorf("load controller known_hosts %s: %w", path, err)
+	}
+	expectedFingerprint = strings.TrimSpace(expectedFingerprint)
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := known(hostname, remote, key)
+		if err == nil {
+			return tofu(hostname, remote, key)
+		}
+		var keyErr *knownhosts.KeyError
+		if !errors.As(err, &keyErr) || len(keyErr.Want) != 0 {
+			// Existing-key mismatch is handled by the normal strict/explicit-repin
+			// callback so its established diagnostics and behavior are preserved.
+			return tofu(hostname, remote, key)
+		}
+		if expectedFingerprint == "" {
+			return fmt.Errorf("controller %s is not pinned; --controller-fingerprint is required for first enrollment", hostname)
+		}
+		presented := ssh.FingerprintSHA256(key)
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(expectedFingerprint)) != 1 {
+			return fmt.Errorf("controller fingerprint mismatch for %s: expected %s, presented %s", hostname, expectedFingerprint, presented)
+		}
+		return tofu(hostname, remote, key)
+	}, nil
 }
 
 // maxReverseInboundChannels caps how many controller-opened fleet-rpc channels a

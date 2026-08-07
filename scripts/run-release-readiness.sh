@@ -17,9 +17,9 @@ todo() {
 }
 
 echo "==> Checking release helper script syntax"
-bash -n scripts/test-release-tools.sh scripts/run-scale-validation.sh scripts/sync-signing-key.sh \
+bash -n scripts/test-release-tools.sh scripts/run-scale-validation.sh scripts/sign-release-artifact.sh scripts/sync-signing-key.sh \
   scripts/update-manifest.sh scripts/validate-release-env.sh scripts/validate-release-manifest.sh \
-  scripts/validate-signing-assets.sh public/install
+  scripts/validate-signing-assets.sh public/install public/install.sh public/uninstall.sh
 
 echo
 echo "==> Running full Go test suite"

@@ -143,3 +143,95 @@ func syncWaitKind(t *testing.T, evs <-chan SyncEvent, kind SyncEventKind, relPat
 		}
 	}
 }
+
+func TestSyncReconcileRetriesFailedCopyWithoutSourceChange(t *testing.T) {
+	writer := map[string]fileMeta{"a.txt": {modUnixNano: 1, size: 5}}
+	pending := newSyncPending()
+	attempts := 0
+	var copied int
+	plan := syncPlan{
+		copy: func(string) (int64, error) {
+			attempts++
+			if attempts == 1 {
+				return 0, errors.New("injected copy failure")
+			}
+			return 5, nil
+		},
+		remove: func(string) error { return nil },
+	}
+	events := func(event SyncEvent) {
+		if event.Kind == SyncCopy {
+			copied++
+		}
+	}
+
+	if syncReconcile(writer, nil, map[string]fileMeta{}, false, SyncOptions{}, plan, pending, events) {
+		t.Fatal("failed copy reported a complete reconciliation")
+	}
+	// Simulate SyncDir advancing its source snapshot. The second pass must still
+	// retry solely because the operation remains pending.
+	if !syncReconcile(writer, nil, writer, false, SyncOptions{}, plan, pending, events) {
+		t.Fatal("successful retry did not complete reconciliation")
+	}
+	if attempts != 2 || copied != 1 {
+		t.Fatalf("copy attempts=%d successful events=%d, want 2 and 1", attempts, copied)
+	}
+	if len(pending.copies) != 0 {
+		t.Fatalf("successful copy remained pending: %#v", pending.copies)
+	}
+}
+
+func TestSyncReconcileRetriesFailedDeleteWithoutSourceChange(t *testing.T) {
+	previous := map[string]fileMeta{"gone.txt": {modUnixNano: 1, size: 5}}
+	writer := map[string]fileMeta{}
+	pending := newSyncPending()
+	attempts := 0
+	var deleted int
+	plan := syncPlan{
+		copy: func(string) (int64, error) { return 0, nil },
+		remove: func(string) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("injected delete failure")
+			}
+			return nil
+		},
+	}
+	events := func(event SyncEvent) {
+		if event.Kind == SyncDelete {
+			deleted++
+		}
+	}
+
+	if syncReconcile(writer, nil, previous, false, SyncOptions{}, plan, pending, events) {
+		t.Fatal("failed delete reported a complete reconciliation")
+	}
+	// The source snapshot is now unchanged and no longer mentions the path.
+	if !syncReconcile(writer, nil, writer, false, SyncOptions{}, plan, pending, events) {
+		t.Fatal("successful delete retry did not complete reconciliation")
+	}
+	if attempts != 2 || deleted != 1 {
+		t.Fatalf("delete attempts=%d successful events=%d, want 2 and 1", attempts, deleted)
+	}
+	if len(pending.deletes) != 0 {
+		t.Fatalf("successful delete remained pending: %#v", pending.deletes)
+	}
+}
+
+func TestSyncPullRejectsIntermediateSymlinkEscape(t *testing.T) {
+	rig := newTransferRig(t)
+	remoteDir := t.TempDir()
+	syncWrite(t, filepath.Join(remoteDir, "sub", "file.txt"), "remote")
+	localDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(localDir, "sub")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	plan := rig.app.makeSyncPlan("loopback", localDir, remoteDir, SyncOptions{From: SyncFromRemote}, true)
+	if _, err := plan.copy(filepath.Join("sub", "file.txt")); err == nil {
+		t.Fatal("sync pull should reject an intermediate symlink escaping the replica root")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "file.txt")); !os.IsNotExist(err) {
+		t.Fatalf("sync pull escaped through intermediate symlink: %v", err)
+	}
+}

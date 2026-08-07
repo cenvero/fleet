@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -45,6 +44,7 @@ type App struct {
 	MetricsDB           *store.Store
 	NetworkDialContext  func(context.Context, string, string) (net.Conn, error)
 	ReverseRPC          func(string, proto.Envelope) (proto.Envelope, error)
+	ReverseRPCContext   func(context.Context, string, proto.Envelope) (proto.Envelope, error)
 	ReverseStatusLookup func(string) (ReverseSessionInfo, error)
 	ReverseDisconnect   func(string) error
 
@@ -200,7 +200,7 @@ func (a *App) AddServer(record ServerRecord) error {
 		record.CreatedAt = time.Now().UTC()
 	}
 	record.UpdatedAt = time.Now().UTC()
-	if err := a.writeServerFile(record); err != nil {
+	if err := a.writeNewServerFile(record); err != nil {
 		return fmt.Errorf("create server record: %w", err)
 	}
 	return a.AuditLog.Append(logs.AuditEntry{
@@ -345,6 +345,47 @@ func (a *App) writeServerFile(server ServerRecord) error {
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	return nil
+}
+
+// writeNewServerFile publishes a complete server record only when the name does
+// not already exist. The hard-link step is atomic and fails if the destination
+// exists, closing both same-process and cross-process check/write races without
+// allowing `server add` to retarget an existing name. SaveServer intentionally
+// continues to use writeServerFile for explicit updates.
+func (a *App) writeNewServerFile(server ServerRecord) error {
+	dir := filepath.Join(a.ConfigDir, "servers")
+	path := filepath.Join(dir, server.Name+".toml")
+	a.serverMu.Lock()
+	defer a.serverMu.Unlock()
+
+	tmp, err := os.CreateTemp(dir, ".server-new-*.toml")
+	if err != nil {
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := toml.NewEncoder(tmp).Encode(server); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write server %s: %w", server.Name, err)
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("server %q already exists; use an explicit update command or remove it first", server.Name)
+		}
+		return fmt.Errorf("publish server %s: %w", server.Name, err)
 	}
 	return nil
 }
@@ -867,11 +908,15 @@ type ExecServerResult struct {
 }
 
 func (a *App) ExecCommand(serverName, command string) (proto.ExecResult, error) {
+	return a.ExecCommandContext(context.Background(), serverName, command)
+}
+
+func (a *App) ExecCommandContext(ctx context.Context, serverName, command string) (proto.ExecResult, error) {
 	server, err := a.GetServer(serverName)
 	if err != nil {
 		return proto.ExecResult{}, err
 	}
-	response, err := a.callRPC(server, proto.Envelope{
+	response, err := a.callRPCContext(ctx, server, proto.Envelope{
 		Action:  "shell.exec",
 		Payload: proto.ExecPayload{Command: command},
 	})
@@ -962,7 +1007,13 @@ func (a *App) ListTemplates() ([]string, error) {
 }
 
 func (a *App) Backup(outputPath string) (string, error) {
-	result, err := Backup(a.ConfigDir, BackupOptions{OutputPath: outputPath})
+	result, err := Backup(a.ConfigDir, BackupOptions{
+		OutputPath: outputPath,
+		SQLiteStores: map[store.Workload]*store.Store{
+			store.WorkloadState:   a.StateDB,
+			store.WorkloadMetrics: a.MetricsDB,
+		},
+	})
 	if err != nil {
 		return "", err
 	}
@@ -1043,56 +1094,59 @@ func applyFirewallInfo(server *ServerRecord, info proto.FirewallInfo) {
 }
 
 func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+	return a.callRPCContext(context.Background(), server, env)
+}
+
+func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		env.DeadlineUnixMilli = deadline.UnixMilli()
+	}
 	switch server.Mode {
 	case transport.ModeDirect:
-		return a.callDirectPooled(server, env)
+		return a.callDirectPooledContext(ctx, server, env)
 	case transport.ModeReverse:
+		if a.ReverseRPCContext != nil {
+			return a.ReverseRPCContext(ctx, server.Name, env)
+		}
 		if a.ReverseRPC != nil {
 			return a.ReverseRPC(server.Name, env)
 		}
-		return a.callReverseControl(server.Name, env)
+		return a.callReverseControlContext(ctx, server.Name, env)
 	default:
 		return proto.Envelope{}, fmt.Errorf("transport mode %q is not implemented for live actions", server.Mode)
 	}
 }
 
-// callDirectPooled runs one control RPC over a pooled SSH connection, dialling
-// only when nothing reusable is cached.
-//
-// A pooled connection can die between calls without either side noticing (agent
-// restart, NAT eviction, idle timeout). Rather than surface that as an error the
-// operator has to retry by hand, a failure on a reused connection tears the
-// connection down and transparently retries once on a fresh one. A failure on a
-// connection we just dialled is a real failure and is returned as-is, so genuine
-// unreachability still reports promptly instead of looping.
-func (a *App) callDirectPooled(server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+// callDirectPooledContext runs one control RPC over a pooled SSH connection,
+// dialing only when nothing reusable is cached.
+
+func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	if l, ok := a.sessions.acquire(server.Name); ok {
-		resp, err := l.session().Call(context.Background(), env)
-		if err == nil {
+		resp, err := l.session().Call(ctx, env)
+		if err == nil || transport.SessionUsableAfterError(err) {
 			l.release()
-			return resp, nil
+			return resp, err
 		}
 		l.discard()
 	}
 
-	l, err := a.dialPooled(server)
+	l, err := a.dialPooledContext(ctx, server)
 	if err != nil {
 		return proto.Envelope{}, err
 	}
-	resp, err := l.session().Call(context.Background(), env)
-	if err != nil {
+	resp, err := l.session().Call(ctx, env)
+	if err != nil && !transport.SessionUsableAfterError(err) {
 		l.discard()
 		return proto.Envelope{}, err
 	}
 	l.release()
-	return resp, nil
+	return resp, err
 }
 
-// dialPooled establishes the pooled connection for a server, or borrows one that
-// another caller established while this one was waiting. The per-server dial
-// lock is held only across connection setup — never across the RPC — so callers
-// serialise on connecting but still run their requests concurrently afterwards.
-func (a *App) dialPooled(server ServerRecord) (*lease, error) {
+// dialPooledContext establishes the pooled connection for a server, or borrows
+// one that another caller established while this one was waiting.
+
+func (a *App) dialPooledContext(ctx context.Context, server ServerRecord) (*lease, error) {
 	dialMu := a.sessions.dialLock(server.Name)
 	dialMu.Lock()
 	defer dialMu.Unlock()
@@ -1101,7 +1155,7 @@ func (a *App) dialPooled(server ServerRecord) (*lease, error) {
 	if l, ok := a.sessions.acquire(server.Name); ok {
 		return l, nil
 	}
-	session, _, err := a.openDirectSession(server, false)
+	session, _, err := a.openDirectSessionContext(ctx, server, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1149,15 +1203,6 @@ func (a *App) operator() string {
 	return currentUser.Username
 }
 
-func runtimeCapability(capability string) bool {
-	switch capability {
-	case "service.manage", "firewall.manage":
-		return runtime.GOOS == "linux"
-	default:
-		return false
-	}
-}
-
 func (a *App) serverPrivateKeyPath(server ServerRecord) string {
 	if server.KeyPath != "" {
 		return server.KeyPath
@@ -1166,10 +1211,18 @@ func (a *App) serverPrivateKeyPath(server ServerRecord) string {
 }
 
 func (a *App) openDirectSession(server ServerRecord, acceptNewHostKey bool) (*transport.Session, proto.HelloPayload, error) {
-	return a.openDirectSessionWithKey(server, a.serverPrivateKeyPath(server), acceptNewHostKey)
+	return a.openDirectSessionContext(context.Background(), server, acceptNewHostKey)
+}
+
+func (a *App) openDirectSessionContext(ctx context.Context, server ServerRecord, acceptNewHostKey bool) (*transport.Session, proto.HelloPayload, error) {
+	return a.openDirectSessionWithKeyContext(ctx, server, a.serverPrivateKeyPath(server), acceptNewHostKey)
 }
 
 func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath string, acceptNewHostKey bool) (*transport.Session, proto.HelloPayload, error) {
+	return a.openDirectSessionWithKeyContext(context.Background(), server, privateKeyPath, acceptNewHostKey)
+}
+
+func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server ServerRecord, privateKeyPath string, acceptNewHostKey bool) (*transport.Session, proto.HelloPayload, error) {
 	if server.Mode != transport.ModeDirect {
 		server.Observed.Reachable = false
 		server.Observed.LastSeen = time.Now().UTC()
@@ -1194,7 +1247,7 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 		NetworkDialContext: a.NetworkDialContext,
 	}
 
-	session, err := connector.DialContext(context.Background(), target)
+	session, err := connector.DialContext(ctx, target)
 	if err != nil {
 		server.Observed.Reachable = false
 		server.Observed.LastSeen = time.Now().UTC()
@@ -1203,7 +1256,7 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 		return nil, proto.HelloPayload{}, err
 	}
 
-	hello, err := session.Hello(context.Background(), a.Config.InstanceID)
+	hello, err := session.Hello(ctx, a.Config.InstanceID)
 	if err != nil {
 		_ = session.Close()
 		server.Observed.Reachable = false
@@ -1231,7 +1284,7 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 	// notify_only and disabled must not trigger unsolicited binary replacements.
 	if hello.AgentVersion != "" && version.Canonical(hello.AgentVersion) != version.Canonical(version.Version) &&
 		a.Config.Updates.Policy == update.PolicyAutoUpdate {
-		go func() {
+		go func() { // #nosec G118 -- policy-approved auto-update intentionally outlives the discovery RPC
 			_ = a.AuditLog.Append(logs.AuditEntry{
 				Action:   "agent.auto-update",
 				Target:   server.Name,

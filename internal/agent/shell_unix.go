@@ -98,7 +98,7 @@ func serveShell(channel ssh.Channel, requests <-chan *ssh.Request, sessionID str
 				// Non-persistent: exec requests run a one-shot command.
 				var execReq struct{ Command string }
 				_ = ssh.Unmarshal(req.Payload, &execReq)
-				cmd := exec.Command(shellPath, "-c", execReq.Command) //nolint:gosec
+				cmd := exec.Command(shellPath, "-c", execReq.Command) // #nosec G204 -- authenticated SSH exec request intentionally invokes the login shell
 				cmd.Env = env
 				replyReq(req, true)
 				if hasPTY {
@@ -224,7 +224,11 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 	// detached is closed when the channel's input goroutine exits (network drop
 	// or clean disconnect). Using the returned signal avoids a second competing
 	// reader on the same channel — which would steal bytes including Ctrl+C.
-	detached := session.attach(channel, cols, rows, globalStore, sessionID)
+	detached, err := session.attach(channel, cols, rows, globalStore, sessionID)
+	if err != nil {
+		sendExitStatus(channel, 1)
+		return
+	}
 
 	// Handle window-change requests while this channel is connected.
 	// This reads from `requests`, not from `channel`, so no race.

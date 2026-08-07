@@ -4,6 +4,12 @@
 package core
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -222,5 +228,163 @@ func TestListEmpty(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("len = %d, want 0", len(list))
+	}
+}
+
+type failingApprovalEntropy struct {
+	err error
+}
+
+func (r failingApprovalEntropy) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestStagePropagatesEntropyFailure(t *testing.T) {
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	s := newTestStore(t, &now)
+	injected := errors.New("injected entropy failure")
+	s.entropy = failingApprovalEntropy{err: injected}
+
+	id, err := s.Stage("web-01", "ls", time.Hour)
+	if !errors.Is(err, injected) {
+		t.Fatalf("Stage error = %v, want injected entropy failure", err)
+	}
+	if id != "" {
+		t.Fatalf("Stage id = %q after entropy failure, want empty", id)
+	}
+	approvals, readErr := s.read()
+	if readErr != nil {
+		t.Fatalf("read after failed Stage: %v", readErr)
+	}
+	if len(approvals) != 0 {
+		t.Fatalf("failed Stage persisted approvals: %#v", approvals)
+	}
+}
+
+func TestConcurrentStoresDoNotLoseStagedApprovals(t *testing.T) {
+	dir := t.TempDir()
+	stores := []*ApprovalStore{NewApprovalStore(dir), NewApprovalStore(dir)}
+	const stages = 40
+	start := make(chan struct{})
+	errs := make(chan error, stages)
+	var wg sync.WaitGroup
+	for i := 0; i < stages; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := stores[i%len(stores)].Stage("web-01", "echo staged", time.Hour)
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Stage: %v", err)
+		}
+	}
+
+	approvals, err := stores[0].List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(approvals) != stages {
+		t.Fatalf("staged approvals = %d, want %d", len(approvals), stages)
+	}
+}
+
+func TestApprovalStoreProcessHelper(t *testing.T) {
+	if os.Getenv("FLEET_APPROVAL_STORE_HELPER") != "1" {
+		return
+	}
+	args := os.Args
+	sep := -1
+	for i, arg := range args {
+		if arg == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 || len(args) != sep+5 {
+		t.Fatalf("bad approval helper args: %v", args)
+	}
+	dir, server, command, gate := args[sep+1], args[sep+2], args[sep+3], args[sep+4]
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat process gate: %v", err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("timed out waiting for process gate")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := NewApprovalStore(dir).Stage(server, command, time.Hour); err != nil {
+		t.Fatalf("Stage(%q): %v", server, err)
+	}
+}
+
+func TestApprovalStoreCrossProcessReadModifyWrite(t *testing.T) {
+	dir := t.TempDir()
+	gate := filepath.Join(dir, "approval-start-gate")
+	const workers = 16
+	commands := make([]*exec.Cmd, 0, workers)
+	for i := 0; i < workers; i++ {
+		name := "worker-" + strconv.Itoa(i)
+		cmd := exec.Command(os.Args[0], "-test.run=^TestApprovalStoreProcessHelper$", "--", dir, name, "echo "+name, gate)
+		cmd.Env = append(os.Environ(), "FLEET_APPROVAL_STORE_HELPER=1")
+		commands = append(commands, cmd)
+	}
+	for _, cmd := range commands {
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start approval helper: %v", err)
+		}
+	}
+	if err := os.WriteFile(gate, []byte("go\n"), 0o600); err != nil {
+		t.Fatalf("write process gate: %v", err)
+	}
+	for _, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("approval helper failed: %v", err)
+		}
+	}
+
+	approvals, err := NewApprovalStore(dir).List()
+	if err != nil {
+		t.Fatalf("List after cross-process mutations: %v", err)
+	}
+	if len(approvals) != workers {
+		t.Fatalf("cross-process stages lost updates: got %d approvals, want %d", len(approvals), workers)
+	}
+	seen := make(map[string]bool, workers)
+	for _, approval := range approvals {
+		if seen[approval.Server] {
+			t.Fatalf("duplicate approval for %q", approval.Server)
+		}
+		seen[approval.Server] = true
+	}
+	for i := 0; i < workers; i++ {
+		name := "worker-" + strconv.Itoa(i)
+		if !seen[name] {
+			t.Errorf("missing cross-process approval for %q", name)
+		}
+	}
+}
+
+func TestApprovalStoreLockFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := ApprovalsPath(dir) + ".lock"
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		t.Fatalf("plant unusable lock path: %v", err)
+	}
+	if _, err := NewApprovalStore(dir).Stage("web-01", "echo blocked", time.Hour); err == nil {
+		t.Fatal("Stage succeeded without acquiring its advisory lock")
+	}
+	if _, err := os.Stat(ApprovalsPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("approval document exists after failed lock acquisition: %v", err)
 	}
 }

@@ -36,6 +36,12 @@ func DetectCapabilities() []string {
 		// Reverse connections accept extra fleet-rpc channels from the
 		// controller, so reverse transfers are no longer single-streamed.
 		proto.CapabilityReverseMultiplex,
+		// Long-running RPCs can be cancelled by request ID without tearing down
+		// the shared SSH connection or corrupting sibling channels.
+		proto.CapabilityRequestCancel,
+		// Offline metrics remain queued until the controller explicitly acks the
+		// exact batch after durable controller-side persistence.
+		proto.CapabilityMetricsPeekAck,
 	}
 	switch runtime.GOOS {
 	case "linux":
@@ -64,6 +70,8 @@ func NewRootCommand() *cobra.Command {
 	var controllerAddress string
 	var serverName string
 	var enrollToken string
+	var enrollTokenPath string
+	var controllerFingerprint string
 	var knownHostsPath string
 	var acceptNewHostKey bool
 	var retryMin time.Duration
@@ -87,7 +95,9 @@ func NewRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&authorizedKeysPath, "authorized-keys", "", "authorized_keys file that may connect to the agent")
 	root.PersistentFlags().StringVar(&controllerAddress, "controller", "127.0.0.1:9443", "controller address for reverse mode")
 	root.PersistentFlags().StringVar(&serverName, "server-name", "", "registered Cenvero Fleet server name for reverse mode")
-	root.PersistentFlags().StringVar(&enrollToken, "enroll-token", "", "one-time reverse-mode enrollment token (from 'fleet server add'/'fleet server enroll-token'); needed only on first connect")
+	root.PersistentFlags().StringVar(&enrollToken, "enroll-token", "", "one-time reverse enrollment token (prefer --enroll-token-file so it is not exposed in process argv)")
+	root.PersistentFlags().StringVar(&enrollTokenPath, "enroll-token-file", "", "owner-only file containing the one-time reverse enrollment token; removed after authentication")
+	root.PersistentFlags().StringVar(&controllerFingerprint, "controller-fingerprint", "", "verified SHA256 controller host-key fingerprint required on first enrollment")
 	root.PersistentFlags().StringVar(&knownHostsPath, "known-hosts", DefaultControllerKnownHostsPath(), "known_hosts file used to pin the controller host key in reverse mode")
 	root.PersistentFlags().BoolVar(&acceptNewHostKey, "accept-new-host-key", false, "accept a replacement controller host key after manual verification")
 	root.PersistentFlags().DurationVar(&retryMin, "retry-min", time.Second, "minimum reconnect backoff for reverse mode")
@@ -156,8 +166,10 @@ func NewRootCommand() *cobra.Command {
 			}
 			return RunReverse(context.Background(), ReverseOptions{
 				ControllerAddress:      controllerAddress,
+				ControllerFingerprint:  controllerFingerprint,
 				ServerName:             serverName,
 				EnrollToken:            enrollToken,
+				EnrollTokenPath:        enrollTokenPath,
 				KnownHostsPath:         knownHostsPath,
 				AcceptNewHostKey:       acceptNewHostKey,
 				MinRetryDelay:          retryMin,

@@ -39,9 +39,7 @@ func Recover(opts RecoverOptions, out io.Writer) error {
 	// 1. Verify the source directory has a valid config.
 	if !IsInitialized(fromDir) {
 		return fmt.Errorf(
-			"no fleet configuration found at %s\n\n"+
-				"Make sure --from-dir points to a directory that was previously set up with 'fleet init'.\n"+
-				"It should contain a fleet.toml (or config.toml) file.",
+			"no fleet configuration found at %s; make sure --from-dir points to a directory previously set up with 'fleet init' containing fleet.toml or config.toml",
 			fromDir,
 		)
 	}

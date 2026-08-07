@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,7 +92,7 @@ func UpdateAvailable(configDir, manifestURL, channel string, policy update.Polic
 	}
 	cacheFile := filepath.Join(configDir, "data", "update-available.json")
 	var cache homebrewHintCache
-	if data, err := os.ReadFile(cacheFile); err == nil {
+	if data, err := os.ReadFile(cacheFile); err == nil { // #nosec G304 -- cache path is fixed beneath the controller data directory
 		_ = json.Unmarshal(data, &cache)
 	}
 	if time.Since(cache.CheckedAt) > updateCheckInterval {
@@ -211,48 +210,11 @@ func (a *App) runUpdateChecker(ctx context.Context) {
 	}
 }
 
-// isNewerVersion returns true if candidate is strictly newer than current.
-// Both strings may or may not carry a leading "v".
+// isNewerVersion returns true only when both inputs are strict SemVer values and
+// candidate has greater SemVer precedence. Malformed inputs fail closed.
 func isNewerVersion(candidate, current string) bool {
-	return semverCompare(candidate, current) > 0
-}
-
-func semverCompare(a, b string) int {
-	av := strings.TrimPrefix(a, "v")
-	bv := strings.TrimPrefix(b, "v")
-	ap := strings.SplitN(av, "-", 2)
-	bp := strings.SplitN(bv, "-", 2)
-	ac := strings.Split(ap[0], ".")
-	bc := strings.Split(bp[0], ".")
-	for len(ac) < 3 {
-		ac = append(ac, "0")
-	}
-	for len(bc) < 3 {
-		bc = append(bc, "0")
-	}
-	for i := 0; i < 3; i++ {
-		an, _ := strconv.Atoi(ac[i])
-		bn, _ := strconv.Atoi(bc[i])
-		if an != bn {
-			if an > bn {
-				return 1
-			}
-			return -1
-		}
-	}
-	// Numeric parts are equal. A release (no pre-release suffix) is newer than
-	// any pre-release of the same version: 1.0.0 > 1.0.0-alpha > 1.0.0-beta.
-	aHasPre := len(ap) > 1 && ap[1] != ""
-	bHasPre := len(bp) > 1 && bp[1] != ""
-	switch {
-	case !aHasPre && bHasPre:
-		return 1 // a is a release, b is a pre-release
-	case aHasPre && !bHasPre:
-		return -1 // a is a pre-release, b is a release
-	case aHasPre && bHasPre:
-		return strings.Compare(ap[1], bp[1]) // lexicographic pre-release comparison
-	}
-	return 0
+	comparison, err := update.CompareSemVer(candidate, current)
+	return err == nil && comparison > 0
 }
 
 func (a *App) ApplyUpdate(ctx context.Context, allowUnsigned, allowDowngrade bool) (update.ApplyResult, error) {
@@ -260,12 +222,16 @@ func (a *App) ApplyUpdate(ctx context.Context, allowUnsigned, allowDowngrade boo
 	if apply == nil {
 		apply = update.Apply
 	}
+	currentVersion := version.Version
+	if currentVersion == "dev" {
+		currentVersion = ""
+	}
 	result, err := apply(ctx, update.ApplyOptions{
 		ManifestURL:    a.Config.ManifestURL,
 		Channel:        a.Config.Updates.Channel,
 		ConfigDir:      a.ConfigDir,
 		ExecutablePath: a.ExecutablePath,
-		CurrentVersion: version.Version,
+		CurrentVersion: currentVersion,
 		AllowUnsigned:  allowUnsigned,
 		AllowDowngrade: allowDowngrade,
 	})

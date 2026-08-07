@@ -236,7 +236,7 @@ func zshCompletionDir() (dir string, needFpathLine bool) {
 // dirIsWritable reports whether dir exists and the current user can create files
 // in it (probed with a temp file, since stat-mode checks lie under ACLs).
 func dirIsWritable(dir string) bool {
-	info, err := os.Stat(dir)
+	info, err := os.Stat(dir) // #nosec G703 -- operator-owned completion/rc path selected from fixed locations or the user environment
 	if err != nil || !info.IsDir() {
 		return false
 	}
@@ -246,7 +246,7 @@ func dirIsWritable(dir string) bool {
 	}
 	name := f.Name()
 	_ = f.Close()
-	_ = os.Remove(name)
+	_ = os.Remove(name) // #nosec G703 -- operator-owned completion/rc path selected from fixed locations or the user environment
 	return true
 }
 
@@ -286,5 +286,5 @@ func removeMarkedBlock(path, marker string) (bool, error) {
 		return false, nil
 	}
 	// WriteFile keeps an existing file's mode (perm applies only on create).
-	return true, os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o600) // #nosec G306 -- existing rc keeps its mode; 0600 only applies if newly created
+	return true, os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o600) // #nosec G306,G703 -- existing rc keeps its mode; 0600 only applies if newly created
 }

@@ -5,122 +5,52 @@ ROOT_DIR="${FLEET_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MANIFEST_PATH="${ROOT_DIR}/public/manifest.json"
 DIST_DIR="${FLEET_DIST_DIR:-${ROOT_DIR}/dist}"
 ARTIFACTS_PATH="${DIST_DIR}/artifacts.json"
-
+EXPECTED_TARGETS=(darwin-amd64 darwin-arm64 linux-amd64 linux-arm64 linux-armv7 windows-amd64 windows-arm64)
 : "${FLEET_VERSION:?FLEET_VERSION is required}"
 : "${FLEET_REPOSITORY:?FLEET_REPOSITORY is required}"
-
-if ! command -v jq >/dev/null 2>&1; then
-  echo "jq is required" >&2
-  exit 1
-fi
-
-[ -f "${MANIFEST_PATH}" ] || {
-  echo "manifest not found: ${MANIFEST_PATH}" >&2
-  exit 1
-}
-[ -f "${ARTIFACTS_PATH}" ] || {
-  echo "artifacts.json not found: ${ARTIFACTS_PATH}" >&2
-  exit 1
-}
+command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
+[ -f "${MANIFEST_PATH}" ] && [ -f "${ARTIFACTS_PATH}" ] || { echo "manifest or artifacts.json missing" >&2; exit 1; }
 
 resolve_artifact_path() {
   local raw="$1"
-  if [ -f "${raw}" ]; then
-    printf '%s\n' "${raw}"
-    return 0
-  fi
-  if [ -f "${ROOT_DIR}/${raw}" ]; then
-    printf '%s\n' "${ROOT_DIR}/${raw}"
-    return 0
-  fi
-  if [ -f "${DIST_DIR}/$(basename "${raw}")" ]; then
-    printf '%s\n' "${DIST_DIR}/$(basename "${raw}")"
-    return 0
-  fi
+  for candidate in "${raw}" "${ROOT_DIR}/${raw}" "${DIST_DIR}/$(basename "${raw}")"; do
+    [ -f "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+  done
   return 1
 }
+sha256_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"|awk '{print $1}'; else shasum -a 256 "$1"|awk '{print $1}'; fi; }
 
+declare -A seen
 validated=0
-
 while IFS= read -r artifact; do
-  binary="$(jq -r '.binary' <<< "${artifact}")"
-  name="$(jq -r '.name' <<< "${artifact}")"
-  path="$(jq -r '.path' <<< "${artifact}")"
-  goos="$(jq -r '.goos' <<< "${artifact}")"
-  goarch="$(jq -r '.goarch' <<< "${artifact}")"
-  goarm="$(jq -r '.goarm' <<< "${artifact}")"
-  checksum="$(jq -r '.checksum' <<< "${artifact}")"
-
-  case "${binary}" in
-    fleet) manifest_key="binaries" ;;
-    fleet-agent) manifest_key="agent_binaries" ;;
-    *) continue ;;
-  esac
-
-  artifact_path="$(resolve_artifact_path "${path}")" || {
-    echo "artifact path not found: ${path}" >&2
-    exit 1
-  }
-  sha256="${checksum#sha256:}"
-  [ -n "${sha256}" ] || {
-    echo "checksum missing for ${name}" >&2
-    exit 1
-  }
-
-  if [ "${goarch}" = "arm" ] && [ -n "${goarm}" ] && [ "${goarm}" != "null" ]; then
-    target="${goos}-armv${goarm}"
-  else
-    target="${goos}-${goarch}"
-  fi
-
+  binary="$(jq -r '.binary' <<<"${artifact}")"; name="$(jq -r '.name' <<<"${artifact}")"; path="$(jq -r '.path' <<<"${artifact}")"
+  goos="$(jq -r '.goos' <<<"${artifact}")"; goarch="$(jq -r '.goarch' <<<"${artifact}")"; goarm="$(jq -r '.goarm' <<<"${artifact}")"
+  [[ "${binary}" == fleet || "${binary}" == fleet-agent ]] || continue
+  manifest_key=binaries; [ "${binary}" = fleet-agent ] && manifest_key=agent_binaries
+  if [ "${goarch}" = arm ]; then [ "${goarm}" = 7 ] || exit 1; target="${goos}-armv7"; else target="${goos}-${goarch}"; fi
+  key="${binary}:${target}"; [ -z "${seen[${key}]:-}" ] || { echo "duplicate ${key}" >&2; exit 1; }; seen[${key}]=1
+  artifact_path="$(resolve_artifact_path "${path}")" || { echo "artifact path missing: ${path}" >&2; exit 1; }
+  signature_path="${artifact_path}.minisig"; [ -s "${signature_path}" ] || { echo "signature missing for ${name}" >&2; exit 1; }
+  sha256="$(sha256_file "${artifact_path}")"; size="$(wc -c <"${artifact_path}"|tr -d '[:space:]')"
   url="https://github.com/${FLEET_REPOSITORY}/releases/download/${FLEET_VERSION}/${name}"
-  signature_url=""
-  if [ -f "${artifact_path}.minisig" ]; then
-    signature_url="${url}.minisig"
+  trusted="$(sed -n '3s/^trusted comment: //p' "${signature_path}")"
+  [ "${trusted}" = "cenvero-fleet ${binary} ${FLEET_VERSION} ${target}" ] || { echo "trusted comment mismatch for ${name}" >&2; exit 1; }
+
+  jq -e --arg k "${manifest_key}" --arg v "${FLEET_VERSION}" --arg t "${target}" --arg u "${url}" --arg h "${sha256}" --arg s "${url}.minisig" --argjson z "${size}" '
+    .[$k][$v][$t].url==$u and .[$k][$v][$t].sha256==$h and .[$k][$v][$t].signature_url==$s and .[$k][$v][$t].size==$z
+  ' "${MANIFEST_PATH}" >/dev/null || { echo "manifest entry mismatch for ${name}" >&2; exit 1; }
+
+  if [ -n "${FLEET_MINISIGN_PUBLIC_KEY:-}" ]; then
+    command -v minisign >/dev/null 2>&1 || { echo "minisign is required for cryptographic validation" >&2; exit 1; }
+    pub="$(printf '%s\n' "${FLEET_MINISIGN_PUBLIC_KEY}"|awk 'NF{line=$0}END{print line}')"
+    minisign -Vm "${artifact_path}" -P "${pub}" -x "${signature_path}" >/dev/null 2>&1 || { echo "signature verification failed for ${name}" >&2; exit 1; }
   fi
-  size="$(wc -c < "${artifact_path}" | tr -d '[:space:]')"
+  validated=$((validated+1))
+done < <(jq -c '.[] | select(.type=="Archive" or .type=="Zip") | ((.extra.Binary // (.extra.Binaries[0] // ""))|sub("\\.exe$";"")) as $bin | select($bin=="fleet" or $bin=="fleet-agent") | {binary:$bin,name:.name,path:.path,goos:.goos,goarch:.goarch,goarm:(.goarm // "")}' "${ARTIFACTS_PATH}")
 
-  jq -e \
-    --arg manifest_key "${manifest_key}" \
-    --arg version "${FLEET_VERSION}" \
-    --arg target "${target}" \
-    --arg url "${url}" \
-    --arg sha256 "${sha256}" \
-    --arg signature_url "${signature_url}" \
-    --argjson size "${size}" \
-    '
-    .[$manifest_key][$version][$target].url == $url
-    and .[$manifest_key][$version][$target].sha256 == $sha256
-    and ((.[$manifest_key][$version][$target].signature_url // "") == $signature_url)
-    and (.[$manifest_key][$version][$target].size == $size)
-    ' "${MANIFEST_PATH}" >/dev/null || {
-      echo "manifest entry does not match artifact metadata for ${name}" >&2
-      exit 1
-    }
+for binary in fleet fleet-agent; do for target in "${EXPECTED_TARGETS[@]}"; do
+  [ -n "${seen[${binary}:${target}]:-}" ] || { echo "incomplete release matrix: missing ${binary} ${target}" >&2; exit 1; }
+done; done
+[ "${validated}" -eq 14 ] || { echo "expected 14 release artifacts, validated ${validated}" >&2; exit 1; }
 
-  validated=$((validated + 1))
-done < <(
-  jq -c --arg version "${FLEET_VERSION}" '
-    .[]
-    | select(.type == "Archive" or .type == "Zip")
-    | ((.extra.Binary // (.extra.Binaries[0] // "")) | gsub("\\.exe$"; "")) as $bin
-    | select($bin == "fleet" or $bin == "fleet-agent")
-    | select(.name | contains(($version | ltrimstr("v")) + "_"))
-    | {
-        binary: $bin,
-        name: .name,
-        path: .path,
-        goos: .goos,
-        goarch: .goarch,
-        goarm: (.goarm // ""),
-        checksum: (.extra.Checksum // "")
-      }
-  ' "${ARTIFACTS_PATH}"
-)
-
-[ "${validated}" -gt 0 ] || {
-  echo "no release artifacts matched ${FLEET_VERSION}" >&2
-  exit 1
-}
-
-echo "release manifest matches ${validated} artifact entries"
+echo "release manifest matches complete signed 14-artifact matrix"

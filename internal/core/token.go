@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cenvero/fleet/internal/logs"
@@ -31,7 +30,16 @@ import (
 // hardening (FL-030 server-side) and is intentionally out of scope here.
 type TokenStore struct {
 	path string
-	mu   sync.Mutex
+}
+
+// withWriteLock serializes a token-store read/modify/write across controller
+// processes. The advisory lock is owned by an open descriptor, so the kernel
+// releases it if a writer exits or is killed. Readers remain lock-free because
+// write() publishes with an atomic rename: they observe either the old complete
+// document or the new one. Acquisition errors and timeouts fail closed without
+// calling fn.
+func (s *TokenStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
 }
 
 // Token is a scoped credential. The ID is the bearer secret: anyone holding it
@@ -194,24 +202,30 @@ func (s *TokenStore) Create(t Token) (Token, error) {
 	t.Prefix = tokenIDPrefix(id)
 	t.Created = time.Now().UTC()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
+	var result Token
+	err = s.withWriteLock(func() error {
+		doc, readErr := s.read()
+		if readErr != nil {
+			return readErr
+		}
+		if _, exists := doc.Tokens[t.Hash]; exists {
+			// Astronomically unlikely with 128 bits of entropy, but be explicit.
+			return fmt.Errorf("token id collision; please retry")
+		}
+		// Persist WITHOUT the cleartext id: the on-disk record keeps only Hash+Prefix.
+		stored := t
+		stored.ID = ""
+		doc.Tokens[t.Hash] = stored
+		if writeErr := s.write(doc); writeErr != nil {
+			return writeErr
+		}
+		result = t
+		return nil
+	})
 	if err != nil {
 		return Token{}, err
 	}
-	if _, exists := doc.Tokens[t.Hash]; exists {
-		// Astronomically unlikely with 128 bits of entropy, but be explicit.
-		return Token{}, fmt.Errorf("token id collision; please retry")
-	}
-	// Persist WITHOUT the cleartext id: the on-disk record keeps only Hash+Prefix.
-	stored := t
-	stored.ID = ""
-	doc.Tokens[t.Hash] = stored
-	if err := s.write(doc); err != nil {
-		return Token{}, err
-	}
-	return t, nil
+	return result, nil
 }
 
 // List returns all tokens sorted by creation time (oldest first). The cleartext
@@ -220,8 +234,6 @@ func (s *TokenStore) Create(t Token) (Token, error) {
 // existing prefix-rendering callers keep working. Use Token.Prefix directly when
 // the distinction matters.
 func (s *TokenStore) List() ([]Token, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	doc, err := s.read()
 	if err != nil {
 		return nil, err
@@ -246,8 +258,6 @@ func (s *TokenStore) List() ([]Token, error) {
 // hash, since the cleartext id is never stored. The returned token does NOT
 // carry the cleartext ID (only Hash/Prefix), so callers must not rely on it.
 func (s *TokenStore) Get(id string) (Token, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	doc, err := s.read()
 	if err != nil {
 		return Token{}, err
@@ -263,18 +273,18 @@ func (s *TokenStore) Get(id string) (Token, error) {
 // and removed by hash. Revoking an unknown token is an error so the operator
 // gets clear feedback.
 func (s *TokenStore) Revoke(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	doc, err := s.read()
-	if err != nil {
-		return err
-	}
-	hash := hashTokenID(id)
-	if _, ok := doc.Tokens[hash]; !ok {
-		return fmt.Errorf("token not found")
-	}
-	delete(doc.Tokens, hash)
-	return s.write(doc)
+	return s.withWriteLock(func() error {
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		hash := hashTokenID(id)
+		if _, ok := doc.Tokens[hash]; !ok {
+			return fmt.Errorf("token not found")
+		}
+		delete(doc.Tokens, hash)
+		return s.write(doc)
+	})
 }
 
 // readCommands is the set of top-level command names that only read controller
@@ -306,8 +316,91 @@ func IsReadCommand(topCommand string) bool {
 	return readCommands[topCommand]
 }
 
-// destructiveCommands documents the (topCommand -> subcommands) pairs that are
-// treated as destructive for FL-030. A token without DestructiveAllowed cannot
+// commandMutationClassifications is the exhaustive security classification for
+// every runnable Cobra command. Keys are full paths below `fleet`; true means
+// the leaf can change controller, server, local filesystem, process, or external
+// state and therefore requires a token's destructive permission. Keeping reads
+// explicit as false is intentional: a future leaf is UNKNOWN rather than
+// silently inheriting read access. CLI tests walk the live command tree and fail
+// whenever a runnable command is added without an entry here.
+var commandMutationClassifications = map[string]bool{
+	"fleet": false,
+
+	"init": true, "status": false, "start": true, "stop": true, "daemon": true,
+	"dashboard": true, "files": true, "filemanager": true, "filemanager ui": true,
+
+	"server add": true, "server list": false, "server show": false, "server metrics": false,
+	"server remove": true, "server reconnect": true, "server mode": true,
+	"server bootstrap": true, "server enroll-token": true,
+
+	"service list": false, "service add": true, "service start": true,
+	"service stop": true, "service restart": true, "service logs": false,
+
+	"file list": false, "file upload": true, "file download": true,
+	"file stat": false, "file cat": false, "file tail": false, "file edit": true,
+	"file diff": false, "file copy": true, "file move": true, "file compress": true,
+	"file extract": true, "file mkdir": true, "file rm": true, "file mv": true,
+	"file ui": true, "file defaults show": false, "file defaults set": true,
+
+	"sync": true, "logs": false, "exec": true, "ssh": true, "tunnel": true,
+	"port list": false, "port open": true, "port close": true,
+	"firewall status": false, "firewall enable": true, "firewall disable": true, "firewall add": true,
+	"alerts": false, "alerts ack": true, "alerts suppress": true, "alerts unsuppress": true,
+	"database show": false, "database shift": true,
+	"config show": false, "config edit": true, "config set": true, "config validate": false,
+	"config backup": true, "config restore": true, "config export": false,
+	"config import": true, "config agent-port": true,
+	"template list": false, "template apply": true,
+	"key rotate": true, "key fingerprint": false, "key export-pub": false, "key audit": false,
+	"update check": false, "update apply": true, "update rollback": true, "update channel": true,
+	"sync-agent": true, "backup": true, "recover": true, "adjust-init": true,
+	"self-uninstall": true, "report": false,
+
+	"context": false, "ai": false,
+	"automation set": true, "automation get": false, "automation list": false, "automation rm": true,
+	"shell-init": true, "autocomplete": false, "autocomplete install": true,
+	"token create": true, "token list": false, "token revoke": true,
+	"secret set": true, "secret list": false, "secret rotate": true, "secret rm": true,
+	"inventory": false, "journal": false, "top": false, "cp": true,
+	"svc status": false, "svc restart": true, "svc start": true, "svc stop": true,
+	"svc enable": true, "svc disable": true,
+	"notify add": true, "notify list": false, "notify rm": true, "notify test": true,
+	"cron add": true, "cron list": false, "cron rm": true,
+	"drift": false, "drift capture": true,
+	"policy set": true, "policy show": false,
+	"agent version": false, "agent update": true,
+	"run": true, "guard": true, "confirm": true, "revert": true,
+	"doctor": false, "job run": true, "job status": false, "job wait": false,
+	"job logs": false, "jobs": false,
+	"cmd-policy set": true, "cmd-policy show": false,
+	"health":    false,
+	"fw status": false, "fw allow": true, "fw enable": true,
+	"approvals": false, "approvals list": false, "approvals reject": true, "approve": true,
+	"skill list": false, "skill claude": true, "skill codex": true, "skill agents": true,
+}
+
+// ClassifyCommandMutation returns whether a full runnable command path is
+// mutating and whether that path has been explicitly classified. Unknown paths
+// return known=false and must be denied by callers (never treated as reads).
+// `tag` is the sole argument-sensitive leaf: listing is a read, while any
+// key=value positional changes group membership and is mutating.
+func ClassifyCommandMutation(commandPath string, args []string) (mutating bool, known bool) {
+	commandPath = strings.Join(strings.Fields(strings.TrimSpace(commandPath)), " ")
+	if commandPath == "tag" {
+		for _, arg := range args {
+			if strings.Contains(arg, "=") {
+				return true, true
+			}
+		}
+		return false, true
+	}
+	mutating, known = commandMutationClassifications[commandPath]
+	return mutating, known
+}
+
+// destructiveCommands documents the legacy topCommand/subcommand compatibility
+// classification used by IsDestructiveCommand. New enforcement uses the full
+// leaf-path classifier above. A token without DestructiveAllowed cannot
 // run any of these. The list is intentionally conservative and explicit:
 //
 //	server    remove                     tears down/forgets a managed server
@@ -420,6 +513,14 @@ var configReadSubs = map[string]bool{
 func IsDestructiveCommand(topCommand, sub string, args []string) bool {
 	topCommand = strings.TrimSpace(topCommand)
 	sub = strings.TrimSpace(sub)
+
+	path := topCommand
+	if sub != "" {
+		path += " " + sub
+	}
+	if mutating, known := ClassifyCommandMutation(path, args); known {
+		return mutating
+	}
 
 	// `key`: any mutating subcommand is destructive (read subs exempted).
 	if topCommand == "key" {
@@ -566,8 +667,10 @@ func Authorize(t Token, topCommand, targetServer string, isDestructive bool, all
 		return fmt.Errorf("denied: token is read-only by default; command %q is not a read command and is not explicitly allowed", topCommand)
 	}
 
-	// 4. Destructive operations require DestructiveAllowed.
-	if isDestructive && !t.DestructiveAllowed {
+	// 4. Destructive operations require DestructiveAllowed for constrained
+	// credentials. A token with no constraints is explicitly admin-equivalent and
+	// retains full behavior for backwards compatibility.
+	if isDestructive && t.IsScoped() && !t.DestructiveAllowed {
 		return fmt.Errorf("denied: command %q is destructive and this token does not allow destructive operations", topCommand)
 	}
 

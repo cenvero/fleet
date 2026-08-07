@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,5 +69,41 @@ func TestCompletionLine(t *testing.T) {
 	}
 	if _, ok := completionLine("nonsense"); ok {
 		t.Error("unknown shell should be unsupported")
+	}
+}
+
+func TestAutomationSetDoesNotWriteThroughSymlink(t *testing.T) {
+	configDir := t.TempDir()
+	dir := automationDir(configDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "deploy.sh")
+	if err := os.Symlink(victim, target); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cmd := newAutomationSetCommand(&configDir)
+	cmd.SetArgs([]string{"deploy"})
+	cmd.SetIn(bytes.NewBufferString("echo safe\n"))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("automation set: %v", err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "unchanged" {
+		t.Fatalf("symlink target was clobbered: %q", got)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("automation target remained a symlink")
 	}
 }

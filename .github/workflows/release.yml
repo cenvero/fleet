@@ -2,23 +2,32 @@ name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
 
 jobs:
   goreleaser:
     name: Build and publish
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - name: Require release tag on main history
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          git merge-base --is-ancestor "${tag_commit}" origin/main || {
+            echo "::error::release tag commit is not an ancestor of origin/main"
+            exit 1
+          }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Validate release secrets
@@ -27,37 +36,50 @@ jobs:
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
         run: ./scripts/validate-release-env.sh
-      - name: Write minisign key
+      - name: Materialize owner-only signing key
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
+          set -euo pipefail
+          umask 077
           mkdir -p .release
           printf '%s' "${MINISIGN_SECRET_KEY}" | base64 -d > .release/minisign.key
-      - name: Sync release signing public key
+          chmod 0600 .release/minisign.key
+          test "$(stat -c '%a' .release/minisign.key)" = 600
+      - name: Sync and validate signing assets
         env:
           FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
-        run: ./scripts/sync-signing-key.sh
-      - name: Validate synced signing assets
-        env:
-          FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
-        run: ./scripts/validate-signing-assets.sh
+        run: |
+          ./scripts/sync-signing-key.sh
+          ./scripts/validate-signing-assets.sh
       - name: Install minisign
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y minisign
-      - name: Install Goreleaser
-        uses: goreleaser/goreleaser-action@v7
+      - name: Release with GoReleaser v2.17.1
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
-          version: latest
+          version: v2.17.1
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TOKEN: ${{ secrets.HOMEBREW_TOKEN }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           MINISIGN_KEY_FILE: .release/minisign.key
+      - name: Remove signing key
+        if: always()
+        run: |
+          if [ -f .release/minisign.key ]; then
+            if command -v shred >/dev/null 2>&1; then
+              shred -u .release/minisign.key
+            else
+              rm -f .release/minisign.key
+            fi
+          fi
+          rmdir .release 2>/dev/null || true
       - name: Upload release dist
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-dist
           path: dist
@@ -66,127 +88,138 @@ jobs:
     name: Update manifest
     runs-on: ubuntu-latest
     needs: goreleaser
+    environment: release
+    permissions:
+      actions: read
+      contents: write
     outputs:
       sha: ${{ steps.manifest-commit.outputs.sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/download-artifact@v8
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-dist
           path: dist
-      - name: Debug artifacts
+      - name: Require release tag on current main history
         run: |
-          echo "=== Archive entries in artifacts.json ==="
-          jq '[.[] | select(.type == "Archive" or .type == "Zip") | {type, name, goos, goarch, binary: (.extra.Binary // .extra.Binaries[0])}]' dist/artifacts.json
+          set -euo pipefail
+          git fetch --no-tags origin main
+          tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          git merge-base --is-ancestor "${tag_commit}" origin/main || {
+            echo "::error::release tag commit is not an ancestor of origin/main"
+            exit 1
+          }
+          git reset --hard origin/main
       - name: Select channel
         id: channel
         run: |
-          if printf '%s' "${GITHUB_REF_NAME}" | grep -Eq -- '-alpha\.'; then
-            echo "value=alpha" >> "${GITHUB_OUTPUT}"
-          elif printf '%s' "${GITHUB_REF_NAME}" | grep -Eq -- '-(beta|rc)\.'; then
-            echo "value=beta" >> "${GITHUB_OUTPUT}"
-          else
-            echo "value=stable" >> "${GITHUB_OUTPUT}"
+          if [[ "${GITHUB_REF_NAME}" =~ -alpha\. ]]; then echo "value=alpha" >>"${GITHUB_OUTPUT}"
+          elif [[ "${GITHUB_REF_NAME}" =~ -(beta|rc)\. ]]; then echo "value=beta" >>"${GITHUB_OUTPUT}"
+          else echo "value=stable" >>"${GITHUB_OUTPUT}"
           fi
-      - name: Sync signing key files
+      - name: Install minisign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y minisign
+      - name: Generate and validate manifest
         env:
           FLEET_MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
-        run: ./scripts/sync-signing-key.sh
-      - name: Update manifest metadata
-        env:
           FLEET_VERSION: ${{ github.ref_name }}
           FLEET_CHANNEL: ${{ steps.channel.outputs.value }}
           FLEET_RELEASE_NOTES_URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
           FLEET_REPOSITORY: ${{ github.repository }}
         run: |
-          # Assign then export separately so a date(1) failure is not masked by
-          # export's own exit status.
+          set -euo pipefail
+          ./scripts/sync-signing-key.sh
           FLEET_RELEASE_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           export FLEET_RELEASE_DATE
           ./scripts/update-manifest.sh
-      - name: Validate generated manifest
-        env:
-          FLEET_VERSION: ${{ github.ref_name }}
-          FLEET_REPOSITORY: ${{ github.repository }}
-        run: ./scripts/validate-release-manifest.sh
-      - name: Commit manifest
+          ./scripts/validate-release-manifest.sh
+      - name: Commit manifest without rebasing tag history
         id: manifest-commit
         run: |
-          git config user.name "cenvero-bot"
-          git config user.email "276044322+cenvero-bot@users.noreply.github.com"
+          set -euo pipefail
+          git config user.name cenvero-bot
+          git config user.email 276044322+cenvero-bot@users.noreply.github.com
           git add public/manifest.json public/signing.pub public/install.sh public/install.ps1 internal/update/signing.pub
-          git commit -m "chore(release): update manifest for ${GITHUB_REF_NAME}" || true
-          git pull --rebase origin main
+          git diff --cached --quiet && { echo "::error::release produced no manifest change"; exit 1; }
+          git commit -m "chore(release): update manifest for ${GITHUB_REF_NAME}"
+          # A concurrent main update causes a non-fast-forward failure. Never
+          # rebase/cherry-pick the release tag history into main automatically.
           git push origin HEAD:main
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >>"${GITHUB_OUTPUT}"
 
   smoke-test:
     name: Smoke test release
     runs-on: ubuntu-latest
     needs: goreleaser
+    permissions:
+      contents: read
     steps:
       - name: Install minisign
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y minisign
-      - name: List release assets
+      - name: Require complete signed release asset matrix
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Assets for ${GITHUB_REF_NAME}:"
-          gh release view "${GITHUB_REF_NAME}" \
-            --repo "${{ github.repository }}" \
-            --json assets \
-            --jq '.assets[].name'
-      - name: Download archive
+          set -euo pipefail
+          assets="$(gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')"
+          version="${GITHUB_REF_NAME#v}"
+          for binary in fleet fleet-agent; do
+            for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64 linux_armv7 windows_amd64 windows_arm64; do
+              ext=tar.gz; [[ "${target}" == windows_* ]] && ext=zip
+              name="${binary}_${version}_${target}.${ext}"
+              grep -Fx "${name}" <<<"${assets}" >/dev/null
+              grep -Fx "${name}.minisig" <<<"${assets}" >/dev/null
+            done
+          done
+      - name: Download and verify Linux archives
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release download "${GITHUB_REF_NAME}" \
-            --repo "${{ github.repository }}" \
-            --pattern "fleet_*_linux_amd64.tar.gz" \
-            --pattern "fleet_*_linux_amd64.tar.gz.minisig" \
-            --dir .
-      - name: Verify signature
-        env:
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
         run: |
-          key_payload="$(printf '%s\n' "${MINISIGN_PUBLIC_KEY}" | awk 'NF { line = $0 } END { print line }')"
-          [ -n "${key_payload}" ] || {
-            echo "minisign public key payload missing" >&2
-            exit 1
-          }
-          [ "${key_payload}" != "REPLACE_WITH_MINISIGN_PUBLIC_KEY" ] || {
-            echo "minisign public key placeholder is not allowed" >&2
-            exit 1
-          }
-          archive="$(ls fleet_*_linux_amd64.tar.gz)"
-          minisign -Vm "${archive}" -P "${key_payload}" -x "${archive}.minisig"
-      - name: Verify binary runs
-        run: |
-          archive="$(ls fleet_*_linux_amd64.tar.gz)"
-          tar -xzf "${archive}"
+          set -euo pipefail
+          gh release download "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" \
+            --pattern 'fleet_*_linux_amd64.tar.gz' --pattern 'fleet_*_linux_amd64.tar.gz.minisig' \
+            --pattern 'fleet-agent_*_linux_amd64.tar.gz' --pattern 'fleet-agent_*_linux_amd64.tar.gz.minisig'
+          pub="$(printf '%s\n' "${MINISIGN_PUBLIC_KEY}" | awk 'NF{line=$0}END{print line}')"
+          version="${GITHUB_REF_NAME}"
+          for binary in fleet fleet-agent; do
+            archive="$(find . -maxdepth 1 -name "${binary}_*_linux_amd64.tar.gz" -print -quit)"
+            test -n "${archive}"
+            minisign -Vm "${archive}" -P "${pub}" -x "${archive}.minisig" >/dev/null
+            comment="$(sed -n '3s/^trusted comment: //p' "${archive}.minisig")"
+            test "${comment}" = "cenvero-fleet ${binary} ${version} linux-amd64"
+          done
+          tar -xzf "$(find . -maxdepth 1 -name 'fleet_*_linux_amd64.tar.gz' -print -quit)"
           ./fleet --version
 
   deploy-pages:
     name: Deploy Pages
     runs-on: ubuntu-latest
-    # Deploy Pages LAST — only after the manifest is committed (update-manifest)
-    # AND the release smoke test passes — so the published site always reflects a
-    # verified release with its committed manifest.
     needs: [update-manifest, smoke-test]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     concurrency:
       group: pages-deployment
       cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.update-manifest.outputs.sha }}
-      - uses: actions/configure-pages@v6
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: public
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

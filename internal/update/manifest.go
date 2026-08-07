@@ -7,8 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"time"
@@ -53,7 +54,7 @@ type Manifest struct {
 }
 
 func ReadFile(path string) (Manifest, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- reading an explicitly operator-selected local manifest is the function contract
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest: %w", err)
 	}
@@ -68,19 +69,20 @@ func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
 	if manifestURL == "" {
 		manifestURL = DefaultManifestURL
 	}
-	// Same scheme allowlist as artifact downloads: https only (http only for a
-	// loopback mirror). Rejects file://, ftp://, etc. so a poisoned config can't
-	// point the manifest fetch at a local file or an odd scheme.
-	if err := validateDownloadScheme(manifestURL); err != nil {
+	parsed, err := url.Parse(manifestURL)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("parse manifest URL: %w", err)
+	}
+	if err := validateUpdateDestination(ctx, net.DefaultResolver, parsed); err != nil {
 		return Manifest{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("create manifest request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newUpdateHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("fetch manifest: %w", err)
@@ -91,16 +93,9 @@ func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("unexpected manifest status %s", resp.Status)
 	}
 
-	// Bound the manifest body before decoding so a malicious/oversized response
-	// cannot exhaust memory. We allow one extra byte so we can distinguish a
-	// body that is exactly at the limit from one that overruns it.
-	limited := io.LimitReader(resp.Body, maxManifestBytes+1)
-	body, err := io.ReadAll(limited)
+	body, err := readBoundedHTTPBody(resp.Body, maxManifestBytes, "manifest")
 	if err != nil {
-		return Manifest{}, fmt.Errorf("read manifest body: %w", err)
-	}
-	if int64(len(body)) > maxManifestBytes {
-		return Manifest{}, fmt.Errorf("manifest exceeds maximum size of %d bytes", maxManifestBytes)
+		return Manifest{}, err
 	}
 
 	var manifest Manifest
@@ -120,7 +115,7 @@ func (m Manifest) BinaryForTarget(channel string, agent bool, goos, goarch strin
 		return "", BinaryInfo{}, fmt.Errorf("channel %q not found", channel)
 	}
 
-	target := goos + "-" + goarch
+	target := canonicalUpdateTarget(goos, goarch)
 	binaries := m.Binaries
 	if agent {
 		binaries = m.AgentBinaries

@@ -223,20 +223,44 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 			return err
 		}
 	} else {
-		// Remote: copy the archive to a private, unpredictably-named temp, then
-		// validate + extract THAT copy. Operating on the copy (not the original)
-		// closes the validate/extract TOCTOU — a local attacker can no longer swap
-		// the archive between the member-check and the extraction.
-		staged, err := a.stageRemoteArchiveCopy(server, archivePath)
+		// Remote extraction is relayed through the hardened file RPC surface rather
+		// than an unsandboxed shell extractor. The archive is downloaded to a
+		// private controller directory, extracted with os.Root confinement, then
+		// uploaded member-by-member; agent finalization atomically replaces link
+		// entries instead of following them.
+		stageDir, err := os.MkdirTemp("", "fleet-remote-extract-*")
 		if err != nil {
 			return err
 		}
-		defer func() { _ = a.runRemoteShell(server, "rm -rf "+shellQuote(path.Dir(staged))) }()
-		if err := a.validateRemoteArchiveMembers(server, staged); err != nil {
+		defer os.RemoveAll(stageDir)
+		localArchive := filepath.Join(stageDir, path.Base(archivePath))
+		if _, err := a.DownloadFile(server, archivePath, localArchive, FileTransferOptions{}, nil); err != nil {
+			return fmt.Errorf("download archive for extraction: %w", err)
+		}
+		extracted := filepath.Join(stageDir, "members")
+		if err := os.Mkdir(extracted, 0o700); err != nil {
 			return err
 		}
-		if err := a.runRemoteShell(server, extractCmdToDir(staged, destDir)); err != nil {
+		if err := a.extractLocal(localArchive, extracted); err != nil {
 			return err
+		}
+		if err := filepath.WalkDir(extracted, func(local string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(extracted, local)
+			if err != nil || rel == "." {
+				return err
+			}
+			return a.RemoteMkdir(server, path.Join(destDir, filepath.ToSlash(rel)))
+		}); err != nil {
+			return fmt.Errorf("create extracted directories: %w", err)
+		}
+		if _, err := a.UploadDir(server, extracted, destDir, FileTransferOptions{}, nil); err != nil {
+			return fmt.Errorf("upload extracted members: %w", err)
 		}
 	}
 	a.auditArchive("file.extract", server, archivePath)
@@ -254,12 +278,10 @@ func (a *App) extractLocal(archivePath, destDir string) error {
 	case strings.HasSuffix(low, ".zip"):
 		return extractZipNative(archivePath, destDir)
 	case strings.HasSuffix(low, ".tar.xz"):
-		// No stdlib xz reader, so we must shell out to tar twice (list to
-		// validate, then extract). Running both against the ORIGINAL path is a
-		// validate-then-extract TOCTOU: a local attacker could swap the file
-		// between the member-check and the extraction. Stage a private 0700 copy
-		// (mirroring the remote path's stageRemoteArchiveCopy) and bind both
-		// operations to that agent-private, unpredictably-named file instead.
+		// The stdlib has no xz reader. Validate a private archive copy, extract it
+		// into a fresh private directory, then merge through the same root-scoped
+		// atomic copy primitive as all other local extraction paths. External tar
+		// therefore never sees the operator's destination tree or its symlinks.
 		staged, cleanup, err := stageLocalArchiveCopy(archivePath)
 		if err != nil {
 			return err
@@ -268,8 +290,19 @@ func (a *App) extractLocal(archivePath, destDir string) error {
 		if err := validateTarXZMembers(staged); err != nil {
 			return err
 		}
-		tool, args := extractArgv(staged, destDir)
-		return runLocalTool("", tool, args)
+		members, err := os.MkdirTemp("", "fleet-xz-members-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(members)
+		if err := os.Chmod(members, 0o700); err != nil { // #nosec G302 -- directory is private but requires the owner execute bit for traversal
+			return err
+		}
+		tool, args := extractArgv(staged, members)
+		if err := runLocalTool("", tool, args); err != nil {
+			return err
+		}
+		return CopyLocalTreeAtomic(members, destDir)
 	default:
 		// tar, tar.gz/.tgz, tar.bz2 — all handled by streaming readers.
 		return extractTarNative(archivePath, destDir)
@@ -314,6 +347,21 @@ func archiveMemberSafe(name string) bool {
 	return true
 }
 
+// archiveMemberRel converts a validated archive member to an os.Root-relative
+// platform path. Validation is repeated here so callers cannot accidentally use
+// it without first rejecting traversal and absolute names.
+func archiveMemberRel(name string) (string, error) {
+	if !archiveMemberSafe(name) {
+		return "", fmt.Errorf("member escapes the destination")
+	}
+	slashed := path.Clean(strings.ReplaceAll(name, "\\", "/"))
+	rel := filepath.FromSlash(slashed)
+	if !safeRel(rel) {
+		return "", fmt.Errorf("member escapes the destination")
+	}
+	return rel, nil
+}
+
 // extractZipNative extracts a zip archive, writing each member through
 // SafeLocalJoin so a "../" or absolute member cannot escape destDir.
 func extractZipNative(archivePath, destDir string) error {
@@ -322,37 +370,40 @@ func extractZipNative(archivePath, destDir string) error {
 		return fmt.Errorf("open zip: %w", err)
 	}
 	defer zr.Close()
+	root, err := openVerifiedLocalDir(destDir, 0o750)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	lim := newExtractLimiter()
 	for _, f := range zr.File {
-		target, err := SafeLocalJoin(destDir, f.Name)
+		rel, err := archiveMemberRel(f.Name)
 		if err != nil {
 			return fmt.Errorf("refusing zip member %q: %w", f.Name, err)
 		}
 		info := f.FileInfo()
 		if info.IsDir() {
-			if err := os.MkdirAll(target, 0o750); err != nil {
+			if err := root.MkdirAll(rel, 0o750); err != nil {
 				return err
 			}
 			continue
 		}
-		// Skip symlinks and other non-regular members: a symlink could point
-		// outside destDir and a later member could then be written through it.
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		// Aggregate cap: refuse once the archive exceeds the whole-archive member
-		// count, before opening/creating yet another file.
 		if err := lim.member(); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return err
+		if dir := filepath.Dir(rel); dir != "." {
+			if err := root.MkdirAll(dir, 0o750); err != nil {
+				return err
+			}
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		if err := writeArchiveFile(target, rc, info.Mode().Perm(), lim); err != nil {
+		if err := writeArchiveFileRoot(root, rel, rc, info.Mode().Perm(), lim); err != nil {
 			_ = rc.Close()
 			return err
 		}
@@ -384,6 +435,11 @@ func extractTarNative(archivePath, destDir string) error {
 		src = bzip2.NewReader(f)
 	}
 
+	root, err := openVerifiedLocalDir(destDir, 0o750)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	tr := tar.NewReader(src)
 	lim := newExtractLimiter()
 	for {
@@ -394,30 +450,28 @@ func extractTarNative(archivePath, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("read tar: %w", err)
 		}
-		target, err := SafeLocalJoin(destDir, hdr.Name)
+		rel, err := archiveMemberRel(hdr.Name)
 		if err != nil {
 			return fmt.Errorf("refusing tar member %q: %w", hdr.Name, err)
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil {
+			if err := root.MkdirAll(rel, 0o750); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			// Aggregate cap: refuse once the archive exceeds the whole-archive
-			// member count, before opening/creating yet another file.
 			if err := lim.member(); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-				return err
+			if dir := filepath.Dir(rel); dir != "." {
+				if err := root.MkdirAll(dir, 0o750); err != nil {
+					return err
+				}
 			}
-			if err := writeArchiveFile(target, tr, os.FileMode(hdr.Mode&0o7777).Perm(), lim); err != nil { // #nosec G115 -- masked to 0o7777
+			if err := writeArchiveFileRoot(root, rel, tr, os.FileMode(hdr.Mode&0o7777).Perm(), lim); err != nil { // #nosec G115 -- masked to 0o7777
 				return err
 			}
 		default:
-			// Skip symlinks/hardlinks/devices: a symlink could later be used to
-			// redirect a write outside destDir.
 			continue
 		}
 	}
@@ -429,36 +483,43 @@ func extractTarNative(archivePath, destDir string) error {
 // by the whole-archive byte budget so a decompression bomb (one giant member or
 // many large members) cannot exhaust the controller's disk.
 func writeArchiveFile(target string, r io.Reader, perm os.FileMode, lim *extractLimiter) error {
-	if perm == 0 {
-		perm = 0o600
-	}
-	// O_NOFOLLOW makes the open fail (ELOOP) if target's final component is an
-	// existing symlink, so a symlink pre-planted in the operator-chosen
-	// destination cannot redirect this write outside the destination directory.
-	// This backs up the symlink-member skip in the extractors (which only stops
-	// links carried *inside* the archive). O_EXCL is too strict because parent
-	// directories may pre-exist; the file itself is created fresh and truncated.
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, perm) // #nosec G304 -- target validated via SafeLocalJoin; O_NOFOLLOW refuses a symlinked target
+	root, err := openVerifiedLocalDir(filepath.Dir(target), 0o750)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	// Per-member cap plus the remaining whole-archive budget: copy at most the
-	// smaller of the two so neither a single bomb member nor the aggregate can
-	// overflow.
+	defer root.Close()
+	return writeArchiveFileRoot(root, filepath.Base(target), r, perm, lim)
+}
+
+func writeArchiveFileRoot(root *os.Root, rel string, r io.Reader, perm os.FileMode, lim *extractLimiter) error {
+	if perm == 0 {
+		perm = 0o600
+	}
+	id, err := randomLocalTransferID()
+	if err != nil {
+		return err
+	}
+	out, err := openAtomicLocalFileInRoot(root, rel, id, perm, false)
+	if err != nil {
+		return err
+	}
+	defer out.Abort()
 	limit := maxExtractedFileBytes
 	if rem := lim.remainingBytes(); rem < limit {
 		limit = rem
 	}
-	n, err := io.Copy(out, io.LimitReader(r, limit+1))
+	n, err := io.Copy(out.File(), io.LimitReader(r, limit+1))
 	if err != nil {
 		return err
 	}
 	if n > limit {
 		return fmt.Errorf("refusing to extract archive: %w", errExtractBudgetExceeded)
 	}
+	if err := out.File().Chmod(perm); err != nil {
+		return err
+	}
 	lim.addBytes(n)
-	return nil
+	return out.Commit()
 }
 
 // maxExtractedFileBytes caps a single extracted member's size to bound a
@@ -533,7 +594,7 @@ func stageLocalArchiveCopy(archivePath string) (staged string, cleanup func(), e
 	}
 	defer src.Close()
 	staged = filepath.Join(dir, filepath.Base(archivePath))
-	dst, err := os.OpenFile(staged, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+	dst, err := os.OpenFile(staged, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600) // #nosec G304 -- path is generated inside an owner-only archive staging directory
 	if err != nil {
 		cleanup()
 		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
@@ -548,75 +609,6 @@ func stageLocalArchiveCopy(archivePath string) (staged string, cleanup func(), e
 		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
 	}
 	return staged, cleanup, nil
-}
-
-// stageRemoteArchiveCopy copies archivePath into a fresh 0700 temp dir on the
-// server (preserving the base name so format detection by extension still works)
-// and returns the copy's path. Validating + extracting the COPY closes the
-// validate/extract TOCTOU: both operations read this agent-private,
-// unpredictably-named file, so a local attacker cannot swap the archive between
-// the member-check and the extraction. The caller removes the temp dir.
-func (a *App) stageRemoteArchiveCopy(server, archivePath string) (string, error) {
-	qbase := shellQuote(path.Base(archivePath))
-	cmd := `d=$(mktemp -d) && cp -- ` + shellQuote(archivePath) + ` "$d"/` + qbase +
-		` && chmod 600 "$d"/` + qbase + ` && printf '%s' "$d"/` + qbase
-	res, err := a.ExecCommand(server, cmd)
-	if err != nil {
-		return "", err
-	}
-	if res.ExitCode != 0 {
-		return "", fmt.Errorf("stage archive copy: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
-	}
-	tmp := strings.TrimSpace(res.Stdout)
-	if tmp == "" || !strings.Contains(tmp, "/") {
-		return "", fmt.Errorf("stage archive copy: unexpected temp path %q", tmp)
-	}
-	return tmp, nil
-}
-
-// validateRemoteArchiveMembers lists the members of a remote archive via the
-// agent's shell.exec (the same path the extract uses) and returns an error if
-// ANY member is absolute or contains a "..". This blocks zip-slip on a node
-// where extraction would otherwise run unsandboxed (outside --file-root).
-func (a *App) validateRemoteArchiveMembers(server, archivePath string) error {
-	cmd, parse := listMembersCmd(archivePath)
-	res, err := a.ExecCommand(server, cmd)
-	if err != nil {
-		return err
-	}
-	if res.ExitCode != 0 {
-		return fmt.Errorf("list archive members: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
-	}
-	if err := rejectUnsafeMembers(parse(res.Stdout)); err != nil {
-		return err
-	}
-	// A name-only check cannot see member TYPE: a symlink/hardlink member (e.g.
-	// "x" -> "/etc/cron.d") followed by a regular member written THROUGH it
-	// ("x/evil") escapes the destination even though both names are
-	// traversal-free, because tar/unzip follow the planted link on extract. List
-	// members verbosely and refuse any non-regular/dir member.
-	vres, err := a.ExecCommand(server, verboseListMembersCmd(archivePath))
-	if err != nil {
-		return err
-	}
-	if vres.ExitCode != 0 {
-		return fmt.Errorf("list archive members (verbose): exit %d: %s", vres.ExitCode, strings.TrimSpace(vres.Stderr))
-	}
-	if unsafe, line := archiveListingHasUnsafeType(vres.Stdout); unsafe {
-		return fmt.Errorf("refusing to extract archive: it contains a non-regular member (symlink/hardlink/special) that can write outside the destination: %q", strings.TrimSpace(line))
-	}
-	return nil
-}
-
-// verboseListMembersCmd builds the shell command (path shell-quoted) that lists
-// an archive's members WITH ls-style type+permission info so a symlink/hardlink
-// member can be detected. zip uses `unzip -Z`, the tar family `tar -tvf`.
-func verboseListMembersCmd(archivePath string) string {
-	a := shellQuote(archivePath)
-	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
-		return fmt.Sprintf("unzip -Z %s", a)
-	}
-	return fmt.Sprintf("tar -tvf %s", a)
 }
 
 // archiveListingHasUnsafeType reports whether a verbose `tar -tvf` / `unzip -Z`
@@ -672,17 +664,6 @@ func rejectUnsafeMembers(members []string) error {
 		}
 	}
 	return nil
-}
-
-// listMembersCmd builds the shell command (path shell-quoted) that lists an
-// archive's members and a parser for its stdout. zip uses `unzip -Z1`, the tar
-// family uses `tar -tf` (auto-detecting gz/bz2/xz from the stream).
-func listMembersCmd(archivePath string) (cmd string, parse func(string) []string) {
-	a := shellQuote(archivePath)
-	if strings.HasSuffix(strings.ToLower(archivePath), ".zip") {
-		return fmt.Sprintf("unzip -Z1 %s", a), splitMemberLines
-	}
-	return fmt.Sprintf("tar -tf %s", a), splitMemberLines
 }
 
 // splitMemberLines splits a tool's newline-separated member listing into trimmed

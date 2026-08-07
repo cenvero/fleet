@@ -2275,45 +2275,68 @@ function hlInlineMd(s) {
 }
 
 function hlXML(src) {
+  // Escape the ENTIRE untrusted document first. From this point on every slice
+  // is inert text; the only literal tags introduced are our fixed <span>s.
+  const safe = escHTML(src);
   let out = "";
   let i = 0;
-  const n = src.length;
+  const n = safe.length;
   while (i < n) {
-    if (src.startsWith("<!--", i)) {
-      const end = src.indexOf("-->", i);
-      const stop = end < 0 ? n : end + 3;
-      out += span("cm", src.slice(i, stop));
+    if (safe.startsWith("&lt;!--", i)) {
+      const end = safe.indexOf("--&gt;", i);
+      const stop = end < 0 ? n : end + 6;
+      out += spanEscaped("cm", safe.slice(i, stop));
       i = stop;
       continue;
     }
-    if (src[i] === "<") {
-      const end = src.indexOf(">", i);
-      const stop = end < 0 ? n : end + 1;
-      out += hlTag(src.slice(i, stop));
+    if (safe.startsWith("&lt;", i)) {
+      const end = safe.indexOf("&gt;", i);
+      const stop = end < 0 ? n : end + 4;
+      out += hlEscapedTag(safe.slice(i, stop));
       i = stop;
       continue;
     }
-    const lt = src.indexOf("<", i);
+    const lt = safe.indexOf("&lt;", i);
     const stop = lt < 0 ? n : lt;
-    out += escHTML(src.slice(i, stop));
+    out += safe.slice(i, stop);
     i = stop;
   }
   return out;
 }
 
-function hlTag(tag) {
-  // <tag attr="val"> → tag name + attrs + strings
+function spanEscaped(cls, safeText) {
+  return '<span class="hl-' + cls + '">' + safeText + "</span>";
+}
+
+function hlEscapedTag(tag) {
   let out = "&lt;";
-  let body = tag.slice(1, tag.endsWith(">") ? -1 : undefined);
-  let closing = "";
-  if (tag.endsWith(">")) closing = "&gt;";
+  let body = tag.slice(4, tag.endsWith("&gt;") ? -4 : undefined);
+  const closing = tag.endsWith("&gt;") ? "&gt;" : "";
   const nameMatch = body.match(/^\/?[A-Za-z0-9:-]+/);
   if (nameMatch) {
-    out += span("ky", nameMatch[0]);
+    out += spanEscaped("ky", nameMatch[0]);
     body = body.slice(nameMatch[0].length);
   }
-  out += body.replace(/("[^"]*"|'[^']*')/g, (m) => span("st", m))
-             .replace(/([A-Za-z-]+)(=)/g, (m, a, eq) => '<span class="hl-nm">' + escHTML(a) + "</span>" + escHTML(eq));
+  let i = 0;
+  while (i < body.length) {
+    const q = body[i];
+    if (q === '"' || q === "'") {
+      let end = i + 1;
+      while (end < body.length && body[end] !== q) end++;
+      if (end < body.length) end++;
+      out += spanEscaped("st", body.slice(i, end));
+      i = end;
+      continue;
+    }
+    const attr = body.slice(i).match(/^([A-Za-z_:][A-Za-z0-9_.:-]*)(\s*=)/);
+    if (attr) {
+      out += spanEscaped("nm", attr[1]) + attr[2];
+      i += attr[0].length;
+      continue;
+    }
+    out += body[i];
+    i++;
+  }
   return out + closing;
 }
 

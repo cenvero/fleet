@@ -106,7 +106,7 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	runCtx, cancel := context.WithTimeout(ctx, defaultExecTimeout)
 	defer cancel()
 
-	cmd := exec.Command("/bin/sh", "-c", payload.Command) //nolint:gosec
+	cmd := exec.Command("/bin/sh", "-c", payload.Command) // #nosec G204 -- authenticated shell.exec RPC intentionally executes the operator command
 	// Setpgid puts the shell and everything it spawns in a new process group so we
 	// can signal the whole tree at once on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

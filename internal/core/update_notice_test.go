@@ -75,3 +75,17 @@ func TestUpgradeCommandNonEmpty(t *testing.T) {
 		t.Fatalf("unexpected upgrade command: %q", cmd)
 	}
 }
+
+func TestIsNewerVersionUsesStrictSemVer(t *testing.T) {
+	if !isNewerVersion("v1.0.0-beta.11", "v1.0.0-beta.2") {
+		t.Fatal("numeric prerelease identifiers were not ordered by SemVer precedence")
+	}
+	if isNewerVersion("v1.0.0-rc.1", "v1.0.0") {
+		t.Fatal("prerelease incorrectly considered newer than release")
+	}
+	for _, malformed := range []string{"1.0", "v1.0.0-01", "not-a-version"} {
+		if isNewerVersion(malformed, "v1.0.0") {
+			t.Fatalf("malformed candidate %q did not fail closed", malformed)
+		}
+	}
+}

@@ -164,3 +164,36 @@ func TestSkillAgentsAppendIdempotent(t *testing.T) {
 		t.Fatalf("fleet section duplicated on second run")
 	}
 }
+
+func TestSkillInstallDoesNotWriteThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(dir, "skills", "cenvero-fleet")
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "SKILL.md")
+	if err := os.Symlink(victim, target); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := runFleet(t, "skill", "claude", "--dir", dir); err != nil {
+		t.Fatalf("skill claude: %v", err)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "unchanged" {
+		t.Fatalf("symlink target was clobbered: %q", got)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("skill target remained a symlink")
+	}
+}

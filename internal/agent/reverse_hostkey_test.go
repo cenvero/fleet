@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -84,6 +85,10 @@ func TestReverseAcceptNewHostKeyOnlyFirstAttempt(t *testing.T) {
 	dir := t.TempDir()
 	knownHosts := filepath.Join(dir, "known_hosts")
 	hostKeyPath := filepath.Join(dir, "agent_host_key")
+	enrollTokenPath := filepath.Join(dir, "enroll.token")
+	if err := os.WriteFile(enrollTokenPath, []byte("one-use-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	firstKey := newTestHostSigner(t)
 	secondKey := newTestHostSigner(t)
@@ -112,13 +117,15 @@ func TestReverseAcceptNewHostKeyOnlyFirstAttempt(t *testing.T) {
 	}
 
 	opts := ReverseOptions{
-		ControllerAddress:  controllerAddr,
-		ServerName:         "rev",
-		KnownHostsPath:     knownHosts,
-		AcceptNewHostKey:   true, // honored on the first attempt only
-		MinRetryDelay:      time.Millisecond,
-		MaxRetryDelay:      2 * time.Millisecond,
-		NetworkDialContext: dial,
+		ControllerAddress:     controllerAddr,
+		ControllerFingerprint: ssh.FingerprintSHA256(firstKey.PublicKey()),
+		ServerName:            "rev",
+		EnrollTokenPath:       enrollTokenPath,
+		KnownHostsPath:        knownHosts,
+		AcceptNewHostKey:      true, // honored on the first attempt only
+		MinRetryDelay:         time.Millisecond,
+		MaxRetryDelay:         2 * time.Millisecond,
+		NetworkDialContext:    dial,
 	}
 
 	server := Server{
@@ -152,6 +159,9 @@ func TestReverseAcceptNewHostKeyOnlyFirstAttempt(t *testing.T) {
 	}
 	cancel()
 	<-done
+	if _, err := os.Stat(enrollTokenPath); !os.IsNotExist(err) {
+		t.Fatalf("consumed enrollment token file was not removed: %v", err)
+	}
 
 	// The pinned key must still be firstKey — the changed key on later reconnects
 	// must NOT have replaced it despite AcceptNewHostKey being set at startup.
@@ -175,5 +185,59 @@ func assertPinnedKeyIs(t *testing.T, knownHosts, address string, wantKey, otherK
 	}
 	if err := cb(address, remote, otherKey); err == nil {
 		t.Fatal("a changed host key must be rejected — accept-new-host-key must NOT have re-pinned on reconnect")
+	}
+}
+
+func TestVerifiedControllerHostKeyRequiredForFirstEnrollment(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	address := "127.0.0.1:9443"
+	key := newTestHostSigner(t).PublicKey()
+	remote := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9443}
+
+	cb, err := verifiedControllerHostKeyCallback(path, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cb(address, remote, key); err == nil {
+		t.Fatal("first enrollment without a verified controller fingerprint must fail")
+	}
+	if data, _ := os.ReadFile(path); len(data) != 0 {
+		t.Fatalf("unverified key was pinned: %q", data)
+	}
+
+	cb, err = verifiedControllerHostKeyCallback(path, ssh.FingerprintSHA256(newTestHostSigner(t).PublicKey()), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cb(address, remote, key); err == nil {
+		t.Fatal("mismatched controller fingerprint must fail")
+	}
+	if data, _ := os.ReadFile(path); len(data) != 0 {
+		t.Fatalf("mismatched key was pinned: %q", data)
+	}
+
+	cb, err = verifiedControllerHostKeyCallback(path, ssh.FingerprintSHA256(key), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cb(address, remote, key); err != nil {
+		t.Fatalf("verified first key should pin: %v", err)
+	}
+}
+
+func TestRunReverseAllowsMissingConsumedEnrollmentFile(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := RunReverse(ctx, ReverseOptions{
+		ControllerAddress:     "127.0.0.1:9443",
+		ControllerFingerprint: ssh.FingerprintSHA256(newTestHostSigner(t).PublicKey()),
+		ServerName:            "rev",
+		EnrollTokenPath:       filepath.Join(t.TempDir(), "already-consumed.token"),
+		KnownHostsPath:        filepath.Join(t.TempDir(), "known_hosts"),
+	}, Server{Mode: transport.ModeReverse, HostKeyPath: filepath.Join(t.TempDir(), "agent-key")})
+	if err != nil {
+		t.Fatalf("missing consumed enrollment file should not break restart: %v", err)
 	}
 }

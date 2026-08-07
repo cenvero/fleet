@@ -146,3 +146,39 @@ func TestPrecreateSQLiteFilesAreOwnerOnly(t *testing.T) {
 		t.Fatalf("db perms after re-run = %o, want 0600", perm)
 	}
 }
+
+func TestSnapshotSQLiteIncludesCommittedWALData(t *testing.T) {
+	base := t.TempDir()
+	cfg := DefaultDatabaseConfig(base)
+	st, err := Open(cfg, WorkloadState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.PutState("wal-only", "committed"); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := st.SnapshotSQLite(t.Context(), destination); err != nil {
+		t.Fatalf("SnapshotSQLite(): %v", err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("snapshot permissions = %o, want 0600", got)
+	}
+
+	restoredCfg := DefaultDatabaseConfig(t.TempDir())
+	restoredCfg.SQLite.StatePath = destination
+	restored, err := Open(restoredCfg, WorkloadState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if got, err := restored.GetState("wal-only"); err != nil || got != "committed" {
+		t.Fatalf("snapshot value = %q, %v", got, err)
+	}
+}

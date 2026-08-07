@@ -5,7 +5,6 @@ package tui
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -309,24 +308,11 @@ func duplicateName(name string, existing map[string]bool) string {
 // copyLocalFile copies a single local file's contents (and permission bits) to a
 // new path, used by Duplicate for the Local pane.
 func copyLocalFile(src, dst string) error {
-	in, err := os.Open(src) // #nosec G304 -- operator-selected path
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	info, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
+	return core.CopyLocalFileAtomic(src, dst, info.Mode())
 }
 
 // ============================================================================

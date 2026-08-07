@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -285,12 +286,9 @@ func TestFileManagerWriteFinalizeConcurrent(t *testing.T) {
 	}
 }
 
-// TestMkdirRefusesEscapingSymlink proves the pre-syscall re-Lstat
-// (recheckFinalComponent) refuses Mkdir/Rename/Delete when the final component
-// is a symlink that resolves outside the allowed roots — the planted-symlink
-// escape that os.MkdirAll/os.Rename/os.RemoveAll would otherwise follow because
-// they have no O_NOFOLLOW equivalent.
-func TestMkdirRenameDeleteRefuseEscapingSymlink(t *testing.T) {
+// TestMkdirAndLinkEntrySemantics proves mkdir refuses an escaping final link,
+// while delete and rename act on symlink entries without dereferencing targets.
+func TestMkdirAndLinkEntrySemantics(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir() // outside the sandbox
 	SetAllowedFileRoots([]string{root})
@@ -316,27 +314,62 @@ func TestMkdirRenameDeleteRefuseEscapingSymlink(t *testing.T) {
 		t.Fatalf("Mkdir onto an escaping symlink must be refused")
 	}
 
-	// Rename target that is a planted symlink-to-outside must be refused.
+	// Rename onto a symlink replaces the link entry itself; it must not operate on
+	// or create anything at the symlink target outside the sandbox.
 	src := filepath.Join(root, "src.txt")
 	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	outsideRenameTarget := filepath.Join(outside, "renamed")
 	renLink := filepath.Join(root, "rename-link")
-	if err := os.Symlink(filepath.Join(outside, "renamed"), renLink); err != nil {
+	if err := os.Symlink(outsideRenameTarget, renLink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Rename(ctx, proto.FileRenamePayload{From: src, To: renLink}); err == nil {
-		t.Fatalf("Rename onto an escaping symlink must be refused")
+	if _, err := m.Rename(ctx, proto.FileRenamePayload{From: src, To: renLink}); err != nil {
+		t.Fatalf("Rename should replace the symlink entry: %v", err)
+	}
+	if got, err := os.ReadFile(renLink); err != nil || string(got) != "x" {
+		t.Fatalf("renamed entry mismatch: %q err=%v", got, err)
+	}
+	if _, err := os.Stat(outsideRenameTarget); !os.IsNotExist(err) {
+		t.Fatalf("rename followed the symlink target: %v", err)
 	}
 
-	// Delete of a planted symlink-to-outside must be refused (would RemoveAll the
-	// link's target tree). validateTransferPath EvalSymlinks the path, but if that
-	// resolution is bypassed/raced the final re-Lstat still catches it; here we
-	// assert the escaping target itself is out of bounds.
-	if _, err := m.Delete(ctx, proto.FileDeletePayload{Path: escapeTarget, Recursive: true}); err == nil {
-		t.Fatalf("Delete of a path outside the sandbox must be refused")
+	// Renaming a symlink source moves the link entry itself and preserves its
+	// target text; it must not move or modify the outside target.
+	outsideSourceTarget := filepath.Join(outside, "source-target.txt")
+	if err := os.WriteFile(outsideSourceTarget, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// The victim directory outside the sandbox must be untouched.
+	sourceLink := filepath.Join(root, "source-link")
+	movedLink := filepath.Join(root, "moved-link")
+	if err := os.Symlink(outsideSourceTarget, sourceLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Rename(ctx, proto.FileRenamePayload{From: sourceLink, To: movedLink}); err != nil {
+		t.Fatalf("Rename symlink source: %v", err)
+	}
+	if _, err := os.Lstat(sourceLink); !os.IsNotExist(err) {
+		t.Fatalf("source link still exists: %v", err)
+	}
+	if target, err := os.Readlink(movedLink); err != nil || target != outsideSourceTarget {
+		t.Fatalf("moved link target = %q err=%v", target, err)
+	}
+	if got, _ := os.ReadFile(outsideSourceTarget); string(got) != "outside" {
+		t.Fatalf("rename modified outside source target: %q", got)
+	}
+
+	// Deleting a symlink removes the link entry, not its outside target.
+	deleteLink := filepath.Join(root, "delete-link")
+	if err := os.Symlink(escapeTarget, deleteLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Delete(ctx, proto.FileDeletePayload{Path: deleteLink, Recursive: true}); err != nil {
+		t.Fatalf("Delete should remove the symlink entry: %v", err)
+	}
+	if _, err := os.Lstat(deleteLink); !os.IsNotExist(err) {
+		t.Fatalf("delete link entry remains: %v", err)
+	}
 	if _, err := os.Stat(escapeTarget); err != nil {
 		t.Fatalf("escape target was modified/removed: %v", err)
 	}
@@ -349,4 +382,64 @@ func writeChunk(t *testing.T, m FileManager, transferID, dest string, offset int
 		TransferID: transferID, Path: dest, Offset: offset, Data: data, SHA256: hex.EncodeToString(sum[:]),
 	})
 	return err
+}
+
+func TestFileManagerRejectsUnsafeTransferIDs(t *testing.T) {
+	m := NewFileManager()
+	ctx := context.Background()
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	bad := []string{"../escape", "a/b", `a\\b`, ".", strings.Repeat("a", 129)}
+	for _, id := range bad {
+		if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: 1, TransferID: id}); err == nil {
+			t.Errorf("OpenWrite accepted unsafe transfer ID %q", id)
+		}
+		if _, err := m.Probe(ctx, proto.FileProbePayload{Path: dest, TransferID: id}); err == nil {
+			t.Errorf("Probe accepted unsafe transfer ID %q", id)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Dir(dest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unsafe IDs created filesystem entries: %v", entries)
+	}
+}
+
+func TestFileManagerFinalizeReplacesFinalSymlinkEntry(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	SetAllowedFileRoots([]string{root})
+	defer SetAllowedFileRoots(nil)
+	victim := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(root, "out.bin")
+	if err := os.Symlink(victim, dest); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	m := NewFileManager()
+	ctx := context.Background()
+	data := []byte("uploaded")
+	const id = "safe-transfer-id"
+	if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: int64(len(data)), TransferID: id}); err != nil {
+		t.Fatalf("OpenWrite: %v", err)
+	}
+	if err := writeChunk(t, m, id, dest, 0, data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	sum := sha256.Sum256(data)
+	if _, err := m.Finalize(ctx, proto.FileFinalizePayload{Path: dest, TotalSize: int64(len(data)), TransferID: id, WholeSHA256: hex.EncodeToString(sum[:])}); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "original" {
+		t.Fatalf("symlink target was clobbered: %q", got)
+	}
+	if info, err := os.Lstat(dest); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("destination link entry was not replaced: err=%v", err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "uploaded" {
+		t.Fatalf("uploaded content mismatch: %q", got)
+	}
 }

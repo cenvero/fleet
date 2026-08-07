@@ -198,7 +198,7 @@ func ensureKnownHostsFile(path string) error {
 // No-ops silently if the file does not exist or the address isn't present.
 func RemoveKnownHost(path, address string) error {
 	normalized := knownhosts.Normalize(address)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the controller-configured known_hosts file; host entries are separately validated
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -266,7 +266,7 @@ func appendKnownHost(path, address string, key ssh.PublicKey) error {
 	defer pinMu.Unlock()
 	// Skip if an entry for this address already exists — prevents duplicates
 	// even if the in-memory callback somehow misses a recently written entry.
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is the controller-configured known_hosts file; host entries are separately validated
 		for _, line := range strings.Split(string(data), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) > 0 && fields[0] == address {
@@ -274,7 +274,7 @@ func appendKnownHost(path, address string, key ssh.PublicKey) error {
 			}
 		}
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- path is the controller-configured known_hosts file; host entries are separately validated
 	if err != nil {
 		return fmt.Errorf("open known_hosts for append: %w", err)
 	}
@@ -291,7 +291,7 @@ func replaceKnownHost(path, address string, key ssh.PublicKey) error {
 	// concurrent append (or another replace) and clobber the file mid-rewrite.
 	pinMu.Lock()
 	defer pinMu.Unlock()
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the controller-configured known_hosts file; host entries are separately validated
 	if err != nil {
 		return fmt.Errorf("read known_hosts for replacement: %w", err)
 	}

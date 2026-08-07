@@ -5,8 +5,13 @@ package core
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestTokenStoreCreateGetListRevoke(t *testing.T) {
@@ -63,6 +68,232 @@ func TestTokenStoreCreateGetListRevoke(t *testing.T) {
 	}
 	if err := store.Revoke("does-not-exist"); err == nil {
 		t.Fatal("Revoke of unknown token should fail")
+	}
+}
+
+// TestAdvisoryLockProcessHelper holds a real store lock until the parent kills
+// this process. It is invoked only by TestTokenStoreKilledLockHolderDoesNotWedge.
+func TestAdvisoryLockProcessHelper(t *testing.T) {
+	if os.Getenv("FLEET_ADVISORY_LOCK_HELPER") != "1" {
+		return
+	}
+	args := os.Args
+	sep := -1
+	for i, arg := range args {
+		if arg == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 || len(args) != sep+3 {
+		t.Fatalf("bad lock helper args: %v", args)
+	}
+	lockPath, readyPath := args[sep+1], args[sep+2]
+	if err := withAdvisoryFileLock(lockPath, func() error {
+		if err := os.WriteFile(readyPath, []byte("locked\n"), 0o600); err != nil {
+			return err
+		}
+		time.Sleep(time.Hour)
+		return nil
+	}); err != nil {
+		t.Fatalf("hold advisory lock: %v", err)
+	}
+}
+
+func waitForTestFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestTokenStoreKilledLockHolderDoesNotWedge(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := TokensPath(dir) + ".lock"
+	readyPath := filepath.Join(dir, "holder-ready")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAdvisoryLockProcessHelper$", "--", lockPath, readyPath)
+	cmd.Env = append(os.Environ(), "FLEET_ADVISORY_LOCK_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start lock holder: %v", err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	waitForTestFile(t, readyPath)
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill lock holder: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("killed lock holder exited successfully")
+	}
+	waited = true
+
+	// The sidecar deliberately remains, but its kernel-owned lock died with the
+	// helper process. A stale file must not delay or prevent token mutation.
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("stat retained lock sidecar: %v", err)
+	}
+	created, err := NewTokenStore(dir).Create(Token{Name: "after-crash"})
+	if err != nil {
+		t.Fatalf("Create after killed lock holder: %v", err)
+	}
+	if created.Name != "after-crash" {
+		t.Fatalf("created token = %+v", created)
+	}
+}
+
+func TestTokenStoreLockFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := TokensPath(dir) + ".lock"
+	// A directory at the fixed sidecar path simulates a local attempt to break
+	// lock acquisition. The store must reject the mutation, never continue
+	// without serialization.
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		t.Fatalf("plant unusable lock path: %v", err)
+	}
+	if _, err := NewTokenStore(dir).Create(Token{Name: "must-not-persist"}); err == nil {
+		t.Fatal("Create succeeded without acquiring its advisory lock")
+	}
+	if _, err := os.Stat(TokensPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("token document exists after failed lock acquisition: %v", err)
+	}
+}
+
+func TestTokenStoreConcurrentIndependentStoresDoNotLoseUpdates(t *testing.T) {
+	dir := t.TempDir()
+	const creates = 40
+	start := make(chan struct{})
+	errs := make(chan error, creates)
+	var wg sync.WaitGroup
+	for i := 0; i < creates; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := NewTokenStore(dir).Create(Token{Name: "race-" + strconv.Itoa(i)})
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent independent Create: %v", err)
+		}
+	}
+	list, err := NewTokenStore(dir).List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != creates {
+		t.Fatalf("concurrent creates lost updates: got %d tokens, want %d", len(list), creates)
+	}
+}
+
+func TestTokenStoreProcessHelper(t *testing.T) {
+	if os.Getenv("FLEET_TOKEN_STORE_HELPER") != "1" {
+		return
+	}
+	args := os.Args
+	sep := -1
+	for i, arg := range args {
+		if arg == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 || len(args) != sep+5 {
+		t.Fatalf("bad helper args: %v", args)
+	}
+	op, dir, value, gate := args[sep+1], args[sep+2], args[sep+3], args[sep+4]
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for process gate")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	store := NewTokenStore(dir)
+	switch op {
+	case "create":
+		if _, err := store.Create(Token{Name: value}); err != nil {
+			t.Fatalf("Create(%q): %v", value, err)
+		}
+	case "revoke":
+		if err := store.Revoke(value); err != nil {
+			t.Fatalf("Revoke: %v", err)
+		}
+	default:
+		t.Fatalf("unknown helper op %q", op)
+	}
+}
+
+func TestTokenStoreCrossProcessReadModifyWrite(t *testing.T) {
+	dir := t.TempDir()
+	store := NewTokenStore(dir)
+	const workers = 12
+	created := make([]Token, workers)
+	for i := range created {
+		tok, err := store.Create(Token{Name: "base-" + strconv.Itoa(i)})
+		if err != nil {
+			t.Fatalf("seed token %d: %v", i, err)
+		}
+		created[i] = tok
+	}
+
+	gate := filepath.Join(dir, "start-gate")
+	commands := make([]*exec.Cmd, 0, workers)
+	for i := 0; i < workers/2; i++ {
+		commands = append(commands, exec.Command(os.Args[0], "-test.run=^TestTokenStoreProcessHelper$", "--", "revoke", dir, created[i].ID, gate))
+	}
+	for i := 0; i < workers/2; i++ {
+		commands = append(commands, exec.Command(os.Args[0], "-test.run=^TestTokenStoreProcessHelper$", "--", "create", dir, "new-"+strconv.Itoa(i), gate))
+	}
+	for _, cmd := range commands {
+		cmd.Env = append(os.Environ(), "FLEET_TOKEN_STORE_HELPER=1")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start helper: %v", err)
+		}
+	}
+	if err := os.WriteFile(gate, []byte("go\n"), 0o600); err != nil {
+		t.Fatalf("open process gate: %v", err)
+	}
+	for _, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("helper failed: %v", err)
+		}
+	}
+
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List after concurrent updates: %v", err)
+	}
+	if len(list) != workers {
+		t.Fatalf("concurrent create/revoke lost updates: got %d tokens, want %d", len(list), workers)
+	}
+	for i := 0; i < workers/2; i++ {
+		if _, err := store.Get(created[i].ID); err == nil {
+			t.Errorf("concurrently revoked token %d still exists", i)
+		}
 	}
 }
 
@@ -227,7 +458,8 @@ func TestIsDestructiveCommand(t *testing.T) {
 		{"config", "", nil, false},
 		// non-destructive
 		{"drift", "", []string{"web-01"}, false},
-		{"exec", "", []string{"web-01", "uptime"}, false},
+		// Arbitrary execution can mutate remote state and requires destructive permission.
+		{"exec", "", []string{"web-01", "uptime"}, true},
 		{"status", "", nil, false},
 		// CRITICAL regression: a server name in args[0] must NOT be mistaken for a
 		// destructive subcommand. `firewall <server>` with sub="" (bare) is not
@@ -324,19 +556,24 @@ func TestAuthorizeGroupScope(t *testing.T) {
 }
 
 func TestAuthorizeDestructive(t *testing.T) {
-	// Destructive op denied when DestructiveAllowed is false.
-	tok := Token{Name: "t"}
+	// Destructive op denied for a constrained token without the grant.
+	tok := Token{Name: "t", AllowCommands: []string{"server", "exec"}}
 	if err := Authorize(tok, "server", "web-01", true, nil, nil); err == nil {
 		t.Fatal("destructive op should be denied without DestructiveAllowed")
 	}
 	// Allowed when DestructiveAllowed is true (and server in scope / unscoped).
-	allow := Token{Name: "t", DestructiveAllowed: true}
+	allow := tok
+	allow.DestructiveAllowed = true
 	if err := Authorize(allow, "server", "web-01", true, nil, nil); err != nil {
 		t.Fatalf("destructive op should be allowed: %v", err)
 	}
 	// Non-destructive op is unaffected by DestructiveAllowed=false.
 	if err := Authorize(tok, "exec", "web-01", false, nil, nil); err != nil {
 		t.Fatalf("non-destructive op should pass: %v", err)
+	}
+	// A constraint-free token is admin-equivalent and preserves full behavior.
+	if err := Authorize(Token{Name: "admin"}, "server", "web-01", true, nil, nil); err != nil {
+		t.Fatalf("unscoped admin token should retain destructive access: %v", err)
 	}
 }
 

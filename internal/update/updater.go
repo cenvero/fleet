@@ -20,11 +20,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"aead.dev/minisign"
+	"golang.org/x/mod/semver"
 )
 
 type ApplyOptions struct {
@@ -35,11 +35,11 @@ type ApplyOptions struct {
 	CurrentVersion   string
 	AgentBinary      bool
 	SigningPublicKey string
-	// AllowUnsigned is an explicit, fail-open opt-in that permits applying an
-	// update that carries no minisign signature. It defaults to false so that
-	// verification is FAIL-CLOSED: callers that leave it unset can never apply
-	// an unsigned update, regardless of channel. It must only be set from an
-	// explicit operator action (e.g. an --allow-unsigned/--insecure flag).
+	// AllowUnsigned is an explicit insecure-development opt-in that permits an
+	// update with incomplete release verification metadata (signature, SHA-256,
+	// or size). It defaults to false so production verification is FAIL-CLOSED.
+	// It must only be set from an explicit operator action (the CLI's prominently
+	// insecure --allow-unsigned flag) for local/ad-hoc development builds.
 	AllowUnsigned bool
 	// AllowDowngrade is an explicit opt-in that permits applying a target version
 	// OLDER than the running version (or below the manifest's MinSupported floor).
@@ -49,6 +49,10 @@ type ApplyOptions struct {
 	FetchManifest  func(context.Context, string) (Manifest, error)
 	DownloadURL    func(context.Context, string) ([]byte, error)
 	Now            func() time.Time
+
+	// fileOps is injected only by package tests to simulate platform-specific
+	// replacement/state failures without depending on the host OS.
+	fileOps *updateFileOps
 }
 
 type ApplyResult struct {
@@ -107,6 +111,13 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	if strings.TrimSpace(opts.ConfigDir) == "" {
 		return ApplyResult{}, fmt.Errorf("config dir is required")
 	}
+	ops := opts.fileOps
+	if ops == nil {
+		ops = defaultUpdateFileOps()
+	}
+	if err := recoverInterruptedUpdate(opts.ConfigDir, ops); err != nil {
+		return ApplyResult{}, fmt.Errorf("recover interrupted update: %w", err)
+	}
 
 	manifest, err := opts.FetchManifest(ctx, opts.ManifestURL)
 	if err != nil {
@@ -117,6 +128,26 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 
+	canonicalVersion, err := canonicalSemVersion(version)
+	if err != nil {
+		return ApplyResult{}, fmt.Errorf("invalid manifest version %q: %w", version, err)
+	}
+	var canonicalCurrent string
+	if strings.TrimSpace(opts.CurrentVersion) != "" {
+		canonicalCurrent, err = canonicalSemVersion(opts.CurrentVersion)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("invalid current version %q: %w", opts.CurrentVersion, err)
+		}
+	}
+
+	var canonicalMin string
+	if minV := strings.TrimSpace(manifest.Channels[opts.Channel].MinSupported); minV != "" {
+		canonicalMin, err = canonicalSemVersion(minV)
+		if err != nil {
+			return ApplyResult{}, fmt.Errorf("invalid minimum supported version %q: %w", minV, err)
+		}
+	}
+
 	result := ApplyResult{
 		Channel:         opts.Channel,
 		CurrentVersion:  opts.CurrentVersion,
@@ -124,51 +155,61 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 		ExecutablePath:  opts.ExecutablePath,
 		ReleaseNotesURL: manifest.Channels[opts.Channel].ReleaseNotes,
 	}
-	if sameVersion(version, opts.CurrentVersion) {
+	if canonicalCurrent != "" && semver.Compare(canonicalVersion, canonicalCurrent) == 0 {
 		return result, nil
 	}
 
-	// Anti-rollback / downgrade protection: refuse a target OLDER than the running
-	// version, or below the manifest's MinSupported floor, unless explicitly
-	// allowed. Stops a replayed/stale (but validly signed) manifest from
-	// downgrading the binary to a known-vulnerable release.
+	// Anti-rollback / downgrade protection uses strict SemVer precedence,
+	// including numeric/non-numeric prerelease identifiers. Invalid versions are
+	// rejected above rather than being coerced to zero.
 	if !opts.AllowDowngrade {
-		if strings.TrimSpace(opts.CurrentVersion) != "" && compareVersions(version, opts.CurrentVersion) < 0 {
+		if canonicalCurrent != "" && semver.Compare(canonicalVersion, canonicalCurrent) < 0 {
 			return ApplyResult{}, fmt.Errorf(
 				"refusing to downgrade from %s to %s (anti-rollback); pass --allow-downgrade to override",
 				opts.CurrentVersion, version)
 		}
-		if minV := strings.TrimSpace(manifest.Channels[opts.Channel].MinSupported); minV != "" && compareVersions(version, minV) < 0 {
+		if canonicalMin != "" && semver.Compare(canonicalVersion, canonicalMin) < 0 {
 			return ApplyResult{}, fmt.Errorf(
 				"target version %s is below the manifest's minimum supported version %s; refusing (pass --allow-downgrade to override)",
-				version, minV)
+				version, manifest.Channels[opts.Channel].MinSupported)
 		}
+	}
+
+	role := artifactRoleFor(opts.AgentBinary)
+	hasSig := strings.TrimSpace(binary.Signature) != ""
+	hashText := strings.TrimSpace(binary.SHA256)
+	hasHash := hashText != ""
+	hasSize := binary.Size > 0
+	if hasHash {
+		decoded, decodeErr := hex.DecodeString(hashText)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return ApplyResult{}, fmt.Errorf("manifest entry for %s has an invalid SHA-256", binary.URL)
+		}
+	}
+	if binary.Size < 0 || binary.Size > maxArtifactBytes {
+		return ApplyResult{}, fmt.Errorf("manifest entry for %s has an invalid artifact size %d", binary.URL, binary.Size)
+	}
+	// --allow-unsigned is the explicit insecure development override. Production
+	// updates require all three independent controls: signature, SHA-256, and size.
+	if !opts.AllowUnsigned && (!hasHash || !hasSize) {
+		return ApplyResult{}, fmt.Errorf("manifest entry for %s must include SHA-256 and size metadata", binary.URL)
+	}
+	if !hasSig && !opts.AllowUnsigned {
+		return ApplyResult{}, fmt.Errorf(
+			"manifest entry for %s has no minisign signature — refusing to apply (pass --allow-unsigned only for insecure development builds)",
+			binary.URL,
+		)
+	}
+	if opts.AllowUnsigned && (!hasSig || !hasHash || !hasSize) {
+		result.Note = "WARNING: insecure development override accepted incomplete release verification metadata (--allow-unsigned)"
 	}
 
 	archive, err := opts.DownloadURL(ctx, binary.URL)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	hasSig := strings.TrimSpace(binary.Signature) != ""
-	hasHash := strings.TrimSpace(binary.SHA256) != ""
-	// Signature verification is FAIL-CLOSED: every applied update must carry a
-	// valid minisign signature, on every channel, by default. A SHA-256 checksum
-	// alone is not sufficient — the manifest is the only thing binding the binary
-	// to that checksum, so an attacker who tampers with the manifest can swap
-	// both the binary and its hash. The minisign signature is verified against a
-	// pinned public key and cannot be forged that way.
-	//
-	// The ONLY way to apply an unsigned update is the explicit AllowUnsigned
-	// opt-in (e.g. an --allow-unsigned/--insecure flag wired by the caller).
-	// An empty or "dev" channel does NOT silently disable verification.
-	if !hasSig {
-		if !opts.AllowUnsigned {
-			return ApplyResult{}, fmt.Errorf(
-				"manifest entry for %s has no minisign signature — refusing to apply (pass --allow-unsigned to override)",
-				binary.URL,
-			)
-		}
-		result.Note = "WARNING: applied without signature verification (--allow-unsigned)"
+	if hasSize && int64(len(archive)) != binary.Size {
+		return ApplyResult{}, fmt.Errorf("download size mismatch for %s: got %d bytes, want %d", binary.URL, len(archive), binary.Size)
 	}
 	if hasSig {
 		signature, err := opts.DownloadURL(ctx, binary.Signature)
@@ -179,90 +220,32 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 			return ApplyResult{}, fmt.Errorf("verify minisign signature: %w", err)
 		}
 		result.SignatureVerified = true
-		// minisign.Verify above only proves the signature matches the archive
-		// BYTES — it does NOT bind those bytes to the version/target the manifest
-		// CLAIMS. A tampered manifest could therefore point a channel at a genuine,
-		// validly-signed OLD release while advertising a fake-high version, slipping
-		// past the byte-level check. Minisign's TRUSTED COMMENT is signed (part of
-		// the comment signature) and tamper-proof, so if the release pipeline embeds
-		// the version (and os-arch target) there, we can ASSERT the signed comment
-		// matches the manifest's claim and close that gap.
-		//
-		// FORWARD-COMPATIBLE: older releases whose trusted comment carries no
-		// version/target token are NOT rejected — we only assert when a token is
-		// present. The release pipeline MUST embed the version in the minisign
-		// trusted comment (e.g. `minisign -S -c '' -t 'fleet vX.Y.Z linux-amd64'`)
-		// for this binding to be fully enforced; until then a note records that the
-		// signed comment did not bind the version.
-		target := runtime.GOOS + "-" + runtime.GOARCH
-		if note, err := assertSignedComment(signature, version, target); err != nil {
-			return ApplyResult{}, fmt.Errorf("verify minisign signature: %w", err)
-		} else if note != "" {
-			result.Note = appendNote(result.Note, note)
+		if err := assertSignedComment(signature, role, canonicalVersion, runtimeUpdateTarget()); err != nil {
+			return ApplyResult{}, fmt.Errorf("verify minisign signature binding: %w", err)
 		}
 	}
 	if hasHash {
 		actual := sha256.Sum256(archive)
-		if !strings.EqualFold(hex.EncodeToString(actual[:]), strings.TrimSpace(binary.SHA256)) {
+		if !strings.EqualFold(hex.EncodeToString(actual[:]), hashText) {
 			return ApplyResult{}, fmt.Errorf("download sha256 mismatch for %s", binary.URL)
 		}
 		result.SHA256Verified = true
 	}
 
-	binaryName := filepath.Base(opts.ExecutablePath)
-	payload, mode, err := extractBinaryPayload(binary.URL, archive, binary.DisplayName, binaryName)
+	payload, mode, err := extractBinaryPayload(binary.URL, archive, canonicalRoleBinary(role))
 	if err != nil {
 		return ApplyResult{}, err
 	}
 
-	updateDir := filepath.Join(opts.ConfigDir, "backups", "updates")
-	if err := os.MkdirAll(updateDir, 0o750); err != nil {
-		return ApplyResult{}, err
-	}
-
-	backupPath := filepath.Join(updateDir, filepath.Base(opts.ExecutablePath)+"."+opts.Now().UTC().Format("20060102T150405Z")+".bak")
-	if err := copyFile(opts.ExecutablePath, backupPath, 0o755); err != nil {
-		return ApplyResult{}, fmt.Errorf("backup current executable: %w", err)
-	}
-
-	stagedPath := opts.ExecutablePath + ".new"
-	// Register cleanup unconditionally so that even a partial write (e.g. disk
-	// full after file creation) never leaves a stray .new file behind.
-	defer os.Remove(stagedPath) //nolint:errcheck
-	if err := os.WriteFile(stagedPath, payload, normalizeMode(mode)); err != nil {
-		if os.IsPermission(err) {
-			userBin := userBinaryInstallPath()
-			return ApplyResult{}, fmt.Errorf(
-				"cannot write to %s: permission denied\n\n"+
-					"The fleet binary is at a system path that requires root access to update.\n\n"+
-					"Option 1 — run with sudo and pass your config dir:\n"+
-					"  sudo fleet --config-dir %s update apply\n\n"+
-					"Option 2 — reinstall fleet to your user path (no sudo needed):\n"+
-					"  install -m 0755 %s %s\n"+
-					"  Then add %s to your PATH.",
-				opts.ExecutablePath,
-				opts.ConfigDir,
-				opts.ExecutablePath, userBin,
-				filepath.Dir(userBin),
-			)
-		}
-		return ApplyResult{}, fmt.Errorf("write staged executable: %w", err)
-	}
-
-	if err := replaceFile(stagedPath, opts.ExecutablePath); err != nil {
-		return ApplyResult{}, fmt.Errorf("replace executable: %w", err)
-	}
-
 	state := rollbackState{
 		ExecutablePath:  opts.ExecutablePath,
-		BackupPath:      backupPath,
 		PreviousVersion: opts.CurrentVersion,
 		AppliedVersion:  version,
 		Channel:         opts.Channel,
 		AppliedAt:       opts.Now().UTC(),
 	}
-	statePath := rollbackStatePath(opts.ConfigDir)
-	if err := writeRollbackState(statePath, state); err != nil {
+	backupPath, statePath, err := installUpdate(opts, payload, mode, state)
+	if err != nil {
 		return ApplyResult{}, err
 	}
 
@@ -272,130 +255,68 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	return result, nil
 }
 
-func sameVersion(candidate, current string) bool {
-	candidate = strings.TrimSpace(candidate)
-	current = strings.TrimSpace(current)
-	if candidate == "" || current == "" {
-		return false
-	}
-	return trimVersionPrefix(candidate) == trimVersionPrefix(current)
-}
-
-// compareVersions returns -1, 0, or +1 comparing two dotted version strings by
-// NUMERIC components (so 1.2.10 > 1.2.3, not lexical). A leading "v" and any
-// pre-release/build suffix (after the first '-' or '+') are ignored.
-func compareVersions(a, b string) int {
-	ap := versionParts(a)
-	bp := versionParts(b)
-	n := len(ap)
-	if len(bp) > n {
-		n = len(bp)
-	}
-	for i := 0; i < n; i++ {
-		var ai, bi int
-		if i < len(ap) {
-			ai = ap[i]
-		}
-		if i < len(bp) {
-			bi = bp[i]
-		}
-		if ai != bi {
-			if ai < bi {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}
-
-// versionParts splits a version into its numeric components, dropping a leading
-// "v" and any pre-release/build suffix. Non-numeric components parse to 0.
-func versionParts(v string) []int {
-	v = trimVersionPrefix(strings.TrimSpace(v))
-	if i := strings.IndexAny(v, "-+"); i >= 0 {
-		v = v[:i]
-	}
+// canonicalSemVersion accepts an optional lowercase v prefix, requires a complete
+// SemVer core (major.minor.patch), and preserves prerelease/build identifiers.
+// x/mod/semver implements SemVer 2.0 precedence, including numeric prerelease
+// ordering. Any malformed input returns an error so security decisions fail closed.
+func canonicalSemVersion(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
 	if v == "" {
-		return nil
+		return "", fmt.Errorf("version is empty")
 	}
-	fields := strings.Split(v, ".")
-	out := make([]int, len(fields))
-	for i, f := range fields {
-		out[i], _ = strconv.Atoi(f)
+	if strings.HasPrefix(v, "V") {
+		return "", fmt.Errorf("uppercase V prefix is not canonical")
 	}
-	return out
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	withoutPrefix := strings.TrimPrefix(v, "v")
+	core := withoutPrefix
+	if i := strings.IndexAny(core, "-+"); i >= 0 {
+		core = core[:i]
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("semantic version must contain major.minor.patch")
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return "", fmt.Errorf("invalid semantic version core")
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return "", fmt.Errorf("invalid semantic version core")
+			}
+		}
+	}
+	if !semver.IsValid(v) {
+		return "", fmt.Errorf("not a valid semantic version")
+	}
+	return v, nil
 }
 
-func trimVersionPrefix(v string) string {
-	v = strings.TrimSpace(v)
-	if len(v) > 1 && (v[0] == 'v' || v[0] == 'V') {
-		return v[1:]
+func CompareSemVer(a, b string) (int, error) {
+	av, err := canonicalSemVersion(a)
+	if err != nil {
+		return 0, err
 	}
-	return v
+	bv, err := canonicalSemVersion(b)
+	if err != nil {
+		return 0, err
+	}
+	return semver.Compare(av, bv), nil
 }
 
 func Rollback(configDir, executablePath string) (RollbackResult, error) {
-	if strings.TrimSpace(configDir) == "" {
-		return RollbackResult{}, fmt.Errorf("config dir is required")
-	}
-	if strings.TrimSpace(executablePath) == "" {
-		path, err := os.Executable()
-		if err != nil {
-			return RollbackResult{}, err
-		}
-		executablePath = path
-	}
-
-	state, err := readRollbackState(rollbackStatePath(configDir))
-	if err != nil {
-		return RollbackResult{}, err
-	}
-	if state.ExecutablePath != "" {
-		executablePath = state.ExecutablePath
-	}
-	if state.BackupPath == "" {
-		return RollbackResult{}, fmt.Errorf("rollback backup path is missing")
-	}
-
-	stagedPath := executablePath + ".rollback"
-	// Register cleanup before copyFile so a partial copy is always removed.
-	defer os.Remove(stagedPath) //nolint:errcheck
-	if err := copyFile(state.BackupPath, stagedPath, 0o755); err != nil {
-		return RollbackResult{}, fmt.Errorf("stage rollback executable: %w", err)
-	}
-	if err := replaceFile(stagedPath, executablePath); err != nil {
-		return RollbackResult{}, fmt.Errorf("replace executable during rollback: %w", err)
-	}
-	if err := os.Remove(rollbackStatePath(configDir)); err != nil && !os.IsNotExist(err) {
-		return RollbackResult{}, err
-	}
-
-	return RollbackResult{
-		ExecutablePath: executablePath,
-		RestoredFrom:   state.BackupPath,
-		Version:        state.PreviousVersion,
-		Restored:       true,
-	}, nil
+	return rollbackUpdate(strings.TrimSpace(configDir), strings.TrimSpace(executablePath), defaultUpdateFileOps())
 }
 
 func rollbackStatePath(configDir string) string {
 	return filepath.Join(configDir, "data", "update-rollback.json")
 }
 
-func writeRollbackState(path string, state rollbackState) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
-}
-
 func readRollbackState(path string) (rollbackState, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is derived from the configured executable/controller update transaction directory
 	if err != nil {
 		return rollbackState{}, fmt.Errorf("read rollback state: %w", err)
 	}
@@ -417,14 +338,42 @@ func readRollbackState(path string) (rollbackState, error) {
 var maxArtifactBytes int64 = 1 << 30 // 1 GiB
 
 func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
-	if err := validateDownloadScheme(rawURL); err != nil {
+	return downloadURLForHosts(ctx, rawURL, nil)
+}
+
+// DownloadApprovedURL downloads a release payload only when the initial URL and
+// every redirect use one of approvedHosts. All hops also use the resolved-address
+// SSRF policy and DNS-pinned transport.
+func DownloadApprovedURL(ctx context.Context, rawURL string, approvedHosts ...string) ([]byte, error) {
+	approved := make(map[string]bool, len(approvedHosts))
+	for _, host := range approvedHosts {
+		host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		if host != "" {
+			approved[host] = true
+		}
+	}
+	if len(approved) == 0 {
+		return nil, fmt.Errorf("at least one approved download host is required")
+	}
+	return downloadURLForHosts(ctx, rawURL, approved)
+}
+
+func downloadURLForHosts(ctx context.Context, rawURL string, approvedHosts map[string]bool) ([]byte, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, fmt.Errorf("parse download url: %w", err)
+	}
+	if len(approvedHosts) > 0 && !approvedHosts[strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))] {
+		return nil, fmt.Errorf("refusing unapproved download host %q", parsed.Hostname())
+	}
+	if err := validateUpdateDestination(ctx, net.DefaultResolver, parsed); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := newUpdateHTTPClientForHosts(30*time.Second, approvedHosts).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download artifact: %w", err)
 	}
@@ -432,60 +381,45 @@ func downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected artifact status %s", resp.Status)
 	}
-	// Bound the body before buffering. Read one extra byte so an artifact that
-	// is exactly at the limit is accepted, while anything larger is rejected.
-	limited := io.LimitReader(resp.Body, maxArtifactBytes+1)
-	data, err := io.ReadAll(limited)
+	data, err := readBoundedHTTPBody(resp.Body, maxArtifactBytes, "artifact")
 	if err != nil {
-		return nil, fmt.Errorf("read artifact body: %w", err)
-	}
-	if int64(len(data)) > maxArtifactBytes {
-		return nil, fmt.Errorf("artifact %s exceeds maximum size of %d bytes", rawURL, maxArtifactBytes)
+		return nil, err
 	}
 	return data, nil
 }
 
-// validateDownloadScheme enforces an allowlist on manifest-controlled download
-// URLs. Only https:// is accepted by default; http:// is permitted ONLY for an
-// explicit loopback/localhost mirror. file://, ftp:// and every other scheme are
-// rejected to prevent local-file reads (LFI) and SSRF via attacker-controlled
-// manifest entries.
+func readBoundedHTTPBody(body io.Reader, limit int64, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s body: %w", label, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds maximum size of %d bytes", label, limit)
+	}
+	return data, nil
+}
+
+// validateDownloadScheme applies the URL-level half of the update network policy.
+// DNS/address validation is performed separately immediately before every hop.
 func validateDownloadScheme(rawURL string) error {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return fmt.Errorf("parse download url: %w", err)
 	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "https":
-		return nil
-	case "http":
-		if isLoopbackHost(parsed.Hostname()) {
-			return nil
-		}
-		return fmt.Errorf("refusing insecure http:// download from non-loopback host %q (only https:// is allowed)", parsed.Host)
-	default:
+	if !parsed.IsAbs() || parsed.Hostname() == "" {
+		return fmt.Errorf("refusing download URL without an absolute scheme and host: %s", rawURL)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("refusing download URL containing credentials: %s", parsed.Redacted())
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
 		return fmt.Errorf("refusing download URL with disallowed scheme %q (only https:// is allowed): %s", parsed.Scheme, rawURL)
 	}
+	return nil
 }
 
-// isLoopbackHost reports whether host is a loopback address or the conventional
-// localhost name, identifying an explicit local mirror.
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
-}
-
-func extractBinaryPayload(sourceURL string, archive []byte, displayName, executableName string) ([]byte, os.FileMode, error) {
-	targets := make([]string, 0, 3)
-	if strings.TrimSpace(displayName) != "" {
-		targets = append(targets, strings.TrimSpace(displayName))
-	}
-	targets = append(targets, executableName, runtimeExecutableName())
+func extractBinaryPayload(sourceURL string, archive []byte, canonicalBinary string) ([]byte, os.FileMode, error) {
+	targets := []string{canonicalBinary}
 
 	switch {
 	case strings.HasSuffix(sourceURL, ".zip"):
@@ -504,7 +438,7 @@ func extractZipBinary(archive []byte, targets []string) ([]byte, os.FileMode, er
 	}
 	for _, target := range targets {
 		for _, file := range reader.File {
-			if file.FileInfo().IsDir() {
+			if !file.Mode().IsRegular() {
 				continue
 			}
 			if filepath.Base(file.Name) != target {
@@ -557,7 +491,7 @@ func extractTarGzBinary(archive []byte, targets []string) ([]byte, os.FileMode, 
 		if err != nil {
 			return nil, 0, err
 		}
-		if header.FileInfo().IsDir() {
+		if header.Typeflag != tar.TypeReg && header.Typeflag != 0 {
 			continue
 		}
 		for _, target := range targets {
@@ -614,31 +548,8 @@ func normalizeMode(mode os.FileMode) os.FileMode {
 	return mode.Perm()
 }
 
-func copyFile(source, target string, mode os.FileMode) error {
-	data, err := os.ReadFile(source)
-	if err != nil {
-		return err
-	}
-	if mode == 0 {
-		if info, err := os.Stat(source); err == nil {
-			mode = info.Mode().Perm()
-		}
-	}
-	if mode == 0 {
-		mode = 0o755
-	}
-	return os.WriteFile(target, data, mode)
-}
-
 func replaceFile(stagedPath, targetPath string) error {
-	if runtime.GOOS == "windows" {
-		_ = os.Remove(targetPath + ".old")
-		if err := os.Rename(targetPath, targetPath+".old"); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return os.Rename(stagedPath, targetPath)
-	}
-	return os.Rename(stagedPath, targetPath)
+	return replaceFilePlatform(stagedPath, targetPath)
 }
 
 func fsMode(mode os.FileMode) os.FileMode {
@@ -671,112 +582,75 @@ func hasConfiguredSigningKey(publicKeyText string) bool {
 	return !strings.Contains(trimmed, "REPLACE_WITH_MINISIGN_PUBLIC_KEY")
 }
 
-// knownGoOS / knownGoArch are the os/arch tokens we recognize inside a minisign
-// trusted comment so we can tell an intended "goos-goarch" target token apart
-// from arbitrary comment text. This list need not be exhaustive â an unknown
-// pair simply isn't treated as a target token (forward-compat, no false reject).
 var (
-	knownGoOS   = map[string]bool{"linux": true, "darwin": true, "windows": true, "freebsd": true, "openbsd": true, "netbsd": true}
-	knownGoArch = map[string]bool{"amd64": true, "arm64": true, "arm": true, "386": true, "ppc64le": true, "s390x": true, "riscv64": true}
+	knownUpdateOS = map[string]bool{
+		"linux": true, "darwin": true, "windows": true,
+		"freebsd": true, "openbsd": true, "netbsd": true,
+	}
+	knownUpdateArch = map[string]bool{
+		"amd64": true, "arm64": true, "armv7": true, "386": true,
+		"ppc64le": true, "s390x": true, "riscv64": true,
+	}
 )
 
-// assertSignedComment inspects a minisign signature's TRUSTED COMMENT (already
-// cryptographically authenticated by a successful minisign.Verify of the same
-// signature) and, IF the comment carries a version and/or os-arch target token,
-// asserts they match the manifest's claimed wantVersion / wantTarget. This binds
-// the signed bytes to the manifest's claim so a tampered manifest cannot point a
-// channel at a genuine OLD signed release under a fake-high version.
-//
-// FORWARD-COMPATIBLE: a comment with no recognizable version or target token is
-// NOT an error â older releases predate this convention. In that case it returns
-// a non-empty note (and nil error) so the caller can record that the signed
-// comment did not bind the version. An error is returned ONLY on a positive
-// MISMATCH (the comment names a different version, or a different recognized
-// os-arch target than expected).
-//
-// The release pipeline MUST embed the version (and ideally the os-arch target)
-// in the minisign trusted comment for this binding to be fully enforced, e.g.:
-//
-//	minisign -S -m fleet.tar.gz -t 'fleet v1.4.0 linux-amd64'
-func assertSignedComment(signature []byte, wantVersion, wantTarget string) (string, error) {
+type artifactRole string
+
+const (
+	artifactRoleFleet      artifactRole = "fleet"
+	artifactRoleFleetAgent artifactRole = "fleet-agent"
+)
+
+func artifactRoleFor(agent bool) artifactRole {
+	if agent {
+		return artifactRoleFleetAgent
+	}
+	return artifactRoleFleet
+}
+
+func canonicalRoleBinary(role artifactRole) string {
+	name := string(role)
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+func canonicalUpdateTarget(goos, goarch string) string {
+	goos = strings.ToLower(strings.TrimSpace(goos))
+	goarch = strings.ToLower(strings.TrimSpace(goarch))
+	switch goarch {
+	case "arm", "armv7", "armv7l":
+		goarch = "armv7"
+	}
+	return goos + "-" + goarch
+}
+
+func runtimeUpdateTarget() string {
+	return canonicalUpdateTarget(runtime.GOOS, runtime.GOARCH)
+}
+
+// assertSignedComment requires exact equality with the one authenticated release
+// identity trusted by the caller. No extra words, aliases, case folding, or
+// manifest-controlled display names are accepted.
+func assertSignedComment(signature []byte, role artifactRole, version, target string) error {
+	if role != artifactRoleFleet && role != artifactRoleFleetAgent {
+		return fmt.Errorf("invalid trusted artifact role %q", role)
+	}
+	canonicalVersion, err := canonicalSemVersion(version)
+	if err != nil {
+		return fmt.Errorf("invalid expected signed version: %w", err)
+	}
+	parts := strings.SplitN(target, "-", 2)
+	if len(parts) != 2 || !knownUpdateOS[parts[0]] || !knownUpdateArch[parts[1]] || canonicalUpdateTarget(parts[0], parts[1]) != target {
+		return fmt.Errorf("expected signed target %q is not canonical", target)
+	}
 	var sig minisign.Signature
 	if err := sig.UnmarshalText(signature); err != nil {
-		return "", fmt.Errorf("parse signature trusted comment: %w", err)
+		return fmt.Errorf("parse signature trusted comment: %w", err)
 	}
-	comment := strings.ToLower(strings.TrimSpace(sig.TrustedComment))
-	if comment == "" {
-		return "signed comment carried no version (cannot bind version/target; update release pipeline to embed it)", nil
+	expected := fmt.Sprintf("cenvero-fleet %s %s %s", role, canonicalVersion, target)
+	if sig.TrustedComment != expected {
+		return fmt.Errorf("signed trusted comment %q does not exactly match %q", sig.TrustedComment, expected)
 	}
-
-	wantVersionNorm := trimVersionPrefix(wantVersion)
-	wantTargetNorm := strings.ToLower(strings.TrimSpace(wantTarget))
-
-	var sawVersionToken bool
-	for _, tok := range strings.Fields(comment) {
-		if isVersionToken(tok) {
-			sawVersionToken = true
-			if !sameVersion(tok, wantVersion) && !strings.EqualFold(trimVersionPrefix(tok), wantVersionNorm) {
-				return "", fmt.Errorf(
-					"signed version %q does not match manifest version %q (possible manifest tampering)",
-					tok, wantVersion)
-			}
-		}
-		if isTargetToken(tok) {
-			if wantTargetNorm != "" && tok != wantTargetNorm {
-				return "", fmt.Errorf(
-					"signed target %q does not match expected target %q (possible manifest tampering)",
-					tok, wantTargetNorm)
-			}
-		}
-	}
-
-	if !sawVersionToken {
-		return "signed comment carried no version token (cannot fully bind version; update release pipeline to embed it)", nil
-	}
-	return "", nil
-}
-
-// isVersionToken reports whether tok looks like a dotted version (optionally with
-// a leading v/V and a pre-release/build suffix), e.g. "v1.4.0" or "1.4.0-rc1".
-// It must contain at least one '.' between digit groups so a bare word or an
-// os-arch token isn't mistaken for a version.
-func isVersionToken(tok string) bool {
-	v := trimVersionPrefix(tok)
-	if i := strings.IndexAny(v, "-+"); i >= 0 {
-		v = v[:i]
-	}
-	if !strings.Contains(v, ".") {
-		return false
-	}
-	for _, part := range strings.Split(v, ".") {
-		if part == "" {
-			return false
-		}
-		for _, r := range part {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// isTargetToken reports whether tok is a recognized "goos-goarch" target pair.
-func isTargetToken(tok string) bool {
-	parts := strings.SplitN(tok, "-", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	return knownGoOS[parts[0]] && knownGoArch[parts[1]]
-}
-
-// appendNote joins update notes with "; " so multiple advisories survive.
-func appendNote(existing, add string) string {
-	if strings.TrimSpace(existing) == "" {
-		return add
-	}
-	if strings.TrimSpace(add) == "" {
-		return existing
-	}
-	return existing + "; " + add
+	return nil
 }

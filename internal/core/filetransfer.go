@@ -73,6 +73,12 @@ type FileTransferOptions struct {
 	Parallel  int
 	ChunkSize int64
 	RemoteDir string
+
+	// localRoot/localRel are set only by recursive download and sync-pull
+	// primitives. They confine remote-derived relative paths beneath a single
+	// descriptor-backed local root.
+	localRoot string
+	localRel  string
 }
 
 // ProgressUpdate is emitted periodically during a transfer.
@@ -414,14 +420,11 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		return proto.FileFinalizeResult{}, fmt.Errorf("refusing to upload %s: %w", localPath, err)
 	}
 
-	// Hash the whole file alongside the transfer instead of ahead of it.
-	//
-	// This used to run to completion before anything else happened, so a large
-	// upload sat at "0 bytes, no progress" for an entire pass over the file
-	// before a single byte moved — which reads as "the transfer never started".
-	// The digest is only needed at finalize, so it overlaps with the transfer and
-	// costs nothing on any network-bound upload.
-	hashDone := startWholeFileHash(localPath)
+	// Hash the exact already-open source descriptor alongside the transfer. The
+	// job is always cancelled and joined on return, so an aborted upload cannot
+	// leave a goroutine reading the file in the background.
+	hashJob := startWholeFileHash(lf, totalSize)
+	defer hashJob.CancelAndWait()
 
 	chunks := buildChunks(totalSize, resolved.ChunkSize)
 	// The transfer id ties the remote temp file to this transfer across channels
@@ -578,7 +581,7 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 
 	// Join the background hash. On any network-bound transfer it finished long
 	// ago; on a fast local link this is the only place its cost can show up.
-	wholeSum, err := hashDone()
+	wholeSum, err := hashJob.Wait()
 	if err != nil {
 		emit(false, err)
 		return proto.FileFinalizeResult{}, err
@@ -661,9 +664,14 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 		return proto.FileStatResult{}, err
 	}
 	resolved := a.resolveTransferOptions(server, opts)
-	if localPath == "" {
+	if opts.localRoot != "" {
+		if !safeRel(opts.localRel) {
+			return proto.FileStatResult{}, fmt.Errorf("refusing unsafe local destination %q", opts.localRel)
+		}
+		localPath = filepath.Join(opts.localRoot, filepath.Clean(opts.localRel))
+	} else if localPath == "" {
 		localPath = filepath.Base(remotePath)
-	} else if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+	} else if info, err := os.Lstat(localPath); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		localPath = filepath.Join(localPath, path.Base(remotePath))
 	}
 
@@ -688,14 +696,22 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 		return proto.FileStatResult{}, fmt.Errorf("refusing to download %s: %w", remotePath, err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
-		return proto.FileStatResult{}, err
+	// Assemble into a stable resumable sidecar, then atomically rename it over
+	// the final directory entry. A planted final symlink is replaced, not opened;
+	// confined callers additionally keep every intermediate lookup beneath their
+	// descriptor-backed local root.
+	downloadID := transferIDFor(serverName+":"+remotePath, totalSize, fmt.Sprintf("%d", stat.Entry.ModTime.UnixNano()))
+	var atomicDest *AtomicLocalFile
+	if opts.localRoot != "" {
+		atomicDest, err = OpenAtomicLocalFileUnder(opts.localRoot, opts.localRel, downloadID, 0o600)
+	} else {
+		atomicDest, err = OpenAtomicLocalFile(localPath, downloadID, 0o600)
 	}
-	dest, err := os.OpenFile(localPath, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- operator-supplied local path
 	if err != nil {
 		return proto.FileStatResult{}, fmt.Errorf("open local destination: %w", err)
 	}
-	defer dest.Close()
+	defer atomicDest.CloseKeep()
+	dest := atomicDest.File()
 
 	chunks := buildChunks(totalSize, resolved.ChunkSize)
 	done := resumeDownloadChunks(conn, remotePath, chunks, dest)
@@ -850,6 +866,14 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 	if fi, serr := dest.Stat(); serr == nil && fi.Size() != totalSize {
 		return proto.FileStatResult{}, fmt.Errorf("assembled file size %d does not match expected %d", fi.Size(), totalSize)
 	}
+	if stat.Entry.Mode != 0 {
+		if err := dest.Chmod(os.FileMode(stat.Entry.Mode).Perm()); err != nil {
+			return proto.FileStatResult{}, fmt.Errorf("set downloaded file mode: %w", err)
+		}
+	}
+	if err := atomicDest.Commit(); err != nil {
+		return proto.FileStatResult{}, fmt.Errorf("install local destination: %w", err)
+	}
 	emit(true, nil)
 
 	_ = a.AuditLog.Append(logs.AuditEntry{
@@ -925,37 +949,66 @@ func resolveUploadRemotePath(remoteDir, remotePath, localPath string) (string, e
 	}
 }
 
-// startWholeFileHash begins hashing a local file in the background and returns a
-// join function that yields the digest (blocking only if hashing is still in
-// flight). It opens its own descriptor because it seeks, and the transfer's
-// workers are concurrently issuing ReadAt on the caller's handle.
-func startWholeFileHash(localPath string) func() (string, error) {
-	type outcome struct {
+type wholeFileHashJob struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+	res    struct {
 		sum string
 		err error
 	}
-	ch := make(chan outcome, 1) // buffered: the goroutine never blocks, even on an aborted transfer
+}
+
+// startWholeFileHash hashes a fixed section of the already-open upload source.
+// SectionReader uses ReadAt, so it is safe alongside transfer workers and cannot
+// be redirected by swapping the source path after UploadFile opened it.
+func startWholeFileHash(file *os.File, size int64) *wholeFileHashJob {
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &wholeFileHashJob{cancel: cancel, done: make(chan struct{})}
 	go func() {
-		f, err := os.Open(localPath) // #nosec G304 -- operator-supplied local path, already opened by the caller
-		if err != nil {
-			ch <- outcome{err: fmt.Errorf("hash local file: %w", err)}
-			return
+		defer cancel()
+		defer close(job.done)
+		h := sha256.New()
+		r := io.NewSectionReader(file, 0, size)
+		buf := make([]byte, 1<<20)
+		for {
+			select {
+			case <-ctx.Done():
+				job.res.err = ctx.Err()
+				return
+			default:
+			}
+			n, err := r.Read(buf)
+			if n > 0 {
+				if _, werr := h.Write(buf[:n]); werr != nil {
+					job.res.err = fmt.Errorf("hash local file: %w", werr)
+					return
+				}
+			}
+			if err == io.EOF {
+				job.res.sum = hex.EncodeToString(h.Sum(nil))
+				return
+			}
+			if err != nil {
+				job.res.err = fmt.Errorf("hash local file: %w", err)
+				return
+			}
 		}
-		defer f.Close()
-		sum, err := streamSHA256(f)
-		if err != nil {
-			err = fmt.Errorf("hash local file: %w", err)
-		}
-		ch <- outcome{sum: sum, err: err}
 	}()
-	var (
-		once sync.Once
-		res  outcome
-	)
-	return func() (string, error) {
-		once.Do(func() { res = <-ch })
-		return res.sum, res.err
+	return job
+}
+
+func (j *wholeFileHashJob) Wait() (string, error) {
+	<-j.done
+	return j.res.sum, j.res.err
+}
+
+func (j *wholeFileHashJob) CancelAndWait() {
+	if j == nil {
+		return
 	}
+	j.once.Do(j.cancel)
+	<-j.done
 }
 
 // fileIdentity is a cheap stand-in for "these bytes are the same bytes": size

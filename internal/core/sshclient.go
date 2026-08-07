@@ -5,6 +5,8 @@ package core
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -110,13 +112,18 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		Timeout:           15 * time.Second,
 	}
 
+	resumeID, err := newShellResumeID()
+	if err != nil {
+		return err
+	}
+
 	for attempt := 0; attempt <= sshMaxRetries; attempt++ {
 		if attempt > 0 {
 			fmt.Fprintf(out, "\r\nReconnecting... (attempt %d/%d)\r\n", attempt, sshMaxRetries)
 			time.Sleep(sshReconnectDelay)
 		}
 
-		err = a.runSSHOnce(addr, clientConfig, knownHostsPath, promptFn, out)
+		err = a.runSSHOnce(addr, clientConfig, knownHostsPath, promptFn, resumeID, out)
 		if err == nil {
 			return nil
 		}
@@ -133,7 +140,7 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 	return fmt.Errorf("disconnected — could not reconnect after %d attempts", sshMaxRetries)
 }
 
-func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath string, promptFn func(string, string, string) bool, out io.Writer) error {
+func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath string, promptFn func(string, string, string) bool, resumeID string, out io.Writer) error {
 	// Fresh callback on every attempt: re-reads known_hosts from disk so a
 	// host pinned in attempt N is visible to attempt N+1 and won't be re-pinned.
 	var state transport.HostKeyState
@@ -180,10 +187,11 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 		}
 	}()
 
-	// Open a fleet-shell channel instead of a standard "session" channel.
-	// The agent only accepts fleet-rpc and fleet-shell — standard SSH clients
-	// connecting to the agent port cannot open any shell.
-	channel, reqs, err := client.OpenChannel(transport.ShellChannelType, nil)
+	// Open a fleet-shell channel with a cryptographically random resume identity.
+	// The same ID is reused only by this invocation's reconnect attempts, so
+	// another connection authenticated by the same controller key cannot attach
+	// to or steal this shell.
+	channel, reqs, err := client.OpenChannel(transport.ShellChannelType, ssh.Marshal(struct{ ResumeID string }{ResumeID: resumeID}))
 	if err != nil {
 		return fmt.Errorf("open fleet-shell channel: %w", err)
 	}
@@ -300,4 +308,12 @@ func isTerminalSSHError(err error) bool {
 		}
 	}
 	return false
+}
+
+func newShellResumeID() (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate shell resume identity: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
 }

@@ -256,14 +256,9 @@ func TestWriteArchiveFileAggregateByteCap(t *testing.T) {
 	}
 }
 
-// TestWriteArchiveFileRefusesSymlinkTarget confirms O_NOFOLLOW stops a member
-// from being written THROUGH a symlink pre-planted at its target path (which a
-// local attacker could place in the operator-chosen destination), so the bytes
-// cannot land outside the destination directory.
-func TestWriteArchiveFileRefusesSymlinkTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("O_NOFOLLOW is a no-op on this platform")
-	}
+// TestWriteArchiveFileReplacesSymlinkEntry confirms atomic publication replaces
+// a pre-planted final symlink rather than opening and truncating its target.
+func TestWriteArchiveFileReplacesSymlinkEntry(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside.txt")
 	if err := os.WriteFile(outside, []byte("original"), 0o600); err != nil {
@@ -275,15 +270,20 @@ func TestWriteArchiveFileRefusesSymlinkTarget(t *testing.T) {
 	}
 	target := filepath.Join(dest, "member.txt")
 	if err := os.Symlink(outside, target); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unsupported: %v", err)
 	}
 
-	err := writeArchiveFile(target, bytes.NewReader([]byte("pwned")), 0o600, newExtractLimiter())
-	if err == nil {
-		t.Fatal("writing through a symlinked target must be refused (O_NOFOLLOW)")
+	if err := writeArchiveFile(target, bytes.NewReader([]byte("safe")), 0o600, newExtractLimiter()); err != nil {
+		t.Fatalf("atomic member write: %v", err)
 	}
 	if got, _ := os.ReadFile(outside); string(got) != "original" {
 		t.Fatalf("symlink target was followed and overwritten: %q", got)
+	}
+	if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("symlink entry was not replaced: err=%v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "safe" {
+		t.Fatalf("member content mismatch: %q", got)
 	}
 }
 
@@ -410,5 +410,45 @@ func TestArchiveListingHasUnsafeType(t *testing.T) {
 	withHeader := "Archive:  x.zip\n-rw-r--r--  3.0 unx 11 tx defN file.txt\n1 file, 11 bytes\n"
 	if unsafe, _ := archiveListingHasUnsafeType(withHeader); unsafe {
 		t.Error("zipinfo header/footer lines must not be flagged")
+	}
+}
+
+func TestExtractZipNativeRejectsIntermediateSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "dest")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dest, "sub")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	archivePath := filepath.Join(dest, "members.zip")
+	zf, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	w, err := zw.Create("sub/payload.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("pwned")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zf.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZipNative(archivePath, dest); err == nil {
+		t.Fatal("extraction should refuse an intermediate symlink escaping the root")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "payload.txt")); !os.IsNotExist(err) {
+		t.Fatalf("archive escaped through intermediate symlink: %v", err)
 	}
 }

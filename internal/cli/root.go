@@ -43,13 +43,6 @@ import (
 // written to the environment, which would be forgeable.
 var actingOperator string
 
-// minRedactLen is the shortest secret value the exec output-scrub will redact. A
-// 1-3 char value (a flag, a digit, "on") would match all over benign output and
-// mass-redact it into ***REDACTED*** noise — corruption, not a leak — so values
-// below this length are skipped. A genuine secret is far longer and a 1-3 char
-// value carries negligible entropy to leak.
-const minRedactLen = 4
-
 // tokenNamePattern is the strict charset allowed for a token name used in audit
 // attribution: letters, digits, dot, underscore and hyphen, 1-64 chars. It
 // excludes whitespace and control characters so a token name can never inject a
@@ -63,6 +56,14 @@ func validateTokenName(name string) error {
 		return fmt.Errorf("name %q must be 1-64 chars of letters, digits, '.', '_' or '-'", name)
 	}
 	return nil
+}
+
+// titleAction capitalizes the fixed ASCII action names used in command help.
+func titleAction(action string) string {
+	if action == "" {
+		return ""
+	}
+	return strings.ToUpper(action[:1]) + action[1:]
 }
 
 func NewRootCommand() *cobra.Command {
@@ -114,8 +115,12 @@ func NewRootCommand() *cobra.Command {
 				switch cmd.Parent().Name() {
 				// Truly-local helpers (cobra built-ins / CLI self-description) that
 				// never touch controller state — safe to short-circuit.
-				case "help", "completion", "skill":
+				case "help", "completion":
 					return nil
+				// Skill targets write integration files unless --print is used. Classify
+				// the leaf conservatively and enforce the token gate.
+				case "skill":
+					return enforceToken(cmd, configDir, tokenID)
 				// Subcommands of these parents WRITE local controller state —
 				// tokens.json, secrets.json, automations/ (+ the shell rc that
 				// shell-init eval()s), and the controller/agent binaries. They MUST be
@@ -269,12 +274,38 @@ func currentVerifiedToken(cmd *cobra.Command, configDir string) (*core.Token, er
 	return &tok, nil
 }
 
+// serverRecordsForOutput strips pending enrollment credentials for constrained
+// tokens. No-token invocations and unscoped admin-equivalent tokens retain the
+// existing output, preserving administrator workflows such as first enrollment.
+func serverRecordsForOutput(cmd *cobra.Command, configDir string, records []core.ServerRecord) ([]core.ServerRecord, error) {
+	token, err := currentVerifiedToken(cmd, configDir)
+	if err != nil {
+		return nil, err
+	}
+	if token == nil || !token.IsScoped() {
+		return records, nil
+	}
+	redacted := make([]core.ServerRecord, len(records))
+	for i, record := range records {
+		redacted[i] = record.WithoutEnrollSecret()
+	}
+	return redacted, nil
+}
+
+func serverRecordForOutput(cmd *cobra.Command, configDir string, record core.ServerRecord) (core.ServerRecord, error) {
+	records, err := serverRecordsForOutput(cmd, configDir, []core.ServerRecord{record})
+	if err != nil {
+		return core.ServerRecord{}, err
+	}
+	return records[0], nil
+}
+
 // enforceToken implements FL-030 CONTROLLER-side RBAC enforcement.
 //
 // When a scoped token is presented (via --token or the FLEET_TOKEN env var) it
-// is loaded from the TokenStore and this invocation is authorized against the
-// token's scope. If the token is unknown/revoked or the invocation is out of
-// scope, a clear error is printed to stderr and the process exits 1.
+// is loaded from the TokenStore and this invocation is authorized against its
+// scope. If the token is unknown/revoked or the invocation is out of scope, a
+// clear error is printed to stderr and the process exits 1.
 //
 // This is controller-side enforcement only: it constrains what THIS controller
 // process will attempt. Agent-side enforcement — where the agent validates the
@@ -317,7 +348,7 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 
 	// A scoped token must never be able to mint or modify tokens: that would let
 	// a constrained credential escalate its own (or others') scope.
-	if top == "token" && (sub == "create" || sub == "revoke") {
+	if token.IsScoped() && top == "token" && (sub == "create" || sub == "revoke") {
 		fmt.Fprintf(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'token %s'\n", sub)
 		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("token %s (scoped token may not mint/modify tokens)", sub))
 		os.Exit(1)
@@ -356,11 +387,16 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 
 	args := commandPositionalArgs(cmd)
 	targetServer := bestEffortTargetServer(top, args)
-	// Pass the REAL subcommand (sub, from topLevelCommand). cobra has already
-	// consumed the subcommand token, so args[0] is the first POSITIONAL (often a
-	// server name), NOT the subcommand — classifying on args[0] is the root-cause
-	// bug this fixes.
-	isDestructive := core.IsDestructiveCommand(top, sub, args)
+	// Classify the FULL runnable Cobra path (including nested leaves such as
+	// `file defaults set`). Unknown paths are denied rather than silently treated
+	// as reads; the exhaustive command-tree test makes additions update this table.
+	commandPath := commandSecurityPath(cmd)
+	isDestructive, classified := core.ClassifyCommandMutation(commandPath, args)
+	if !classified {
+		fmt.Fprintf(cmd.ErrOrStderr(), "denied: command %q has no RBAC mutation classification (fail closed)\n", commandPath)
+		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("%s denied: unclassified command leaf", commandPath))
+		os.Exit(1)
+	}
 
 	// Fan-out commands (`exec --all`, `exec --group EXPR`) run on a set of servers
 	// the single best-effort target check cannot vet. A server-scoped token is
@@ -507,6 +543,20 @@ func commandPositionalArgs(cmd *cobra.Command) []string {
 		return cmd.Flags().Args()
 	}
 	return nil
+}
+
+// commandSecurityPath returns the complete Cobra path below the root command.
+// Unlike topLevelCommand it retains nested leaves (`file defaults set`), which is
+// required for mutation classification at leaf granularity.
+func commandSecurityPath(cmd *cobra.Command) string {
+	if cmd == nil {
+		return ""
+	}
+	parts := strings.Fields(cmd.CommandPath())
+	if len(parts) <= 1 {
+		return "fleet"
+	}
+	return strings.Join(parts[1:], " ")
 }
 
 // serverArgCommands is the set of top-level commands whose targeted server is
@@ -697,7 +747,7 @@ func newStatusCommand(configDir *string) *cobra.Command {
 func newLifecycleCommand(action string, configDir *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   action,
-		Short: strings.Title(action) + " the controller runtime",
+		Short: titleAction(action) + " the controller runtime",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -880,7 +930,7 @@ func openBrowser(url string) error {
 	default:
 		name, args = "xdg-open", []string{url}
 	}
-	return exec.Command(name, args...).Start()
+	return exec.Command(name, args...).Start() // #nosec G204 -- name is selected from fixed per-OS constants; no shell
 }
 
 func newServerCommand(configDir *string) *cobra.Command {
@@ -1067,10 +1117,15 @@ func newServerCommand(configDir *string) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), core.AgentInstallInstructions(record, parsedMode))
 			}
 			if enrollSecret != "" {
+				fingerprint, fpErr := app.ControllerHostKeyFingerprint()
+				if fpErr != nil {
+					return fpErr
+				}
 				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintf(cmd.OutOrStdout(), "Reverse-mode enrollment token (one-time, required on the agent's FIRST connect):\n\n  %s\n\n", enrollSecret)
-				fmt.Fprintf(cmd.OutOrStdout(), "Start the agent with:\n  fleet-agent --mode reverse --controller <addr> --server-name %s --enroll-token %s\n\n", name, enrollSecret)
-				fmt.Fprintln(cmd.OutOrStdout(), "Keep it secret; it's consumed once the agent's key is pinned. Re-mint with 'fleet server enroll-token "+name+"'.")
+				fmt.Fprintf(cmd.OutOrStdout(), "Reverse-mode enrollment token (one-time):\n\n  %s\n\n", enrollSecret)
+				fmt.Fprintf(cmd.OutOrStdout(), "Verified controller host-key fingerprint:\n\n  %s\n\n", fingerprint)
+				fmt.Fprintf(cmd.OutOrStdout(), "Store the token in an owner-only file, then start the agent without exposing it in argv:\n  install -m 600 /dev/null /path/to/fleet-enroll.token\n  # write the token to that file securely\n  fleet-agent reverse --controller <addr> --server-name %s --controller-fingerprint %s --enroll-token-file /path/to/fleet-enroll.token\n\n", name, fingerprint)
+				fmt.Fprintln(cmd.OutOrStdout(), "The agent removes the token file after authentication. Re-mint with 'fleet server enroll-token "+name+"'.")
 			}
 			return nil
 		},
@@ -1102,6 +1157,10 @@ func newServerCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			servers, err = serverRecordsForOutput(cmd, *configDir, servers)
+			if err != nil {
+				return err
+			}
 			if strings.EqualFold(listFormat, "table") {
 				return writeServerTable(cmd, servers)
 			}
@@ -1122,6 +1181,10 @@ func newServerCommand(configDir *string) *cobra.Command {
 			}
 			defer app.Close()
 			server, err := app.GetServer(args[0])
+			if err != nil {
+				return err
+			}
+			server, err = serverRecordForOutput(cmd, *configDir, server)
 			if err != nil {
 				return err
 			}
@@ -1358,7 +1421,11 @@ If the server is unreachable or credentials have changed, use one of:
 			if err := app.SaveServer(server); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "New enrollment token for %s (one-time):\n\n  %s\n\nStart the agent with --enroll-token %s\n", args[0], secret, secret)
+			fingerprint, err := app.ControllerHostKeyFingerprint()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "New enrollment token for %s (one-time):\n\n  %s\n\nController fingerprint:\n\n  %s\n\nStore the token in a 0600 file and use --enroll-token-file with --controller-fingerprint %s.\n", args[0], secret, fingerprint, fingerprint)
 			return nil
 		},
 	})
@@ -1409,7 +1476,7 @@ func newServiceCommand(configDir *string) *cobra.Command {
 		action := action
 		serviceCmd.AddCommand(&cobra.Command{
 			Use:   action + " <server> <name>",
-			Short: strings.Title(action) + " a tracked service",
+			Short: titleAction(action) + " a tracked service",
 			Args:  cobra.ExactArgs(2),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				app, err := openApp(*configDir)
@@ -1579,7 +1646,7 @@ func newPortCommand(configDir *string) *cobra.Command {
 		action := action
 		portCmd.AddCommand(&cobra.Command{
 			Use:   action + " <server> <port>",
-			Short: strings.Title(action) + " a tracked port",
+			Short: titleAction(action) + " a tracked port",
 			Args:  cobra.ExactArgs(2),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				port, err := strconv.Atoi(args[1])
@@ -1621,7 +1688,7 @@ func newFirewallCommand(configDir *string) *cobra.Command {
 		action := action
 		firewallCmd.AddCommand(&cobra.Command{
 			Use:   action + " <server>",
-			Short: strings.Title(action) + " a server firewall",
+			Short: titleAction(action) + " a server firewall",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				app, err := openApp(*configDir)
@@ -1771,16 +1838,7 @@ func newConfigCommand(configDir *string) *cobra.Command {
 		Use:   "edit",
 		Short: "Open the configuration in $EDITOR",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				return errors.New("$EDITOR is not set")
-			}
-			path := core.ConfigPath(*configDir)
-			c := exec.Command(editor, path)
-			c.Stdin = cmd.InOrStdin()
-			c.Stdout = cmd.OutOrStdout()
-			c.Stderr = cmd.ErrOrStderr()
-			return c.Run()
+			return openInEditor(cmd, *configDir, core.ConfigPath(*configDir))
 		},
 	})
 	configCmd.AddCommand(&cobra.Command{
@@ -2294,7 +2352,7 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 							fmt.Fprintln(cmd.ErrOrStderr(), "warning: 'brew' not found on PATH; run the command above manually")
 							return nil
 						}
-						uninstall := exec.Command(brewPath, "uninstall", "cenvero-fleet")
+						uninstall := exec.Command(brewPath, "uninstall", "cenvero-fleet") // #nosec G204 -- brewPath is from exec.LookPath; arguments are constant
 						uninstall.Stdout = out
 						uninstall.Stderr = cmd.ErrOrStderr()
 						if runErr := uninstall.Run(); runErr != nil {
@@ -2322,7 +2380,7 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 			if err := os.Remove(binaryPath); err != nil {
 				if os.IsPermission(err) {
 					// Try with sudo on unix
-					sudoErr := exec.Command("sudo", "rm", "-f", binaryPath).Run()
+					sudoErr := exec.Command("sudo", "rm", "-f", binaryPath).Run() // #nosec G204 -- fixed executable/flags; binaryPath is an argv element, not shell text
 					if sudoErr != nil {
 						fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove %s (permission denied). Run: sudo rm -f %s\n", binaryPath, binaryPath)
 						return nil
@@ -2449,7 +2507,7 @@ func followServiceLogs(ctx context.Context, cmd *cobra.Command, app *core.App, s
 			_, err := fmt.Fprint(cmd.OutOrStdout(), formatted)
 			return err
 		}
-		f, err := os.OpenFile(exportPath, os.O_APPEND|os.O_WRONLY, 0o600)
+		f, err := os.OpenFile(exportPath, os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- operator-selected log export path is the command contract
 		if err != nil {
 			return err
 		}
@@ -2618,6 +2676,8 @@ Examples:
 		Args:         cobra.MinimumNArgs(1),
 		SilenceUsage: true, // a remote non-zero exit / transport error must not dump usage text
 		RunE: func(cmd *cobra.Command, args []string) error {
+			commandCtx, stopCommand := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer stopCommand()
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
@@ -2671,26 +2731,14 @@ Examples:
 				}
 			}
 
-			// redact applies the configured output redaction AND scrubs every
-			// resolved secret value. The secret scrub is independent of the
-			// file-based redactor (which is nil when no policy.json exists), so a
-			// secret value is always removed from output even with no policy set.
-			//
-			// A very short secret value (1-3 chars, e.g. a flag or a counter) would
-			// match all over benign output and mass-redact it into noise — that is
-			// corruption, not a leak. Skip the scrub for values below minRedactLen; a
-			// real secret is far longer, and a tiny value carries little entropy to
-			// leak anyway. The file-based redactor (regex patterns) is unaffected.
+			// redact applies configured output redaction and then scrubs every
+			// resolved secret value. Even one-byte values are redacted: preserving
+			// readability must never take precedence over confidentiality.
 			redact := func(s string) string {
 				if redactor != nil {
 					s = redactor.Redact(s)
 				}
-				for _, sec := range secrets {
-					if len(sec.value) >= minRedactLen {
-						s = strings.ReplaceAll(s, sec.value, core.RedactPlaceholder)
-					}
-				}
-				return s
+				return redactSecretValues(s, secrets)
 			}
 
 			// secretEnvPrefix builds the environment assignment prefix prepended to
@@ -2743,34 +2791,26 @@ Examples:
 				return 2222
 			}
 
-			// runOnce applies the optional controller-side timeout to a single attempt.
-			// It prepends the secret env prefix (VALUES, shell-quoted) ONLY here, at
-			// the point of execution — the prefixed string never escapes this scope,
-			// so values cannot leak into echoes/policy/audit. The original `command`
-			// is used everywhere else (policy, echo, dry-run, the on-fail prefix).
-			// TODO: agent-side kill so the remote process also stops on timeout.
+			// runOnce applies a deadline that is carried in the RPC envelope. The
+			// transport closes the timed-out channel and the agent independently uses
+			// the same deadline to kill the complete remote process group.
 			runOnce := func(server, command string) (proto.ExecResult, bool, error) {
 				command = secretEnvPrefix() + command
 				if timeout <= 0 {
-					r, e := app.ExecCommand(server, command)
+					r, e := app.ExecCommandContext(commandCtx, server, command)
 					return r, false, e
 				}
-				type out struct {
-					r proto.ExecResult
-					e error
+				execCtx, cancel := context.WithTimeout(commandCtx, timeout)
+				defer cancel()
+				r, e := app.ExecCommandContext(execCtx, server, command)
+				if errors.Is(e, context.DeadlineExceeded) || errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+					return proto.ExecResult{}, true, fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
 				}
-				ch := make(chan out, 1)
-				go func() { r, e := app.ExecCommand(server, command); ch <- out{r, e} }()
-				select {
-				case o := <-ch:
-					return o.r, false, o.e
-				case <-time.After(timeout):
-					return proto.ExecResult{}, true, fmt.Errorf("timed out after %s", timeout)
-				}
+				return r, false, e
 			}
 			// run retries only transport-class failures (agentErr set, not a timeout,
 			// and the command never reached execution), never a command that ran.
-			run := func(server, command string) (res proto.ExecResult, timedOut bool, agentErr error, dur time.Duration) {
+			run := func(server, command string) (res proto.ExecResult, timedOut bool, dur time.Duration, agentErr error) {
 				for attempt := 0; ; attempt++ {
 					start := time.Now()
 					res, timedOut, agentErr = runOnce(server, command)
@@ -2878,7 +2918,7 @@ Examples:
 					return execJSON{Server: server}, true, nil
 				}
 				// run, then redact, then handle on-fail.
-				r, timedOut, agentErr, dur := run(server, command)
+				r, timedOut, dur, agentErr := run(server, command)
 				j := toJSON(server, r, timedOut, agentErr, dur)
 				if idempotencyKey != "" {
 					if data, merr := json.Marshal(j); merr == nil {
@@ -2900,7 +2940,7 @@ Examples:
 						}
 						return j, false, berr
 					}
-					or, oTimedOut, oAgentErr, oDur := run(server, onFail)
+					or, oTimedOut, oDur, oAgentErr := run(server, onFail)
 					oj := toJSON(server, or, oTimedOut, oAgentErr, oDur)
 					if human {
 						printExecHuman(cmd, j, printHeader)
@@ -3044,6 +3084,22 @@ type resolvedSecret struct {
 	name    string // env var name (VAR)
 	value   string // resolved value — NEVER printed/echoed/logged
 	display string // safe reference for echo/dry-run, never the value
+}
+
+// redactSecretValues removes every non-empty resolved value. Empty values are
+// skipped because replacing the empty string would corrupt all output without
+// protecting any secret bytes.
+func redactSecretValues(output string, secrets []resolvedSecret) string {
+	pairs := make([]string, 0, len(secrets)*2)
+	for _, secret := range secrets {
+		if secret.value != "" {
+			pairs = append(pairs, secret.value, core.RedactPlaceholder)
+		}
+	}
+	if len(pairs) == 0 {
+		return output
+	}
+	return strings.NewReplacer(pairs...).Replace(output)
 }
 
 // parseSecretSpec parses one --secret token. The safe form is `VAR=@name`, which

@@ -34,6 +34,10 @@ type Envelope struct {
 	Capabilities    []string     `json:"capabilities,omitempty"`
 	Payload         any          `json:"payload,omitempty"`
 	Error           *Error       `json:"error,omitempty"`
+	// DeadlineUnixMilli carries the caller's absolute deadline end to end. Agents
+	// use it to cancel long-running work (notably shell.exec process groups) even
+	// when the transport channel is interrupted at the same instant.
+	DeadlineUnixMilli int64 `json:"deadline_unix_milli,omitempty"`
 
 	// Binary is a raw byte attachment carried after the JSON envelope rather
 	// than base64-encoded inside it — see binaryFrameFlag in codec.go. It is
@@ -56,6 +60,26 @@ const CapabilityBinaryFrames = "file.binary-frames"
 // let the controller run reverse transfers with real parallelism. Without it the
 // controller keeps to the single-channel behaviour.
 const CapabilityReverseMultiplex = "reverse.multiplex"
+
+// CapabilityRequestCancel is advertised by agents that accept an out-of-band
+// request.cancel event on an RPC channel. It lets a controller cancel a
+// deadline-free shell.exec by request ID while keeping the channel usable.
+const CapabilityRequestCancel = "rpc.request-cancel"
+
+// CapabilityMetricsPeekAck is advertised by agents whose offline metrics queue
+// uses non-destructive peek followed by an explicit acknowledgement. Controllers
+// must not invoke the legacy destructive flush action when this is absent.
+const CapabilityMetricsPeekAck = "metrics.queue.peek-ack"
+
+const (
+	ActionRequestCancel    = "request.cancel"
+	ActionMetricsPeekQueue = "metrics.peek_queue"
+	ActionMetricsAckQueue  = "metrics.ack_queue"
+)
+
+type CancelRequestPayload struct {
+	RequestID string `json:"request_id"`
+}
 
 // BinaryCarrier is implemented by payloads whose bulk bytes can travel as a
 // binary frame attachment instead of a base64 JSON field.
@@ -179,7 +203,12 @@ type MetricsPayload struct {
 }
 
 type MetricsReplayResult struct {
+	BatchID   string            `json:"batch_id,omitempty"`
 	Snapshots []MetricsSnapshot `json:"snapshots"`
+}
+
+type MetricsReplayAck struct {
+	BatchID string `json:"batch_id"`
 }
 
 type MetricsSnapshot struct {

@@ -82,7 +82,7 @@ func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogL
 		return nil
 	}
 
-	file, err := os.OpenFile(basePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(basePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- path is derived from the controller log root and validated server/service components
 	if err != nil {
 		return fmt.Errorf("open aggregated log: %w", err)
 	}
@@ -117,7 +117,7 @@ func (s *ServiceStore) Read(serverName, serviceName, search string, tailLines in
 	lines := make([]proto.LogLine, 0, 128)
 	lineNumber := 0
 	for _, path := range paths {
-		file, err := os.Open(path)
+		file, err := os.Open(path) // #nosec G304 -- path is derived from the controller log root and validated server/service components
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -167,7 +167,7 @@ func (s *ServiceStore) cursorPath(serverName, serviceName string) string {
 
 func (s *ServiceStore) readCursor(serverName, serviceName string) (logCursor, error) {
 	path := s.cursorPath(serverName, serviceName)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is derived from the controller log root and validated server/service components
 	if err != nil {
 		if os.IsNotExist(err) {
 			return logCursor{}, nil

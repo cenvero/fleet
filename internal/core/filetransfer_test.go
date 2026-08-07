@@ -83,10 +83,9 @@ func TestEffectiveFileTransferDefaultsMerge(t *testing.T) {
 // transferTestRig stands up an in-memory agent serving a real file manager and
 // a controller App wired to dial it over a buffered conn pair.
 type transferTestRig struct {
-	app       *App
-	fileMgr   *instrumentedFileManager
-	errCh     chan error
-	dialCount int
+	app     *App
+	fileMgr *instrumentedFileManager
+	errCh   chan error
 }
 
 func newTransferRig(t *testing.T) *transferTestRig {
@@ -452,4 +451,76 @@ func auditDetailsContain(t *testing.T, app *App, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestDownloadReplacesFinalSymlinkWithoutClobberingTarget(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+	remote := filepath.Join(t.TempDir(), "remote.bin")
+	if err := os.WriteFile(remote, []byte("downloaded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localDir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(localDir, "result.bin")
+	if err := os.Symlink(victim, dst); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, err := rig.app.DownloadFile("loopback", remote, dst, FileTransferOptions{ChunkSize: 4}, nil); err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "original" {
+		t.Fatalf("symlink target was clobbered: %q", got)
+	}
+	if info, err := os.Lstat(dst); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("destination symlink entry was not replaced: mode=%v err=%v", info.Mode(), err)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "downloaded" {
+		t.Fatalf("downloaded content mismatch: %q", got)
+	}
+}
+
+func TestDownloadDirRejectsIntermediateSymlinkEscape(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+	remoteDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(remoteDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "sub", "file.txt"), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(localDir, "sub")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, err := rig.app.DownloadDir("loopback", remoteDir, localDir, FileTransferOptions{}, nil); err == nil {
+		t.Fatal("DownloadDir should refuse an intermediate symlink escaping its local root")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "file.txt")); !os.IsNotExist(err) {
+		t.Fatalf("download escaped through intermediate symlink: %v", err)
+	}
+}
+
+func TestWholeFileHashCancelJoinsWorker(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "hash-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(64 << 20); err != nil {
+		t.Fatal(err)
+	}
+	job := startWholeFileHash(f, 64<<20)
+	job.CancelAndWait()
+	select {
+	case <-job.done:
+		// joined
+	default:
+		t.Fatal("CancelAndWait returned before the hash worker exited")
+	}
 }

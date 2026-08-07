@@ -56,12 +56,16 @@ func (u managedUpdater) Apply(ctx context.Context, payload proto.UpdateApplyPayl
 		configDir = agentConfigDir()
 	}
 
+	currentVersion := version.Version
+	if currentVersion == "dev" {
+		currentVersion = ""
+	}
 	result, err := update.Apply(ctx, update.ApplyOptions{
 		ManifestURL:      payload.ManifestURL,
 		Channel:          payload.Channel,
 		ConfigDir:        configDir,
 		ExecutablePath:   executablePath,
-		CurrentVersion:   version.Version,
+		CurrentVersion:   currentVersion,
 		AgentBinary:      true,
 		SigningPublicKey: u.SigningPublicKey,
 		FetchManifest:    u.FetchManifest,

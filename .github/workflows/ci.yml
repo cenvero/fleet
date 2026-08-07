@@ -14,8 +14,8 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: gofmt check
@@ -24,15 +24,23 @@ jobs:
           # empty match does not leave gofmt reading stdin.
           unformatted="$(find . -name '*.go' -print0 | xargs -0 -r gofmt -l)"
           test -z "${unformatted}"
+      - name: go mod tidy must be clean
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
       - name: go vet
         run: go vet ./...
+      - name: Install staticcheck (pinned)
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+      - name: Run staticcheck
+        run: staticcheck ./...
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Test with race detector
@@ -59,8 +67,8 @@ jobs:
           - goos: windows
             goarch: amd64
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Build
@@ -78,27 +86,24 @@ jobs:
     name: Security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
       - name: Install scanners
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
       - name: Run govulncheck
         run: govulncheck ./...
       - name: Run gosec
-        # G304/G703: file ops on user-controlled paths are intentional in a CLI fleet manager
-        # G122: TOCTOU in WalkDir is acceptable risk for key rotation
-        # G204/G702: subprocess with variable is intentional (editor launch, service commands)
-        run: gosec -exclude=G304,G703,G122,G204,G702 ./...
+        run: gosec ./...
 
   manifest-validate:
     name: Validate manifest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate JSON syntax
         run: jq empty public/manifest.json
       - name: Validate schema basics
@@ -111,7 +116,7 @@ jobs:
     name: Validate release guardrails
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate placeholder secret rejection
         env:
           MINISIGN_SECRET_KEY: bm90LWEtcmVhbC1zZWNyZXQ=
@@ -146,10 +151,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/configure-pages@v6
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: public
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

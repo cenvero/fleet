@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,4 +221,70 @@ type fakeBootstrapExecutor struct {
 func (f *fakeBootstrapExecutor) Bootstrap(_ context.Context, req BootstrapRequest) error {
 	f.requests = append(f.requests, req)
 	return nil
+}
+
+func TestBootstrapServerReverseKeepsEnrollmentCredentialOutOfArgv(t *testing.T) {
+	t.Parallel()
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{ConfigDir: configDir, Alias: "fleet", DefaultMode: transport.ModeReverse, CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	const secret = "bootstrap-one-use-secret"
+	if err := app.AddServer(ServerRecord{Name: "edge-secure", Address: "192.0.2.44", Mode: transport.ModeReverse, EnrollSecret: secret}); err != nil {
+		t.Fatal(err)
+	}
+	agentBinary := filepath.Join(t.TempDir(), "fleet-agent")
+	if err := os.WriteFile(agentBinary, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executor := &fakeBootstrapExecutor{}
+	app.BootstrapExecutor = executor
+	result, err := app.BootstrapServer("edge-secure", BootstrapOptions{LoginUser: "root", AgentBinaryPath: agentBinary, ControllerAddress: "203.0.113.7:9443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.ServiceUnit, secret) || strings.Contains(result.Script, secret) {
+		t.Fatal("enrollment credential leaked into service unit or script")
+	}
+	if !strings.Contains(result.ServiceUnit, "--enroll-token-file") || !strings.Contains(result.ServiceUnit, "--controller-fingerprint") || !strings.Contains(result.ServiceUnit, "SHA256:") {
+		t.Fatalf("secure reverse flags missing from unit: %s", result.ServiceUnit)
+	}
+	if len(executor.requests) != 1 {
+		t.Fatalf("bootstrap requests = %d, want 1", len(executor.requests))
+	}
+	foundCredential := false
+	for _, upload := range executor.requests[0].Uploads {
+		if strings.Contains(string(upload.Content), secret) {
+			foundCredential = true
+			if upload.Mode.Perm() != 0o600 || !strings.HasSuffix(upload.Path, ".enroll") {
+				t.Fatalf("credential upload is not owner-only temporary file: %#v", upload)
+			}
+		}
+		if (strings.HasSuffix(upload.Path, ".service") || strings.HasSuffix(upload.Path, ".sh")) && strings.Contains(string(upload.Content), secret) {
+			t.Fatalf("credential leaked into uploaded %s", upload.Path)
+		}
+	}
+	if !foundCredential {
+		t.Fatal("bootstrap did not upload the one-use enrollment credential")
+	}
+}
+
+type failingBootstrapEntropy struct{ err error }
+
+func (r failingBootstrapEntropy) Read([]byte) (int, error) { return 0, r.err }
+
+func TestRandomBootstrapTokenPropagatesEntropyFailure(t *testing.T) {
+	injected := errors.New("injected bootstrap entropy failure")
+	token, err := randomBootstrapToken(failingBootstrapEntropy{err: injected})
+	if !errors.Is(err, injected) {
+		t.Fatalf("randomBootstrapToken error = %v, want %v", err, injected)
+	}
+	if token != "" {
+		t.Fatalf("randomBootstrapToken token = %q after entropy failure, want empty", token)
+	}
 }

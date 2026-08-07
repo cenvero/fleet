@@ -232,9 +232,7 @@ func parseProbeOutput(item *InventoryItem, stdout string) {
 			}
 			sort.Ints(item.ListenPorts)
 		case "SERVICES":
-			for _, s := range strings.Fields(val) {
-				item.Services = append(item.Services, s)
-			}
+			item.Services = append(item.Services, strings.Fields(val)...)
 		}
 	}
 }

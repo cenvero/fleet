@@ -51,8 +51,11 @@ type FileManager interface {
 type activeUpload struct {
 	mu        sync.RWMutex
 	f         *os.File
+	root      *os.Root
 	tempPath  string
 	finalPath string
+	tempRel   string
+	finalRel  string
 	totalSize int64
 	mode      uint32
 	done      bool
@@ -184,6 +187,73 @@ func recheckFinalComponent(real string) *RPCError {
 	return checkBlockedTransferPath(resolved)
 }
 
+// validateTransferEntryPath validates an existing directory entry without
+// dereferencing its final component. Delete and rename must act on a symlink
+// itself, not on the file or directory it points to.
+func validateTransferEntryPath(name string) (string, *RPCError) {
+	if name == "" {
+		return "", &RPCError{Code: "missing_path", Message: "path is required"}
+	}
+	if !filepath.IsAbs(name) {
+		return "", &RPCError{Code: "invalid_path", Message: "path must be absolute"}
+	}
+	clean := filepath.Clean(name)
+	parent := filepath.Dir(clean)
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		parent = resolved
+	}
+	real := filepath.Join(parent, filepath.Base(clean))
+	if err := checkBlockedTransferPath(real); err != nil {
+		return "", err
+	}
+	return real, nil
+}
+
+// openTransferRoot returns a descriptor-backed root and a relative path beneath
+// it. With --file-root configured, opening from the allowed root closes the
+// validate/open TOCTOU for every intermediate component.
+func openTransferRoot(real string) (*os.Root, string, *RPCError) {
+	var rootPath string
+	for _, candidate := range allowedFileRoots {
+		if real == candidate || strings.HasPrefix(real, candidate+string(filepath.Separator)) {
+			if len(candidate) > len(rootPath) {
+				rootPath = candidate
+			}
+		}
+	}
+	if rootPath == "" {
+		rootPath = filepath.VolumeName(real) + string(filepath.Separator)
+	}
+	rel, err := filepath.Rel(rootPath, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, "", &RPCError{Code: "invalid_path", Message: "path is outside the selected file root"}
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, "", &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	return root, rel, nil
+}
+
+func validTransferID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for i := range len(id) {
+		c := id[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func invalidTransferID() *RPCError {
+	return &RPCError{Code: "invalid_transfer_id", Message: "transfer_id must be a bounded safe path component"}
+}
+
 func checkBlockedTransferPath(real string) *RPCError {
 	for _, blocked := range blockedTransferPrefixes {
 		if real == strings.TrimSuffix(blocked, "/") || strings.HasPrefix(real, blocked) {
@@ -278,12 +348,44 @@ func reapStaleParts(dir, keepName string, now time.Time) {
 	}
 }
 
+func reapStalePartsRoot(root *os.Root, dirRel, keepName string, now time.Time) {
+	dir, err := root.Open(dirRel)
+	if err != nil {
+		return
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || name == keepName || !strings.Contains(name, ".fleet-") || !strings.HasSuffix(name, ".part") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && now.Sub(info.ModTime()) > stalePartMaxAge {
+			_ = root.Remove(filepath.Join(dirRel, name))
+		}
+	}
+}
+
 func (m *fileManager) List(_ context.Context, p proto.FileListPayload) (proto.FileListResult, error) {
 	real, rerr := validateTransferPath(p.Path)
 	if rerr != nil {
 		return proto.FileListResult{}, rerr
 	}
-	entries, err := os.ReadDir(real)
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileListResult{}, rerr
+	}
+	defer root.Close()
+	dir, err := root.Open(rel)
+	if err != nil {
+		return proto.FileListResult{}, &RPCError{Code: "list_failed", Message: err.Error()}
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
 	if err != nil {
 		return proto.FileListResult{}, &RPCError{Code: "list_failed", Message: err.Error()}
 	}
@@ -321,7 +423,12 @@ func (m *fileManager) Stat(_ context.Context, p proto.FileStatPayload) (proto.Fi
 	if rerr != nil {
 		return proto.FileStatResult{}, rerr
 	}
-	info, err := os.Stat(real)
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileStatResult{}, rerr
+	}
+	defer root.Close()
+	info, err := root.Stat(rel)
 	if err != nil {
 		return proto.FileStatResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
@@ -347,7 +454,12 @@ func (m *fileManager) Read(_ context.Context, p proto.FileReadPayload) (proto.Fi
 	if length <= 0 || length > proto.MaxRawChunkBytes {
 		length = proto.MaxRawChunkBytes
 	}
-	file, err := os.Open(real)
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileReadResult{}, rerr
+	}
+	defer root.Close()
+	file, err := root.Open(rel)
 	if err != nil {
 		return proto.FileReadResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
 	}
@@ -381,10 +493,13 @@ func (m *fileManager) Read(_ context.Context, p proto.FileReadPayload) (proto.Fi
 }
 
 func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload) (proto.FileOpenWriteResult, error) {
-	if p.TransferID == "" {
-		return proto.FileOpenWriteResult{}, &RPCError{Code: "missing_transfer_id", Message: "transfer_id is required"}
+	if !validTransferID(p.TransferID) {
+		return proto.FileOpenWriteResult{}, invalidTransferID()
 	}
-	real, rerr := validateWriteTarget(p.Path)
+	if p.TotalSize < 0 {
+		return proto.FileOpenWriteResult{}, &RPCError{Code: "invalid_size", Message: "total size must be non-negative"}
+	}
+	real, rerr := validateTransferEntryPath(p.Path)
 	if rerr != nil {
 		return proto.FileOpenWriteResult{}, rerr
 	}
@@ -392,6 +507,9 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.active[p.TransferID]; ok {
+		if existing.finalPath != real || existing.totalSize != p.TotalSize {
+			return proto.FileOpenWriteResult{}, &RPCError{Code: "transfer_conflict", Message: "transfer_id is already bound to a different destination or size"}
+		}
 		var size int64
 		if info, err := existing.f.Stat(); err == nil {
 			size = info.Size()
@@ -399,25 +517,42 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		return proto.FileOpenWriteResult{TempPath: existing.tempPath, ResumeOffset: size}, nil
 	}
 
-	// The temp file is keyed by TransferID, not just the destination path, so two
-	// concurrent transfers to the same remote path can't corrupt one shared temp.
-	// TransferID is deterministic from (path,size,content-hash), so the SAME
-	// content still maps to the SAME temp and resumes; different content does not.
-	temp := real + ".fleet-" + p.TransferID + ".part"
-	// Lazily reap temps abandoned by long-dead transfers in this directory
-	// (never the current one), so orphaned .part files don't pile up.
-	reapStaleParts(filepath.Dir(real), filepath.Base(temp), time.Now())
-	// O_CREATE without O_TRUNC: a temp left by a previous interrupted transfer
-	// is reopened so its bytes can be reused for resume. O_NOFOLLOW (oNoFollow,
-	// a no-op on non-unix) refuses to follow a symlink swapped in at the temp
-	// path after validateWriteTarget's Lstat — closing the write TOCTOU.
-	f, err := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|oNoFollow, 0o600)
+	root, finalRel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileOpenWriteResult{}, rerr
+	}
+	tempRel := finalRel + ".fleet-" + p.TransferID + ".part"
+	if filepath.Dir(tempRel) != filepath.Dir(finalRel) || !validTransferID(p.TransferID) {
+		_ = root.Close()
+		return proto.FileOpenWriteResult{}, invalidTransferID()
+	}
+	temp := filepath.Join(root.Name(), tempRel)
+	if err := checkBlockedTransferPath(temp); err != nil {
+		_ = root.Close()
+		return proto.FileOpenWriteResult{}, err
+	}
+	reapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
+	if info, err := root.Lstat(tempRel); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			_ = root.Close()
+			return proto.FileOpenWriteResult{}, &RPCError{Code: "invalid_path", Message: "upload sidecar is not a regular file"}
+		}
+	} else if !os.IsNotExist(err) {
+		_ = root.Close()
+		return proto.FileOpenWriteResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	f, err := root.OpenFile(tempRel, os.O_RDWR|os.O_CREATE|oNoFollow, 0o600)
 	if err != nil {
+		_ = root.Close()
 		return proto.FileOpenWriteResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
 	}
 	info, err := f.Stat()
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
 		_ = f.Close()
+		_ = root.Close()
+		if err == nil {
+			err = fmt.Errorf("upload sidecar is not a regular file")
+		}
 		return proto.FileOpenWriteResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
 	mode := p.Mode
@@ -425,16 +560,17 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		mode = 0o644
 	}
 	m.active[p.TransferID] = &activeUpload{
-		f:         f,
-		tempPath:  temp,
-		finalPath: real,
-		totalSize: p.TotalSize,
-		mode:      mode,
+		f: f, root: root, tempPath: temp, finalPath: real,
+		tempRel: tempRel, finalRel: finalRel,
+		totalSize: p.TotalSize, mode: mode,
 	}
 	return proto.FileOpenWriteResult{TempPath: temp, ResumeOffset: info.Size()}, nil
 }
 
 func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.FileWriteResult, error) {
+	if !validTransferID(p.TransferID) {
+		return proto.FileWriteResult{}, invalidTransferID()
+	}
 	if len(p.Data) > proto.MaxRawChunkBytes {
 		return proto.FileWriteResult{}, &RPCError{
 			Code:    "chunk_too_large",
@@ -449,6 +585,13 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 	m.mu.Unlock()
 	if !ok {
 		return proto.FileWriteResult{}, &RPCError{Code: "unknown_transfer", Message: "no open upload for transfer id; call file.open_write first"}
+	}
+	real, rerr := validateTransferEntryPath(p.Path)
+	if rerr != nil {
+		return proto.FileWriteResult{}, rerr
+	}
+	if real != au.finalPath {
+		return proto.FileWriteResult{}, &RPCError{Code: "transfer_conflict", Message: "transfer path does not match open upload"}
 	}
 	// Bound the write to the size declared at open_write. Without this a client
 	// could write at an arbitrary offset (e.g. 1 PiB) and allocate an enormous
@@ -485,15 +628,26 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 }
 
 func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
+	if !validTransferID(p.TransferID) {
+		return proto.FileFinalizeResult{}, invalidTransferID()
+	}
+	real, rerr := validateTransferEntryPath(p.Path)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
 	m.mu.Lock()
 	au, ok := m.active[p.TransferID]
-	if ok {
-		delete(m.active, p.TransferID)
-	}
-	m.mu.Unlock()
 	if !ok {
+		m.mu.Unlock()
 		return proto.FileFinalizeResult{}, &RPCError{Code: "unknown_transfer", Message: "no open upload for transfer id"}
 	}
+	if real != au.finalPath || p.TotalSize != au.totalSize {
+		m.mu.Unlock()
+		return proto.FileFinalizeResult{}, &RPCError{Code: "transfer_conflict", Message: "finalize path or size does not match open upload"}
+	}
+	delete(m.active, p.TransferID)
+	m.mu.Unlock()
+	defer au.root.Close()
 
 	au.mu.Lock()
 	defer au.mu.Unlock()
@@ -510,7 +664,7 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 		_ = au.f.Close()
 		return proto.FileFinalizeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
-	if p.TotalSize > 0 && info.Size() != p.TotalSize {
+	if info.Size() != p.TotalSize {
 		_ = au.f.Close()
 		return proto.FileFinalizeResult{}, &RPCError{
 			Code:    "size_mismatch",
@@ -544,45 +698,39 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 	if err := au.f.Close(); err != nil {
 		return proto.FileFinalizeResult{}, &RPCError{Code: "close_failed", Message: err.Error()}
 	}
-	if err := os.Rename(au.tempPath, au.finalPath); err != nil {
+	if err := au.root.Rename(au.tempRel, au.finalRel); err != nil {
 		return proto.FileFinalizeResult{}, &RPCError{Code: "rename_failed", Message: err.Error()}
 	}
 	return proto.FileFinalizeResult{Path: au.finalPath, Size: info.Size(), SHA256: sum}, nil
 }
 
 func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.FileProbeResult, error) {
-	probePath := ""
-	if p.TransferID != "" {
-		m.mu.Lock()
-		au, ok := m.active[p.TransferID]
-		m.mu.Unlock()
-		if ok {
-			probePath = au.tempPath
-		}
+	if p.TransferID != "" && !validTransferID(p.TransferID) {
+		return proto.FileProbeResult{}, invalidTransferID()
 	}
-	if probePath == "" {
-		real, rerr := validateWriteTarget(p.Path)
-		if rerr != nil {
-			return proto.FileProbeResult{}, rerr
+	real, rerr := validateTransferEntryPath(p.Path)
+	if rerr != nil {
+		return proto.FileProbeResult{}, rerr
+	}
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileProbeResult{}, rerr
+	}
+	defer root.Close()
+	probeRel := rel
+	if p.TransferID != "" {
+		tempRel := rel + ".fleet-" + p.TransferID + ".part"
+		if filepath.Dir(tempRel) != filepath.Dir(rel) {
+			return proto.FileProbeResult{}, invalidTransferID()
 		}
-		// Prefer an upload temp left by an interrupted transfer; otherwise fall
-		// back to the real path (download source probe). The temp name MUST match
-		// what OpenWrite creates — "<name>.fleet-<TransferID>.part" — otherwise
-		// the lookup never hits and resume is silently disabled (the controller
-		// always sends TransferID on probe). The previous ".fleetpart" suffix was
-		// wrong and could never match.
-		if p.TransferID != "" {
-			if temp := real + ".fleet-" + p.TransferID + ".part"; fileExists(temp) {
-				probePath = temp
-			} else {
-				probePath = real
-			}
-		} else {
-			probePath = real
+		if info, err := root.Lstat(tempRel); err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+			probeRel = tempRel
+		} else if err != nil && !os.IsNotExist(err) {
+			return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 		}
 	}
 
-	info, err := os.Stat(probePath)
+	info, err := root.Stat(probeRel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return proto.FileProbeResult{Exists: false}, nil
@@ -591,26 +739,19 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 	}
 	result := proto.FileProbeResult{Exists: true, CurrentSize: info.Size()}
 	if len(p.Ranges) > 0 {
-		// Bound the number of ranges hashed per probe so a hostile request can't
-		// drive unbounded read/CPU amplification (a transfer has far fewer chunks).
 		const maxProbeRanges = 65536
 		ranges := p.Ranges
 		if len(ranges) > maxProbeRanges {
 			ranges = ranges[:maxProbeRanges]
 		}
-		file, err := os.Open(probePath)
+		file, err := root.Open(probeRel)
 		if err != nil {
 			return proto.FileProbeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
 		}
 		defer file.Close()
 		for _, r := range ranges {
-			// Overflow-safe: avoid r.Offset+r.Length which can wrap for hostile
-			// near-MaxInt64 values. Equivalent to r.Offset+r.Length > size. The
-			// MaxRawChunkBytes cap bounds the per-range allocation below: a probe
-			// range is a transfer chunk, so anything larger is invalid and skipped
-			// (otherwise one range could force a file-size-large allocation).
 			if r.Length <= 0 || r.Length > proto.MaxRawChunkBytes || r.Offset < 0 || r.Length > info.Size() || r.Offset > info.Size()-r.Length {
-				continue // range not fully present / not a valid chunk — leave it out
+				continue
 			}
 			buf := make([]byte, r.Length)
 			if _, err := file.ReadAt(buf, r.Offset); err != nil {
@@ -618,9 +759,7 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 			}
 			sum := sha256.Sum256(buf)
 			result.RangeChecksums = append(result.RangeChecksums, proto.FileRangeChecksum{
-				Offset: r.Offset,
-				Length: r.Length,
-				SHA256: hex.EncodeToString(sum[:]),
+				Offset: r.Offset, Length: r.Length, SHA256: hex.EncodeToString(sum[:]),
 			})
 		}
 	}
@@ -645,29 +784,32 @@ func (m *fileManager) Mkdir(_ context.Context, p proto.FileMkdirPayload) (proto.
 	if rerr := recheckFinalComponent(real); rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
-	if err := os.MkdirAll(real, os.FileMode(mode)); err != nil {
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileOpResult{}, rerr
+	}
+	defer root.Close()
+	if err := root.MkdirAll(rel, os.FileMode(mode)); err != nil {
 		return proto.FileOpResult{}, &RPCError{Code: "mkdir_failed", Message: err.Error()}
 	}
 	return proto.FileOpResult{Path: real}, nil
 }
 
 func (m *fileManager) Delete(_ context.Context, p proto.FileDeletePayload) (proto.FileOpResult, error) {
-	real, rerr := validateTransferPath(p.Path)
+	real, rerr := validateTransferEntryPath(p.Path)
 	if rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
-	// Re-Lstat the final component immediately before the delete: between
-	// validateTransferPath and here a local process can swap `real` for a symlink
-	// pointing outside the sandbox, and os.RemoveAll follows the final symlink's
-	// target when recursing. Refuse if it became an escaping symlink.
-	if rerr := recheckFinalComponent(real); rerr != nil {
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
+	defer root.Close()
 	var err error
 	if p.Recursive {
-		err = os.RemoveAll(real)
+		err = root.RemoveAll(rel)
 	} else {
-		err = os.Remove(real)
+		err = root.Remove(rel)
 	}
 	if err != nil {
 		return proto.FileOpResult{}, &RPCError{Code: "delete_failed", Message: err.Error()}
@@ -676,27 +818,29 @@ func (m *fileManager) Delete(_ context.Context, p proto.FileDeletePayload) (prot
 }
 
 func (m *fileManager) Rename(_ context.Context, p proto.FileRenamePayload) (proto.FileOpResult, error) {
-	from, rerr := validateTransferPath(p.From)
+	from, rerr := validateTransferEntryPath(p.From)
 	if rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
-	to, rerr := validateWriteTarget(p.To)
+	to, rerr := validateTransferEntryPath(p.To)
 	if rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
-	// Re-Lstat the destination's final component just before the rename. A
-	// symlink swapped in at `to` after validateWriteTarget would let the move
-	// land outside the sandbox; refuse if it now escapes the allowed roots.
-	if rerr := recheckFinalComponent(to); rerr != nil {
+	fromRoot, fromRel, rerr := openTransferRoot(from)
+	if rerr != nil {
 		return proto.FileOpResult{}, rerr
 	}
-	if err := os.Rename(from, to); err != nil {
+	defer fromRoot.Close()
+	toRoot, toRel, rerr := openTransferRoot(to)
+	if rerr != nil {
+		return proto.FileOpResult{}, rerr
+	}
+	defer toRoot.Close()
+	if fromRoot.Name() != toRoot.Name() {
+		return proto.FileOpResult{}, &RPCError{Code: "rename_failed", Message: "cross-root rename is not permitted"}
+	}
+	if err := fromRoot.Rename(fromRel, toRel); err != nil {
 		return proto.FileOpResult{}, &RPCError{Code: "rename_failed", Message: err.Error()}
 	}
 	return proto.FileOpResult{Path: to}, nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

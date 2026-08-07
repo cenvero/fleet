@@ -129,7 +129,7 @@ parses systemctl/journalctl directly over the live agent transport.
 		action := action
 		cmd.AddCommand(&cobra.Command{
 			Use:          action + " <server> <unit>",
-			Short:        strings.Title(action) + " a systemd unit",
+			Short:        titleAction(action) + " a systemd unit",
 			Args:         cobra.ExactArgs(2),
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, args []string) error {

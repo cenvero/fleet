@@ -4,18 +4,26 @@
 package agent
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestExecRunnerRejectsUnapprovedCommand(t *testing.T) {
+	if _, err := (execRunner{}).Run(context.Background(), "sh", "-c", "exit 0"); err == nil {
+		t.Fatal("execRunner accepted an executable outside the fixed allowlist")
+	}
+}
 
 func TestLoadAuthorizedKeysSkipsMalformedLineWithoutCorruptingNextKey(t *testing.T) {
 	t.Parallel()
@@ -139,4 +147,39 @@ func generateTestSigner(t *testing.T) (ssh.Signer, error) {
 		return nil, err
 	}
 	return ssh.NewSignerFromKey(priv)
+}
+
+func TestIdentityConnectionLimiterCapsPerIdentityAndReleases(t *testing.T) {
+	limiter := newIdentityConnectionLimiter(3, 2)
+	if !limiter.acquire("key-a") {
+		t.Fatal("expected first connection for identity to be accepted")
+	}
+	if !limiter.acquire("key-a") {
+		t.Fatal("expected second connection for identity to be accepted")
+	}
+	if limiter.acquire("key-a") {
+		t.Fatal("third connection for one identity must be rejected")
+	}
+	if !limiter.acquire("key-b") {
+		t.Fatal("independent identity should use remaining aggregate capacity")
+	}
+	if limiter.acquire("key-c") {
+		t.Fatal("aggregate post-auth connection cap must be enforced")
+	}
+	limiter.release("key-a")
+	if !limiter.acquire("key-c") {
+		t.Fatal("released post-auth capacity should be reusable")
+	}
+}
+
+func TestShellResumeIdentityRequires256BitsOfHex(t *testing.T) {
+	valid := strings.Repeat("ab", 32)
+	if !validShellResumeID(valid) {
+		t.Fatal("expected 256-bit hex resume identity to be valid")
+	}
+	for _, invalid := range []string{"", "abcd", strings.Repeat("z", 64), strings.Repeat("ab", 31)} {
+		if validShellResumeID(invalid) {
+			t.Fatalf("resume identity %q should be rejected", invalid)
+		}
+	}
 }

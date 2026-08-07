@@ -4,8 +4,10 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -60,6 +62,7 @@ type Store struct {
 	db       *gorm.DB
 	sqlDB    *sql.DB
 	workload Workload
+	backend  Backend
 }
 
 type StateEntry struct {
@@ -223,6 +226,7 @@ func Open(cfg DatabaseConfig, workload Workload) (*Store, error) {
 		db:       db,
 		sqlDB:    sqlDB,
 		workload: workload,
+		backend:  cfg.Backend,
 	}
 	if err := s.Init(); err != nil {
 		_ = sqlDB.Close()
@@ -365,6 +369,91 @@ func (c DatabaseConfig) sqlSettings() SQLBackendConfig {
 	default:
 		return SQLBackendConfig{}
 	}
+}
+
+// SnapshotSQLite writes a transactionally consistent copy of a live SQLite
+// store to destination. VACUUM INTO runs through SQLite itself, so committed
+// pages that have not yet left the WAL are included; copying the main .db file
+// directly is not safe in WAL mode. The destination must not already exist.
+func (s *Store) SnapshotSQLite(ctx context.Context, destination string) error {
+	if s == nil || s.sqlDB == nil {
+		return fmt.Errorf("snapshot sqlite store: store is closed")
+	}
+	if s.backend != BackendSQLite {
+		return fmt.Errorf("snapshot sqlite store: backend %q is not sqlite", s.backend)
+	}
+	if _, err := os.Lstat(destination); err == nil {
+		return fmt.Errorf("snapshot sqlite store: destination already exists")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("snapshot sqlite store: inspect destination: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return fmt.Errorf("snapshot sqlite store: create destination directory: %w", err)
+	}
+
+	// VACUUM INTO accepts a bound filename expression. Using a parameter avoids
+	// constructing SQL from a filesystem path.
+	if _, err := s.sqlDB.ExecContext(ctx, "VACUUM INTO ?", destination); err != nil {
+		_ = os.Remove(destination)
+		return fmt.Errorf("snapshot sqlite store: online backup: %w", err)
+	}
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure {
+			_ = os.Remove(destination)
+		}
+	}()
+	if err := os.Chmod(destination, 0o600); err != nil {
+		return fmt.Errorf("snapshot sqlite store: secure destination: %w", err)
+	}
+	f, err := os.Open(destination) // #nosec G304 -- destination is the caller-provided private SQLite snapshot path
+	if err != nil {
+		return fmt.Errorf("snapshot sqlite store: open destination: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("snapshot sqlite store: sync destination: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("snapshot sqlite store: close destination: %w", err)
+	}
+	if err := verifySQLiteSnapshot(ctx, destination); err != nil {
+		return err
+	}
+	removeOnFailure = false
+	return nil
+}
+
+func verifySQLiteSnapshot(ctx context.Context, snapshotPath string) error {
+	u := &url.URL{Scheme: "file", Path: snapshotPath}
+	db, err := sql.Open("sqlite", u.String()+"?mode=ro&immutable=1")
+	if err != nil {
+		return fmt.Errorf("verify sqlite snapshot: open: %w", err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check")
+	if err != nil {
+		return fmt.Errorf("verify sqlite snapshot: integrity check: %w", err)
+	}
+	defer rows.Close()
+	checked := false
+	for rows.Next() {
+		var result string
+		if err := rows.Scan(&result); err != nil {
+			return fmt.Errorf("verify sqlite snapshot: read integrity result: %w", err)
+		}
+		checked = true
+		if result != "ok" {
+			return fmt.Errorf("verify sqlite snapshot: integrity check failed: %s", result)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("verify sqlite snapshot: integrity result: %w", err)
+	}
+	if !checked {
+		return fmt.Errorf("verify sqlite snapshot: integrity check returned no result")
+	}
+	return nil
 }
 
 func (s *Store) Init() error {

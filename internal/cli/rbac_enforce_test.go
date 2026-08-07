@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/spf13/cobra"
 )
 
 // TestBestEffortTargetServer pins the CRITICAL fix: at controller-enforcement
@@ -60,6 +62,135 @@ func TestBestEffortTargetServer(t *testing.T) {
 		if got := bestEffortTargetServer(c.top, c.args); got != c.want {
 			t.Errorf("%s: bestEffortTargetServer(%q, %v) = %q, want %q", c.name, c.top, c.args, got, c.want)
 		}
+	}
+}
+
+func TestEveryRunnableCommandHasMutationClassification(t *testing.T) {
+	root := NewRootCommand()
+	var unknown []string
+	var walk func(*cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		if cmd.Run != nil || cmd.RunE != nil {
+			path := commandSecurityPath(cmd)
+			if _, known := core.ClassifyCommandMutation(path, nil); !known {
+				unknown = append(unknown, path)
+			}
+		}
+		for _, child := range cmd.Commands() {
+			walk(child)
+		}
+	}
+	walk(root)
+	sort.Strings(unknown)
+	if len(unknown) != 0 {
+		t.Fatalf("runnable Cobra commands lack an explicit RBAC mutation classification: %v", unknown)
+	}
+}
+
+func TestMutatingLeavesRequireDestructivePermission(t *testing.T) {
+	root := NewRootCommand()
+	checked := 0
+	var walk func(*cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		if cmd.Run != nil || cmd.RunE != nil {
+			path := commandSecurityPath(cmd)
+			mutating, known := core.ClassifyCommandMutation(path, nil)
+			if known && mutating {
+				checked++
+				top := strings.Fields(path)[0]
+				token := core.Token{Name: "scoped", AllowCommands: []string{top}}
+				if err := core.Authorize(token, top, "", true, nil, nil); err == nil {
+					t.Errorf("%q was allowed without destructive permission", path)
+				}
+				token.DestructiveAllowed = true
+				if err := core.Authorize(token, top, "", true, nil, nil); err != nil {
+					t.Errorf("%q denied with destructive permission: %v", path, err)
+				}
+			}
+		}
+		for _, child := range cmd.Commands() {
+			walk(child)
+		}
+	}
+	walk(root)
+	if checked == 0 {
+		t.Fatal("no mutating runnable leaves were checked")
+	}
+
+	// Pin the audit findings whose leaves were previously omitted or classified
+	// too coarsely, including the nested defaults leaf and arbitrary execution.
+	for _, path := range []string{
+		"server add", "server enroll-token", "service add", "file mkdir",
+		"file download", "file defaults set", "firewall add", "alerts ack",
+		"database shift", "config backup", "exec", "ssh", "job run",
+		"notify test", "skill claude",
+	} {
+		if mutating, known := core.ClassifyCommandMutation(path, nil); !known || !mutating {
+			t.Errorf("%q classification = mutating:%v known:%v, want true,true", path, mutating, known)
+		}
+	}
+	if mutating, known := core.ClassifyCommandMutation("tag", []string{"web-01", "role=web"}); !known || !mutating {
+		t.Errorf("mutating tag leaf classification = mutating:%v known:%v, want true,true", mutating, known)
+	}
+	if _, known := core.ClassifyCommandMutation("future dangerous leaf", nil); known {
+		t.Fatal("unknown future command must remain unclassified so enforcement fails closed")
+	}
+}
+
+func TestServerRecordsForOutputHidesEnrollSecretFromScopedToken(t *testing.T) {
+	dir := t.TempDir()
+	store := core.NewTokenStore(dir)
+	scoped, err := store.Create(core.Token{Name: "reader", AllowCommands: []string{"server"}})
+	if err != nil {
+		t.Fatalf("create scoped token: %v", err)
+	}
+	admin, err := store.Create(core.Token{Name: "admin"})
+	if err != nil {
+		t.Fatalf("create admin token: %v", err)
+	}
+	record := core.ServerRecord{Name: "edge", EnrollSecret: "one-time-join-secret"}
+
+	commandWithToken := func(id string) *cobra.Command {
+		cmd := &cobra.Command{Use: "show"}
+		cmd.Flags().String("token", "", "")
+		if err := cmd.Flags().Set("token", id); err != nil {
+			t.Fatalf("set token flag: %v", err)
+		}
+		return cmd
+	}
+	got, err := serverRecordForOutput(commandWithToken(scoped.ID), dir, record)
+	if err != nil {
+		t.Fatalf("scoped projection: %v", err)
+	}
+	if got.EnrollSecret != "" {
+		t.Fatalf("scoped server read leaked EnrollSecret %q", got.EnrollSecret)
+	}
+	got, err = serverRecordForOutput(commandWithToken(admin.ID), dir, record)
+	if err != nil {
+		t.Fatalf("admin projection: %v", err)
+	}
+	if got.EnrollSecret != record.EnrollSecret {
+		t.Fatal("unscoped admin output unexpectedly redacted the enrollment secret")
+	}
+	got, err = serverRecordForOutput(&cobra.Command{Use: "show"}, dir, record)
+	if err != nil {
+		t.Fatalf("no-token projection: %v", err)
+	}
+	if got.EnrollSecret != record.EnrollSecret {
+		t.Fatal("no-token admin output unexpectedly redacted the enrollment secret")
+	}
+}
+
+func TestRedactSecretValuesIncludesShortSecrets(t *testing.T) {
+	secrets := []resolvedSecret{{value: "x"}, {value: "on"}, {value: "abc"}, {value: "long-secret"}, {value: ""}}
+	got := redactSecretValues("x on abc long-secret safe", secrets)
+	for _, leaked := range []string{"x", "on", "abc", "long-secret"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("redacted output %q still contains secret %q", got, leaked)
+		}
+	}
+	if !strings.Contains(got, "safe") {
+		t.Fatalf("redaction unexpectedly removed unrelated output: %q", got)
 	}
 }
 
@@ -273,9 +404,10 @@ func TestPerTokenSecretAllowlist(t *testing.T) {
 	// the single-server exec passes the RBAC server check and we isolate the
 	// secret-authorization behavior.
 	scoped, err := store.Create(core.Token{
-		Name:          "ci",
-		AllowCommands: []string{"exec"},
-		AllowSecrets:  []string{"allowed_key"},
+		Name:               "ci",
+		AllowCommands:      []string{"exec"},
+		AllowSecrets:       []string{"allowed_key"},
+		DestructiveAllowed: true,
 	})
 	if err != nil {
 		t.Fatalf("create scoped token: %v", err)
@@ -604,7 +736,7 @@ func TestTunnelTargetScopedToLoopback(t *testing.T) {
 	dir := initConfigDir(t, bin)
 
 	store := core.NewTokenStore(dir)
-	scoped, err := store.Create(core.Token{Name: "scoped", Servers: []string{"web-01"}})
+	scoped, err := store.Create(core.Token{Name: "scoped", Servers: []string{"web-01"}, DestructiveAllowed: true})
 	if err != nil {
 		t.Fatalf("create scoped token: %v", err)
 	}

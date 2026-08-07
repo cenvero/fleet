@@ -73,7 +73,7 @@ func (s *BaselineStore) Get(server string) (Baseline, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- server name is strict-charset validated before joining under the baseline directory
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Baseline{}, false, nil

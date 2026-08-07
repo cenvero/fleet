@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cenvero/fleet/internal/core"
 	"github.com/spf13/cobra"
 )
 
@@ -168,12 +169,12 @@ func installAgentsFile(opts skillInstallOptions) (skillResult, error) {
 	}
 	// AGENTS.md is commonly shared — append our section idempotently rather than
 	// clobbering an existing file.
-	if existing, err := os.ReadFile(target); err == nil {
+	if existing, err := os.ReadFile(target); err == nil { // #nosec G304 -- operator-selected integration file is intentionally read before atomic replacement
 		if strings.Contains(string(existing), agentsMarker) {
 			return skillResult{message: fmt.Sprintf("%s already contains the Cenvero Fleet section; nothing to do", target)}, nil
 		}
 		merged := strings.TrimRight(string(existing), "\n") + "\n\n" + content
-		if err := os.WriteFile(target, []byte(merged), 0o600); err != nil {
+		if err := writeSkillFile(target, merged); err != nil {
 			return skillResult{}, err
 		}
 		return skillResult{paths: []string{target}}, nil
@@ -190,7 +191,15 @@ func writeSkillFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o600)
+	out, err := core.CreateAtomicLocalFile(path, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Abort()
+	if _, err := out.File().Write([]byte(content)); err != nil {
+		return err
+	}
+	return out.Commit()
 }
 
 // ---- content ----

@@ -4,6 +4,7 @@
 package core
 
 import (
+	"io"
 	"time"
 
 	"github.com/cenvero/fleet/internal/alerts"
@@ -160,6 +161,15 @@ type ServerRecord struct {
 	UpdatedAt    time.Time             `toml:"updated_at" json:"updated_at"`
 }
 
+// WithoutEnrollSecret returns a copy safe for scoped-token read output. The
+// pending reverse enrollment secret remains available to trusted controller
+// internals and unscoped administrators, but is never serialized to a
+// constrained credential.
+func (s ServerRecord) WithoutEnrollSecret() ServerRecord {
+	s.EnrollSecret = ""
+	return s
+}
+
 type AgentInstall struct {
 	Managed     bool      `toml:"managed" json:"managed"`
 	BinaryPath  string    `toml:"binary_path,omitempty" json:"binary_path,omitempty"`
@@ -241,6 +251,7 @@ type BootstrapOptions struct {
 	AcceptNewHostKey  bool
 	UseSudo           bool
 	PrintScript       bool
+	entropy           io.Reader
 }
 
 type BootstrapResult struct {

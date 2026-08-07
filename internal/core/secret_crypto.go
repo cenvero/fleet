@@ -246,7 +246,7 @@ func loadOneControllerKey(keysDir, name string) (seed []byte, ok bool) {
 	if validateSafeName(name) != nil {
 		return nil, false
 	}
-	data, err := os.ReadFile(filepath.Join(keysDir, name))
+	data, err := os.ReadFile(filepath.Join(keysDir, name)) // #nosec G304 -- path is a fixed filename beneath the controller keys directory
 	if err != nil {
 		return nil, false
 	}
@@ -267,7 +267,7 @@ func loadOneControllerKey(keysDir, name string) (seed []byte, ok bool) {
 // A genuine read error (e.g. permissions) is returned so it is never mistaken
 // for "no pin".
 func readPinnedSource(keysDir string) (id string, hasPin bool, err error) {
-	data, err := os.ReadFile(filepath.Join(keysDir, secretKeySourceFile))
+	data, err := os.ReadFile(filepath.Join(keysDir, secretKeySourceFile)) // #nosec G304 -- path is a fixed filename beneath the controller keys directory
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", false, nil
@@ -333,7 +333,7 @@ func rawPrivateKeyBytes(raw any) ([]byte, bool) {
 // first use. The file is 0600 and its parent dir 0700.
 func loadOrCreateSecretKeyFile(keysDir string) ([]byte, error) {
 	path := filepath.Join(keysDir, secretKeyFile)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is a fixed filename beneath the controller keys directory
 	if err == nil {
 		if len(data) < 32 {
 			return nil, fmt.Errorf("secret key file %s is too short (%d bytes)", path, len(data))
@@ -372,7 +372,7 @@ func loadOrCreateSecretKeyFile(keysDir string) ([]byte, error) {
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		// A racing writer may have created it first; fall back to its contents.
-		if existing, rerr := os.ReadFile(path); rerr == nil && len(existing) >= 32 {
+		if existing, rerr := os.ReadFile(path); rerr == nil && len(existing) >= 32 { // #nosec G304 -- path is a fixed filename beneath the controller keys directory
 			return existing[:32], nil
 		}
 		return nil, fmt.Errorf("write secret key: %w", err)

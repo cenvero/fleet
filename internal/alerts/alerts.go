@@ -69,7 +69,7 @@ func (s *Store) Get(id string) (Alert, error) {
 	if err := validateAlertID(id); err != nil {
 		return Alert{}, fmt.Errorf("read alert: %w", err)
 	}
-	data, err := os.ReadFile(filepath.Join(s.dir, id+".json"))
+	data, err := os.ReadFile(filepath.Join(s.dir, id+".json")) // #nosec G304 -- alert ID is strict-charset validated before joining under the alert store
 	if err != nil {
 		return Alert{}, fmt.Errorf("read alert: %w", err)
 	}

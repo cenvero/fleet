@@ -279,12 +279,13 @@ func TestRotateKeysUpdatesReverseAgentControllerKnownHosts(t *testing.T) {
 	agentErrCh := make(chan error, 1)
 	go func() {
 		agentErrCh <- agent.RunReverse(ctx, agent.ReverseOptions{
-			EnrollToken:       testReverseEnroll,
-			ControllerAddress: "127.0.0.1:9443",
-			ServerName:        "reverse-node",
-			KnownHostsPath:    knownHostsPath,
-			MinRetryDelay:     10 * time.Millisecond,
-			MaxRetryDelay:     20 * time.Millisecond,
+			EnrollToken:           testReverseEnroll,
+			ControllerFingerprint: testControllerFingerprint(t, app),
+			ControllerAddress:     "127.0.0.1:9443",
+			ServerName:            "reverse-node",
+			KnownHostsPath:        knownHostsPath,
+			MinRetryDelay:         10 * time.Millisecond,
+			MaxRetryDelay:         20 * time.Millisecond,
 			NetworkDialContext: func(context.Context, string, string) (net.Conn, error) {
 				clientConn, serverConn := testutil.NewBufferedConnPair("127.0.0.1:41010", "127.0.0.1:9443")
 				dials.Add(1)
@@ -400,12 +401,13 @@ func TestRotateKeysRollsBackOnReverseKnownHostsFailure(t *testing.T) {
 	agentErrCh := make(chan error, 1)
 	go func() {
 		agentErrCh <- agent.RunReverse(ctx, agent.ReverseOptions{
-			EnrollToken:       testReverseEnroll,
-			ControllerAddress: "127.0.0.1:9443",
-			ServerName:        "reverse-node",
-			KnownHostsPath:    knownHostsPath,
-			MinRetryDelay:     10 * time.Millisecond,
-			MaxRetryDelay:     20 * time.Millisecond,
+			EnrollToken:           testReverseEnroll,
+			ControllerFingerprint: testControllerFingerprint(t, app),
+			ControllerAddress:     "127.0.0.1:9443",
+			ServerName:            "reverse-node",
+			KnownHostsPath:        knownHostsPath,
+			MinRetryDelay:         10 * time.Millisecond,
+			MaxRetryDelay:         20 * time.Millisecond,
 			NetworkDialContext: func(context.Context, string, string) (net.Conn, error) {
 				clientConn, serverConn := testutil.NewBufferedConnPair("127.0.0.1:41011", "127.0.0.1:9443")
 				go func() {
@@ -707,5 +709,30 @@ func TestPruneOldRotationsNoOpCases(t *testing.T) {
 	}
 	if len(removed) != 1 {
 		t.Fatalf("keep=0 (clamped to 1) with 2 dirs should prune 1, got %d: %v", len(removed), removed)
+	}
+}
+
+func TestArchiveKeyFilesRejectsSymlinkedKey(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "keys")
+	archive := filepath.Join(dir, "archive")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(archive, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(source, "id_ed25519")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := archiveKeyFiles(source, archive); err == nil {
+		t.Fatal("archiveKeyFiles accepted symlinked private key")
+	}
+	if _, err := os.Stat(filepath.Join(archive, "id_ed25519")); !os.IsNotExist(err) {
+		t.Fatalf("symlinked key was archived: %v", err)
 	}
 }

@@ -6,6 +6,7 @@
 package agent
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -102,11 +103,17 @@ func (s *persistentSession) idleGrace() time.Duration {
 	return sessionIdleTimeout
 }
 
-// attach wires a new SSH channel to this session.
-// It cancels any pending idle timer, sends the replay buffer so the user
-// sees recent output, then starts proxying live I/O.
-func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store *sessionStore, id string) <-chan struct{} {
+var errSessionAlreadyAttached = errors.New("persistent shell already has an active attachment")
+
+// attach wires a new SSH channel to this session. Exactly one active channel is
+// permitted: a second holder of the same resume secret cannot steal I/O from an
+// attachment that has not actually disconnected.
+func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store *sessionStore, id string) (<-chan struct{}, error) {
 	s.mu.Lock()
+	if s.activeConn != nil {
+		s.mu.Unlock()
+		return nil, errSessionAlreadyAttached
+	}
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 		s.idleTimer = nil
@@ -140,7 +147,7 @@ func (s *persistentSession) attach(channel ssh.Channel, cols, rows uint32, store
 		_, _ = io.Copy(s.ptm, channel)
 		s.detach(channel, store, id)
 	}()
-	return detached
+	return detached, nil
 }
 
 // detach is called when the channel closes (user disconnected / network drop).

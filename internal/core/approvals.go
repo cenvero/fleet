@@ -8,11 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -47,14 +47,18 @@ func (a Approval) Expired(now time.Time) bool {
 }
 
 // ApprovalStore is a small standalone JSON-backed store for staged command
-// approvals. It mirrors the TagStore pattern: a single JSON document at
-// <configDir>/approvals.json (0600), read/modify/write under a mutex, opened
-// from a config dir and kept off *App so it does not require touching app.go.
+// approvals. Read/modify/write operations are serialized by a cross-process
+// advisory lock, while write publishes the document with an atomic rename.
 type ApprovalStore struct {
 	path string
-	mu   sync.Mutex
 	// now is injected so tests can control time; defaults to time.Now.
 	now func() time.Time
+	// entropy is injected so crypto/rand failures can be propagated and tested.
+	entropy io.Reader
+}
+
+func (s *ApprovalStore) withWriteLock(fn func() error) error {
+	return withAdvisoryFileLock(s.path+".lock", fn)
 }
 
 // NewApprovalStore opens (without reading) an approval store rooted at
@@ -63,7 +67,8 @@ func NewApprovalStore(configDir string) *ApprovalStore {
 	if configDir == "" {
 		configDir = DefaultConfigDir("")
 	}
-	return &ApprovalStore{path: ApprovalsPath(configDir), now: time.Now}
+	path := ApprovalsPath(configDir)
+	return &ApprovalStore{path: path, now: time.Now, entropy: rand.Reader}
 }
 
 // ApprovalsPath returns the on-disk location of the approvals document.
@@ -119,7 +124,14 @@ func (s *ApprovalStore) write(approvals []Approval) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write approvals: %w", err)
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if n, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write approvals: %w", err)
+	} else if n != len(data) {
+		_ = tmp.Close()
+		return fmt.Errorf("write approvals: %w", io.ErrShortWrite)
+	}
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write approvals: %w", err)
 	}
@@ -146,12 +158,15 @@ func markExpired(approvals []Approval, now time.Time) bool {
 }
 
 // newApprovalID returns a random 16-character hex id for an approval.
-func newApprovalID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("crypto/rand unavailable: " + err.Error())
+func newApprovalID(entropy io.Reader) (string, error) {
+	if entropy == nil {
+		entropy = rand.Reader
 	}
-	return hex.EncodeToString(b[:])
+	var b [8]byte
+	if _, err := io.ReadFull(entropy, b[:]); err != nil {
+		return "", fmt.Errorf("generate approval id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // Stage records a new pending approval for running command on server, expiring
@@ -167,71 +182,79 @@ func (s *ApprovalStore) Stage(server, command string, ttl time.Duration) (string
 	if ttl <= 0 {
 		ttl = DefaultApprovalTTL
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	approvals, err := s.read()
-	if err != nil {
-		return "", err
-	}
-	now := s.clock()
-	markExpired(approvals, now)
-	approval := Approval{
-		ID:        newApprovalID(),
-		Server:    server,
-		Command:   command,
-		Status:    ApprovalPending,
-		Requested: now.UTC(),
-		Expires:   now.UTC().Add(ttl),
-	}
-	approvals = append(approvals, approval)
-	if err := s.write(approvals); err != nil {
-		return "", err
-	}
-	return approval.ID, nil
+	var result string
+	err := s.withWriteLock(func() error {
+		id, err := newApprovalID(s.entropy)
+		if err != nil {
+			return err
+		}
+		approvals, err := s.read()
+		if err != nil {
+			return err
+		}
+		now := s.clock()
+		markExpired(approvals, now)
+		approval := Approval{
+			ID:        id,
+			Server:    server,
+			Command:   command,
+			Status:    ApprovalPending,
+			Requested: now.UTC(),
+			Expires:   now.UTC().Add(ttl),
+		}
+		approvals = append(approvals, approval)
+		if err := s.write(approvals); err != nil {
+			return err
+		}
+		result = approval.ID
+		return nil
+	})
+	return result, err
 }
 
 // decide transitions a pending approval identified by id into status. It
 // returns an error if the id is unknown or the approval is not pending (already
 // approved, rejected, or expired).
 func (s *ApprovalStore) decide(id, status string) (Approval, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	approvals, err := s.read()
-	if err != nil {
-		return Approval{}, err
-	}
-	now := s.clock()
-	// markExpired may flip pending->expired records as a side effect. Those
-	// changes must be persisted even when this call ultimately returns an error
-	// (unknown id, or the target is no longer pending), so the on-disk state
-	// reflects the expirations rather than silently dropping them.
-	expiredChanged := markExpired(approvals, now)
-	persistOnError := func(retErr error) (Approval, error) {
-		if expiredChanged {
-			if werr := s.write(approvals); werr != nil {
-				return Approval{}, werr
+	var result Approval
+	err := s.withWriteLock(func() error {
+		approvals, err := s.read()
+		if err != nil {
+			return err
+		}
+		now := s.clock()
+		// markExpired may flip pending->expired records as a side effect. Those
+		// changes must be persisted even when this call ultimately returns an error.
+		expiredChanged := markExpired(approvals, now)
+		persistOnError := func(retErr error) error {
+			if expiredChanged {
+				if writeErr := s.write(approvals); writeErr != nil {
+					return writeErr
+				}
+			}
+			return retErr
+		}
+		idx := -1
+		for i := range approvals {
+			if approvals[i].ID == id {
+				idx = i
+				break
 			}
 		}
-		return Approval{}, retErr
-	}
-	idx := -1
-	for i := range approvals {
-		if approvals[i].ID == id {
-			idx = i
-			break
+		if idx < 0 {
+			return persistOnError(fmt.Errorf("approval %q not found", id))
 		}
-	}
-	if idx < 0 {
-		return persistOnError(fmt.Errorf("approval %q not found", id))
-	}
-	if approvals[idx].Status != ApprovalPending {
-		return persistOnError(fmt.Errorf("approval %q is %s, not pending", id, approvals[idx].Status))
-	}
-	approvals[idx].Status = status
-	if err := s.write(approvals); err != nil {
-		return Approval{}, err
-	}
-	return approvals[idx], nil
+		if approvals[idx].Status != ApprovalPending {
+			return persistOnError(fmt.Errorf("approval %q is %s, not pending", id, approvals[idx].Status))
+		}
+		approvals[idx].Status = status
+		if err := s.write(approvals); err != nil {
+			return err
+		}
+		result = approvals[idx]
+		return nil
+	})
+	return result, err
 }
 
 // Approve marks a pending approval approved and returns the updated record.
@@ -247,66 +270,71 @@ func (s *ApprovalStore) Reject(id string) (Approval, error) {
 // Get returns the approval with the given id. Pending-but-expired approvals are
 // reported with status expired (and persisted so the on-disk state matches).
 func (s *ApprovalStore) Get(id string) (Approval, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	approvals, err := s.read()
-	if err != nil {
-		return Approval{}, err
-	}
-	if markExpired(approvals, s.clock()) {
-		if err := s.write(approvals); err != nil {
-			return Approval{}, err
+	var result Approval
+	err := s.withWriteLock(func() error {
+		approvals, err := s.read()
+		if err != nil {
+			return err
 		}
-	}
-	for _, a := range approvals {
-		if a.ID == id {
-			return a, nil
+		if markExpired(approvals, s.clock()) {
+			if err := s.write(approvals); err != nil {
+				return err
+			}
 		}
-	}
-	return Approval{}, fmt.Errorf("approval %q not found", id)
+		for _, approval := range approvals {
+			if approval.ID == id {
+				result = approval
+				return nil
+			}
+		}
+		return fmt.Errorf("approval %q not found", id)
+	})
+	return result, err
 }
 
 // List returns all approvals, newest request first, after flipping any expired
 // pending requests to expired status (persisted so on-disk state matches).
 func (s *ApprovalStore) List() ([]Approval, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	approvals, err := s.read()
-	if err != nil {
-		return nil, err
-	}
-	if markExpired(approvals, s.clock()) {
-		if err := s.write(approvals); err != nil {
-			return nil, err
+	var result []Approval
+	err := s.withWriteLock(func() error {
+		approvals, err := s.read()
+		if err != nil {
+			return err
 		}
-	}
-	sort.SliceStable(approvals, func(i, j int) bool {
-		return approvals[i].Requested.After(approvals[j].Requested)
+		if markExpired(approvals, s.clock()) {
+			if err := s.write(approvals); err != nil {
+				return err
+			}
+		}
+		sort.SliceStable(approvals, func(i, j int) bool {
+			return approvals[i].Requested.After(approvals[j].Requested)
+		})
+		result = approvals
+		return nil
 	})
-	return approvals, nil
+	return result, err
 }
 
 // PruneExpired flips pending-but-past-expiry approvals to expired status and
 // persists if anything changed. It returns the number of approvals expired.
 func (s *ApprovalStore) PruneExpired() (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	approvals, err := s.read()
-	if err != nil {
-		return 0, err
-	}
-	now := s.clock()
 	count := 0
-	for i := range approvals {
-		if approvals[i].Expired(now) {
-			approvals[i].Status = ApprovalExpired
-			count++
+	err := s.withWriteLock(func() error {
+		approvals, err := s.read()
+		if err != nil {
+			return err
 		}
-	}
-	if count > 0 {
-		if err := s.write(approvals); err != nil {
-			return 0, err
+		now := s.clock()
+		for i := range approvals {
+			if approvals[i].Expired(now) {
+				approvals[i].Status = ApprovalExpired
+				count++
+			}
 		}
-	}
-	return count, nil
+		if count > 0 {
+			return s.write(approvals)
+		}
+		return nil
+	})
+	return count, err
 }

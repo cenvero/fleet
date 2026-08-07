@@ -63,10 +63,6 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#e7ecef"))
 
-	panelSubtleTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#0a0e14"))
-
 	panelMetaStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#9ab3bf"))
 
@@ -293,7 +289,7 @@ func (m *model) clampSelections() {
 }
 
 func renderHeader(snapshot core.DashboardSnapshot, loading string) string {
-	headerChrome := panelStyle.Copy().
+	headerChrome := panelStyle.
 		BorderForeground(lipgloss.Color("#00d4aa")).
 		Background(lipgloss.Color("#0b1416"))
 
@@ -473,7 +469,7 @@ func renderServersTab(snapshot core.DashboardSnapshot, width, selected int) stri
 	}
 
 	detailLines := []string{
-		fmt.Sprintf("%s", server.Name),
+		server.Name,
 		"",
 		fmt.Sprintf("Address: %s:%d", server.Address, server.Port),
 		fmt.Sprintf("User: %s", server.User),
@@ -628,7 +624,7 @@ func renderAlertsTab(snapshot core.DashboardSnapshot, width, selected int) strin
 	}
 
 	detailLines := []string{
-		fmt.Sprintf("%s", styleSeverity(alert.Severity)),
+		styleSeverity(alert.Severity),
 		"",
 		fmt.Sprintf("Server: %s", dashIfEmpty(alert.Server)),
 		fmt.Sprintf("Created: %s", alert.CreatedAt.Local().Format("2006-01-02 15:04:05")),
@@ -668,9 +664,7 @@ func renderOpsTab(snapshot core.DashboardSnapshot, width, selected int) string {
 	}
 	keys := sortedFingerprints(snapshot.Status.Fingerprints)
 	summaryLines = append(summaryLines, "", subtleStyle.Render("Controller keys"))
-	for _, line := range keys {
-		summaryLines = append(summaryLines, line)
-	}
+	summaryLines = append(summaryLines, keys...)
 
 	auditLines := []string{"Audit Trail", ""}
 	if len(audit) == 0 {
@@ -738,7 +732,7 @@ func countTrackedServices(servers []core.ServerRecord) int {
 }
 
 func renderPanel(title, subtitle, body, accent string, width int) string {
-	chrome := panelStyle.Copy().
+	chrome := panelStyle.
 		Width(width).
 		BorderForeground(lipgloss.Color(accent))
 	banner := lipgloss.NewStyle().
@@ -920,13 +914,6 @@ func clamp(value, low, high int) int {
 		return high
 	}
 	return value
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func max(a, b int) int {

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -90,13 +91,15 @@ func (rs *reverseSession) leaseChannel() (*transport.Session, bool) {
 		return rs.session, false
 	}
 	go ssh.DiscardRequests(requests)
-	return &transport.Session{
+	sess := &transport.Session{
 		Mode:               transport.ModeReverse,
 		LocalAddr:          rs.session.LocalAddr,
 		RemoteAddr:         rs.session.RemoteAddr,
 		HostKeyFingerprint: rs.session.HostKeyFingerprint,
 		Channel:            channel,
-	}, true
+	}
+	sess.SetCapabilities(rs.info.Hello.Capabilities)
+	return sess, true
 }
 
 func (rs *reverseSession) releaseChannel(sess *transport.Session, healthy bool) {
@@ -146,6 +149,11 @@ type ReverseHub struct {
 	// exactly one connection can enroll. Enrollment is rare and the section is
 	// cheap, so a single hub-wide lock is sufficient.
 	enrollMu sync.Mutex
+
+	activeMu       sync.Mutex
+	activeTotal    int
+	activeByServer map[string]int
+	controlSlots   chan struct{}
 }
 
 // reverseControlRequest is the JSON wrapper a CLI process sends over the local
@@ -212,9 +220,11 @@ func (r reverseControlResponse) responseEnvelope() (proto.Envelope, bool) {
 
 func NewReverseHub(app *App, controlToken string) *ReverseHub {
 	return &ReverseHub{
-		app:          app,
-		sessions:     make(map[string]*reverseSession),
-		controlToken: controlToken,
+		app:            app,
+		sessions:       make(map[string]*reverseSession),
+		controlToken:   controlToken,
+		activeByServer: make(map[string]int),
+		controlSlots:   make(chan struct{}, maxConcurrentControlConnections),
 	}
 }
 
@@ -242,8 +252,10 @@ func (h *ReverseHub) Serve(ctx context.Context, listener net.Listener) error {
 			continue
 		}
 		go func() {
-			defer func() { <-reverseHandshakeSlots }()
-			_ = h.ServeConn(conn)
+			var once sync.Once
+			releaseHandshake := func() { once.Do(func() { <-reverseHandshakeSlots }) }
+			defer releaseHandshake()
+			_ = h.serveConnAfterAuth(conn, releaseHandshake)
 		}()
 	}
 }
@@ -266,7 +278,41 @@ var reverseHandshakeSlots = make(chan struct{}, maxConcurrentReverseHandshakes)
 // connection goroutine indefinitely.
 const reversePostAuthTimeout = 30 * time.Second
 
+const (
+	reverseFirstChannelTimeout     = 15 * time.Second
+	maxActiveReverseConnections    = 256
+	maxReverseConnectionsPerServer = 2
+)
+
+func (h *ReverseHub) acquireAuthenticated(server string) bool {
+	h.activeMu.Lock()
+	defer h.activeMu.Unlock()
+	if server == "" || h.activeTotal >= maxActiveReverseConnections || h.activeByServer[server] >= maxReverseConnectionsPerServer {
+		return false
+	}
+	h.activeTotal++
+	h.activeByServer[server]++
+	return true
+}
+
+func (h *ReverseHub) releaseAuthenticated(server string) {
+	h.activeMu.Lock()
+	defer h.activeMu.Unlock()
+	if h.activeByServer[server] <= 0 {
+		return
+	}
+	h.activeTotal--
+	h.activeByServer[server]--
+	if h.activeByServer[server] == 0 {
+		delete(h.activeByServer, server)
+	}
+}
+
 func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
+	return h.serveConnAfterAuth(rawConn, nil)
+}
+
+func (h *ReverseHub) serveConnAfterAuth(rawConn net.Conn, authenticated func()) error {
 	defer rawConn.Close()
 
 	signer, err := fleetcrypto.LoadPrivateKeySigner(h.app.controllerPrivateKeyPath(), nil)
@@ -292,24 +338,39 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	_ = rawConn.SetDeadline(time.Time{})
+	if authenticated != nil {
+		authenticated()
+	}
+	serverName := conn.Permissions.Extensions["server"]
+	if !h.acquireAuthenticated(serverName) {
+		_ = conn.Close()
+		return fmt.Errorf("too many authenticated reverse connections for %q", serverName)
+	}
+	defer h.releaseAuthenticated(serverName)
+	_ = rawConn.SetDeadline(time.Now().Add(reverseFirstChannelTimeout))
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 
+	registered := false
 	for newChannel := range chans {
 		if newChannel.ChannelType() != transport.RPCChannelType {
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
+			continue
+		}
+		if registered {
+			_ = newChannel.Reject(ssh.ResourceShortage, "reverse session channel already registered")
 			continue
 		}
 		channel, requests, err := newChannel.Accept()
 		if err != nil {
 			continue
 		}
+		registered = true
+		_ = rawConn.SetDeadline(time.Time{})
 		go ssh.DiscardRequests(requests)
 
-		// The authenticated, colon-stripped server name (the raw SSH username may
-		// carry an enrollment token); authorizeAgent stored the clean name here.
-		serverName := conn.Permissions.Extensions["server"]
+		// authorizeAgent stored the authenticated, colon-stripped server name in
+		// permissions; never use the raw SSH username carrying enrollment data.
 		session := &transport.Session{
 			Mode:               transport.ModeReverse,
 			LocalAddr:          conn.LocalAddr(),
@@ -334,7 +395,7 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 			HostKeyFingerprint: conn.Permissions.Extensions["fingerprint"],
 			Hello:              hello,
 		}
-		replayed, replayErr := h.replayQueuedMetrics(serverName, session)
+		replayed, replayErr := h.replayQueuedMetrics(serverName, session, hello.Capabilities)
 		if replayErr != nil {
 			_ = h.app.AuditLog.Append(logs.AuditEntry{
 				Action:   "metrics.replay.failed",
@@ -355,11 +416,17 @@ func (h *ReverseHub) ServeConn(rawConn net.Conn) error {
 	return nil
 }
 
-func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.Session) (int, error) {
+func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.Session, capabilities []string) (int, error) {
+	// Older agents implemented metrics.flush_queue destructively. Never probe it:
+	// absence of the explicit peek/ack capability means queued data stays on the
+	// agent until it is upgraded.
+	if !slices.Contains(capabilities, proto.CapabilityMetricsPeekAck) {
+		return 0, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), reversePostAuthTimeout)
 	defer cancel()
 	response, err := session.Call(ctx, proto.Envelope{
-		Action: "metrics.flush_queue",
+		Action: proto.ActionMetricsPeekQueue,
 		Payload: proto.MetricsPayload{
 			Server: serverName,
 		},
@@ -368,9 +435,6 @@ func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.S
 		return 0, err
 	}
 	if response.Error != nil {
-		if response.Error.Code == "unsupported_action" {
-			return 0, nil
-		}
 		return 0, fmt.Errorf("%s: %s", response.Error.Code, response.Error.Message)
 	}
 
@@ -380,6 +444,22 @@ func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.S
 	}
 	if len(replay.Snapshots) == 0 {
 		return 0, nil
+	}
+	if replay.BatchID == "" {
+		return 0, fmt.Errorf("peek/ack capable agent returned metrics without a batch id")
+	}
+	acknowledge := func() error {
+		ackResponse, err := session.Call(ctx, proto.Envelope{
+			Action:  proto.ActionMetricsAckQueue,
+			Payload: proto.MetricsReplayAck{BatchID: replay.BatchID},
+		})
+		if err != nil {
+			return err
+		}
+		if ackResponse.Error != nil {
+			return fmt.Errorf("%s: %s", ackResponse.Error.Code, ackResponse.Error.Message)
+		}
+		return nil
 	}
 
 	server, err := h.app.GetServer(serverName)
@@ -416,10 +496,17 @@ func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.S
 	}); err != nil {
 		return 0, err
 	}
+	if err := acknowledge(); err != nil {
+		return 0, fmt.Errorf("acknowledge replayed metrics: %w", err)
+	}
 	return len(replay.Snapshots), nil
 }
 
 func (h *ReverseHub) Call(server string, env proto.Envelope) (proto.Envelope, error) {
+	return h.CallContext(context.Background(), server, env)
+}
+
+func (h *ReverseHub) CallContext(ctx context.Context, server string, env proto.Envelope) (proto.Envelope, error) {
 	h.mu.RLock()
 	current := h.sessions[server]
 	h.mu.RUnlock()
@@ -430,14 +517,18 @@ func (h *ReverseHub) Call(server string, env proto.Envelope) (proto.Envelope, er
 	// Against an agent without CapabilityReverseMultiplex this returns the
 	// single agent-opened channel and behaves exactly as it always did.
 	sess, pooled := current.leaseChannel()
-	response, err := sess.Call(context.Background(), env)
+	response, err := sess.Call(ctx, env)
 	if err != nil {
+		if transport.SessionUsableAfterError(err) {
+			if pooled {
+				current.releaseChannel(sess, true)
+			}
+			return proto.Envelope{}, err
+		}
 		if pooled {
 			current.releaseChannel(sess, false)
 		}
-		// A failure on any channel means the whole connection is suspect — they
-		// all ride one ssh.Conn — so retire the session and let the agent
-		// reconnect, which is what this did before channels were pooled.
+		// A framing or transport failure makes the whole connection suspect.
 		h.clearSession(server, err.Error(), current.session)
 		return proto.Envelope{}, err
 	}
@@ -479,7 +570,17 @@ func (h *ReverseHub) Close() {
 	}
 }
 
+const (
+	maxControlRequestBytes          = 32 << 20
+	controlIOTimeout                = 30 * time.Second
+	maxConcurrentControlConnections = 32
+)
+
 func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) error {
+	if err := requireLoopbackListener(listener); err != nil {
+		_ = listener.Close()
+		return err
+	}
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -493,17 +594,35 @@ func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) er
 			}
 			return fmt.Errorf("accept control connection: %w", err)
 		}
-		go h.handleControlConn(conn)
+		select {
+		case h.controlSlots <- struct{}{}:
+			go func() {
+				defer func() { <-h.controlSlots }()
+				h.handleControlConn(conn)
+			}()
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (h *ReverseHub) handleControlConn(conn net.Conn) {
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(controlIOTimeout))
 
+	limited := &io.LimitedReader{R: conn, N: maxControlRequestBytes + 1}
+	decoder := json.NewDecoder(limited)
 	var req reverseControlRequest
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := decoder.Decode(&req); err != nil {
 		_ = json.NewEncoder(conn).Encode(reverseControlResponse{
-			Error: &proto.Error{Code: "decode_error", Message: err.Error()},
+			Error: &proto.Error{Code: "decode_error", Message: "invalid control request"},
+		})
+		return
+	}
+	buffered, _ := io.ReadAll(decoder.Buffered())
+	if limited.N <= 0 || len(strings.TrimSpace(string(buffered))) != 0 {
+		_ = json.NewEncoder(conn).Encode(reverseControlResponse{
+			Error: &proto.Error{Code: "request_too_large", Message: "control request exceeds limit or contains trailing data"},
 		})
 		return
 	}
@@ -518,7 +637,24 @@ func (h *ReverseHub) handleControlConn(conn net.Conn) {
 	var resp reverseControlResponse
 	switch req.Type {
 	case "call":
-		out, err := h.Call(req.Server, req.envelope())
+		callCtx, cancel := context.WithTimeout(context.Background(), controlIOTimeout)
+		if deadline := req.Envelope.DeadlineUnixMilli; deadline > 0 {
+			requested := time.UnixMilli(deadline)
+			if current, ok := callCtx.Deadline(); !ok || requested.Before(current) {
+				cancel()
+				callCtx, cancel = context.WithDeadline(context.Background(), requested)
+			}
+		}
+		// The CLI closes this loopback connection when its context is cancelled.
+		// Continue reading after the one complete request solely to observe that
+		// close and cancel the daemon-side call; otherwise a deadline-free Ctrl-C
+		// would leave the remote process running until controlIOTimeout.
+		go func() {
+			_, _ = io.Copy(io.Discard, conn)
+			cancel()
+		}()
+		out, err := h.CallContext(callCtx, req.Server, req.envelope())
+		cancel()
 		if err != nil {
 			resp.Error = &proto.Error{Code: "reverse_call_failed", Message: err.Error()}
 			break
@@ -585,7 +721,7 @@ func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*
 		server = fresh
 	}
 
-	data, readErr := os.ReadFile(path)
+	data, readErr := os.ReadFile(path) // #nosec G304 -- path is the controller-configured public key file
 	switch {
 	case readErr == nil:
 		// Already enrolled: the presented key MUST match the pinned key.
@@ -641,6 +777,9 @@ func GenerateEnrollSecret() (string, error) {
 }
 
 func (h *ReverseHub) setSession(serverName string, session *transport.Session, info ReverseSessionInfo, conn ssh.Conn) {
+	if session != nil {
+		session.SetCapabilities(info.Hello.Capabilities)
+	}
 	h.mu.Lock()
 	if existing := h.sessions[serverName]; existing != nil {
 		existing.closeExtraChannels()
@@ -706,6 +845,9 @@ func (h *ReverseHub) clearSession(serverName, lastError string, expected *transp
 	delete(h.sessions, serverName)
 	h.mu.Unlock()
 	current.closeExtraChannels()
+	if current.session != nil {
+		_ = current.session.Close()
+	}
 
 	server, err := h.app.GetServer(serverName)
 	if err != nil {
@@ -731,12 +873,25 @@ func (a *App) reverseDisconnect(serverName string) error {
 	return a.callReverseDisconnect(serverName)
 }
 
-func (a *App) callReverseControl(serverName string, env proto.Envelope) (proto.Envelope, error) {
-	conn, err := net.DialTimeout("tcp", a.Config.Runtime.ControlAddress, 2*time.Second)
+func (a *App) callReverseControlContext(ctx context.Context, serverName string, env proto.Envelope) (proto.Envelope, error) {
+	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
+		return proto.Envelope{}, err
+	}
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", a.Config.Runtime.ControlAddress)
 	if err != nil {
 		return proto.Envelope{}, fmt.Errorf("connect to local reverse control at %s: %w", a.Config.Runtime.ControlAddress, err)
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
+	deadline := time.Now().Add(controlIOTimeout)
+	if requested, ok := ctx.Deadline(); ok && requested.Before(deadline) {
+		deadline = requested
+		env.DeadlineUnixMilli = requested.UnixMilli()
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return proto.Envelope{}, fmt.Errorf("set reverse control deadline: %w", err)
+	}
 
 	token, err := a.readControlToken()
 	if err != nil {
@@ -745,11 +900,17 @@ func (a *App) callReverseControl(serverName string, env proto.Envelope) (proto.E
 	if err := json.NewEncoder(conn).Encode(
 		newReverseControlRequest(token, "call", serverName, env),
 	); err != nil {
+		if ctx.Err() != nil {
+			return proto.Envelope{}, ctx.Err()
+		}
 		return proto.Envelope{}, err
 	}
 
 	var resp reverseControlResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		if ctx.Err() != nil {
+			return proto.Envelope{}, ctx.Err()
+		}
 		return proto.Envelope{}, err
 	}
 	if resp.Error != nil {
@@ -763,11 +924,17 @@ func (a *App) callReverseControl(serverName string, env proto.Envelope) (proto.E
 }
 
 func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {
+	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
+		return ReverseSessionInfo{}, err
+	}
 	conn, err := net.DialTimeout("tcp", a.Config.Runtime.ControlAddress, 2*time.Second)
 	if err != nil {
 		return ReverseSessionInfo{}, fmt.Errorf("connect to local reverse control at %s: %w", a.Config.Runtime.ControlAddress, err)
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(controlIOTimeout)); err != nil {
+		return ReverseSessionInfo{}, err
+	}
 
 	token, err := a.readControlToken()
 	if err != nil {
@@ -795,11 +962,17 @@ func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {
 }
 
 func (a *App) callReverseDisconnect(serverName string) error {
+	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
+		return err
+	}
 	conn, err := net.DialTimeout("tcp", a.Config.Runtime.ControlAddress, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connect to local reverse control at %s: %w", a.Config.Runtime.ControlAddress, err)
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(controlIOTimeout)); err != nil {
+		return err
+	}
 
 	token, err := a.readControlToken()
 	if err != nil {
@@ -851,7 +1024,31 @@ func (a *App) readControlToken() (string, error) {
 	return string(data), nil
 }
 
+func validateLoopbackControlAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("parse control address %q: %w", address, err)
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("reverse control address %q must bind to a loopback IP", address)
+	}
+	return nil
+}
+
+func requireLoopbackListener(listener net.Listener) error {
+	tcp, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcp.IP == nil || !tcp.IP.IsLoopback() {
+		return fmt.Errorf("reverse control listener must be loopback-only (got %s)", listener.Addr())
+	}
+	return nil
+}
+
 func (a *App) RunDaemon(ctx context.Context) error {
+	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
+		return err
+	}
 	reverseListener, err := net.Listen("tcp", a.Config.Runtime.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("listen for reverse agents on %s: %w", a.Config.Runtime.ListenAddress, err)
@@ -889,4 +1086,14 @@ func (a *App) RunDaemon(ctx context.Context) error {
 
 func (a *App) controllerPrivateKeyPath() string {
 	return filepath.Join(a.ConfigDir, "keys", a.Config.Crypto.PrimaryKey)
+}
+
+// ControllerHostKeyFingerprint returns the fingerprint agents must verify before
+// creating their first controller pin.
+func (a *App) ControllerHostKeyFingerprint() (string, error) {
+	signer, err := fleetcrypto.LoadPrivateKeySigner(a.controllerPrivateKeyPath(), nil)
+	if err != nil {
+		return "", err
+	}
+	return ssh.FingerprintSHA256(signer.PublicKey()), nil
 }

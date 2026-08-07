@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cenvero/fleet/internal/crypto"
@@ -121,10 +122,25 @@ func (c Connector) DialContext(ctx context.Context, target ServerTarget) (*Sessi
 		return nil, fmt.Errorf("dial %s: %w", address, err)
 	}
 
+	// ssh.ClientConfig.Timeout is not honored by NewClientConn when callers
+	// provide an already-dialled net.Conn. Bound the version/KEX/auth exchange on
+	// the socket itself, respecting an earlier caller deadline.
+	handshakeDeadline := time.Now().Add(config.Timeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	if err := rawConn.SetDeadline(handshakeDeadline); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("set ssh handshake deadline for %s: %w", address, err)
+	}
 	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, address, config)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("establish ssh connection to %s: %w", address, err)
+	}
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
+		_ = sshConn.Close()
+		return nil, fmt.Errorf("clear ssh handshake deadline for %s: %w", address, err)
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	channel, requests, err := client.OpenChannel(RPCChannelType, nil)
@@ -148,8 +164,11 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 	if s == nil || s.Channel == nil {
 		return proto.Envelope{}, fmt.Errorf("transport session is not open")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.callMu.Lock()
+	defer s.callMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return proto.Envelope{}, err
+	}
 	if env.RequestID == "" {
 		requestID, err := newRequestID()
 		if err != nil {
@@ -159,49 +178,93 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 	}
 	env.Type = proto.EnvelopeTypeRequest
 	env.ProtocolVersion = proto.CurrentProtocolVersion
+	_, hasDeadline := ctx.Deadline()
+	if deadline, ok := ctx.Deadline(); ok {
+		env.DeadlineUnixMilli = deadline.UnixMilli()
+	}
 
-	if err := proto.Encode(s.Channel, env); err != nil {
+	canCancel := s.SupportsCapability(proto.CapabilityRequestCancel)
+	if strings.EqualFold(env.Action, "shell.exec") && ctx.Done() != nil && !hasDeadline && !canCancel {
+		return proto.Envelope{}, fmt.Errorf("agent does not advertise %s; refusing deadline-free cancellable execution until it is upgraded", proto.CapabilityRequestCancel)
+	}
+
+	if err := s.encode(env); err != nil {
 		return proto.Envelope{}, fmt.Errorf("encode rpc request: %w", err)
 	}
 
-	// A context that can never be cancelled (Background/TODO — every call on the
-	// transfer hot path) has nothing to select on, so decode inline. The
-	// goroutine-and-channel below exists only to make the read interruptible;
-	// spawning one per RPC costs a goroutine, a channel and a scheduler handoff
-	// on every chunk of every transfer.
-	if ctx.Done() == nil {
+	decode := func() (proto.Envelope, error) {
 		resp, err := proto.Decode(s.Channel)
 		if err != nil {
 			return proto.Envelope{}, fmt.Errorf("decode rpc response: %w", err)
 		}
+		if resp.RequestID != "" && resp.RequestID != env.RequestID {
+			return proto.Envelope{}, fmt.Errorf("rpc response request id %q does not match %q", resp.RequestID, env.RequestID)
+		}
 		return resp, nil
+	}
+
+	// Background/TODO cannot be cancelled, so avoid a goroutine on transfer hot
+	// paths. Cancellable calls use a read goroutine while this method retains the
+	// logical-call lock; request.cancel is the only frame allowed to bypass it.
+	if ctx.Done() == nil {
+		return decode()
 	}
 
 	type result struct {
 		response proto.Envelope
 		err      error
 	}
-
 	done := make(chan result, 1)
 	go func() {
-		resp, err := proto.Decode(s.Channel)
+		resp, err := decode()
 		done <- result{response: resp, err: err}
 	}()
 
 	select {
-	case <-ctx.Done():
-		_ = s.Close()
-		// The decode goroutine is still blocked on the channel read; closing the
-		// session unblocks it. Drain the buffered channel so the goroutine exits
-		// cleanly rather than leaking until the next GC sweep.
-		go func() { <-done }()
-		return proto.Envelope{}, ctx.Err()
 	case out := <-done:
-		if out.err != nil {
-			return proto.Envelope{}, fmt.Errorf("decode rpc response: %w", out.err)
+		return out.response, out.err
+	case <-ctx.Done():
+		if !canCancel {
+			_ = s.Channel.Close()
+			go func() { <-done }()
+			return proto.Envelope{}, &callContextError{err: ctx.Err()}
 		}
-		return out.response, nil
+		cancelEnv := proto.Envelope{
+			Type:            proto.EnvelopeTypeEvent,
+			ProtocolVersion: proto.CurrentProtocolVersion,
+			Action:          proto.ActionRequestCancel,
+			Payload:         proto.CancelRequestPayload{RequestID: env.RequestID},
+		}
+		if err := s.encode(cancelEnv); err != nil {
+			_ = s.Channel.Close()
+			go func() { <-done }()
+			return proto.Envelope{}, &callContextError{err: ctx.Err()}
+		}
+
+		// Do not return while the original response is still on the wire: the next
+		// pooled caller could otherwise consume it. A capable agent kills the
+		// process group and replies promptly. If it lies about the capability,
+		// close only this RPC channel and mark it unusable.
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case out := <-done:
+			if out.err != nil {
+				return proto.Envelope{}, &callContextError{err: ctx.Err()}
+			}
+			return proto.Envelope{}, &callContextError{err: ctx.Err(), sessionUsable: true}
+		case <-timer.C:
+			_ = s.Channel.Close()
+			go func() { <-done }()
+			return proto.Envelope{}, &callContextError{err: ctx.Err()}
+		}
 	}
+}
+
+func (s *Session) encode(env proto.Envelope) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return proto.Encode(s.Channel, env)
 }
 
 func (s *Session) Hello(ctx context.Context, controllerID string) (proto.HelloPayload, error) {
@@ -221,6 +284,7 @@ func (s *Session) Hello(ctx context.Context, controllerID string) (proto.HelloPa
 	if err != nil {
 		return proto.HelloPayload{}, err
 	}
+	s.SetCapabilities(payload.Capabilities)
 	return payload, nil
 }
 

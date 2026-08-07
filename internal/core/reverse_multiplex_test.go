@@ -58,10 +58,11 @@ func reverseTransferRig(t *testing.T) (*App, *ReverseHub, context.CancelFunc) {
 	go func() { _ = hub.ServeConn(serverConn) }()
 	go func() {
 		_ = agent.RunReverse(ctx, agent.ReverseOptions{
-			EnrollToken:       testReverseEnroll,
-			ControllerAddress: "127.0.0.1:9543",
-			ServerName:        "reverse-node",
-			KnownHostsPath:    filepath.Join(t.TempDir(), "controller_known_hosts"),
+			EnrollToken:           testReverseEnroll,
+			ControllerFingerprint: testControllerFingerprint(t, app),
+			ControllerAddress:     "127.0.0.1:9543",
+			ServerName:            "reverse-node",
+			KnownHostsPath:        filepath.Join(t.TempDir(), "controller_known_hosts"),
 			NetworkDialContext: func(context.Context, string, string) (net.Conn, error) {
 				return clientConn, nil
 			},

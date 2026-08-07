@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,50 @@ func TestInitializeCreatesLayoutAndConfig(t *testing.T) {
 
 	if result.Config.Database.Backend != "sqlite" {
 		t.Fatalf("expected sqlite backend, got %q", result.Config.Database.Backend)
+	}
+}
+
+func TestAddServerIsCreateOnly(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir: configDir, Alias: "fleet", DefaultMode: transport.ModeDirect,
+		CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer app.Close()
+
+	original := ServerRecord{Name: "web-01", Address: "192.0.2.10", Port: 2222, Mode: transport.ModeDirect, EnrollSecret: "original-secret"}
+	if err := app.AddServer(original); err != nil {
+		t.Fatalf("first AddServer: %v", err)
+	}
+	if err := app.AddServer(ServerRecord{Name: "web-01", Address: "203.0.113.99", Port: 22, Mode: transport.ModeDirect}); err == nil {
+		t.Fatal("duplicate AddServer unexpectedly retargeted an existing name")
+	} else if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate AddServer error = %q, want clear already-exists error", err)
+	}
+	got, err := app.GetServer("web-01")
+	if err != nil {
+		t.Fatalf("GetServer: %v", err)
+	}
+	if got.Address != original.Address || got.Port != original.Port || got.EnrollSecret != original.EnrollSecret {
+		t.Fatalf("duplicate add changed existing record: %+v", got)
+	}
+
+	got.Address = "198.51.100.7"
+	if err := app.SaveServer(got); err != nil {
+		t.Fatalf("explicit SaveServer: %v", err)
+	}
+	updated, err := app.GetServer("web-01")
+	if err != nil {
+		t.Fatalf("GetServer after SaveServer: %v", err)
+	}
+	if updated.Address != got.Address {
+		t.Fatalf("SaveServer did not preserve intended update behavior: address=%q", updated.Address)
 	}
 }
 

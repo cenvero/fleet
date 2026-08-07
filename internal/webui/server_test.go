@@ -624,9 +624,9 @@ func TestOriginLoopback(t *testing.T) {
 	}
 }
 
-// TestLocalWriteRefusesSymlink confirms O_NOFOLLOW stops a local write/upload
-// from clobbering the file a symlinked target points at.
-func TestLocalWriteRefusesSymlink(t *testing.T) {
+// TestLocalWriteReplacesSymlinkEntry confirms a local editor save atomically
+// replaces the named symlink entry without clobbering the file it pointed at.
+func TestLocalWriteReplacesSymlinkEntry(t *testing.T) {
 	t.Parallel()
 	s, ts := newTestServer(t)
 	dir := t.TempDir()
@@ -651,13 +651,20 @@ func TestLocalWriteRefusesSymlink(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode == http.StatusOK {
-		t.Fatalf("write through symlink unexpectedly succeeded")
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("atomic write status %d: %s", res.StatusCode, body)
 	}
 
-	// The victim file must be untouched.
+	// The victim file must be untouched and the named entry must now be regular.
 	if b, _ := os.ReadFile(secret); string(b) != "original\n" {
 		t.Fatalf("symlink target was clobbered: %q", b)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("symlink entry was not replaced: err=%v", err)
+	}
+	if b, _ := os.ReadFile(link); string(b) != "attacker\n" {
+		t.Fatalf("saved content mismatch: %q", b)
 	}
 }
 
@@ -697,5 +704,33 @@ func TestResolveLocalWritePathCanonicalizesParent(t *testing.T) {
 	missing := filepath.Join(root, "does-not-exist", "f.txt")
 	if got := resolveLocalWritePath(missing); got != missing {
 		t.Fatalf("resolveLocalWritePath(missing parent) = %q, want %q", got, missing)
+	}
+}
+
+func TestCopyLocalFileReplacesSymlinkEntry(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	if err := os.WriteFile(src, []byte("copied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "dst.txt")
+	if err := os.Symlink(victim, dst); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := copyLocalFile(src, dst, 0o644); err != nil {
+		t.Fatalf("copyLocalFile: %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "original" {
+		t.Fatalf("copy clobbered symlink target: %q", got)
+	}
+	if info, err := os.Lstat(dst); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("copy did not replace link entry: err=%v", err)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "copied" {
+		t.Fatalf("copy content mismatch: %q", got)
 	}
 }

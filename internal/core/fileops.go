@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -222,17 +221,21 @@ func (a *App) DownloadDir(serverName, remoteDir, localDir string, opts FileTrans
 	if err != nil {
 		return 0, err
 	}
-	if err := os.MkdirAll(localDir, 0o750); err != nil {
+	root, err := openVerifiedLocalDir(localDir, 0o750)
+	if err != nil {
 		return 0, err
 	}
+	_ = root.Close()
 	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
-		localPath, err := SafeLocalJoin(localDir, rel)
-		if err != nil {
+		if _, err := SafeLocalJoin(localDir, rel); err != nil {
 			return err
 		}
 		remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-		_, err = a.DownloadFile(serverName, remotePath, localPath, opts, fp)
-		return err
+		confined := opts
+		confined.localRoot = localDir
+		confined.localRel = rel
+		_, downloadErr := a.DownloadFile(serverName, remotePath, "", confined, fp)
+		return downloadErr
 	})
 }
 

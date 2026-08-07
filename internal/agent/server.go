@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -34,16 +35,57 @@ var globalUpdateMu sync.Mutex
 // reverseHandshakeTimeout on the controller side.
 const handshakeTimeout = 20 * time.Second
 
-// maxConcurrentHandshakes caps how many inbound connections may be in-handshake
-// or active at once on the direct-mode listener. Each pins a goroutine and at
-// least one fd before any key is verified, so an unauthenticated flood could
-// otherwise exhaust goroutines/fds. A token is acquired before the handshake and
-// released when the connection closes; connections beyond the cap are dropped
-// (the peer can retry). Accepting continues regardless.
+// maxConcurrentHandshakes caps only unauthenticated SSH handshakes on the
+// direct-mode listener. The slot is released immediately after authentication;
+// established connections are governed by aggregate and per-key limits below.
 const maxConcurrentHandshakes = 256
 
 // handshakeSlots is a counting semaphore buffered to maxConcurrentHandshakes.
 var handshakeSlots = make(chan struct{}, maxConcurrentHandshakes)
+
+const (
+	firstChannelTimeout        = 15 * time.Second
+	maxActiveDirectConnections = 256
+	maxConnectionsPerIdentity  = 8
+)
+
+type identityConnectionLimiter struct {
+	mu       sync.Mutex
+	total    int
+	byID     map[string]int
+	maxTotal int
+	maxPerID int
+}
+
+func newIdentityConnectionLimiter(maxTotal, maxPerID int) *identityConnectionLimiter {
+	return &identityConnectionLimiter{byID: make(map[string]int), maxTotal: maxTotal, maxPerID: maxPerID}
+}
+
+func (l *identityConnectionLimiter) acquire(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if id == "" || l.total >= l.maxTotal || l.byID[id] >= l.maxPerID {
+		return false
+	}
+	l.total++
+	l.byID[id]++
+	return true
+}
+
+func (l *identityConnectionLimiter) release(id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.byID[id] <= 0 {
+		return
+	}
+	l.total--
+	l.byID[id]--
+	if l.byID[id] == 0 {
+		delete(l.byID, id)
+	}
+}
+
+var directConnectionLimits = newIdentityConnectionLimiter(maxActiveDirectConnections, maxConnectionsPerIdentity)
 
 type Server struct {
 	Mode                     transport.Mode
@@ -123,8 +165,10 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 			continue
 		}
 		go func() {
-			defer func() { <-handshakeSlots }()
-			_ = s.serveConn(rawConn, config)
+			var once sync.Once
+			releaseHandshake := func() { once.Do(func() { <-handshakeSlots }) }
+			defer releaseHandshake()
+			_ = s.serveConnAfterAuth(rawConn, config, releaseHandshake)
 		}()
 	}
 }
@@ -165,17 +209,34 @@ func (s Server) ServeConn(rawConn net.Conn) error {
 }
 
 func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
+	return s.serveConnAfterAuth(rawConn, config, nil)
+}
+
+func (s Server) serveConnAfterAuth(rawConn net.Conn, config *ssh.ServerConfig, authenticated func()) error {
 	defer rawConn.Close()
 
 	// Bound the SSH handshake so a stalled or half-open peer can't pin a goroutine
-	// and fd open indefinitely (DoS). Cleared once the handshake completes — the
-	// established session manages its own lifetime. Mirrors ReverseHub.ServeConn.
+	// and fd open indefinitely (DoS). Mirrors ReverseHub.ServeConn.
 	_ = rawConn.SetDeadline(time.Now().Add(handshakeTimeout))
 	conn, chans, reqs, err := ssh.NewServerConn(rawConn, config)
 	if err != nil {
 		return err
 	}
-	_ = rawConn.SetDeadline(time.Time{})
+	if authenticated != nil {
+		authenticated()
+	}
+
+	identity := conn.Permissions.Extensions["key_fp"]
+	if !directConnectionLimits.acquire(identity) {
+		_ = conn.Close()
+		return fmt.Errorf("too many authenticated connections for identity %q", identity)
+	}
+	defer directConnectionLimits.release(identity)
+
+	// Authentication alone must not buy an indefinitely idle connection. Require
+	// the first accepted application channel promptly; established sessions then
+	// manage their own lifetime.
+	_ = rawConn.SetDeadline(time.Now().Add(firstChannelTimeout))
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 
@@ -184,6 +245,10 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 	// cap). Each handler releases its slot when it returns.
 	const maxChannelsPerConn = 128
 	chanSlots := make(chan struct{}, maxChannelsPerConn)
+	var firstAccepted sync.Once
+	markFirstAccepted := func() {
+		firstAccepted.Do(func() { _ = rawConn.SetDeadline(time.Time{}) })
+	}
 	for newChannel := range chans {
 		switch newChannel.ChannelType() {
 		case transport.RPCChannelType:
@@ -198,6 +263,7 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 				<-chanSlots
 				continue
 			}
+			markFirstAccepted()
 			go ssh.DiscardRequests(requests)
 			go func() { defer func() { <-chanSlots }(); s.serveRPC(channel) }()
 		case transport.ShellChannelType:
@@ -207,20 +273,42 @@ func (s Server) serveConn(rawConn net.Conn, config *ssh.ServerConfig) error {
 				_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent channels")
 				continue
 			}
+			var resume shellResumeExtraData
+			if err := ssh.Unmarshal(newChannel.ExtraData(), &resume); err != nil || !validShellResumeID(resume.ResumeID) {
+				<-chanSlots
+				_ = newChannel.Reject(ssh.Prohibited, "a valid random shell resume identity is required")
+				continue
+			}
 			channel, requests, err := newChannel.Accept()
 			if err != nil {
 				<-chanSlots
 				continue
 			}
-			sessionID := conn.Permissions.Extensions["key_fp"]
+			markFirstAccepted()
+			sessionID := conn.Permissions.Extensions["key_fp"] + "\x00" + resume.ResumeID
 			go func() { defer func() { <-chanSlots }(); serveShell(channel, requests, sessionID) }()
 		case directTCPIPChannelType:
-			go serveDirectTCPIP(newChannel)
+			go serveDirectTCPIP(newChannel, markFirstAccepted)
 		default:
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
 		}
 	}
 	return nil
+}
+
+// shellResumeExtraData is authenticated as part of the SSH channel open. A
+// controller generates one 256-bit value per interactive invocation and reuses
+// it only for that invocation's reconnect attempts.
+type shellResumeExtraData struct {
+	ResumeID string
+}
+
+func validShellResumeID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	decoded, err := hex.DecodeString(id)
+	return err == nil && len(decoded) == 32
 }
 
 // directTCPIPChannelType is the standard SSH channel type a client opens to
@@ -274,7 +362,7 @@ type directTCPIPExtraData struct {
 // boundary that grants shell.exec and firewall control. No new authorization is
 // added here; anyone able to open a fleet-shell/fleet-rpc channel can already
 // run arbitrary commands on the agent, so tunneling grants no additional power.
-func serveDirectTCPIP(newChannel ssh.NewChannel) {
+func serveDirectTCPIP(newChannel ssh.NewChannel, accepted func()) {
 	var req directTCPIPExtraData
 	if err := ssh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
 		_ = newChannel.Reject(ssh.ConnectionFailed, "malformed direct-tcpip request")
@@ -305,6 +393,9 @@ func serveDirectTCPIP(newChannel ssh.NewChannel) {
 		_ = remote.Close()
 		return
 	}
+	if accepted != nil {
+		accepted()
+	}
 	go ssh.DiscardRequests(requests)
 
 	// Pipe both directions. When either side hits EOF/error, close both ends so
@@ -333,13 +424,32 @@ func serveDirectTCPIP(newChannel ssh.NewChannel) {
 }
 
 func (s Server) serveRPC(channel ssh.Channel) {
-	defer channel.Close()
+	channelCtx, cancelChannel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	var encodeMu sync.Mutex
+	encode := func(env proto.Envelope) error {
+		encodeMu.Lock()
+		defer encodeMu.Unlock()
+		return proto.Encode(channel, env)
+	}
+	var activeMu sync.Mutex
+	active := make(map[string]context.CancelFunc)
+	defer func() {
+		cancelChannel()
+		activeMu.Lock()
+		for _, cancel := range active {
+			cancel()
+		}
+		activeMu.Unlock()
+		workers.Wait()
+		_ = channel.Close()
+	}()
 
 	for {
 		request, err := proto.Decode(channel)
 		if err != nil {
 			if err != io.EOF {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					Action:          "error",
@@ -356,7 +466,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "hello", "inventory":
 			hello := Hello(s.Mode)
 			hello.ControllerID = controllerIDFromPayload(request.Payload)
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -367,10 +477,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "service.list":
 			services, err := s.serviceManager().List(context.Background())
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -380,7 +490,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "service.control":
 			action, err := proto.DecodePayload[proto.ServiceActionPayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -394,10 +504,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			}
 			info, err := s.serviceManager().Control(context.Background(), action.Service, action.Action)
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -407,7 +517,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "auth.update_keys":
 			payload, err := proto.DecodePayload[proto.AuthorizedKeysPayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -421,10 +531,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			}
 			result, err := s.authorizedKeysManager().Update(context.Background(), payload)
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -434,7 +544,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "auth.update_controller_host_keys":
 			payload, err := proto.DecodePayload[proto.ControllerKnownHostsPayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -448,10 +558,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			}
 			result, err := s.controllerKnownHostsManager().Update(context.Background(), payload)
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -461,35 +571,52 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "metrics.collect":
 			snapshot, err := s.metricsCollector().Collect(context.Background())
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
 				Action:          request.Action,
 				Payload:         snapshot,
 			})
-		case "metrics.flush_queue":
-			snapshots, err := s.metricsQueue().Flush()
+		case proto.ActionMetricsPeekQueue:
+			batch, err := s.metricsQueue().Peek()
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
 				Action:          request.Action,
 				Payload: proto.MetricsReplayResult{
-					Snapshots: snapshots,
+					BatchID:   batch.ID,
+					Snapshots: batch.Snapshots,
 				},
+			})
+		case proto.ActionMetricsAckQueue:
+			payload, err := proto.DecodePayload[proto.MetricsReplayAck](request.Payload)
+			if err != nil {
+				_ = encode(errorEnvelope(request, err))
+				continue
+			}
+			if err := s.metricsQueue().Acknowledge(payload.BatchID); err != nil {
+				_ = encode(errorEnvelope(request, err))
+				continue
+			}
+			_ = encode(proto.Envelope{
+				Type:            proto.EnvelopeTypeResponse,
+				ProtocolVersion: proto.CurrentProtocolVersion,
+				RequestID:       request.RequestID,
+				Action:          request.Action,
 			})
 		case "log.read":
 			payload, err := proto.DecodePayload[proto.LogReadPayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -503,10 +630,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			}
 			result, err := s.logReader().Read(context.Background(), payload)
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -516,10 +643,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "firewall.status":
 			info, err := s.firewallManager().Status(context.Background())
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -529,10 +656,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "firewall.enable", "firewall.disable":
 			info, err := s.firewallManager().Enable(context.Background(), request.Action == "firewall.enable")
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -542,7 +669,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "firewall.add_rule":
 			rule, err := proto.DecodePayload[proto.FirewallRulePayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -556,10 +683,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			}
 			info, err := s.firewallManager().AddRule(context.Background(), rule.Rule)
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -569,10 +696,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "port.list":
 			ports, err := s.firewallManager().ListOpenPorts(context.Background())
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -582,7 +709,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "port.set":
 			payload, err := proto.DecodePayload[proto.PortActionPayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -596,10 +723,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			}
 			info, err := s.firewallManager().SetPort(context.Background(), payload.Port, payload.Open)
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -608,7 +735,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			})
 		case "update.apply":
 			if !globalUpdateMu.TryLock() {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -623,7 +750,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			payload, err := proto.DecodePayload[proto.UpdateApplyPayload](request.Payload)
 			if err != nil {
 				globalUpdateMu.Unlock()
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -638,10 +765,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			op, err := s.updater().Apply(context.Background(), payload)
 			globalUpdateMu.Unlock()
 			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+				_ = encode(errorEnvelope(request, err))
 				continue
 			}
-			encErr := proto.Encode(channel, proto.Envelope{
+			encErr := encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -660,7 +787,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case "shell.exec":
 			payload, err := proto.DecodePayload[proto.ExecPayload](request.Payload)
 			if err != nil {
-				_ = proto.Encode(channel, proto.Envelope{
+				_ = encode(proto.Envelope{
 					Type:            proto.EnvelopeTypeResponse,
 					ProtocolVersion: proto.CurrentProtocolVersion,
 					RequestID:       request.RequestID,
@@ -672,40 +799,76 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				})
 				continue
 			}
-			result, err := runShellExec(context.Background(), payload)
-			if err != nil {
-				_ = proto.Encode(channel, errorEnvelope(request, err))
+			if request.RequestID == "" {
+				_ = encode(errorEnvelope(request, fmt.Errorf("shell.exec requires a request id")))
 				continue
 			}
-			_ = proto.Encode(channel, proto.Envelope{
-				Type:            proto.EnvelopeTypeResponse,
-				ProtocolVersion: proto.CurrentProtocolVersion,
-				RequestID:       request.RequestID,
-				Action:          request.Action,
-				Payload:         result,
-			})
+			execCtx, cancelExec := requestDeadlineContext(channelCtx, request)
+			activeMu.Lock()
+			if _, exists := active[request.RequestID]; exists {
+				activeMu.Unlock()
+				cancelExec()
+				_ = encode(errorEnvelope(request, fmt.Errorf("duplicate request id %q", request.RequestID)))
+				continue
+			}
+			active[request.RequestID] = cancelExec
+			activeMu.Unlock()
+
+			workers.Add(1)
+			go func(request proto.Envelope, payload proto.ExecPayload, execCtx context.Context, cancelExec context.CancelFunc) {
+				defer workers.Done()
+				defer func() {
+					activeMu.Lock()
+					delete(active, request.RequestID)
+					activeMu.Unlock()
+					cancelExec()
+				}()
+				result, err := runShellExec(execCtx, payload)
+				if err != nil {
+					_ = encode(errorEnvelope(request, err))
+					return
+				}
+				_ = encode(proto.Envelope{
+					Type:            proto.EnvelopeTypeResponse,
+					ProtocolVersion: proto.CurrentProtocolVersion,
+					RequestID:       request.RequestID,
+					Action:          request.Action,
+					Payload:         result,
+				})
+			}(request, payload, execCtx, cancelExec)
+		case proto.ActionRequestCancel:
+			payload, err := proto.DecodePayload[proto.CancelRequestPayload](request.Payload)
+			if err != nil || payload.RequestID == "" {
+				continue // events are one-way; malformed/guessed IDs cancel nothing
+			}
+			activeMu.Lock()
+			cancelExec := active[payload.RequestID]
+			activeMu.Unlock()
+			if cancelExec != nil {
+				cancelExec()
+			}
 		case proto.ActionFileList:
-			handleFileRPC(channel, request, s.fileManager().List)
+			handleFileRPC(encode, request, s.fileManager().List)
 		case proto.ActionFileStat:
-			handleFileRPC(channel, request, s.fileManager().Stat)
+			handleFileRPC(encode, request, s.fileManager().Stat)
 		case proto.ActionFileRead:
-			handleFileRPC(channel, request, s.fileManager().Read)
+			handleFileRPC(encode, request, s.fileManager().Read)
 		case proto.ActionFileOpenWrite:
-			handleFileRPC(channel, request, s.fileManager().OpenWrite)
+			handleFileRPC(encode, request, s.fileManager().OpenWrite)
 		case proto.ActionFileWrite:
-			handleFileRPC(channel, request, s.fileManager().Write)
+			handleFileRPC(encode, request, s.fileManager().Write)
 		case proto.ActionFileFinalize:
-			handleFileRPC(channel, request, s.fileManager().Finalize)
+			handleFileRPC(encode, request, s.fileManager().Finalize)
 		case proto.ActionFileProbe:
-			handleFileRPC(channel, request, s.fileManager().Probe)
+			handleFileRPC(encode, request, s.fileManager().Probe)
 		case proto.ActionFileMkdir:
-			handleFileRPC(channel, request, s.fileManager().Mkdir)
+			handleFileRPC(encode, request, s.fileManager().Mkdir)
 		case proto.ActionFileDelete:
-			handleFileRPC(channel, request, s.fileManager().Delete)
+			handleFileRPC(encode, request, s.fileManager().Delete)
 		case proto.ActionFileRename:
-			handleFileRPC(channel, request, s.fileManager().Rename)
+			handleFileRPC(encode, request, s.fileManager().Rename)
 		default:
-			_ = proto.Encode(channel, proto.Envelope{
+			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
 				ProtocolVersion: proto.CurrentProtocolVersion,
 				RequestID:       request.RequestID,
@@ -717,6 +880,13 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			})
 		}
 	}
+}
+
+func requestDeadlineContext(parent context.Context, request proto.Envelope) (context.Context, context.CancelFunc) {
+	if request.DeadlineUnixMilli <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithDeadline(parent, time.UnixMilli(request.DeadlineUnixMilli))
 }
 
 func (s Server) serviceManager() ServiceManager {
@@ -790,10 +960,10 @@ func errorEnvelope(request proto.Envelope, err error) proto.Envelope {
 // handleFileRPC decodes the request payload as T, runs the manager method, and
 // encodes the typed response (or an error envelope). It collapses the per-action
 // decode/dispatch/encode boilerplate shared by every file.* handler.
-func handleFileRPC[T any, R any](channel ssh.Channel, request proto.Envelope, fn func(context.Context, T) (R, error)) {
+func handleFileRPC[T any, R any](encode func(proto.Envelope) error, request proto.Envelope, fn func(context.Context, T) (R, error)) {
 	payload, err := proto.DecodePayload[T](request.Payload)
 	if err != nil {
-		_ = proto.Encode(channel, proto.Envelope{
+		_ = encode(proto.Envelope{
 			Type:            proto.EnvelopeTypeResponse,
 			ProtocolVersion: proto.CurrentProtocolVersion,
 			RequestID:       request.RequestID,
@@ -808,7 +978,7 @@ func handleFileRPC[T any, R any](channel ssh.Channel, request proto.Envelope, fn
 
 	result, err := fn(context.Background(), payload)
 	if err != nil {
-		_ = proto.Encode(channel, errorEnvelope(request, err))
+		_ = encode(errorEnvelope(request, err))
 		return
 	}
 	response := proto.Envelope{
@@ -824,7 +994,7 @@ func handleFileRPC[T any, R any](channel ssh.Channel, request proto.Envelope, fn
 	if proto.PeerWantsBinary(request, payload) {
 		response = proto.DetachBinary(response)
 	}
-	_ = proto.Encode(channel, response)
+	_ = encode(response)
 }
 
 func controllerIDFromPayload(payload any) string {
@@ -837,7 +1007,7 @@ func controllerIDFromPayload(payload any) string {
 }
 
 func loadAuthorizedKeys(path string) (map[string]struct{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an explicit agent configuration file and contents are strictly validated
 	if os.IsNotExist(err) {
 		// File not yet written (e.g. install race). Return empty set — connections
 		// will be denied but the service keeps running and will succeed once the

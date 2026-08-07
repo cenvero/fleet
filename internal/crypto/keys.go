@@ -98,7 +98,7 @@ func Fingerprints(dir string) (map[string]string, error) {
 
 	out := make(map[string]string)
 	for key, path := range files {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) // #nosec G304 -- path is controller/operator-selected key material and is validated by the key loader
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -122,7 +122,7 @@ func ExportPublicKeys(dir string) (map[string]string, error) {
 
 	out := make(map[string]string)
 	for key, path := range files {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) // #nosec G304 -- path is controller/operator-selected key material and is validated by the key loader
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue

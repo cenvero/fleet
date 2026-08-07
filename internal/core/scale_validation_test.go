@@ -64,10 +64,11 @@ func TestScaleSmoke100ReverseAgents(t *testing.T) {
 		name := fmt.Sprintf("scale-node-%03d", i+1)
 		names = append(names, name)
 		if err := app.AddServer(ServerRecord{
-			Name:    name,
-			Address: "unknown",
-			Mode:    transport.ModeReverse,
-			User:    "cenvero-agent",
+			Name:         name,
+			Address:      "unknown",
+			Mode:         transport.ModeReverse,
+			User:         "cenvero-agent",
+			EnrollSecret: testReverseEnroll,
 		}); err != nil {
 			t.Fatalf("AddServer(%s) error = %v", name, err)
 		}
@@ -87,12 +88,14 @@ func TestScaleSmoke100ReverseAgents(t *testing.T) {
 		name := name
 		go func() {
 			errCh <- agent.RunReverse(ctx, agent.ReverseOptions{
-				ControllerAddress: "127.0.0.1:9443",
-				ServerName:        name,
-				KnownHostsPath:    filepath.Join(agentsDir, name+"-known_hosts"),
-				MetricsQueuePath:  filepath.Join(agentsDir, name+"-metrics.jsonl"),
-				MinRetryDelay:     10 * time.Millisecond,
-				MaxRetryDelay:     25 * time.Millisecond,
+				EnrollToken:           testReverseEnroll,
+				ControllerFingerprint: testControllerFingerprint(t, app),
+				ControllerAddress:     "127.0.0.1:9443",
+				ServerName:            name,
+				KnownHostsPath:        filepath.Join(agentsDir, name+"-known_hosts"),
+				MetricsQueuePath:      filepath.Join(agentsDir, name+"-metrics.jsonl"),
+				MinRetryDelay:         10 * time.Millisecond,
+				MaxRetryDelay:         25 * time.Millisecond,
 				NetworkDialContext: func(context.Context, string, string) (net.Conn, error) {
 					clientConn, serverConn := testutil.NewBufferedConnPair(
 						fmt.Sprintf("127.0.0.1:%d", 43000+i),

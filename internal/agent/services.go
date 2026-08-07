@@ -41,7 +41,14 @@ type commandRunner interface {
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	switch name {
+	case "systemctl", "ufw", "systemd-run":
+		// Fixed internal tool allowlist; caller-controlled data is passed only as
+		// separate validated arguments and never through a shell.
+	default:
+		return nil, fmt.Errorf("refusing unapproved agent command %q", name)
+	}
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- name passed the fixed allowlist above
 	return cmd.CombinedOutput()
 }
 

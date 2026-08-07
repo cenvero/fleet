@@ -134,7 +134,7 @@ func readAuthorizedKeyLines(path string) ([]string, os.FileMode, error) {
 	if err == nil {
 		mode = info.Mode().Perm()
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an explicit agent configuration file and contents are strictly validated
 	switch {
 	case err == nil:
 	case os.IsNotExist(err):

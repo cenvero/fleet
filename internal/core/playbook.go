@@ -57,7 +57,7 @@ func ParsePlaybook(data []byte) (Playbook, error) {
 
 // LoadPlaybook reads and parses a playbook file.
 func LoadPlaybook(path string) (Playbook, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- reading an explicitly operator-selected playbook is the function contract
 	if err != nil {
 		return Playbook{}, fmt.Errorf("read playbook: %w", err)
 	}

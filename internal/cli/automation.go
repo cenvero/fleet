@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/cenvero/fleet/internal/core"
 	"github.com/spf13/cobra"
 )
 
@@ -94,7 +95,15 @@ func newAutomationSetCommand(configDir *string) *cobra.Command {
 			if err := os.MkdirAll(automationDir(*configDir), 0o700); err != nil {
 				return err
 			}
-			if err := os.WriteFile(path, body, 0o600); err != nil {
+			out, err := core.CreateAtomicLocalFile(path, 0o600)
+			if err != nil {
+				return err
+			}
+			defer out.Abort()
+			if _, err := out.File().Write(body); err != nil {
+				return err
+			}
+			if err := out.Commit(); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "stored automation %q (%d bytes)\n", args[0], len(body))

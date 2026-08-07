@@ -20,8 +20,8 @@ func TestBackupSkipsOutputInsideConfigDir(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o750); err != nil {
 		t.Fatalf("MkdirAll(configDir) error = %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("alias = \"fleet\"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile(config) error = %v", err)
+	if err := os.WriteFile(filepath.Join(configDir, "marker.txt"), []byte("fleet\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(marker) error = %v", err)
 	}
 
 	outputPath := filepath.Join(configDir, "self.tar.gz")
@@ -37,8 +37,8 @@ func TestBackupSkipsOutputInsideConfigDir(t *testing.T) {
 	if slices.Contains(names, "self.tar.gz") {
 		t.Fatalf("backup archive included itself: %#v", names)
 	}
-	if !slices.Contains(names, "config.toml") {
-		t.Fatalf("backup archive omitted config.toml: %#v", names)
+	if !slices.Contains(names, "marker.txt") {
+		t.Fatalf("backup archive omitted marker.txt: %#v", names)
 	}
 }
 

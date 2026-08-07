@@ -73,6 +73,15 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 	if err != nil {
 		return BootstrapResult{}, err
 	}
+	if server.Mode == transport.ModeReverse && server.EnrollSecret == "" {
+		server.EnrollSecret, err = GenerateEnrollSecret()
+		if err != nil {
+			return BootstrapResult{}, err
+		}
+		if err := a.SaveServer(server); err != nil {
+			return BootstrapResult{}, fmt.Errorf("store reverse enrollment credential: %w", err)
+		}
+	}
 
 	resolved, err := a.resolveBootstrapConfig(server, opts)
 	if err != nil {
@@ -141,6 +150,13 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 			Content: authorizedKeys,
 		})
 	}
+	if server.Mode == transport.ModeReverse {
+		request.Uploads = append(request.Uploads, BootstrapUpload{
+			Path:    resolved.tempEnrollTokenPath,
+			Mode:    0o600,
+			Content: []byte(server.EnrollSecret + "\n"),
+		})
+	}
 	request.Uploads = append(request.Uploads, BootstrapUpload{
 		Path:    resolved.tempScriptPath,
 		Mode:    0o700,
@@ -195,6 +211,7 @@ type resolvedBootstrapConfig struct {
 	agentListenAddr        string
 	agentPort              int
 	controllerAddress      string
+	controllerFingerprint  string
 	serviceName            string
 	useSudo                bool
 	acceptNewHostKey       bool
@@ -202,6 +219,8 @@ type resolvedBootstrapConfig struct {
 	tempUnitPath           string
 	tempScriptPath         string
 	tempAuthorizedKeysPath string
+	tempEnrollTokenPath    string
+	enrollTokenPath        string
 }
 
 func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions) (resolvedBootstrapConfig, error) {
@@ -255,6 +274,7 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 	}
 
 	controllerAddress := strings.TrimSpace(opts.ControllerAddress)
+	controllerFingerprint := ""
 	if server.Mode == transport.ModeReverse {
 		if controllerAddress == "" {
 			controllerAddress = defaultControllerBootstrapAddress(a.Config.Runtime.ListenAddress)
@@ -262,9 +282,24 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		if controllerAddress == "" {
 			return resolvedBootstrapConfig{}, fmt.Errorf("controller address is required for reverse bootstrap; pass --controller with a reachable address")
 		}
+		signer, err := fleetcrypto.LoadPrivateKeySigner(a.controllerPrivateKeyPath(), nil)
+		if err != nil {
+			return resolvedBootstrapConfig{}, fmt.Errorf("load controller host key for bootstrap verification: %w", err)
+		}
+		controllerFingerprint = ssh.FingerprintSHA256(signer.PublicKey())
+		if server.EnrollSecret == "" {
+			return resolvedBootstrapConfig{}, fmt.Errorf("reverse bootstrap requires a pending enrollment credential")
+		}
 	}
 
-	token := randomBootstrapToken()
+	entropy := opts.entropy
+	if entropy == nil {
+		entropy = rand.Reader
+	}
+	token, err := randomBootstrapToken(entropy)
+	if err != nil {
+		return resolvedBootstrapConfig{}, fmt.Errorf("generate unpredictable bootstrap paths: %w", err)
+	}
 	return resolvedBootstrapConfig{
 		loginUser:              loginUser,
 		loginPort:              loginPort,
@@ -273,6 +308,7 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		agentListenAddr:        agentListenAddr,
 		agentPort:              agentPort,
 		controllerAddress:      controllerAddress,
+		controllerFingerprint:  controllerFingerprint,
 		serviceName:            serviceName,
 		useSudo:                opts.UseSudo,
 		acceptNewHostKey:       opts.AcceptNewHostKey,
@@ -280,18 +316,21 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		tempUnitPath:           "/tmp/cenvero-" + token + ".service",
 		tempScriptPath:         "/tmp/cenvero-" + token + ".sh",
 		tempAuthorizedKeysPath: "/tmp/cenvero-" + token + ".keys",
+		tempEnrollTokenPath:    "/tmp/cenvero-" + token + ".enroll",
+		enrollTokenPath:        filepath.Join(defaultStateDir, "enroll.token"),
 	}, nil
 }
 
 // randomBootstrapToken returns a 16-character hex token for use in temp file
 // paths during bootstrap. This prevents local users on the target server from
-// pre-staging symlinks or scripts at the predictable /tmp paths.
-func randomBootstrapToken() string {
+// pre-staging symlinks or scripts at predictable /tmp paths. Entropy failures
+// are returned so bootstrap fails closed without terminating the controller.
+func randomBootstrapToken(entropy io.Reader) (string, error) {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("crypto/rand unavailable: " + err.Error())
+	if _, err := io.ReadFull(entropy, b[:]); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }
 
 func resolveAgentBinaryPath(override string) (string, error) {
@@ -350,12 +389,14 @@ func buildAgentServiceUnit(server ServerRecord, cfg resolvedBootstrapConfig) (st
 			shellQuote(defaultDirectAuthorizedKeysPath()),
 		)
 	case transport.ModeReverse:
-		execStart = fmt.Sprintf("%s reverse --controller %s --server-name %s --host-key %s --known-hosts %s",
+		execStart = fmt.Sprintf("%s reverse --controller %s --server-name %s --host-key %s --known-hosts %s --controller-fingerprint %s --enroll-token-file %s",
 			defaultAgentBinaryPath,
 			shellQuote(cfg.controllerAddress),
 			shellQuote(server.Name),
 			shellQuote(filepath.Join(defaultStateDir, "ssh_host_ed25519_key")),
 			shellQuote(filepath.Join(defaultStateDir, "controller_known_hosts")),
+			shellQuote(cfg.controllerFingerprint),
+			shellQuote(cfg.enrollTokenPath),
 		)
 	default:
 		return "", fmt.Errorf("bootstrap is not implemented for mode %q", server.Mode)
@@ -397,6 +438,7 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 		"TEMP_BIN=" + shellQuote(cfg.tempBinaryPath),
 		"TEMP_UNIT=" + shellQuote(cfg.tempUnitPath),
 		"TEMP_SCRIPT=" + shellQuote(cfg.tempScriptPath),
+		"TEMP_ENROLL=" + shellQuote(cfg.tempEnrollTokenPath),
 		"",
 		sudo + "mkdir -p \"$BIN_DIR\" \"$STATE_DIR\" \"$CONFIG_DIR\"",
 		sudo + "install -m 0755 \"$TEMP_BIN\" \"$BIN_PATH\"",
@@ -405,10 +447,13 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 	if includeAuthorizedKeys {
 		lines = append(lines, sudo+"install -m 0600 "+shellQuote(cfg.tempAuthorizedKeysPath)+" "+shellQuote(defaultDirectAuthorizedKeysPath()))
 	}
+	if server.Mode == transport.ModeReverse {
+		lines = append(lines, sudo+"install -m 0600 \"$TEMP_ENROLL\" "+shellQuote(cfg.enrollTokenPath))
+	}
 	lines = append(lines,
 		sudo+"systemctl daemon-reload",
 		sudo+"systemctl enable --now \"$SERVICE_NAME\".service",
-		"rm -f \"$TEMP_BIN\" \"$TEMP_UNIT\" \"$TEMP_SCRIPT\"",
+		"rm -f \"$TEMP_BIN\" \"$TEMP_UNIT\" \"$TEMP_SCRIPT\" \"$TEMP_ENROLL\"",
 	)
 	if includeAuthorizedKeys {
 		lines = append(lines, "rm -f "+shellQuote(cfg.tempAuthorizedKeysPath))
@@ -472,9 +517,20 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 	}
 	defer rawConn.Close()
 
+	handshakeDeadline := time.Now().Add(config.Timeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	if err := rawConn.SetDeadline(handshakeDeadline); err != nil {
+		return fmt.Errorf("set bootstrap ssh handshake deadline: %w", err)
+	}
 	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, address, config)
 	if err != nil {
 		return fmt.Errorf("establish bootstrap ssh connection to %s: %w", address, err)
+	}
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
+		_ = sshConn.Close()
+		return fmt.Errorf("clear bootstrap ssh handshake deadline: %w", err)
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()

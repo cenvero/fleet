@@ -4,10 +4,7 @@
 package update
 
 import (
-	"context"
-	"net/http"
-	"net/http/httptest"
-	"runtime"
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -15,7 +12,7 @@ import (
 func TestBinaryForSelectsCurrentTarget(t *testing.T) {
 	t.Parallel()
 
-	target := runtime.GOOS + "-" + runtime.GOARCH
+	target := runtimeUpdateTarget()
 	manifest := Manifest{
 		Channels: map[string]ChannelInfo{
 			"stable": {Version: "v1.0.0"},
@@ -39,38 +36,29 @@ func TestBinaryForSelectsCurrentTarget(t *testing.T) {
 	}
 }
 
-// TestFetchRejectsOversizedManifest verifies that Fetch bounds the manifest body
-// before decoding, so an oversized response is rejected rather than buffered in
-// full.
-func TestFetchRejectsOversizedManifest(t *testing.T) {
+// TestManifestBodyLimitRejectsOversizedResponse proves manifests are bounded
+// before JSON decoding without making an insecure network request.
+func TestManifestBodyLimitRejectsOversizedResponse(t *testing.T) {
 	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		// Emit a valid-looking JSON prefix, then pad past the manifest limit so
-		// the bound trips before decoding completes.
-		_, _ = w.Write([]byte(`{"channels":{},"_pad":"`))
-		chunk := make([]byte, 1<<20) // 1 MiB
-		for i := range chunk {
-			chunk[i] = 'a'
-		}
-		var written int64
-		for written <= maxManifestBytes {
-			n, err := w.Write(chunk)
-			if err != nil {
-				return
-			}
-			written += int64(n)
-		}
-	}))
-	defer server.Close()
-
-	_, err := Fetch(context.Background(), server.URL)
-	if err == nil {
-		t.Fatalf("expected oversized manifest to be rejected")
-	}
-	if !strings.Contains(err.Error(), "exceeds maximum size") {
+	_, err := readBoundedHTTPBody(bytes.NewReader(make([]byte, maxManifestBytes+1)), maxManifestBytes, "manifest")
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
 		t.Fatalf("expected size-limit error, got %v", err)
+	}
+}
+
+func TestBinaryForTargetCanonicalizesARMv7(t *testing.T) {
+	t.Parallel()
+	manifest := Manifest{
+		Channels: map[string]ChannelInfo{"stable": {Version: "v2.0.0"}},
+		Binaries: map[string]map[string]BinaryInfo{"v2.0.0": {
+			"linux-armv7": {URL: "https://example.com/fleet_linux_armv7.tar.gz"},
+		}},
+	}
+	_, binary, err := manifest.BinaryForTarget("stable", false, "linux", "arm")
+	if err != nil {
+		t.Fatalf("BinaryForTarget(linux, arm) error = %v", err)
+	}
+	if !strings.Contains(binary.URL, "armv7") {
+		t.Fatalf("selected URL = %q, want armv7 artifact", binary.URL)
 	}
 }

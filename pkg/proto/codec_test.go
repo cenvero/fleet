@@ -12,11 +12,12 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	original := Envelope{
-		Type:            EnvelopeTypeRequest,
-		ProtocolVersion: CurrentProtocolVersion,
-		RequestID:       "req-1",
-		Action:          "service.restart",
-		Capabilities:    []string{"service.manage"},
+		Type:              EnvelopeTypeRequest,
+		ProtocolVersion:   CurrentProtocolVersion,
+		RequestID:         "req-1",
+		Action:            "service.restart",
+		Capabilities:      []string{"service.manage"},
+		DeadlineUnixMilli: 1893456000123,
 		Payload: map[string]any{
 			"server":  "web-01",
 			"service": "nginx",
@@ -38,5 +39,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 	if decoded.RequestID != original.RequestID {
 		t.Fatalf("decoded request id = %s, want %s", decoded.RequestID, original.RequestID)
+	}
+	if decoded.DeadlineUnixMilli != original.DeadlineUnixMilli {
+		t.Fatalf("decoded deadline = %d, want %d", decoded.DeadlineUnixMilli, original.DeadlineUnixMilli)
 	}
 }

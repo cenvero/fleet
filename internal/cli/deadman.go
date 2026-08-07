@@ -33,13 +33,6 @@ type guardExec interface {
 	ExecCommand(server, command string) (proto.ExecResult, error)
 }
 
-// guardExecFunc adapts a plain function to guardExec for tests.
-type guardExecFunc func(server, command string) (proto.ExecResult, error)
-
-func (f guardExecFunc) ExecCommand(server, command string) (proto.ExecResult, error) {
-	return f(server, command)
-}
-
 func newGuardCommand(configDir *string) *cobra.Command {
 	var revertAfter time.Duration
 	var revertCmd string

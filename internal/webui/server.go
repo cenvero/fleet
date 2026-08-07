@@ -438,9 +438,9 @@ func (s *Server) transferLocalToServer(srcPath, dstServer, dstPath string, recur
 		return err
 	}
 	if recursive {
-		return os.RemoveAll(srcPath)
+		return os.RemoveAll(srcPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 	}
-	return os.Remove(srcPath)
+	return os.Remove(srcPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 }
 
 func (s *Server) transferServerToLocal(srcServer, srcPath, dstPath string, recursive, move bool, prog core.ProgressFunc) error {
@@ -458,9 +458,9 @@ func (s *Server) transferServerToLocal(srcServer, srcPath, dstPath string, recur
 
 func transferLocalToLocal(srcPath, dstPath string, move bool) error {
 	if move {
-		return os.Rename(srcPath, dstPath)
+		return os.Rename(srcPath, dstPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 	}
-	info, err := os.Lstat(srcPath)
+	info, err := os.Lstat(srcPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 	if err != nil {
 		return err
 	}
@@ -472,38 +472,12 @@ func transferLocalToLocal(srcPath, dstPath string, move bool) error {
 
 // copyLocalFile copies a single regular file, preserving permission bits.
 func copyLocalFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src) // #nosec G304 -- path validated by cleanLocalPath
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm()) // #nosec G304
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
+	return core.CopyLocalFileAtomic(src, dst, mode)
 }
 
 // copyLocalTree recursively copies a directory tree on the controller.
 func copyLocalTree(src, dst string) error {
-	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode().Perm())
-		}
-		return copyLocalFile(p, target, info.Mode())
-	})
+	return core.CopyLocalTreeAtomic(src, dst)
 }
 
 func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) { s.handleTransfer(w, r, false) }
@@ -533,23 +507,18 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// A Local destination pane writes the uploaded bytes straight to disk on the
 	// controller — no spooling or agent round-trip needed.
 	if server == "" {
-		// Resolve the parent's symlinks so a symlinked INTERMEDIATE directory in
-		// `dir` can't redirect the write outside the path the user named; O_NOFOLLOW
-		// only guards the final component.
-		localPath := resolveLocalWritePath(filepath.Join(filepath.Clean(dir), name))
-		// O_NOFOLLOW so a symlink planted at the destination can't redirect the
-		// truncating write to an arbitrary file; a symlinked target is rejected.
-		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- dir validated absolute above, parent symlinks resolved + final O_NOFOLLOW
+		localPath := filepath.Join(filepath.Clean(dir), name)
+		out, err := core.CreateAtomicLocalFile(localPath, 0o600)
 		if err != nil {
 			writeError(w, symlinkClobberError(localPath, err))
 			return
 		}
-		if _, err := io.Copy(out, http.MaxBytesReader(w, r.Body, maxWebUploadBytes)); err != nil {
-			_ = out.Close()
+		defer out.Abort()
+		if _, err := io.Copy(out.File(), http.MaxBytesReader(w, r.Body, maxWebUploadBytes)); err != nil {
 			writeError(w, err)
 			return
 		}
-		if err := out.Close(); err != nil {
+		if err := out.Commit(); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -598,7 +567,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		info, err := os.Stat(clean)
+		info, err := os.Stat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err != nil {
 			writeError(w, err)
 			return
@@ -609,7 +578,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(clean)))
-		http.ServeFile(w, r, clean)
+		http.ServeFile(w, r, clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		return
 	}
 	tmp, err := os.CreateTemp("", "fleet-webui-download-*")
@@ -625,7 +594,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	f, err := os.Open(tmpPath)
+	f, err := os.Open(tmpPath) // #nosec G304 -- temporary path was returned by os.CreateTemp and is controller-owned
 	if err != nil {
 		writeError(w, err)
 		return
@@ -675,7 +644,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		info, err := os.Stat(clean)
+		info, err := os.Stat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err != nil {
 			writeError(w, err)
 			return
@@ -687,7 +656,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		// Read bounded via an explicit open + LimitReader instead of trusting the
 		// stat size: a file that grows between the stat and the read can't slip past
 		// the cap (TOCTOU), and O_NOFOLLOW refuses a symlinked target.
-		f, oerr := os.OpenFile(clean, os.O_RDONLY|oNoFollow, 0) // #nosec G304 -- path validated by cleanLocalPath; O_NOFOLLOW set
+		f, oerr := os.OpenFile(clean, os.O_RDONLY|oNoFollow, 0) // #nosec G304,G703 -- path validated by cleanLocalPath; O_NOFOLLOW set
 		if oerr != nil {
 			writeError(w, oerr)
 			return
@@ -769,23 +738,17 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		// Resolve the parent's symlinks so a symlinked intermediate directory can't
-		// redirect this truncating write outside the named path; O_NOFOLLOW below
-		// only guards the final component.
-		clean = resolveLocalWritePath(clean)
-		// O_NOFOLLOW so an attacker-planted symlink at the edit target can't
-		// redirect this truncating write elsewhere; a symlinked target errors out.
-		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0o600) // #nosec G304 -- path validated by cleanLocalPath, parent symlinks resolved + final O_NOFOLLOW
+		f, err := core.CreateAtomicLocalFile(clean, 0o600)
 		if err != nil {
 			writeError(w, symlinkClobberError(clean, err))
 			return
 		}
-		if _, err := f.Write(body); err != nil {
-			_ = f.Close()
+		defer f.Abort()
+		if _, err := f.File().Write(body); err != nil {
 			writeError(w, err)
 			return
 		}
-		if err := f.Close(); err != nil {
+		if err := f.Commit(); err != nil {
 			writeError(w, err)
 			return
 		}
@@ -861,20 +824,6 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// humanBytes renders a byte count for an error message (rough, two-figure).
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
 // maxSSELifetime caps how long a single progress (SSE) stream may stay open, so
 // a client can't hold a connection — and a server goroutine — open forever even
 // if the underlying transfer never reports Done.
@@ -928,7 +877,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		if err := os.Mkdir(clean, 0o750); err != nil {
+		if err := os.Mkdir(clean, 0o750); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			writeError(w, err)
 			return
 		}
@@ -959,9 +908,9 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 		// passes recursive=true for directories but RemoveAll is safe either way.
 		var rmErr error
 		if recursive {
-			rmErr = os.RemoveAll(clean)
+			rmErr = os.RemoveAll(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		} else {
-			rmErr = os.Remove(clean)
+			rmErr = os.Remove(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		}
 		if rmErr != nil {
 			writeError(w, rmErr)
@@ -991,7 +940,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		if err := os.Rename(cf, ct); err != nil {
+		if err := os.Rename(cf, ct); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			writeError(w, err)
 			return
 		}
@@ -1131,12 +1080,12 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		info, err := os.Lstat(clean)
+		info, err := os.Lstat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		dst := freeDuplicateName(clean, func(c string) bool { _, e := os.Lstat(c); return e == nil })
+		dst := freeDuplicateName(clean, func(c string) bool { _, e := os.Lstat(c); return e == nil }) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if info.IsDir() {
 			if err := copyLocalTree(clean, dst); err != nil {
 				writeError(w, err)
@@ -1308,7 +1257,7 @@ func symlinkClobberError(path string, err error) error {
 	}
 	symlinked := errors.Is(err, syscall.ELOOP)
 	if !symlinked {
-		if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			symlinked = true
 		}
 	}

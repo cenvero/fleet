@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -326,116 +328,280 @@ func BackupDir(sourceDir, outputPath string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o750); err != nil {
 		return "", fmt.Errorf("create backup output directory: %w", err)
 	}
-
-	f, err := os.Create(outputPath)
+	result, err := Backup(sourceDir, BackupOptions{OutputPath: outputPath})
 	if err != nil {
-		return "", fmt.Errorf("create backup file: %w", err)
+		return "", err
 	}
-	defer f.Close()
+	return result.OutputPath, nil
+}
 
-	gz := gzip.NewWriter(f)
-	defer gz.Close()
-	tw := tar.NewWriter(gz)
-	defer tw.Close()
+const (
+	maxRestoreFileSize    int64 = 512 * 1024 * 1024
+	maxRestoreTotalSize   int64 = 2 * 1024 * 1024 * 1024
+	maxRestoreTrailerSize int64 = 1 * 1024 * 1024
+	maxRestoreMembers           = 100_000
+)
 
-	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if filepath.Clean(path) == filepath.Clean(outputPath) {
-			return nil
-		}
-		rel, err := filepath.Rel(sourceDir, path)
-		if err != nil || rel == "." {
-			return err
-		}
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		header.Name = rel
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		_, err = io.Copy(tw, file)
-		return err
-	})
-	if err != nil {
-		return "", fmt.Errorf("archive config directory: %w", err)
+type restoreLimits struct {
+	fileSize  int64
+	totalSize int64
+	members   int
+}
+
+func defaultRestoreLimits() restoreLimits {
+	return restoreLimits{
+		fileSize:  maxRestoreFileSize,
+		totalSize: maxRestoreTotalSize,
+		members:   maxRestoreMembers,
 	}
-	return outputPath, nil
 }
 
 func RestoreBackup(inputPath, outputDir string) error {
-	f, err := os.Open(inputPath)
+	return restoreBackupWithLimits(inputPath, outputDir, defaultRestoreLimits(), os.Rename)
+}
+
+func restoreBackupWithLimits(inputPath, outputDir string, limits restoreLimits, rename func(string, string) error) error {
+	if limits.fileSize <= 0 || limits.totalSize <= 0 || limits.members <= 0 {
+		return fmt.Errorf("restore limits must be positive")
+	}
+	absOutput, err := filepath.Abs(outputDir)
+	if err != nil {
+		return fmt.Errorf("resolve restore directory: %w", err)
+	}
+	absOutput = filepath.Clean(absOutput)
+	if absOutput == filepath.Clean(filepath.VolumeName(absOutput)+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to restore over filesystem root")
+	}
+	if info, err := os.Lstat(absOutput); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("restore destination must not be a symlink")
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("restore destination is not a directory")
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect restore destination: %w", err)
+	}
+
+	parent := filepath.Dir(absOutput)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create restore parent: %w", err)
+	}
+	txnDir, err := os.MkdirTemp(parent, ".fleet-restore-*")
+	if err != nil {
+		return fmt.Errorf("create restore staging directory: %w", err)
+	}
+	if err := os.Chmod(txnDir, 0o700); err != nil { // #nosec G302 -- directory is private but requires the owner execute bit for traversal
+		_ = os.RemoveAll(txnDir)
+		return fmt.Errorf("secure restore staging directory: %w", err)
+	}
+	defer os.RemoveAll(txnDir)
+	stage := filepath.Join(txnDir, "new")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		return fmt.Errorf("create restore staging tree: %w", err)
+	}
+	if err := extractBackupToStage(inputPath, stage, limits); err != nil {
+		return err
+	}
+	if err := syncRestoreTree(stage); err != nil {
+		return fmt.Errorf("sync restore staging tree: %w", err)
+	}
+	if err := commitRestore(stage, absOutput, txnDir, rename); err != nil {
+		return err
+	}
+	return nil
+}
+
+func extractBackupToStage(inputPath, stage string, limits restoreLimits) error {
+	f, err := os.Open(inputPath) // #nosec G304 -- operator-selected backup input
 	if err != nil {
 		return fmt.Errorf("open backup: %w", err)
 	}
 	defer f.Close()
-
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("open gzip backup: %w", err)
 	}
 	defer gz.Close()
-
 	tr := tar.NewReader(gz)
+	seen := make(map[string]struct{})
+	var total int64
+	members := 0
+
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
+			// tar.Reader stops at the tar terminator. Drain a bounded tail so the
+			// gzip trailer and late corruption are validated without allowing a
+			// concatenated-stream decompression bomb.
+			drained, drainErr := io.Copy(io.Discard, io.LimitReader(gz, maxRestoreTrailerSize+1))
+			if drainErr != nil {
+				return fmt.Errorf("validate backup gzip trailer: %w", drainErr)
+			}
+			if drained > maxRestoreTrailerSize {
+				return fmt.Errorf("backup gzip contains excessive data after tar terminator")
+			}
+			if err := gz.Close(); err != nil {
+				return fmt.Errorf("close gzip backup: %w", err)
+			}
 			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("read backup archive: %w", err)
 		}
-		// Zip-slip guard: reject absolute paths and entries that escape outputDir.
-		// filepath.Join(base, "/etc/passwd") = "/etc/passwd" on all platforms
-		// if the cleaned name is absolute, so we must check explicitly.
-		cleanName := filepath.Clean(header.Name)
-		if filepath.IsAbs(cleanName) || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || cleanName == ".." {
-			return fmt.Errorf("backup archive contains unsafe path %q", header.Name)
+		members++
+		if members > limits.members {
+			return fmt.Errorf("backup archive exceeds %d member limit", limits.members)
 		}
-		target := filepath.Join(outputDir, cleanName)
-		if !strings.HasPrefix(filepath.Clean(target)+string(filepath.Separator), filepath.Clean(outputDir)+string(filepath.Separator)) {
+		cleanName, err := safeRestoreMemberName(header.Name)
+		if err != nil {
+			return err
+		}
+		if _, duplicate := seen[cleanName]; duplicate {
+			return fmt.Errorf("backup archive contains duplicate member %q", header.Name)
+		}
+		seen[cleanName] = struct{}{}
+		target := filepath.Join(stage, filepath.FromSlash(cleanName))
+		if !pathWithinBase(stage, target) {
 			return fmt.Errorf("backup archive entry %q escapes the restore directory", header.Name)
 		}
+
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(header.Mode&0o7777)); err != nil { //nolint:gosec
-				return fmt.Errorf("create restore directory: %w", err)
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				return fmt.Errorf("create staged restore directory: %w", err)
+			}
+			if err := os.Chmod(target, 0o700); err != nil { // #nosec G302 -- directory is private but requires the owner execute bit for traversal
+				return fmt.Errorf("secure staged restore directory: %w", err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-				return fmt.Errorf("create restore parent: %w", err)
+			if header.Size < 0 || header.Size > limits.fileSize {
+				return fmt.Errorf("backup archive entry %q exceeds %d byte file limit", header.Name, limits.fileSize)
 			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode&0o7777)) //nolint:gosec
+			if header.Size > limits.totalSize-total {
+				return fmt.Errorf("backup archive exceeds %d byte aggregate limit", limits.totalSize)
+			}
+			total += header.Size
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				return fmt.Errorf("create staged restore parent: %w", err)
+			}
+			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600) // #nosec G304 -- target is validated within private staging
 			if err != nil {
-				return fmt.Errorf("create restore file: %w", err)
+				return fmt.Errorf("create staged restore file %q: %w", header.Name, err)
 			}
-			const maxRestoreSize = 512 * 1024 * 1024
-			// Read one byte beyond the limit so we can detect a truncated restore.
-			n, err := io.Copy(file, io.LimitReader(tr, maxRestoreSize+1))
-			if err != nil {
-				_ = file.Close()
-				return fmt.Errorf("restore file contents: %w", err)
+			_, copyErr := io.CopyN(out, tr, header.Size)
+			if copyErr == nil {
+				copyErr = out.Sync()
 			}
-			if n > maxRestoreSize {
-				_ = file.Close()
-				return fmt.Errorf("backup archive entry %q exceeds 512 MiB restore limit — restore aborted to prevent data corruption", header.Name)
+			closeErr := out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("restore file %q contents: %w", header.Name, copyErr)
 			}
-			if err := file.Close(); err != nil {
-				return fmt.Errorf("close restore file: %w", err)
+			if closeErr != nil {
+				return fmt.Errorf("close staged restore file %q: %w", header.Name, closeErr)
 			}
+			mode := os.FileMode(header.Mode & 0o700) // #nosec G115 -- masked to three owner permission bits before conversion
+			if mode == 0 {
+				mode = 0o600
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				return fmt.Errorf("set staged restore file mode %q: %w", header.Name, err)
+			}
+		default:
+			// In particular, reject symlink and hard-link members rather than
+			// attempting to validate or follow their targets.
+			return fmt.Errorf("backup archive entry %q has unsupported type %d", header.Name, header.Typeflag)
 		}
 	}
+}
+
+func safeRestoreMemberName(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, '\x00') || strings.Contains(name, `\\`) {
+		return "", fmt.Errorf("backup archive contains unsafe path %q", name)
+	}
+	clean := path.Clean(name)
+	if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") || filepath.IsAbs(name) {
+		return "", fmt.Errorf("backup archive contains unsafe path %q", name)
+	}
+	return clean, nil
+}
+
+func pathWithinBase(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func syncRestoreTree(root string) error {
+	var dirs []string
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			dirs = append(dirs, path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := syncDirectory(dirs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	f, err := os.Open(dir) // #nosec G304 -- path is an operator-selected export or verified controller directory
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+func commitRestore(stage, output, txnDir string, rename func(string, string) error) error {
+	old := filepath.Join(txnDir, "old")
+	_, statErr := os.Lstat(output)
+	hadOld := statErr == nil
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("inspect live config before commit: %w", statErr)
+	}
+	if hadOld {
+		if err := rename(output, old); err != nil {
+			return fmt.Errorf("stage live config for rollback: %w", err)
+		}
+	}
+	if err := rename(stage, output); err != nil {
+		if hadOld {
+			if rollbackErr := rename(old, output); rollbackErr != nil {
+				return fmt.Errorf("commit restored config: %v; rollback failed: %w", err, rollbackErr)
+			}
+		}
+		return fmt.Errorf("commit restored config: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(output)); err != nil {
+		// Keep the reported-failure contract transactional: put the complete new
+		// tree back in staging and restore the untouched old directory.
+		if moveErr := rename(output, stage); moveErr != nil {
+			return fmt.Errorf("sync restored config parent: %v; prepare rollback failed: %w", err, moveErr)
+		}
+		if hadOld {
+			if rollbackErr := rename(old, output); rollbackErr != nil {
+				return fmt.Errorf("sync restored config parent: %v; rollback failed: %w", err, rollbackErr)
+			}
+		}
+		return fmt.Errorf("sync restored config parent: %w", err)
+	}
+	return nil
 }
 
 func WriteExport(path string, export ConfigExport) error {
@@ -451,7 +617,7 @@ func WriteExport(path string, export ConfigExport) error {
 }
 
 func ReadExport(path string) (ConfigExport, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-selected export or verified controller directory
 	if err != nil {
 		return ConfigExport{}, fmt.Errorf("read config export: %w", err)
 	}

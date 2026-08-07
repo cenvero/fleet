@@ -39,7 +39,11 @@ func TestManagedUpdaterAppliesAgentBinaryAndSchedulesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKey error = %v", err)
 	}
-	signature := minisign.Sign(priv, archive)
+	targetArch := runtime.GOARCH
+	if targetArch == "arm" {
+		targetArch = "armv7"
+	}
+	signature := minisign.SignWithComments(priv, archive, "cenvero-fleet fleet-agent v1.2.3 "+runtime.GOOS+"-"+targetArch, "test")
 	pubText, err := pub.MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText error = %v", err)
@@ -51,9 +55,10 @@ func TestManagedUpdaterAppliesAgentBinaryAndSchedulesRestart(t *testing.T) {
 		},
 		AgentBinaries: map[string]map[string]update.BinaryInfo{
 			"v1.2.3": {
-				runtime.GOOS + "-" + runtime.GOARCH: {
+				runtime.GOOS + "-" + targetArch: {
 					URL:       "https://example.invalid/fleet-agent.tar.gz",
 					SHA256:    hex.EncodeToString(sum[:]),
+					Size:      int64(len(archive)),
 					Signature: sigURL,
 				},
 			},

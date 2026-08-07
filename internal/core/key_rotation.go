@@ -6,7 +6,6 @@ package core
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -338,46 +337,44 @@ func pruneOldRotations(rotationsRoot string, keep int) ([]string, error) {
 	return removed, firstErr
 }
 
+var controllerKeyFileNames = []string{"id_ed25519", "id_ed25519.pub", "id_rsa4096", "id_rsa4096.pub"}
+
+func copyControllerKeyFile(sourceDir, targetDir, name string) (bool, error) {
+	source := filepath.Join(sourceDir, name)
+	info, err := os.Lstat(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return false, fmt.Errorf("refusing non-regular or symlink controller key %q", source)
+	}
+	if err := CopyLocalFileAtomic(source, filepath.Join(targetDir, name), info.Mode().Perm()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func archiveKeyFiles(sourceDir, rotationDir string) ([]string, error) {
 	var archived []string
-	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "id_rsa4096", "id_rsa4096.pub"} {
-		source := filepath.Join(sourceDir, name)
-		info, err := os.Stat(source)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, err
-		}
-		data, err := os.ReadFile(source)
+	for _, name := range controllerKeyFileNames {
+		copied, err := copyControllerKeyFile(sourceDir, rotationDir, name)
 		if err != nil {
 			return nil, err
 		}
-		target := filepath.Join(rotationDir, name)
-		if err := os.WriteFile(target, data, info.Mode().Perm()); err != nil {
-			return nil, err
+		if copied {
+			archived = append(archived, filepath.Join(rotationDir, name))
 		}
-		archived = append(archived, target)
 	}
 	slices.Sort(archived)
 	return archived, nil
 }
 
 func promoteGeneratedKeys(tempDir, targetDir string) error {
-	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "id_rsa4096", "id_rsa4096.pub"} {
-		source := filepath.Join(tempDir, name)
-		info, err := os.Stat(source)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return err
-		}
-		data, err := os.ReadFile(source)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(targetDir, name), data, info.Mode().Perm()); err != nil {
+	for _, name := range controllerKeyFileNames {
+		if _, err := copyControllerKeyFile(tempDir, targetDir, name); err != nil {
 			return err
 		}
 	}
@@ -385,28 +382,16 @@ func promoteGeneratedKeys(tempDir, targetDir string) error {
 }
 
 func restoreActiveKeyFiles(rotationDir, targetDir string) error {
-	return filepath.WalkDir(rotationDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+	for _, name := range controllerKeyFileNames {
+		if _, err := copyControllerKeyFile(rotationDir, targetDir, name); err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
-		name := filepath.Base(path)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Join(targetDir, name), data, info.Mode().Perm())
-	})
+	}
+	return nil
 }
 
 func readPublicKeyLine(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path names fixed controller public key material selected by rotation logic
 	if err != nil {
 		return "", err
 	}

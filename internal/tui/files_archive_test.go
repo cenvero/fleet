@@ -4,6 +4,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -141,5 +143,30 @@ func TestChmodPromptSeedsCurrentMode(t *testing.T) {
 	}
 	if m.promptValue != "644" {
 		t.Fatalf("chmod prompt should seed current mode, got %q", m.promptValue)
+	}
+}
+
+func TestCopyLocalFileReplacesSymlinkEntry(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	if err := os.WriteFile(src, []byte("copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "dst.txt")
+	if err := os.Symlink(victim, dst); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := copyLocalFile(src, dst); err != nil {
+		t.Fatalf("copyLocalFile: %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "original" {
+		t.Fatalf("copy clobbered symlink target: %q", got)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "copy" {
+		t.Fatalf("copy content mismatch: %q", got)
 	}
 }

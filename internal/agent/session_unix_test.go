@@ -5,7 +5,12 @@
 
 package agent
 
-import "testing"
+import (
+	"bytes"
+	"errors"
+	"io"
+	"testing"
+)
 
 // TestReplayBufferSnapshotAndClear proves the scrollback is replayed at most
 // once: snapshotAndClear hands back the accumulated bytes and empties the
@@ -42,5 +47,26 @@ func TestReplayBufferCapAfterClear(t *testing.T) {
 	r.write(make([]byte, replayBufCap+4096))
 	if got := r.snapshot(); len(got) != replayBufCap {
 		t.Fatalf("buffer should be capped at %d, got %d", replayBufCap, len(got))
+	}
+}
+
+type attachmentTestChannel struct{}
+
+func (*attachmentTestChannel) Read([]byte) (int, error)                       { return 0, io.EOF }
+func (*attachmentTestChannel) Write(p []byte) (int, error)                    { return len(p), nil }
+func (*attachmentTestChannel) Close() error                                   { return nil }
+func (*attachmentTestChannel) CloseWrite() error                              { return nil }
+func (*attachmentTestChannel) SendRequest(string, bool, []byte) (bool, error) { return true, nil }
+func (*attachmentTestChannel) Stderr() io.ReadWriter                          { return &bytes.Buffer{} }
+
+func TestPersistentSessionRejectsSecondActiveAttachment(t *testing.T) {
+	first := &attachmentTestChannel{}
+	second := &attachmentTestChannel{}
+	s := &persistentSession{activeConn: first}
+	if _, err := s.attach(second, 80, 24, &sessionStore{}, "resume-id"); !errors.Is(err, errSessionAlreadyAttached) {
+		t.Fatalf("second active attachment error = %v, want %v", err, errSessionAlreadyAttached)
+	}
+	if s.activeConn != first {
+		t.Fatal("second attachment must not replace the active channel")
 	}
 }

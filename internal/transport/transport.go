@@ -5,6 +5,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -105,7 +106,10 @@ type Session struct {
 	// only its own channel — closing the shared client would kill every sibling
 	// channel. The parent session owns the client lifecycle.
 	childOfClient bool
-	mu            sync.Mutex
+	callMu        sync.Mutex
+	writeMu       sync.Mutex
+	capMu         sync.RWMutex
+	capabilities  []string
 }
 
 type Connector struct {
@@ -125,6 +129,48 @@ func CapabilitySupported(caps []string, capability string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Session) SetCapabilities(caps []string) {
+	if s == nil {
+		return
+	}
+	s.capMu.Lock()
+	s.capabilities = append(s.capabilities[:0], caps...)
+	s.capMu.Unlock()
+}
+
+func (s *Session) SupportsCapability(capability string) bool {
+	if s == nil {
+		return false
+	}
+	s.capMu.RLock()
+	defer s.capMu.RUnlock()
+	return CapabilitySupported(s.capabilities, capability)
+}
+
+func (s *Session) capabilitiesSnapshot() []string {
+	if s == nil {
+		return nil
+	}
+	s.capMu.RLock()
+	defer s.capMu.RUnlock()
+	return append([]string(nil), s.capabilities...)
+}
+
+type callContextError struct {
+	err           error
+	sessionUsable bool
+}
+
+func (e *callContextError) Error() string { return e.err.Error() }
+func (e *callContextError) Unwrap() error { return e.err }
+
+// SessionUsableAfterError reports that Call consumed the cancelled request's
+// terminal response, so the RPC channel can safely be returned to its pool.
+func SessionUsableAfterError(err error) bool {
+	var callErr *callContextError
+	return errors.As(err, &callErr) && callErr.sessionUsable
 }
 
 func (s *Session) Close() error {
@@ -165,7 +211,7 @@ func (s *Session) OpenChannelSession() (*Session, error) {
 		return nil, fmt.Errorf("open extra %s channel: %w", RPCChannelType, err)
 	}
 	go ssh.DiscardRequests(requests)
-	return &Session{
+	child := &Session{
 		Mode:               s.Mode,
 		LocalAddr:          s.LocalAddr,
 		RemoteAddr:         s.RemoteAddr,
@@ -173,5 +219,7 @@ func (s *Session) OpenChannelSession() (*Session, error) {
 		Client:             s.Client,
 		Channel:            channel,
 		childOfClient:      true,
-	}, nil
+	}
+	child.SetCapabilities(s.capabilitiesSnapshot())
+	return child, nil
 }
