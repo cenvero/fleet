@@ -73,10 +73,6 @@ type GuardStore struct {
 	mu   sync.Mutex
 }
 
-func (s *GuardStore) withWriteLock(fn func() error) error {
-	return withAdvisoryFileLock(s.path+".lock", fn)
-}
-
 // NewGuardStore opens (without reading) a guard store rooted at configDir. If
 // configDir is empty the default config dir is used.
 func NewGuardStore(configDir string) *GuardStore {
