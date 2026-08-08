@@ -139,12 +139,13 @@ const (
 )
 
 type fileItem struct {
-	name    string
-	isDir   bool
-	size    int64
-	mode    uint32
-	modTime time.Time
-	symlink bool
+	name      string
+	lowerName string
+	isDir     bool
+	size      int64
+	mode      uint32
+	modTime   time.Time
+	symlink   bool
 }
 
 type paneState struct {
@@ -504,10 +505,17 @@ func (m *filesModel) reapplyPane(side int) {
 	pane := m.paneRef(side)
 	pane.touch()
 
+	// Ensure lowerName is populated for fast case-insensitive filter/sort
+	for i := range pane.allItems {
+		if pane.allItems[i].lowerName == "" && pane.allItems[i].name != "" {
+			pane.allItems[i].lowerName = strings.ToLower(pane.allItems[i].name)
+		}
+	}
+
 	filtered := make([]fileItem, 0, len(pane.allItems))
 	needle := strings.ToLower(strings.TrimSpace(pane.filter))
 	for _, it := range pane.allItems {
-		if needle != "" && !strings.Contains(strings.ToLower(it.name), needle) {
+		if needle != "" && !strings.Contains(it.lowerName, needle) {
 			continue
 		}
 		filtered = append(filtered, it)
@@ -519,7 +527,7 @@ func (m *filesModel) reapplyPane(side int) {
 	if atRoot {
 		pane.entries = filtered
 	} else {
-		pane.entries = append([]fileItem{{name: "..", isDir: true}}, filtered...)
+		pane.entries = append([]fileItem{{name: "..", lowerName: "..", isDir: true}}, filtered...)
 	}
 
 	if pane.index >= len(pane.entries) {
@@ -544,7 +552,7 @@ func sortItems(items []fileItem, key sortKey, desc bool) {
 				return a.modTime.Before(b.modTime)
 			}
 		}
-		return strings.ToLower(a.name) < strings.ToLower(b.name)
+		return a.lowerName < b.lowerName
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].isDir != items[j].isDir {

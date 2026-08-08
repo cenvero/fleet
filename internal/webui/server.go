@@ -257,8 +257,25 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	dir := r.URL.Query().Get("path")
 	showHidden := r.URL.Query().Get("hidden") == "1" || r.URL.Query().Get("hidden") == "true"
-	if server == "" { // Local: the controller's own filesystem.
+	hs := "0"
+	if showHidden {
+		hs = "1"
+	}
+	cacheKey := server + "\x00" + dir + "\x00" + hs
+	if v, ok := listCache.Load(cacheKey); ok {
+		c := v.(cachedList)
+		if time.Now().Before(c.expires) {
+			if c.err != nil {
+				writeError(w, c.err)
+				return
+			}
+			writeJSON(w, c.result)
+			return
+		}
+	}
+	if server == "" {
 		result, err := listLocalDir(dir, showHidden)
+		listCache.Store(cacheKey, cachedList{result: result, err: err, expires: time.Now().Add(400 * time.Millisecond)})
 		if err != nil {
 			writeError(w, err)
 			return
@@ -267,6 +284,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.app.ListRemoteDirHidden(server, dir, showHidden)
+	listCache.Store(cacheKey, cachedList{result: result, err: err, expires: time.Now().Add(400 * time.Millisecond)})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -294,6 +312,13 @@ func cleanLocalPath(p string) (string, error) {
 var statCache sync.Map // string -> cachedStat
 type cachedStat struct {
 	info    os.FileInfo
+	err     error
+	expires time.Time
+}
+
+var listCache sync.Map // string -> cachedList
+type cachedList struct {
+	result  proto.FileListResult
 	err     error
 	expires time.Time
 }
