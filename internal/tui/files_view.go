@@ -47,6 +47,22 @@ var (
 	fmConfigC  = lipgloss.Color("#9fb0bd") // config/dotfiles: cool grey
 	fmDocsRedC = lipgloss.Color("#ff8c8c") // pdf/rich docs: soft red
 
+	// Cached icon styles — iconFor is called per-row per-frame, so reuse
+	// prebuilt styles instead of allocating a new lipgloss.Style each time.
+	iconDirStyle     = lipgloss.NewStyle().Foreground(fmDirC).Bold(true)
+	iconUpStyle      = lipgloss.NewStyle().Foreground(fmMutedC).Bold(true)
+	iconSymlinkStyle = lipgloss.NewStyle().Foreground(fmDimC)
+	iconCodeStyle    = lipgloss.NewStyle().Foreground(fmCodeC).Bold(true)
+	iconDocStyle     = lipgloss.NewStyle().Foreground(fmDocC)
+	iconDataStyle    = lipgloss.NewStyle().Foreground(fmDataC)
+	iconImageStyle   = lipgloss.NewStyle().Foreground(fmImageC)
+	iconArchiveStyle = lipgloss.NewStyle().Foreground(fmArchiveC)
+	iconMediaStyle   = lipgloss.NewStyle().Foreground(fmMediaC)
+	iconExecStyle    = lipgloss.NewStyle().Foreground(fmExecC).Bold(true)
+	iconConfigStyle  = lipgloss.NewStyle().Foreground(fmConfigC)
+	iconDocsRedStyle = lipgloss.NewStyle().Foreground(fmDocsRedC)
+	iconDefaultStyle = lipgloss.NewStyle().Foreground(fmMutedC)
+
 	fmHeaderBar = lipgloss.NewStyle().Background(fmHeaderBg)
 	fmBrand     = lipgloss.NewStyle().Foreground(fmAccent).Bold(true)
 	fmTag       = lipgloss.NewStyle().Foreground(fmDimC)
@@ -672,72 +688,50 @@ func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
 func iconFor(item fileItem) (glyph string, style lipgloss.Style) {
 	switch {
 	case item.name == "..":
-		// Parent directory: distinct up/back glyph.
-		return "⬑", lipgloss.NewStyle().Foreground(fmMutedC).Bold(true)
+		return "⬑", iconUpStyle
 	case item.isDir:
-		// Directory: folder-like glyph in the bold dir accent.
-		return "▣", lipgloss.NewStyle().Foreground(fmDirC).Bold(true)
+		return "▣", iconDirStyle
 	case item.symlink:
-		// Symlink: dim link/arrow glyph.
-		return "↳", lipgloss.NewStyle().Foreground(fmDimC)
+		return "↳", iconSymlinkStyle
 	}
 
 	ext := strings.ToLower(filepath.Ext(item.name))
 	name := strings.ToLower(item.name)
 
-	// Dotfiles / config without a meaningful extension (e.g. .gitignore, .env).
 	if strings.HasPrefix(item.name, ".") && (ext == "" || ext == name) {
-		return "✦", lipgloss.NewStyle().Foreground(fmConfigC)
+		return "✦", iconConfigStyle
 	}
 
 	switch ext {
-	// Code & scripts.
 	case ".go", ".rs", ".c", ".h", ".hpp", ".cpp", ".cc", ".py", ".js", ".jsx",
 		".ts", ".tsx", ".java", ".rb", ".sh", ".bash", ".zsh", ".php", ".lua",
 		".swift", ".kt", ".scala", ".pl", ".sql", ".html", ".css", ".scss", ".vue":
-		return "λ", lipgloss.NewStyle().Foreground(fmCodeC).Bold(true)
-
-	// Docs & plain text.
+		return "λ", iconCodeStyle
 	case ".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".tsv", ".rtf", ".tex":
-		return "≡", lipgloss.NewStyle().Foreground(fmDocC)
-
-	// Structured data / config.
+		return "≡", iconDocStyle
 	case ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml",
 		".env", ".properties", ".lock":
-		return "◈", lipgloss.NewStyle().Foreground(fmDataC)
-
-	// Images.
+		return "◈", iconDataStyle
 	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
 		".tiff", ".heic":
-		return "❖", lipgloss.NewStyle().Foreground(fmImageC)
-
-	// Archives & compressed.
+		return "❖", iconImageStyle
 	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".zst",
 		".lz", ".lzma", ".deb", ".rpm":
-		return "▤", lipgloss.NewStyle().Foreground(fmArchiveC)
-
-	// Rich documents.
+		return "▤", iconArchiveStyle
 	case ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".epub":
-		return "▥", lipgloss.NewStyle().Foreground(fmDocsRedC)
-
-	// Audio & video.
+		return "▥", iconDocsRedStyle
 	case ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac",
 		".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv":
-		return "♪", lipgloss.NewStyle().Foreground(fmMediaC)
-
-	// Known executables / binaries.
+		return "♪", iconMediaStyle
 	case ".exe", ".bin", ".so", ".dylib", ".dll", ".o", ".a", ".app", ".out":
-		return "⚙", lipgloss.NewStyle().Foreground(fmExecC).Bold(true)
+		return "⚙", iconExecStyle
 	}
 
-	// Executable bit set (and not already categorized): treat as a runnable
-	// program. Covers the "no extension + exec" case too.
 	if item.mode&0o111 != 0 {
-		return "⚙", lipgloss.NewStyle().Foreground(fmExecC).Bold(true)
+		return "⚙", iconExecStyle
 	}
 
-	// Sensible default for everything else.
-	return "•", lipgloss.NewStyle().Foreground(fmMutedC)
+	return "•", iconDefaultStyle
 }
 
 // ============================================================================

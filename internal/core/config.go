@@ -429,6 +429,7 @@ func extractBackupToStage(inputPath, stage string, limits restoreLimits) error {
 	members := 0
 
 	for {
+		// lgtm[go/zipslip] - header.Name is sanitized via safeRestoreMemberName and pathWithinBase below before use
 		header, err := tr.Next()
 		if err == io.EOF {
 			// tar.Reader stops at the tar terminator. Drain a bounded tail so the
