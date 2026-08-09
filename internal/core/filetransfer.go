@@ -488,9 +488,11 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		data   []byte
 		sha256 string
 	}
-	chunkCh := make(chan chunkJob, len(chunks))
+	chunkCh := make(chan chunkJob, len(conn.senders)*2)
 	hash := sha256.New()
 	hashErrCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
 		defer close(chunkCh)
 		for i, c := range chunks {
@@ -514,7 +516,11 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 				continue
 			}
 			sum := sha256Hex(buf)
-			chunkCh <- chunkJob{idx: i, offset: c.offset, data: buf, sha256: sum}
+			select {
+			case chunkCh <- chunkJob{idx: i, offset: c.offset, data: buf, sha256: sum}:
+			case <-ctx.Done():
+				return
+			}
 		}
 		hashErrCh <- nil
 	}()
@@ -564,6 +570,7 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 				if werr != nil {
 					if firstErr == nil {
 						firstErr = fmt.Errorf("write chunk at %d: %w", job.offset, werr)
+						cancel()
 					}
 					mu.Unlock()
 					return

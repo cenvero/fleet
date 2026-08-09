@@ -306,7 +306,12 @@ func cleanLocalPath(p string) (string, error) {
 	return filepath.Clean(p), nil
 }
 
-var listCache sync.Map // string -> cachedList
+var listCache sync.Map // listCacheKey -> cachedList
+type listCacheKey struct {
+	server string
+	dir    string
+	hidden bool
+}
 type cachedList struct {
 	result  proto.FileListResult
 	err     error
