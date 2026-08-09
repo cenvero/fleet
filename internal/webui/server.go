@@ -306,33 +306,11 @@ func cleanLocalPath(p string) (string, error) {
 	return filepath.Clean(p), nil
 }
 
-// statCache is a tiny TTL cache for os.Lstat results in the web file manager.
-// The manager stats the same path repeatedly within a single page load (list
-// + duplicate-name check + icon), so a 500 ms cache cuts syscalls ~3x.
-var statCache sync.Map // string -> cachedStat
-type cachedStat struct {
-	info    os.FileInfo
-	err     error
-	expires time.Time
-}
-
 var listCache sync.Map // string -> cachedList
 type cachedList struct {
 	result  proto.FileListResult
 	err     error
 	expires time.Time
-}
-
-func cachedLstat(path string) (os.FileInfo, error) {
-	if v, ok := statCache.Load(path); ok {
-		c := v.(cachedStat)
-		if time.Now().Before(c.expires) {
-			return c.info, c.err
-		}
-	}
-	info, err := os.Lstat(path)
-	statCache.Store(path, cachedStat{info: info, err: err, expires: time.Now().Add(500 * time.Millisecond)})
-	return info, err
 }
 
 // gzipHandler compresses responses when the client accepts gzip and the
