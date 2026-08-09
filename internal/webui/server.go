@@ -312,6 +312,8 @@ type listCacheKey struct {
 	dir    string
 	hidden bool
 }
+
+var _ = listCacheKey{} // ensure type is used for staticcheck
 type cachedList struct {
 	result  proto.FileListResult
 	err     error
