@@ -307,6 +307,7 @@ func cleanLocalPath(p string) (string, error) {
 }
 
 var listCache sync.Map // listCacheKey -> cachedList
+//lint:ignore U1000 listCacheKey is used as sync.Map key (fields via struct literal)
 type listCacheKey struct {
 	server string
 	dir    string
