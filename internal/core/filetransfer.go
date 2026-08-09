@@ -488,12 +488,19 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		data   []byte
 		sha256 string
 	}
-	chunkCh := make(chan chunkJob, len(conn.senders)*2)
+	chunkCh := make(chan chunkJob, len(chunks))
 	hash := sha256.New()
 	hashErrCh := make(chan error, 1)
 	go func() {
 		defer close(chunkCh)
 		for i, c := range chunks {
+			mu.Lock()
+			if firstErr != nil {
+				mu.Unlock()
+				hashErrCh <- firstErr
+				return
+			}
+			mu.Unlock()
 			buf := make([]byte, c.length)
 			if _, err := lf.ReadAt(buf, c.offset); err != nil && err != io.EOF {
 				hashErrCh <- fmt.Errorf("read local chunk: %w", err)
@@ -507,8 +514,6 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 				continue
 			}
 			sum := sha256Hex(buf)
-			// Copy ownership to the worker; the slice header and backing array
-			// are transferred, so we must not reuse buf after sending.
 			chunkCh <- chunkJob{idx: i, offset: c.offset, data: buf, sha256: sum}
 		}
 		hashErrCh <- nil

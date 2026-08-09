@@ -552,7 +552,15 @@ func sortItems(items []fileItem, key sortKey, desc bool) {
 				return a.modTime.Before(b.modTime)
 			}
 		}
-		return a.lowerName < b.lowerName
+		al := a.lowerName
+		if al == "" {
+			al = strings.ToLower(a.name)
+		}
+		bl := b.lowerName
+		if bl == "" {
+			bl = strings.ToLower(b.name)
+		}
+		return al < bl
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].isDir != items[j].isDir {
