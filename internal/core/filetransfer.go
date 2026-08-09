@@ -420,6 +420,12 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		return proto.FileFinalizeResult{}, fmt.Errorf("refusing to upload %s: %w", localPath, err)
 	}
 
+	// Hash the exact already-open source descriptor alongside the transfer. The
+	// job is always cancelled and joined on return, so an aborted upload cannot
+	// leave a goroutine reading the file in the background.
+	hashJob := startWholeFileHash(lf, totalSize)
+	defer hashJob.CancelAndWait()
+
 	chunks := buildChunks(totalSize, resolved.ChunkSize)
 	// The transfer id ties the remote temp file to this transfer across channels
 	// and across a resumed run. It is derived from the file's identity rather
@@ -478,59 +484,34 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 	}
 	emit(false, nil)
 
-	// Pipelined single-pass hash and distribution: one sequential read hashes
-	// the whole file and feeds chunks to workers, avoiding the previous
-	// double-read (background hash + per-worker ReadAt). A 10 GiB file was
-	// previously 20 GiB of disk reads.
-	type chunkJob struct {
-		idx    int
-		offset int64
-		data   []byte
-		sha256 string
-	}
-	chunkCh := make(chan chunkJob, len(conn.senders)*2)
-	hash := sha256.New()
-	hashErrCh := make(chan error, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		defer close(chunkCh)
-		for i, c := range chunks {
-			mu.Lock()
-			if firstErr != nil {
-				mu.Unlock()
-				hashErrCh <- firstErr
-				return
-			}
-			mu.Unlock()
-			buf := make([]byte, c.length)
-			if _, err := lf.ReadAt(buf, c.offset); err != nil && err != io.EOF {
-				hashErrCh <- fmt.Errorf("read local chunk: %w", err)
-				return
-			}
-			if _, err := hash.Write(buf); err != nil {
-				hashErrCh <- fmt.Errorf("hash local file: %w", err)
-				return
-			}
-			if done[i] {
-				continue
-			}
-			sum := sha256Hex(buf)
-			select {
-			case chunkCh <- chunkJob{idx: i, offset: c.offset, data: buf, sha256: sum}:
-			case <-ctx.Done():
-				return
-			}
+	jobs := make(chan int, len(chunks))
+	for i := range chunks {
+		if !done[i] {
+			jobs <- i
 		}
-		hashErrCh <- nil
-	}()
+	}
+	close(jobs)
+
+	recordErr := func(e error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = e
+		}
+		mu.Unlock()
+	}
 
 	var wg sync.WaitGroup
 	for w := 0; w < len(conn.senders); w++ {
 		wg.Add(1)
 		go func(send senderFunc) {
 			defer wg.Done()
-			for job := range chunkCh {
+			// One buffer per worker, reused for every chunk it sends. Allocating
+			// per chunk turned a large upload into gigabytes of garbage — a 10 GB
+			// file is thousands of multi-megabyte allocations — and kept the GC
+			// busy for no reason. Reuse is safe because send() writes the bytes
+			// to the wire synchronously before returning.
+			buf := make([]byte, resolved.ChunkSize)
+			for idx := range jobs {
 				mu.Lock()
 				if firstErr != nil {
 					mu.Unlock()
@@ -538,6 +519,14 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 				}
 				active++
 				mu.Unlock()
+
+				c := chunks[idx]
+				chunk := buf[:c.length]
+				if _, err := lf.ReadAt(chunk, c.offset); err != nil && err != io.EOF {
+					recordErr(fmt.Errorf("read local chunk: %w", err))
+					return
+				}
+				sum := sha256Hex(chunk)
 
 				var werr error
 				for attempt := 0; attempt <= sshMaxRetries; attempt++ {
@@ -552,12 +541,15 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 						Payload: &proto.FileWritePayload{
 							TransferID: transferID,
 							Path:       target,
-							Offset:     job.offset,
-							Data:       job.data,
-							SHA256:     job.sha256,
+							Offset:     c.offset,
+							Data:       chunk,
+							SHA256:     sum,
 						},
 					}
 					if conn.binaryFrames {
+						// Ship the chunk verbatim after the envelope instead of
+						// base64 inside it: no +33% inflation, no base64 pass,
+						// and no multi-megabyte intermediate on either side.
 						req = proto.DetachBinary(req)
 					}
 					_, werr = decodeResult[proto.FileWriteResult](send(req))
@@ -569,13 +561,12 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 				active--
 				if werr != nil {
 					if firstErr == nil {
-						firstErr = fmt.Errorf("write chunk at %d: %w", job.offset, werr)
-						cancel()
+						firstErr = fmt.Errorf("write chunk at %d: %w", c.offset, werr)
 					}
 					mu.Unlock()
 					return
 				}
-				bytesDone += int64(len(job.data))
+				bytesDone += c.length
 				mu.Unlock()
 				emit(false, nil)
 			}
@@ -583,17 +574,18 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 	}
 	wg.Wait()
 
-	// Drain the hasher goroutine and check for read/hash errors.
-	if herr := <-hashErrCh; herr != nil {
-		emit(false, herr)
-		return proto.FileFinalizeResult{}, herr
-	}
 	if firstErr != nil {
 		emit(false, firstErr)
 		return proto.FileFinalizeResult{}, firstErr
 	}
 
-	wholeSum := hex.EncodeToString(hash.Sum(nil))
+	// Join the background hash. On any network-bound transfer it finished long
+	// ago; on a fast local link this is the only place its cost can show up.
+	wholeSum, err := hashJob.Wait()
+	if err != nil {
+		emit(false, err)
+		return proto.FileFinalizeResult{}, err
+	}
 
 	result, err := decodeResult[proto.FileFinalizeResult](conn.callRetry(0, proto.ActionFileFinalize, proto.FileFinalizePayload{
 		TransferID:  transferID,
