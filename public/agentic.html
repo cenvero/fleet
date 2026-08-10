@@ -68,6 +68,21 @@
       },
       {
         "@type": "Question",
+        "name": "Can an AI agent handle a full deployment end to end?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. The whole path is one self-describing CLI, so the agent never leaves the tool. It ships the build with 'fleet file upload' (chunked, parallel, resumable, checksummed), unpacks it with 'fleet file extract', renders config with 'fleet template' and injects credentials with 'fleet secret', restarts the unit with 'fleet service restart', then verifies with 'fleet svc status', 'fleet logs' and 'fleet exec' health checks. Long steps run detached as 'fleet job' so the agent polls for completion instead of holding a connection open. Every command returns JSON, so the agent branches on real results rather than scraped text." }
+      },
+      {
+        "@type": "Question",
+        "name": "Can one AI agent manage multiple servers at once?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. 'fleet exec --all' fans a command out across the whole fleet and 'fleet exec --group role=web' targets a tag expression, so a single instruction can drive an entire tier and return per-server JSON. 'fleet tag' defines the groups, 'fleet file diff --group' compares a config file across a group, and 'fleet top', 'fleet status' and 'fleet report' give the agent fleet-wide state. File transfers address one server at a time, so the agent iterates over its targets for the upload step." }
+      },
+      {
+        "@type": "Question",
+        "name": "What stops an AI agent from breaking production during an unattended deploy?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Several controller-side rails, none of which depend on the agent behaving well. 'fleet guard' runs a risky command behind a dead-man's switch: a detached server-side timer reverts it unless the change is explicitly confirmed, so an agent that locks itself out recovers automatically. '--dry-run' prints what would run without running it, '--require-approval' stages a command for a human instead of executing it, and '--idempotency-key' returns the cached result for a key so a retrying agent cannot apply the same change twice. Scoped tokens are fail-closed, destructive commands need an explicit opt-in, and 'fleet drift' detects config that has moved away from a captured baseline." }
+      },
+      {
+        "@type": "Question",
         "name": "Does Cenvero Fleet require a cloud account?",
         "acceptedAnswer": { "@type": "Answer", "text": "No. Cenvero Fleet is fully self-hosted. A single binary is the controller; it connects to your servers over an encrypted, host-key-pinned channel and auto-installs agents. Agents can also dial out to the controller, so hosts behind NAT need no inbound access. There is no SaaS, no cloud account, and no telemetry in the core runtime." }
       }
@@ -202,6 +217,9 @@
     <div class="card"><h3>Can Claude control my servers over SSH?</h3><p>Yes. <code>fleet skill claude</code> installs a <code>/fleet</code> command; typing it makes the agent run <code>fleet context</code> and operate your servers over an authenticated, host-key-pinned SSH channel with your keys, on your machine. No cloud control plane.</p></div>
     <div class="card"><h3>How does an AI agent learn the CLI?</h3><p>From the binary itself. <code>fleet context</code> prints the full reference and <code>fleet ai &lt;command&gt;</code> gives complete per-command help — both generated live, so they always match your version.</p></div>
     <div class="card"><h3>Is it safe to let an agent operate it?</h3><p>The controller never trusts agent-provided paths for local writes, the agent can be confined with <code>--file-root</code>, updates require signed binaries, and destructive actions prompt for confirmation.</p></div>
+    <div class="card"><h3>Can an agent run a whole deployment end to end?</h3><p>Yes — the entire path is one CLI, so the agent never leaves the tool. It ships the build with <code>fleet file upload</code> (chunked, parallel, resumable, checksummed), unpacks with <code>fleet file extract</code>, renders config via <code>fleet template</code> and <code>fleet secret</code>, restarts with <code>fleet service restart</code>, then proves it worked with <code>fleet svc status</code>, <code>fleet logs</code> and <code>fleet exec</code> health checks. Slow steps run detached as <code>fleet job</code>, so the agent polls instead of holding a connection.</p></div>
+    <div class="card"><h3>Can one agent manage many servers at once?</h3><p><code>fleet exec --all</code> fans out across the fleet and <code>fleet exec --group role=web</code> targets a tag expression, so one instruction drives a whole tier and returns per-server JSON. <code>fleet tag</code> defines the groups, <code>fleet file diff --group</code> compares a config across them, and <code>fleet top</code> / <code>fleet status</code> give fleet-wide state. Transfers are per-server, so the agent iterates its targets for the upload step.</p></div>
+    <div class="card"><h3>What stops an agent breaking prod unattended?</h3><p>Rails that don't depend on the agent behaving. <code>fleet guard</code> runs a risky command behind a dead-man's switch — a detached server-side timer reverts it unless confirmed, so an agent that locks itself out recovers on its own. <code>--dry-run</code> shows the command without running it, <code>--require-approval</code> hands it to a human, and <code>--idempotency-key</code> makes a retry return the cached result instead of applying twice.</p></div>
     <div class="card"><h3>Does it need the cloud?</h3><p>No. Fleet is fully self-hosted — one binary, SSH to your servers, no SaaS and no telemetry in the core runtime.</p></div>
   </div>
 </section>

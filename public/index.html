@@ -524,6 +524,7 @@
     <button onclick="copyCmd(this,'fleet skill claude')">copy</button>
   </div>
   <p class="section-sub" style="margin-top:18px">Self-describing by design: <code>fleet context</code> and <code>fleet ai &lt;command&gt;</code> generate full, machine-readable help straight from the command tree — always in sync with the installed version, nothing to maintain by hand.</p>
+  <p class="section-sub" style="margin-top:18px"><strong>Whole deployments, not just single commands.</strong> An agent can carry a release end to end without leaving the CLI: upload the build (chunked, parallel, resumable), extract it, render config from templates and secrets, restart the service, then verify with status, logs and health checks — fanning out across the whole fleet with <code>fleet exec --all</code> or one tier with <code>--group role=web</code>. Long steps detach as jobs it can poll, and <code>fleet guard</code> arms a dead-man's switch that auto-reverts a risky change unless it's confirmed, so an unattended agent that locks itself out recovers on its own.</p>
   <div class="hero-actions" style="margin-top:26px">
     <a href="/agentic.html" class="btn btn-primary">Why Fleet is the best agentic SSH tool →</a>
   </div>
