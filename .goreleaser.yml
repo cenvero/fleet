@@ -62,6 +62,19 @@ signs:
       - "${artifact}"
       - "${signature}"
       - "{{ .Env.MINISIGN_KEY_FILE }}"
+  # Sign the aggregate checksum manifest too. Each archive already carries its
+  # own .minisig, so per-artifact integrity was covered, but an unsigned
+  # checksums.txt is a tampering surface for anyone who verifies via the
+  # manifest instead of the individual signatures.
+  - id: bound-checksum-signature
+    artifacts: checksum
+    cmd: ./scripts/sign-release-artifact.sh
+    signature: "${artifact}.minisig"
+    stdin: "{{ .Env.MINISIGN_PASSWORD }}"
+    args:
+      - "${artifact}"
+      - "${signature}"
+      - "{{ .Env.MINISIGN_KEY_FILE }}"
 
 homebrew_casks:
   - name: cenvero-fleet

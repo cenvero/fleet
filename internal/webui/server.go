@@ -190,6 +190,13 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+		// Every mutating endpoint is a POST, so this is the one place that
+		// catches them all — including /api/upload, which enforces POST itself
+		// rather than going through postOnly. Without this a create/delete could
+		// stay invisible (or a deleted file keep showing) for the cache TTL.
+		if r.Method == http.MethodPost {
+			listCache.invalidate()
+		}
 	}
 }
 
@@ -262,33 +269,26 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		hs = "1"
 	}
 	cacheKey := server + "\x00" + dir + "\x00" + hs
-	if v, ok := listCache.Load(cacheKey); ok {
-		c := v.(cachedList)
-		if time.Now().Before(c.expires) {
-			if c.err != nil {
-				writeError(w, c.err)
-				return
-			}
-			writeJSON(w, c.result)
-			return
-		}
+	if result, ok := listCache.get(cacheKey); ok {
+		writeJSON(w, result)
+		return
 	}
 	if server == "" {
 		result, err := listLocalDir(dir, showHidden)
-		listCache.Store(cacheKey, cachedList{result: result, err: err, expires: time.Now().Add(400 * time.Millisecond)})
 		if err != nil {
 			writeError(w, err)
 			return
 		}
+		listCache.put(cacheKey, result)
 		writeJSON(w, result)
 		return
 	}
 	result, err := s.app.ListRemoteDirHidden(server, dir, showHidden)
-	listCache.Store(cacheKey, cachedList{result: result, err: err, expires: time.Now().Add(400 * time.Millisecond)})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	listCache.put(cacheKey, result)
 	writeJSON(w, result)
 }
 
@@ -306,19 +306,75 @@ func cleanLocalPath(p string) (string, error) {
 	return filepath.Clean(p), nil
 }
 
-var listCache sync.Map // listCacheKey -> cachedList
-//lint:ignore U1000 listCacheKey is used as sync.Map key (fields via struct literal)
-type listCacheKey struct {
-	server string
-	dir    string
-	hidden bool
+// listCacheTTL is deliberately short: it exists only to collapse the burst of
+// duplicate /api/list calls the UI makes when a pane repaints, not to serve
+// stale data. listCacheMaxEntries hard-caps memory — the cache key embeds the
+// operator-supplied `path`, so without a ceiling a session that browses many
+// directories would grow the map for the life of the process.
+const (
+	listCacheTTL        = 400 * time.Millisecond
+	listCacheMaxEntries = 512
+)
+
+type listCacheEntry struct {
+	result  proto.FileListResult
+	expires time.Time
 }
 
-var _ = listCacheKey{} // ensure type is used for staticcheck
-type cachedList struct {
-	result  proto.FileListResult
-	err     error
-	expires time.Time
+// dirListCache is a bounded, self-evicting TTL cache for directory listings.
+// Only successful listings are cached: caching an error would replay a transient
+// SSH failure for the whole TTL window.
+type dirListCache struct {
+	mu      sync.Mutex
+	entries map[string]listCacheEntry
+}
+
+var listCache = &dirListCache{entries: make(map[string]listCacheEntry)}
+
+func (c *dirListCache) get(key string) (proto.FileListResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return proto.FileListResult{}, false
+	}
+	if !time.Now().Before(e.expires) {
+		// Drop on access so expired keys cannot accumulate indefinitely.
+		delete(c.entries, key)
+		return proto.FileListResult{}, false
+	}
+	return e.result, true
+}
+
+func (c *dirListCache) put(key string, result proto.FileListResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for k, e := range c.entries {
+		if !now.Before(e.expires) {
+			delete(c.entries, k)
+		}
+	}
+	// If a burst of distinct live keys still exceeds the cap, evict until under
+	// it. Map iteration order is randomized, so this is an arbitrary-victim
+	// policy — acceptable for a 400ms cache, and it bounds memory absolutely.
+	for k := range c.entries {
+		if len(c.entries) < listCacheMaxEntries {
+			break
+		}
+		delete(c.entries, k)
+	}
+	c.entries[key] = listCacheEntry{result: result, expires: now.Add(listCacheTTL)}
+}
+
+// invalidate clears the whole cache after any mutating request. A mutation can
+// affect a directory other than the one named (a copy/move touches its
+// destination, possibly on another server), so clearing everything is correct
+// where per-key invalidation would miss those.
+func (c *dirListCache) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	clear(c.entries)
 }
 
 // gzipHandler compresses responses when the client accepts gzip and the
@@ -348,10 +404,25 @@ func gzipHandler(next http.Handler) http.Handler {
 
 type gzipResponseWriter struct {
 	http.ResponseWriter
-	Writer io.Writer
+	Writer *gzip.Writer
 }
 
 func (g *gzipResponseWriter) Write(b []byte) (int, error) { return g.Writer.Write(b) }
+
+// Flush keeps the wrapper transparent to streaming handlers: without it the
+// embedded ResponseWriter's Flush would push the compressor's *unflushed* buffer
+// nowhere, so a streaming response wrapped in gzip would stall. Flushing the
+// gzip writer first guarantees the bytes reach the client.
+func (g *gzipResponseWriter) Flush() {
+	_ = g.Writer.Flush()
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets net/http (and ResponseController) reach the underlying writer for
+// capabilities this wrapper does not implement.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
 // resolveLocalWritePath canonicalizes a local write/create target so an attacker
 // cannot use a symlinked INTERMEDIATE directory to redirect the create/truncate

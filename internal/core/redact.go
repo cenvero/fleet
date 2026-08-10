@@ -22,7 +22,24 @@ var defaultSecretPatterns = []string{
 	`(?i)(password|passwd|pwd)\s*[:=]\s*\S+`,
 	`(?i)(secret|api[_-]?key|token)\s*[:=]\s*\S+`,
 	`(?i)authorization:\s*bearer\s+\S+`,
-	`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
+	// Match the WHOLE PEM block, not just the BEGIN line. Go's regexp is
+	// line-oriented and `.` does not cross a newline without the `s` flag, so a
+	// header-only pattern masks the header and lets the base64 key body through
+	// verbatim — worse than no redaction, because it looks handled. `(?s)` makes
+	// `.` span newlines and the non-greedy `.*?` stops at the first END line so
+	// two concatenated keys are redacted separately rather than as one blob.
+	`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
+	// Fallback for a truncated/unterminated key (no END line): the block pattern
+	// above cannot match, so still mask the header. Ordering matters — the block
+	// pattern runs first and consumes a complete key before this one is tried.
+	`(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`,
+	// High-specificity credential shapes. Each is narrow enough not to mangle
+	// ordinary output: AWS key IDs have a fixed prefix+length, a JWT has three
+	// base64url segments, and URL credentials require the `user:pass@` form.
+	`\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b`,
+	`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`,
+	`(?i)\b[a-z][a-z0-9+.-]*://[^\s:/@]+:[^\s/@]+@`,
+	`(?i)\bbearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}`,
 }
 
 // RedactStore holds output-redaction policy, persisted as a single JSON

@@ -255,6 +255,7 @@ func (h *ReverseHub) Serve(ctx context.Context, listener net.Listener) error {
 			var once sync.Once
 			releaseHandshake := func() { once.Do(func() { <-reverseHandshakeSlots }) }
 			defer releaseHandshake()
+			defer guardPanic("reverse agent connection")
 			_ = h.serveConnAfterAuth(conn, releaseHandshake)
 		}()
 	}
@@ -598,6 +599,7 @@ func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) er
 		case h.controlSlots <- struct{}{}:
 			go func() {
 				defer func() { <-h.controlSlots }()
+				defer guardPanic("control connection")
 				h.handleControlConn(conn)
 			}()
 		default:
@@ -824,6 +826,7 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 	if info.Hello.AgentVersion != "" && version.Canonical(info.Hello.AgentVersion) != version.Canonical(version.Version) &&
 		h.app.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() {
+			defer guardPanic("agent auto-update")
 			_ = h.app.AuditLog.Append(logs.AuditEntry{
 				Action:   "agent.auto-update",
 				Target:   serverName,
@@ -1021,7 +1024,12 @@ func (a *App) readControlToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read control token: %w", err)
 	}
-	return string(data), nil
+	// Trim surrounding whitespace: the token is compared byte-for-byte with a
+	// constant-time compare, so a trailing newline introduced by an editor or a
+	// manual rewrite of the file would fail authentication with no useful
+	// diagnostic. generateControlToken writes no newline, so this is
+	// forward-compatible robustness, not a behavior change today.
+	return strings.TrimSpace(string(data)), nil
 }
 
 func validateLoopbackControlAddress(address string) error {
