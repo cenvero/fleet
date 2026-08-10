@@ -62,19 +62,13 @@ signs:
       - "${artifact}"
       - "${signature}"
       - "{{ .Env.MINISIGN_KEY_FILE }}"
-  # Sign the aggregate checksum manifest too. Each archive already carries its
-  # own .minisig, so per-artifact integrity was covered, but an unsigned
-  # checksums.txt is a tampering surface for anyone who verifies via the
-  # manifest instead of the individual signatures.
-  - id: bound-checksum-signature
-    artifacts: checksum
-    cmd: ./scripts/sign-release-artifact.sh
-    signature: "${artifact}.minisig"
-    stdin: "{{ .Env.MINISIGN_PASSWORD }}"
-    args:
-      - "${artifact}"
-      - "${signature}"
-      - "{{ .Env.MINISIGN_KEY_FILE }}"
+  # NOTE: checksums.txt is deliberately NOT signed here. sign-release-artifact.sh
+  # only accepts `<product>_<version>_<os>_<arch>.(tar.gz|zip)` because it derives
+  # the minisign trusted comment from those fields, so pointing it at
+  # checksums.txt fails the release with "unrecognized release name". Signing the
+  # manifest needs the signer to take an explicit version argument first; until
+  # then per-archive .minisig files remain the integrity mechanism the installers
+  # actually verify.
 
 homebrew_casks:
   - name: cenvero-fleet
