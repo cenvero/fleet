@@ -181,6 +181,17 @@ func (s *JobStore) reserve(doc *jobsDocument) int {
 // leaves its /var/tmp file for the sweep). Returns the number of records removed.
 func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
 	var removed int
+	// Collected under the lock, executed after it is released. Doing the remote
+	// deletions inline would hold a CROSS-PROCESS advisory lock across N
+	// sequential SSH round-trips, so one unreachable server could stall every
+	// other `fleet` invocation until the 10s lock timeout. The record removal is
+	// the part that needs to be atomic; the log cleanup is best-effort and its
+	// failures are already ignored.
+	type pendingDelete struct {
+		server  string
+		logfile string
+	}
+	var pending []pendingDelete
 	err := s.withWriteLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -190,11 +201,12 @@ func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
 		}
 		var kept []JobRecord
 		removed = 0
+		pending = pending[:0]
 		for _, j := range doc.Jobs {
 			if j.Status == JobDone && !j.Finished.IsZero() && j.Finished.Before(cutoff) {
 				removed++
 				if exec != nil && j.Logfile != "" {
-					_, _, _ = exec(j.Server, "rm -f "+shellQuote(j.Logfile))
+					pending = append(pending, pendingDelete{server: j.Server, logfile: j.Logfile})
 				}
 				continue
 			}
@@ -204,12 +216,15 @@ func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
 			return nil
 		}
 		doc.Jobs = kept
-		if err := s.write(doc); err != nil {
-			return err
-		}
-		return nil
+		return s.write(doc)
 	})
-	return removed, err
+	if err != nil {
+		return removed, err
+	}
+	for _, p := range pending {
+		_, _, _ = exec(p.server, "rm -f "+shellQuote(p.logfile))
+	}
+	return removed, nil
 }
 
 // maxJobLogBytes bounds how much of a job's remote logfile Tail reads into memory

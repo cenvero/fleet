@@ -168,6 +168,7 @@ func (s Server) Serve(ctx context.Context, listener net.Listener) error {
 			var once sync.Once
 			releaseHandshake := func() { once.Do(func() { <-handshakeSlots }) }
 			defer releaseHandshake()
+			defer guardPanic("inbound connection")
 			_ = s.serveConnAfterAuth(rawConn, config, releaseHandshake)
 		}()
 	}
@@ -243,7 +244,7 @@ func (s Server) serveConnAfterAuth(rawConn net.Conn, config *ssh.ServerConfig, a
 	// Cap concurrent RPC/shell channels per connection so a peer can't fork-bomb
 	// the agent with unbounded channel opens (direct-tcpip has its own tunnelSlots
 	// cap). Each handler releases its slot when it returns.
-	const maxChannelsPerConn = 128
+	const maxChannelsPerConn = transport.MaxChannelsPerConn
 	chanSlots := make(chan struct{}, maxChannelsPerConn)
 	var firstAccepted sync.Once
 	markFirstAccepted := func() {
@@ -265,7 +266,11 @@ func (s Server) serveConnAfterAuth(rawConn net.Conn, config *ssh.ServerConfig, a
 			}
 			markFirstAccepted()
 			go ssh.DiscardRequests(requests)
-			go func() { defer func() { <-chanSlots }(); s.serveRPC(channel) }()
+			go func() {
+				defer func() { <-chanSlots }()
+				defer guardPanic("rpc channel")
+				s.serveRPC(channel)
+			}()
 		case transport.ShellChannelType:
 			select {
 			case chanSlots <- struct{}{}:
@@ -286,9 +291,28 @@ func (s Server) serveConnAfterAuth(rawConn net.Conn, config *ssh.ServerConfig, a
 			}
 			markFirstAccepted()
 			sessionID := conn.Permissions.Extensions["key_fp"] + "\x00" + resume.ResumeID
-			go func() { defer func() { <-chanSlots }(); serveShell(channel, requests, sessionID) }()
+			go func() {
+				defer func() { <-chanSlots }()
+				defer guardPanic("shell channel")
+				serveShell(channel, requests, sessionID)
+			}()
 		case directTCPIPChannelType:
-			go serveDirectTCPIP(newChannel, markFirstAccepted)
+			// Take a per-connection slot like the other channel types. Without
+			// this, direct-tcpip opens bypassed maxChannelsPerConn entirely and
+			// only the global tunnel cap applied — and that was acquired inside
+			// the goroutine, after the spawn, so a peer could still churn
+			// unbounded transient goroutines.
+			select {
+			case chanSlots <- struct{}{}:
+			default:
+				_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent channels")
+				continue
+			}
+			go func() {
+				defer func() { <-chanSlots }()
+				defer guardPanic("direct-tcpip channel")
+				serveDirectTCPIP(newChannel, markFirstAccepted)
+			}()
 		default:
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel type")
 		}

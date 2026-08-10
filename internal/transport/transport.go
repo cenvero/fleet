@@ -24,6 +24,14 @@ const (
 	ModePerNode Mode = "per-server"
 )
 
+// MaxChannelsPerConn is the number of concurrent fleet-rpc/shell channels one
+// SSH connection may have open. The agent enforces it when accepting channel
+// opens, and the controller clamps its transfer concurrency against it so a
+// configured `parallel_streams` can never plan more channels than the peer will
+// accept. Keeping it here — rather than as a local const on each side — is what
+// makes the two limits provably consistent instead of coincidentally so.
+const MaxChannelsPerConn = 128
+
 func (m Mode) String() string {
 	return string(m)
 }

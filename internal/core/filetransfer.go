@@ -132,6 +132,15 @@ func (a *App) resolveTransferOptions(server ServerRecord, opts FileTransferOptio
 	if resolved.ChunkSize > proto.MaxRawChunkBytes {
 		resolved.ChunkSize = proto.MaxRawChunkBytes
 	}
+	// A recursive directory transfer runs dirTransferConcurrency files at once
+	// and EACH file opens `Parallel` channels, so the peak channel count is the
+	// product. `parallel_streams` is operator-configurable with no upper bound,
+	// so without this clamp a high value would plan more channels than the agent
+	// accepts and the transfer would fail mid-flight with ResourceShortage
+	// ("too many concurrent channels") rather than simply running slower.
+	if maxParallel := transport.MaxChannelsPerConn / dirTransferConcurrency; resolved.Parallel > maxParallel {
+		resolved.Parallel = maxParallel
+	}
 	if server.Mode == transport.ModeReverse && !serverSupportsReverseMultiplex(server) {
 		// An agent that cannot accept controller-opened channels leaves the hub
 		// with one mutex-serialised channel, so parallel streams are impossible.
