@@ -70,22 +70,55 @@ signs:
   # then per-archive .minisig files remain the integrity mechanism the installers
   # actually verify.
 
-homebrew_casks:
+# Homebrew: we publish a FORMULA, not a Cask, and that is deliberate.
+#
+# Our macOS binaries are not Apple-notarized (notarization needs a paid Apple
+# Developer account). Homebrew treats the two package types differently:
+#
+#   - Casks are downloaded with the `com.apple.quarantine` attribute set, so
+#     Gatekeeper runs its notarization check and blocks an un-notarized binary
+#     with "Apple could not verify 'fleet' is free of malware". v2.4.0 shipped
+#     as a Cask and hit exactly this.
+#   - Formulae are fetched with plain curl, which never sets that attribute, so
+#     Gatekeeper does not run and the binary launches. This is how essentially
+#     every un-notarized CLI tool is distributed.
+#
+# GoReleaser deprecated `brews` in v2.10 in favour of `homebrew_casks`, so this
+# block emits a deprecation warning. That is accepted on purpose: per
+# GoReleaser's own policy deprecated options are only removed on a major
+# version, and a warning is preferable to shipping a package macOS refuses to
+# run. Do NOT "fix" the warning by switching back to homebrew_casks.
+#
+# Bring the Cask back only once ONE of these is true:
+#   1. The darwin builds are codesigned + notarized with an Apple Developer ID
+#      (see the `notarize` section in GoReleaser's docs), or
+#   2. fleet is accepted into homebrew-core, where Homebrew's own CI builds the
+#      bottles and neither a Cask nor a certificate is needed.
+#
+# Note also that Homebrew is actively removing the escape hatches here: as of
+# Homebrew 5.0.0 the `--no-quarantine` flag is deprecated and un-codesigned
+# casks in homebrew-cask are scheduled to be disabled. Stripping the quarantine
+# bit in a post-install hook is therefore a dead end, not a fix.
+brews:
   - name: cenvero-fleet
-    ids: [fleet-archive]
-    binaries: [fleet]
+    ids:
+      - fleet-archive
     repository:
       owner: cenvero
       name: homebrew-fleet
       token: "{{ .Env.HOMEBREW_TOKEN }}"
-    homepage: https://fleet.cenvero.org
-    description: Self-hosted decentralized fleet management platform
-    license: AGPL-3.0-or-later
-    directory: Casks
+    homepage: "https://fleet.cenvero.org"
+    description: "Self-hosted decentralized fleet management platform"
+    license: "AGPL-3.0-or-later"
+    directory: Formula
     skip_upload: auto
     commit_author:
       name: cenvero-bot
       email: 276044322+cenvero-bot@users.noreply.github.com
+    install: |
+      bin.install "fleet"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/fleet --version")
 
 release:
   draft: false
