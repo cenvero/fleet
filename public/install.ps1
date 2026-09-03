@@ -7,6 +7,18 @@ $VersionOverride = $env:FLEET_VERSION
 $MinisignPublicKey = "RWRb53p9WTsWCO2RZT3bvjrZw4QjXnIo2R7NUqhPsfvhR8u0sS55hZb3"
 $ApprovedHosts = @("fleet.cenvero.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
 
+# A clean Windows installation does not include minisign. Bootstrap the official
+# verifier from an immutable release URL and authenticate the archive before
+# executing it. Update the URL, size, and digest together when upgrading.
+$MinisignBootstrapUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
+$MinisignBootstrapSize = 252505L
+$MinisignBootstrapSha256 = "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479"
+
+# Windows PowerShell 5.1 does not reliably load these assemblies on first use.
+# Load them before any HttpClient or ZipFile type is resolved.
+Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+
 function Test-ForbiddenAddress([System.Net.IPAddress] $Address) {
   if ($Address.IsIPv4MappedToIPv6) { $Address = $Address.MapToIPv4() }
   if ([System.Net.IPAddress]::IsLoopback($Address) -or $Address.Equals([System.Net.IPAddress]::Any) -or $Address.Equals([System.Net.IPAddress]::IPv6Any)) { return $true }
@@ -54,7 +66,7 @@ function Get-ApprovedFile([string] $Url, [string] $OutFile) {
       try {
         if ($response.StatusCode -eq [System.Net.HttpStatusCode]::OK) {
           $stream = [System.IO.File]::Create($OutFile)
-          try { $response.Content.CopyToAsync($stream).GetAwaiter().GetResult() } finally { $stream.Dispose() }
+          try { [void]$response.Content.CopyToAsync($stream).GetAwaiter().GetResult() } finally { $stream.Dispose() }
           return
         }
         if ([int]$response.StatusCode -notin @(301, 302, 303, 307, 308)) { throw "Unexpected download HTTP status: $($response.StatusCode)" }
@@ -70,18 +82,55 @@ function Get-ApprovedFile([string] $Url, [string] $OutFile) {
   finally { $client.Dispose(); $handler.Dispose() }
 }
 
+function Resolve-Minisign([string] $TempDirectory, [string] $Architecture) {
+  $installed = Get-Command -Name "minisign.exe", "minisign" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($installed) { return $installed.Source }
+
+  Write-Host "minisign was not found; downloading the pinned official verifier."
+  $bootstrapArchive = Join-Path $TempDirectory "minisign-bootstrap.zip"
+  Get-ApprovedFile $MinisignBootstrapUrl $bootstrapArchive
+  if ((Get-Item $bootstrapArchive).Length -ne $MinisignBootstrapSize) {
+    throw "Minisign bootstrap archive size mismatch."
+  }
+  $bootstrapHash = (Get-FileHash -Algorithm SHA256 -Path $bootstrapArchive).Hash.ToLowerInvariant()
+  if ($bootstrapHash -cne $MinisignBootstrapSha256) {
+    throw "Minisign bootstrap archive checksum mismatch."
+  }
+
+  $entryName = if ($Architecture -eq "arm64") {
+    "minisign-win64/aarch64/minisign.exe"
+  } else {
+    "minisign-win64/x86_64/minisign.exe"
+  }
+  $bootstrapZip = [System.IO.Compression.ZipFile]::OpenRead($bootstrapArchive)
+  try {
+    $entries = @($bootstrapZip.Entries | Where-Object { $_.FullName -ceq $entryName -and $_.Name -ceq "minisign.exe" })
+    if ($entries.Count -ne 1) { throw "Minisign bootstrap archive is missing the expected executable." }
+    $bootstrapExecutable = Join-Path $TempDirectory "minisign.exe"
+    $input = $entries[0].Open()
+    $output = [System.IO.File]::Create($bootstrapExecutable)
+    try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+  }
+  finally { $bootstrapZip.Dispose() }
+  if ((Get-Item $bootstrapExecutable).Length -le 0) { throw "Minisign bootstrap executable is empty." }
+  return $bootstrapExecutable
+}
+
 $archMap = @{ "AMD64" = "amd64"; "ARM64" = "arm64" }
-$arch = $archMap[$env:PROCESSOR_ARCHITECTURE]
-if (-not $arch) { throw "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
+# PROCESSOR_ARCHITEW6432 reports the native architecture when a 32-bit or x64
+# PowerShell process is running under Windows-on-Windows emulation.
+$processorArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$processorArchitecture = ([string]$processorArchitecture).ToUpperInvariant()
+$arch = $archMap[$processorArchitecture]
+if (-not $arch) { throw "Unsupported architecture: $processorArchitecture" }
 $target = "windows-$arch"
 
-$minisign = Get-Command minisign -ErrorAction SilentlyContinue
-if (-not $minisign) { throw "minisign is required; signature verification cannot be skipped." }
 if ($MinisignPublicKey -eq "REPLACE_WITH_MINISIGN_PUBLIC_KEY") { throw "Installer public key is not configured." }
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("fleet-install-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
+  $minisignPath = Resolve-Minisign $tmp $arch
   $manifestPath = Join-Path $tmp "manifest.json"
   Get-ApprovedFile "$BaseUrl/manifest.json" $manifestPath
   $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
@@ -109,7 +158,7 @@ try {
   if ((Get-Item $archivePath).Length -ne $artifactSize) { throw "Artifact size mismatch." }
   Get-ApprovedFile $binary.signature_url $sigPath
 
-  & $minisign.Source -Vm $archivePath -P $MinisignPublicKey -x $sigPath | Out-Null
+  & $minisignPath -Vm $archivePath -P $MinisignPublicKey -x $sigPath | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Minisign verification failed." }
   $signatureLines = Get-Content $sigPath
   if ($signatureLines.Count -lt 3 -or -not $signatureLines[2].StartsWith("trusted comment: ")) { throw "Minisign trusted comment is missing." }
@@ -120,7 +169,6 @@ try {
   $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
   if ($actual -cne $binary.sha256.ToLowerInvariant()) { throw "Checksum mismatch." }
 
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
   try {
     $entries = @($zip.Entries | Where-Object { $_.FullName -ceq "fleet.exe" -and $_.Name -ceq "fleet.exe" })
@@ -139,12 +187,18 @@ try {
   Write-Host "Installed Cenvero Fleet $version to $installDir\fleet.exe"
 
   $currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-  if ($currentPath -notlike "*$installDir*") {
-    $choice = Read-Host "Add $installDir to PATH? (Y/N)"
-    if ($choice -match "^[Yy]$") {
-      [Environment]::SetEnvironmentVariable("PATH", (($currentPath, $installDir | Where-Object { $_ }) -join ";"), "User")
-      $env:PATH += ";$installDir"
-    } else { Write-Host "Skipped. Add manually: `$env:PATH += ';$installDir'" }
+  $pathEntries = @($currentPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().TrimEnd("\") })
+  if ($pathEntries -notcontains $installDir.TrimEnd("\")) {
+    if ($env:FLEET_SKIP_PATH_UPDATE -eq "1") {
+      Write-Host "Skipped PATH update. Add manually: `$env:PATH += ';$installDir'"
+    } else {
+      $choice = Read-Host "Add $installDir to PATH? (Y/N)"
+      if ($choice -match "^[Yy]$") {
+        $newPath = @($currentPath, $installDir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        [Environment]::SetEnvironmentVariable("PATH", ($newPath -join ";"), "User")
+        $env:PATH += ";$installDir"
+      } else { Write-Host "Skipped. Add manually: `$env:PATH += ';$installDir'" }
+    }
   }
   Write-Host "Run: fleet init"
 }

@@ -1,0 +1,74 @@
+name: installer-smoke
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  posix-installer:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux installer (Ubuntu)
+            runner: ubuntu-latest
+          - name: macOS installer
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install verifier dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq minisign
+
+      - name: Install verifier dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for formula in jq minisign; do
+            brew list --versions "${formula}" >/dev/null 2>&1 || brew install "${formula}"
+          done
+
+      - name: Install and run the real signed release
+        run: ./scripts/test-posix-installer.sh
+
+  windows-installer:
+    name: Windows installer (${{ matrix.name }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1
+            executable: powershell.exe
+            major: 5
+          - name: PowerShell 7
+            executable: pwsh.exe
+            major: 7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install and run the real signed release
+        shell: powershell
+        run: |
+          & "${{ matrix.executable }}" -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File .\scripts\test-windows-installer.ps1 `
+            -ExpectedMajor ${{ matrix.major }}
+          if ($LASTEXITCODE -ne 0) {
+            throw "installer smoke test failed with exit code $LASTEXITCODE"
+          }
