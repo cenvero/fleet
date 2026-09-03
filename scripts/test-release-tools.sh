@@ -80,6 +80,12 @@ grep -q 'verification cannot be skipped' "${TMP_DIR}/public/install.sh"
 grep -q 'EXPECTED_COMMENT="cenvero-fleet fleet' "${TMP_DIR}/public/install.sh"
 grep -q 'Release signature URL is required' "${TMP_DIR}/public/install.ps1"
 grep -q 'Signature is not bound' "${TMP_DIR}/public/install.ps1"
+grep -Fq 'Add-Type -AssemblyName System.Net.Http' "${TMP_DIR}/public/install.ps1"
+grep -Fq 'minisign-0.12-win64.zip' "${TMP_DIR}/public/install.ps1"
+grep -Fq '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479' "${TMP_DIR}/public/install.ps1"
+if grep -Fq 'minisign is required' "${TMP_DIR}/public/install.ps1"; then
+  echo "Windows installer still requires a preinstalled minisign executable" >&2; exit 1
+fi
 grep -q -- '--max-redirs 0' "${TMP_DIR}/public/install" "${TMP_DIR}/public/install.sh"
 grep -Fq "AllowAutoRedirect = \$false" "${TMP_DIR}/public/install.ps1"
 grep -q 'GetHostAddresses' "${TMP_DIR}/public/install.ps1"

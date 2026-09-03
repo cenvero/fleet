@@ -16,7 +16,15 @@ For the public installer entrypoint:
 curl -fsSL https://fleet.cenvero.org/install | sh
 ```
 
-That command resolves to the hosted installer for the detected platform. On Linux and macOS it runs the POSIX installer. From a Windows-compatible shell such as Git Bash or WSL, it hands off to the PowerShell installer.
+For native Windows PowerShell 5.1 or later:
+
+```powershell
+irm https://fleet.cenvero.org/install.ps1 | iex
+```
+
+The Windows installer automatically downloads a checksum-pinned official `minisign` verifier when needed, then verifies the Fleet archive signature and checksum before installation.
+
+The cross-platform command resolves to the hosted installer for the detected platform. On Linux and macOS it runs the POSIX installer. From a Windows-compatible shell such as Git Bash, it hands off to the PowerShell installer.
 
 ## Build the Binaries
 
