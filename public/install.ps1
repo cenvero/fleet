@@ -187,18 +187,25 @@ try {
   Write-Host "Installed Cenvero Fleet $version to $installDir\fleet.exe"
 
   $currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+  $normalizedInstallDir = $installDir.TrimEnd("\")
   $pathEntries = @($currentPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().TrimEnd("\") })
-  if ($pathEntries -notcontains $installDir.TrimEnd("\")) {
-    if ($env:FLEET_SKIP_PATH_UPDATE -eq "1") {
-      Write-Host "Skipped PATH update. Add manually: `$env:PATH += ';$installDir'"
-    } else {
-      $choice = Read-Host "Add $installDir to PATH? (Y/N)"
-      if ($choice -match "^[Yy]$") {
-        $newPath = @($currentPath, $installDir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-        [Environment]::SetEnvironmentVariable("PATH", ($newPath -join ";"), "User")
-        $env:PATH += ";$installDir"
-      } else { Write-Host "Skipped. Add manually: `$env:PATH += ';$installDir'" }
+  if ($pathEntries -notcontains $normalizedInstallDir) {
+    try {
+      $newPath = @($currentPath, $installDir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+      [Environment]::SetEnvironmentVariable("PATH", ($newPath -join ";"), "User")
+      Write-Host "Added $installDir to your user PATH."
     }
+    catch {
+      Write-Warning "Fleet was installed, but the user PATH could not be updated: $($_.Exception.Message)"
+      Write-Host "Add this directory to your user PATH manually: $installDir"
+    }
+  }
+
+  # Make fleet available immediately in the PowerShell process that invoked the
+  # installer, even before a new terminal inherits the updated user PATH.
+  $processPathEntries = @($env:PATH -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().TrimEnd("\") })
+  if ($processPathEntries -notcontains $normalizedInstallDir) {
+    $env:PATH = (@($env:PATH, $installDir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
   }
   Write-Host "Run: fleet init"
 }

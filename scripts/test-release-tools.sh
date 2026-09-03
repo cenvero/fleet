@@ -86,6 +86,12 @@ grep -Fq '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479' "${T
 if grep -Fq 'minisign is required' "${TMP_DIR}/public/install.ps1"; then
   echo "Windows installer still requires a preinstalled minisign executable" >&2; exit 1
 fi
+grep -Fq '[Environment]::SetEnvironmentVariable("PATH"' "${TMP_DIR}/public/install.ps1"
+grep -Fq 'Added $installDir to your user PATH.' "${TMP_DIR}/public/install.ps1"
+grep -Fq 'Add this directory to your user PATH manually:' "${TMP_DIR}/public/install.ps1"
+if grep -q 'Read-Host\|FLEET_SKIP_PATH_UPDATE\|Skipped PATH update' "${TMP_DIR}/public/install.ps1"; then
+  echo "Windows installer contains interactive or skip-based PATH behavior" >&2; exit 1
+fi
 grep -q -- '--max-redirs 0' "${TMP_DIR}/public/install" "${TMP_DIR}/public/install.sh"
 grep -Fq "AllowAutoRedirect = \$false" "${TMP_DIR}/public/install.ps1"
 grep -q 'GetHostAddresses' "${TMP_DIR}/public/install.ps1"

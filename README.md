@@ -65,7 +65,7 @@ For native Windows PowerShell 5.1 or later:
 irm https://fleet.cenvero.org/install.ps1 | iex
 ```
 
-The Windows installer automatically downloads a checksum-pinned official `minisign` verifier when one is not already installed, then verifies the Fleet archive signature and checksum before installing it.
+The Windows installer automatically downloads a checksum-pinned official `minisign` verifier when one is not already installed, verifies the Fleet archive signature and checksum, installs `fleet.exe`, and adds its directory to the user `PATH`. If the persistent `PATH` update fails, the installer prints the directory to add manually.
 
 The `install` entrypoint dispatches to the correct hosted installer for the detected platform. On Linux and macOS it runs the POSIX installer directly. From a Windows-compatible shell such as Git Bash, it hands off to the PowerShell installer.
 
