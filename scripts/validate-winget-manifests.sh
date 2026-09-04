@@ -47,7 +47,7 @@ grep -Fx "    InstallerUrl: https://github.com/cenvero/fleet/releases/download/v
 grep -Fx "    InstallerUrl: https://github.com/cenvero/fleet/releases/download/v${version}/fleet_${version}_windows_arm64.zip" "${installer_file}" >/dev/null
 
 if command -v ruby >/dev/null 2>&1; then
-  ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }' "${version_file}" "${locale_file}" "${installer_file}"
+  ruby -e 'require "yaml"; ARGV.each { |f| Psych.parse_file(f) or raise "empty YAML document: #{f}" }' "${version_file}" "${locale_file}" "${installer_file}"
 fi
 
 sha256_file() {
