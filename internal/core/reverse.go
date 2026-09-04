@@ -824,6 +824,7 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 
 	// Auto-update the agent only when the policy permits it.
 	if info.Hello.AgentVersion != "" && version.Canonical(info.Hello.AgentVersion) != version.Canonical(version.Version) &&
+		agentSupportsUnattendedUpdateActivation(info.Hello.OS) &&
 		h.app.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() {
 			defer guardPanic("agent auto-update")

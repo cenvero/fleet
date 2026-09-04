@@ -135,7 +135,7 @@ type structuralIssue struct {
 // missing or set to an invalid/inconsistent value. This runs independently of
 // the version-migration table so configs that were hand-edited or very old also
 // get caught.
-func configStructuralIssues(cfg *Config, isHomebrew bool) []structuralIssue {
+func configStructuralIssues(cfg *Config, manager InstallManager) []structuralIssue {
 	var issues []structuralIssue
 
 	// 1. Default transport mode
@@ -227,60 +227,22 @@ func configStructuralIssues(cfg *Config, isHomebrew bool) []structuralIssue {
 			Field:       "updates.policy",
 			Description: "Missing — will be set now.",
 			Fix: func(cfg *Config, reader *bufio.Reader, out io.Writer) error {
-				if isHomebrew {
-					fmt.Fprintln(out, "  Homebrew manages the controller binary, so 'auto-update' is not available.")
-					fmt.Fprintln(out, "  [1] notify-only  (show a reminder when updates are available) [default]")
-					fmt.Fprintln(out, "  [2] disabled     (no update reminders)")
-					choice, err := prompt(reader, out, "  Choice [1]: ", "1")
-					if err != nil {
-						return err
-					}
-					if choice == "2" {
-						cfg.Updates.Policy = update.PolicyDisabled
-					} else {
-						cfg.Updates.Policy = update.PolicyNotifyOnly
-					}
-				} else {
-					fmt.Fprintln(out, "  [1] notify-only  (show a reminder, you apply manually) [default]")
-					fmt.Fprintln(out, "  [2] auto-update  (download and apply automatically)")
-					fmt.Fprintln(out, "  [3] disabled     (no update checks)")
-					choice, err := prompt(reader, out, "  Choice [1]: ", "1")
-					if err != nil {
-						return err
-					}
-					switch choice {
-					case "2":
-						cfg.Updates.Policy = update.PolicyAutoUpdate
-					case "3":
-						cfg.Updates.Policy = update.PolicyDisabled
-					default:
-						cfg.Updates.Policy = update.PolicyNotifyOnly
-					}
+				if manager.ManagesController() {
+					fmt.Fprintf(out, "  %s manages controller upgrades; this policy controls reminders and managed-agent updates.\n", manager.DisplayName())
 				}
-				return nil
-			},
-		})
-	}
-
-	// 6. Homebrew + auto-update is a mismatch — Homebrew owns the binary.
-	//    auto-update is silently skipped at runtime, but the config is wrong.
-	if isHomebrew && cfg.Updates.Policy == update.PolicyAutoUpdate {
-		issues = append(issues, structuralIssue{
-			Field: "updates.policy",
-			Description: "Set to 'auto-update' but this install is managed by Homebrew. " +
-				"The self-updater cannot replace a Homebrew-managed binary, so auto-update " +
-				"has no effect. Fleet will only notify you when updates are available.",
-			Fix: func(cfg *Config, reader *bufio.Reader, out io.Writer) error {
-				fmt.Fprintln(out, "  Current value: auto-update (has no effect under Homebrew)")
-				fmt.Fprintln(out, "  [1] notify-only  (show a reminder when updates are available) [default]")
-				fmt.Fprintln(out, "  [2] disabled     (no update reminders)")
+				fmt.Fprintln(out, "  [1] notify-only  (show a reminder, you apply manually) [default]")
+				fmt.Fprintln(out, "  [2] auto-update  (automatically update eligible Linux managed agents)")
+				fmt.Fprintln(out, "  [3] disabled     (no update checks)")
 				choice, err := prompt(reader, out, "  Choice [1]: ", "1")
 				if err != nil {
 					return err
 				}
-				if choice == "2" {
+				switch choice {
+				case "2":
+					cfg.Updates.Policy = update.PolicyAutoUpdate
+				case "3":
 					cfg.Updates.Policy = update.PolicyDisabled
-				} else {
+				default:
 					cfg.Updates.Policy = update.PolicyNotifyOnly
 				}
 				return nil
@@ -288,7 +250,7 @@ func configStructuralIssues(cfg *Config, isHomebrew bool) []structuralIssue {
 		})
 	}
 
-	// 7. Database backend
+	// 6. Database backend
 	if cfg.Database.Backend == "" {
 		issues = append(issues, structuralIssue{
 			Field:       "database.backend",
@@ -301,7 +263,7 @@ func configStructuralIssues(cfg *Config, isHomebrew bool) []structuralIssue {
 		})
 	}
 
-	// 8. Reverse-mode controller needs a listen address.
+	// 7. Reverse-mode controller needs a listen address.
 	if (cfg.DefaultMode == transport.ModeReverse || cfg.DefaultMode == transport.ModePerNode) &&
 		cfg.Runtime.ListenAddress == "" {
 		issues = append(issues, structuralIssue{
@@ -329,15 +291,15 @@ func NeedsAdjustInit(cfg Config) bool {
 	if cfg.InitVersion < CurrentInitVersion {
 		return true
 	}
-	isHomebrew := RuntimeIsHomebrewInstall()
-	return len(configStructuralIssues(&cfg, isHomebrew)) > 0
+	manager := RuntimeInstallManager()
+	return len(configStructuralIssues(&cfg, manager)) > 0
 }
 
 // AdjustInitHint returns a one-line hint to show after every command when the
 // config needs attention. Returns "" when everything is up to date.
 func AdjustInitHint(cfg Config) string {
-	isHomebrew := RuntimeIsHomebrewInstall()
-	structural := configStructuralIssues(&cfg, isHomebrew)
+	manager := RuntimeInstallManager()
+	structural := configStructuralIssues(&cfg, manager)
 	versionBehind := cfg.InitVersion < CurrentInitVersion
 
 	switch {
@@ -372,8 +334,8 @@ func AdjustInit(configDir string, in io.Reader, out io.Writer) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	isHomebrew := RuntimeIsHomebrewInstall()
-	structural := configStructuralIssues(&cfg, isHomebrew)
+	manager := RuntimeInstallManager()
+	structural := configStructuralIssues(&cfg, manager)
 	versionBehind := cfg.InitVersion < CurrentInitVersion
 
 	if !versionBehind && len(structural) == 0 {

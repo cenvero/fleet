@@ -71,7 +71,7 @@ func TestUpdateAvailableAndNotice(t *testing.T) {
 }
 
 func TestUpgradeCommandNonEmpty(t *testing.T) {
-	if cmd := UpgradeCommand(); cmd == "" || !(strings.Contains(cmd, "brew") || strings.Contains(cmd, "fleet update")) {
+	if cmd := UpgradeCommand(); cmd == "" || !(strings.Contains(cmd, "brew") || strings.Contains(cmd, "winget") || strings.Contains(cmd, "fleet update")) {
 		t.Fatalf("unexpected upgrade command: %q", cmd)
 	}
 }

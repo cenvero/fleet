@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"${ROOT_DIR}/scripts/test-winget-manifests.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT INT TERM
 mkdir -p "${TMP_DIR}/public" "${TMP_DIR}/internal/update" "${TMP_DIR}/dist" "${TMP_DIR}/bin"

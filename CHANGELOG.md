@@ -34,7 +34,25 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
-_Nothing yet — changes for the next release land here._
+### Added
+
+- WinGet-ready `Cenvero.Fleet` ZIP/portable manifests for Windows x64 and ARM64,
+  generated and validated against immutable GitHub release assets.
+- Generalized self-managed, Homebrew, and WinGet controller ownership detection,
+  including Homebrew symlinks and custom WinGet portable locations.
+
+### Changed
+
+- WinGet owns controller update, rollback, channel, and uninstall lifecycle;
+  managed agents remain Fleet-owned through `fleet sync-agent`.
+- WinGet uses catalog SHA-256 validation and Microsoft scanning. Direct installs
+  and Fleet-managed updates retain fail-closed minisign verification.
+
+### Fixed
+
+- Unattended managed-agent activation is Linux-only. Windows delivery reports
+  pending activation and preserves the observed live version until restart and
+  reconnect.
 
 ## [v2.3.0] — 2026-06-21 (stable)
 

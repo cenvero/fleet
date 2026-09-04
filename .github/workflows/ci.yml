@@ -82,6 +82,22 @@ jobs:
           go build -trimpath -ldflags="-s -w -X github.com/cenvero/fleet/internal/version.Version=${GITHUB_REF_NAME:-dev}" -o "dist/fleet-${GOOS}-${GOARCH}" ./cmd/fleet
           go build -trimpath -ldflags="-s -w -X github.com/cenvero/fleet/internal/version.Version=${GITHUB_REF_NAME:-dev}" -o "dist/fleet-agent-${GOOS}-${GOARCH}" ./cmd/fleet-agent
 
+  windows-test:
+    name: Windows install-manager tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Test WinGet ownership and lifecycle behavior
+        shell: pwsh
+        run: |
+          go test ./internal/core -run 'Test(DetectInstallManager|InstallManagerCommands|RegisteredWinGetLocationOwnsOnlyRegisteredExecutable|ApplyFleetUpdateSkipsControllerForWinGetInstall|WindowsAgentDeliveryPreservesObservedVersionUntilReconnect)$' -count=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test ./internal/cli -count=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   security:
     name: Security
     runs-on: ubuntu-latest

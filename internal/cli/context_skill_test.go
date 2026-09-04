@@ -197,3 +197,23 @@ func TestSkillInstallDoesNotWriteThroughSymlink(t *testing.T) {
 		t.Fatal("skill target remained a symlink")
 	}
 }
+
+func TestSyncAgentHelpDescribesWindowsActivation(t *testing.T) {
+	out, err := runFleet(t, "sync-agent", "--help")
+	if err != nil {
+		t.Fatalf("sync-agent --help: %v", err)
+	}
+	for _, want := range []string{
+		"On Linux managed nodes, it schedules a systemd service restart automatically.",
+		"On Windows managed nodes, Fleet delivers and replaces the executable",
+		"restart or reverify the live Windows service automatically",
+		"Windows tooling, reconnect, and verify the live agent version",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("sync-agent help missing %q", want)
+		}
+	}
+	if strings.Contains(out, "the agent service is restarted automatically") {
+		t.Fatal("sync-agent help contains an unconditional restart promise")
+	}
+}

@@ -25,7 +25,13 @@ fleet sync-agent --server web-01 # or just one (repeatable)
 
 `fleet update apply` updates the controller first and then rolls updates across managed agents. Partial agent failures are reported instead of bricking the whole rollout.
 
-On **Homebrew** installs the controller binary is `brew`-managed, so `update apply` does **not** roll out agents — it is informational only (it prints the `brew upgrade` command and points you to `fleet sync-agent`). Only `fleet update check` does real work on Homebrew; `apply`, `channel`, and `rollback` are blocked there. Update agents with `fleet sync-agent`; `update check` will also name any agents that have drifted from the controller.
+On **package-manager installs** the controller executable remains owned by the package manager. `fleet update apply` is informational only and does **not** roll out agents; it prints the correct controller command and points to `fleet sync-agent`. Only `fleet update check` performs a release check; `apply`, `channel`, and rollback are blocked for the package-owned controller.
+
+- Homebrew controller: `brew update && brew upgrade cenvero-fleet`
+- WinGet controller: `winget upgrade --id Cenvero.Fleet --exact --source winget`
+- Managed agents under either install method: `fleet sync-agent`
+
+WinGet installs `Cenvero.Fleet` as a per-user ZIP/portable package for x64 or ARM64, registers it in Apps & Features, and creates the `fleet` alias. `fleet self-uninstall` may clear controller data but never deletes the WinGet-owned executable; finish package removal with `winget uninstall --id Cenvero.Fleet --exact --source winget`.
 
 `fleet sync-agent` brings managed agents up to the controller's version. It syncs servers **in parallel** (bounded concurrency) and streams **per-server progress** as each finishes — `→ checking`, `✓ updated X → Y`, `• up to date`, `✗ error` — followed by a one-line summary, while `stdout` stays clean JSON for scripting. It runs **synchronously** (it waits for every server before returning), so there are no detached, orphaned, half-updated agents. Limit it to one or more servers with `--server <name>` (repeatable).
 
@@ -34,13 +40,16 @@ On **Homebrew** installs the controller binary is `brew`-managed, so `update app
 With the default `notify-only` posture you are never auto-updated, but you are told when a newer release exists. The daemon re-checks the configured channel's manifest every **10 minutes** and caches the result. Any `fleet` command then surfaces a yellow **"Update your fleet"** notice on stderr when a newer version is available, with the correct command for how you installed it:
 
 - `brew update && brew upgrade cenvero-fleet` for a Homebrew install
-- `fleet update apply` otherwise
+- `winget upgrade --id Cenvero.Fleet --exact --source winget` for a WinGet install
+- `fleet update apply` for a self-managed install
 
 The check is cached, so it never hammers the CDN, and it is skipped entirely for dev/unversioned builds or when the update policy is disabled.
 
 ### Auto-update policy
 
-If you set `policy: auto-update` in `config.toml`, the controller will apply updates automatically when the daemon is running. This policy is not available for Homebrew installs — Homebrew manages the binary and `fleet update apply` cannot replace it. If you accidentally configure `auto-update` on a Homebrew install, `fleet adjust-init` will detect and fix it.
+If you set `policy: auto-update` in `config.toml`, Fleet automatically updates a version-mismatched managed agent only when Fleet can restart and reverify it without operator action (**currently Linux managed agents**). Windows replacement delivery remains explicit through `fleet sync-agent`; restart the Windows service, reconnect, and verify the live version. The daemon's controller update checker remains notice-only; it does not replace the running controller binary. Apply controller updates explicitly with `fleet update apply` for a self-managed install or the package-manager command shown by Fleet.
+
+WinGet does not run background package upgrades merely because its source metadata refreshes. For unattended controller upgrades, schedule `winget upgrade --id Cenvero.Fleet --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity` under the same Windows user that installed the portable package. Stop any long-running `fleet daemon` process first so the in-use executable can be replaced.
 
 ## Signature and Integrity Model
 
@@ -51,7 +60,9 @@ The release design uses:
 - minisign signatures for authenticity
 - a pinned public key in installers and updater logic
 
-Checksums alone are not enough. If both the artifact and the manifest were tampered with together, a checksum-only model could still pass. The pinned minisign public key is what proves the release was signed by the project.
+Checksums alone are not enough for Fleet's direct installer and built-in updater. If both the artifact and the Fleet manifest were tampered with together, a checksum-only model could still pass. The pinned minisign public key is what proves the release was signed by the project.
+
+The **WinGet package path is intentionally different**: WinGet downloads the immutable GitHub release ZIP, verifies it against `InstallerSha256` in Microsoft's catalog metadata, and subjects the submission to Microsoft validation and malware scanning. WinGet does not consume Fleet's `.minisig` sidecar. Direct installs and Fleet-managed updates continue to require minisign.
 
 Signature verification is **fail-closed on every channel**: an update whose manifest entry carries no minisign signature is **refused**. There is no exempt channel — an empty or ad-hoc channel name does not silently disable verification. A SHA-256 checksum alone is never accepted as a substitute, because a manifest-level attacker can rewrite both the binary and its checksum together; only the pinned minisign key proves authenticity. The single, explicit escape hatch is the updater's `AllowUnsigned` opt-in (surfaced as `--allow-unsigned`) — for applying an unsigned local/ad-hoc build — and it is never the silent default.
 

@@ -17,7 +17,7 @@ todo() {
 }
 
 echo "==> Checking release helper script syntax"
-bash -n scripts/test-release-tools.sh scripts/run-scale-validation.sh scripts/sign-release-artifact.sh scripts/sync-signing-key.sh \
+bash -n scripts/test-winget-manifests.sh scripts/generate-winget-manifests.sh scripts/validate-winget-manifests.sh scripts/test-release-tools.sh scripts/run-scale-validation.sh scripts/sign-release-artifact.sh scripts/sync-signing-key.sh \
   scripts/update-manifest.sh scripts/validate-release-env.sh scripts/validate-release-manifest.sh \
   scripts/validate-signing-assets.sh public/install public/install.sh public/uninstall.sh
 

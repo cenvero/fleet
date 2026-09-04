@@ -59,13 +59,26 @@ For the public one-command installer entrypoint:
 curl -fsSL https://fleet.cenvero.org/install | sh
 ```
 
-For native Windows PowerShell 5.1 or later:
+For Windows through Windows Package Manager:
+
+```powershell
+winget install --id Cenvero.Fleet --exact --source winget
+```
+
+WinGet installs a per-user ZIP/portable package, verifies the release archive against the SHA-256 in Microsoft's catalog manifest, and owns controller upgrades and removal:
+
+```powershell
+winget upgrade --id Cenvero.Fleet --exact --source winget
+winget uninstall --id Cenvero.Fleet --exact --source winget
+```
+
+For a direct native Windows install using PowerShell 5.1 or later:
 
 ```powershell
 irm https://fleet.cenvero.org/install.ps1 | iex
 ```
 
-The Windows installer automatically downloads a checksum-pinned official `minisign` verifier when one is not already installed, verifies the Fleet archive signature and checksum, installs `fleet.exe`, and adds its directory to the user `PATH`. If the persistent `PATH` update fails, the installer prints the directory to add manually.
+The direct installer automatically downloads a checksum-pinned official `minisign` verifier when one is not already installed, verifies the Fleet archive signature and checksum, installs `fleet.exe`, and adds its directory to the user `PATH`. If the persistent `PATH` update fails, the installer prints the directory to add manually. WinGet does not invoke this script or consume the `.minisig` sidecar; it uses catalog hash validation and Microsoft's validation/scanning pipeline.
 
 The `install` entrypoint dispatches to the correct hosted installer for the detected platform. On Linux and macOS it runs the POSIX installer directly. From a Windows-compatible shell such as Git Bash, it hands off to the PowerShell installer.
 

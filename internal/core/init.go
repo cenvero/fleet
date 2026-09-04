@@ -271,21 +271,26 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 
 	channel := "stable"
 	policy := update.PolicyNotifyOnly
-	if IsHomebrewInstall(executablePath) {
+	manager := DetectInstallManager(executablePath)
+	if manager.ManagesController() {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Step 5 of 7 — Update notifications")
+		fmt.Fprintln(out, "Step 5 of 7 — Update policy")
 		fmt.Fprintln(out, "─────────────────────────────────────")
-		fmt.Fprintln(out, "  Homebrew install detected — updates are managed by Homebrew.")
-		fmt.Fprintln(out, "  Run 'brew upgrade cenvero-fleet' to update when a new version is available.")
+		fmt.Fprintf(out, "  %s install detected — %s owns controller upgrades.\n", manager.DisplayName(), manager.DisplayName())
+		fmt.Fprintf(out, "  Controller upgrade command: %s\n", manager.UpgradeCommand())
+		fmt.Fprintln(out, "  Fleet's auto-update policy applies only to eligible managed agents (currently Linux).")
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "  Fleet can remind you when a new version is available:")
-		fmt.Fprintln(out, "    [1] Notify me (show reminder on each fleet command)")
-		fmt.Fprintln(out, "    [2] Disabled  (no reminders)")
-		notifyChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
+		fmt.Fprintln(out, "    [1] Notify only  (show controller and agent update reminders)")
+		fmt.Fprintln(out, "    [2] Auto-update  (automatically update eligible Linux managed agents)")
+		fmt.Fprintln(out, "    [3] Disabled     (no update checks)")
+		policyChoice, err := prompt(reader, out, "  Choice [1]: ", "1")
 		if err != nil {
 			return InitResult{}, err
 		}
-		if notifyChoice == "2" {
+		switch policyChoice {
+		case "2":
+			policy = update.PolicyAutoUpdate
+		case "3":
 			policy = update.PolicyDisabled
 		}
 	} else {
@@ -303,7 +308,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 			channel = "beta"
 		}
 		fmt.Fprintln(out, "  Policy:")
-		fmt.Fprintln(out, "    [1] Auto-update  (download and apply automatically)")
+		fmt.Fprintln(out, "    [1] Auto-update  (automatically update eligible Linux managed agents)")
 		fmt.Fprintln(out, "    [2] Notify only  (tell you when an update is available, you apply it)")
 		fmt.Fprintln(out, "    [3] Disabled     (no update checks)")
 		policyChoice, err := prompt(reader, out, "  Choice [2]: ", "2")

@@ -1283,6 +1283,7 @@ func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server Server
 	// Auto-update the agent only when the policy permits it.
 	// notify_only and disabled must not trigger unsolicited binary replacements.
 	if hello.AgentVersion != "" && version.Canonical(hello.AgentVersion) != version.Canonical(version.Version) &&
+		agentSupportsUnattendedUpdateActivation(hello.OS) &&
 		a.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() { // #nosec G118 -- policy-approved auto-update intentionally outlives the discovery RPC
 			_ = a.AuditLog.Append(logs.AuditEntry{

@@ -2128,21 +2128,21 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if core.RuntimeIsHomebrewInstall() {
+			manager := core.RuntimeInstallManager()
+			if manager.ManagesController() {
 				out := cmd.OutOrStdout()
 				fmt.Fprintf(out, "Current version : %s\n", version.Canonical(version.Version))
 				fmt.Fprintf(out, "Latest version  : %s\n", version.Canonical(latestVersion))
 				if version.Canonical(latestVersion) != version.Canonical(version.Version) {
 					fmt.Fprintln(out)
-					fmt.Fprintln(out, "A newer version is available. To update the controller, run:")
+					fmt.Fprintf(out, "A newer version is available. %s owns the controller binary; run:\n", manager.DisplayName())
 					fmt.Fprintln(out)
-					fmt.Fprintln(out, "  brew update && brew upgrade cenvero-fleet")
+					fmt.Fprintf(out, "  %s\n", manager.UpgradeCommand())
 				} else {
 					fmt.Fprintln(out, "You are on the latest version.")
 				}
-				// Agents are synced explicitly with `fleet sync-agent` (never rolled
-				// out from `update apply` on Homebrew). Surface any that have drifted
-				// from the controller, using versions already on disk.
+				// Package-manager-owned controller updates never roll out agents.
+				// Surface any drift already observed on disk.
 				if stale, _ := app.AgentsNeedingSync(); len(stale) > 0 {
 					fmt.Fprintln(out)
 					fmt.Fprintln(out, describeStaleAgents(stale))
@@ -2162,18 +2162,17 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 		Use:   "apply",
 		Short: "Apply the latest controller update and roll it out across managed agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// On Homebrew the controller binary is brew-managed, and we no longer
-			// roll out agent updates from here — that is `fleet sync-agent`'s job.
-			// So `update apply` is informational only on Homebrew: tell the user
-			// how to update the controller and how to bring agents in line, then
-			// stop. (Only `update check` does real work on Homebrew.)
-			if core.RuntimeIsHomebrewInstall() {
+			// External package managers own the controller executable and package
+			// database. Keep this command informational and leave managed-agent
+			// rollout to the explicit `fleet sync-agent` command.
+			manager := core.RuntimeInstallManager()
+			if manager.ManagesController() {
 				out := cmd.OutOrStdout()
-				fmt.Fprintln(out, "Controller is managed by Homebrew — to update the controller binary:")
+				fmt.Fprintf(out, "Controller is managed by %s — to update the controller binary:\n", manager.DisplayName())
 				fmt.Fprintln(out)
-				fmt.Fprintln(out, "  brew update && brew upgrade cenvero-fleet")
+				fmt.Fprintf(out, "  %s\n", manager.UpgradeCommand())
 				fmt.Fprintln(out)
-				fmt.Fprintln(out, "Agents are not rolled out from `update apply` on Homebrew. To update them, run:")
+				fmt.Fprintf(out, "Agents are not rolled out from `update apply` on %s. To update them, run:\n", manager.DisplayName())
 				fmt.Fprintln(out)
 				fmt.Fprintln(out, "  fleet sync-agent")
 				// Best-effort: name any agents that have drifted from the controller.
@@ -2224,10 +2223,18 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			if core.RuntimeIsHomebrewInstall() {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — rollback is handled by Homebrew.")
-				fmt.Fprintln(cmd.ErrOrStderr(), "To roll back: brew install cenvero/fleet/cenvero-fleet@<version>")
-				return fmt.Errorf("rollback not available for Homebrew installs")
+			manager := core.RuntimeInstallManager()
+			if manager.ManagesController() {
+				switch manager {
+				case core.InstallManagerHomebrew:
+					fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — rollback is handled by Homebrew.")
+					fmt.Fprintln(cmd.ErrOrStderr(), "To roll back: brew install cenvero/fleet/cenvero-fleet@<version>")
+				case core.InstallManagerWinGet:
+					fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by WinGet — Fleet cannot replace or roll back the package-owned binary.")
+					fmt.Fprintf(cmd.ErrOrStderr(), "List retained versions: winget show --id %s --exact --versions\n", core.WinGetPackageIdentifier)
+					fmt.Fprintln(cmd.ErrOrStderr(), "Then uninstall and reinstall the required version with WinGet; controller data is preserved.")
+				}
+				return fmt.Errorf("rollback not available for %s installs", manager.DisplayName())
 			}
 			result, err := app.RollbackUpdate()
 			if err != nil {
@@ -2246,10 +2253,17 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			if core.RuntimeIsHomebrewInstall() {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — the update channel is determined")
-				fmt.Fprintln(cmd.ErrOrStderr(), "by which Homebrew tap/formula you have installed.")
-				return fmt.Errorf("update channel not configurable for Homebrew installs")
+			manager := core.RuntimeInstallManager()
+			if manager.ManagesController() {
+				switch manager {
+				case core.InstallManagerHomebrew:
+					fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by Homebrew — the update channel is determined")
+					fmt.Fprintln(cmd.ErrOrStderr(), "by which Homebrew tap/formula you have installed.")
+				case core.InstallManagerWinGet:
+					fmt.Fprintln(cmd.ErrOrStderr(), "Controller is managed by WinGet — Cenvero.Fleet tracks stable releases.")
+					fmt.Fprintln(cmd.ErrOrStderr(), "WinGet manifest channels are not implemented; use a self-managed install for beta releases.")
+				}
+				return fmt.Errorf("update channel not configurable for %s installs", manager.DisplayName())
 			}
 			return app.UpdateChannel(args[0])
 		},
@@ -2295,23 +2309,22 @@ func newSelfUninstallCommand(configDir *string) *cobra.Command {
 		Long: `Removes the fleet binary from its install location and deletes
 the local config directory (servers, keys, logs, etc.).
 
-On Homebrew installs the binary is managed by Homebrew, so it is left in
-place; this command removes the config directory and then offers to run
-'brew uninstall cenvero-fleet' for you.
+On package-manager installs the binary is left in place; this command removes
+the config directory and then prints the Homebrew or WinGet uninstall command.
 
 All managed agents on remote servers are left untouched.
 Run 'fleet server remove <name>' first if you want to tear those down.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			homebrew := core.RuntimeIsHomebrewInstall()
+			manager := core.RuntimeInstallManager()
 			if !yes {
 				fmt.Fprintln(cmd.OutOrStdout(), "This will remove:")
-				if homebrew {
+				if manager.ManagesController() {
 					fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet config directory (servers, keys, logs, etc.)")
 					fmt.Fprintln(cmd.OutOrStdout())
-					fmt.Fprintln(cmd.OutOrStdout(), "The fleet binary is managed by Homebrew and is NOT removed by this")
-					fmt.Fprintln(cmd.OutOrStdout(), "command. After clearing the config you'll be offered to run:")
+					fmt.Fprintf(cmd.OutOrStdout(), "The fleet binary is managed by %s and is NOT removed by this\n", manager.DisplayName())
+					fmt.Fprintln(cmd.OutOrStdout(), "command. After clearing the config, remove the package with:")
 					fmt.Fprintln(cmd.OutOrStdout())
-					fmt.Fprintln(cmd.OutOrStdout(), "  brew uninstall cenvero-fleet")
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", manager.UninstallCommand())
 				} else {
 					fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet binary from its install location")
 					fmt.Fprintln(cmd.OutOrStdout(), "  • the fleet config directory (servers, keys, logs, etc.)")
@@ -2334,15 +2347,22 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 				fmt.Fprintf(cmd.OutOrStdout(), "Removed config directory: %s\n", *configDir)
 			}
 
-			// On Homebrew the binary belongs to brew — never delete it ourselves.
-			// Offer to run `brew uninstall` instead, and only with the operator's
-			// explicit ok. On a non-interactive run, just print the command.
-			if homebrew {
+			// Package-manager-owned binaries must be removed by their manager so its
+			// package database, PATH alias, and Apps & Features entry stay coherent.
+			if manager.ManagesController() {
 				out := cmd.OutOrStdout()
 				fmt.Fprintln(out)
-				fmt.Fprintln(out, "The fleet binary is managed by Homebrew. To remove it, run:")
+				fmt.Fprintf(out, "The fleet binary is managed by %s. To remove it, run:\n", manager.DisplayName())
 				fmt.Fprintln(out)
-				fmt.Fprintln(out, "  brew uninstall cenvero-fleet")
+				fmt.Fprintf(out, "  %s\n", manager.UninstallCommand())
+
+				// Homebrew can safely remove the package after this process has opened
+				// its executable. WinGet portable upgrades/uninstalls can be blocked by
+				// an in-use fleet.exe, so the operator must run it after Fleet exits.
+				if manager == core.InstallManagerWinGet {
+					fmt.Fprintln(out, "\nRun that command after this Fleet process exits.")
+					return nil
+				}
 				if term.IsTerminal(int(os.Stdin.Fd())) {
 					fmt.Fprint(out, "\nRun that now? [y/N]: ")
 					answer := strings.ToLower(strings.TrimSpace(transport.ReadLine(bufio.NewReader(os.Stdin))))
@@ -3189,13 +3209,16 @@ func newSyncAgentCommand(configDir *string) *cobra.Command {
 	var targetServers []string
 	cmd := &cobra.Command{
 		Use:   "sync-agent",
-		Short: "Sync agent version to match the controller, restarting the service if updated",
+		Short: "Sync agent versions; Linux restarts automatically, Windows activation is manual",
 		Long: `Checks the agent version on every managed server (or the servers you specify
 with --server) against the currently installed controller version.
 
-If the versions differ, the latest agent binary is downloaded on the remote
-server, verified, and the agent service is restarted automatically.
-Servers already running the correct version are skipped.`,
+If versions differ, Fleet downloads, verifies, and replaces the agent binary.
+On Linux managed nodes, it schedules a systemd service restart automatically.
+On Windows managed nodes, Fleet delivers and replaces the executable but cannot
+restart or reverify the live Windows service automatically; restart it with
+Windows tooling, reconnect, and verify the live agent version. Servers already
+running the correct version are skipped.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -3214,6 +3237,8 @@ Servers already running the correct version are skipped.`,
 					fmt.Fprintf(errOut, "  → %s: checking/updating...\n", p.Server)
 				case "updated":
 					fmt.Fprintf(errOut, "  ✓ %s: updated %s → %s\n", p.Server, p.From, p.To)
+				case "pending-activation":
+					fmt.Fprintf(errOut, "  ⚠ %s: delivered %s → %s; restart and reconnect to activate/verify\n", p.Server, p.From, p.To)
 				case "uptodate":
 					fmt.Fprintf(errOut, "  • %s: already up to date (%s)\n", p.Server, p.From)
 				case "error":
@@ -3223,7 +3248,7 @@ Servers already running the correct version are skipped.`,
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(errOut, "Done: %d updated, %d up to date, %d failed.\n", result.Synced, result.AlreadyUpToDate, result.Failed)
+			fmt.Fprintf(errOut, "Done: %d updated/delivered, %d up to date, %d failed.\n", result.Synced, result.AlreadyUpToDate, result.Failed)
 			return writeJSON(cmd, result)
 		},
 	}

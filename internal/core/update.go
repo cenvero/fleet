@@ -41,25 +41,6 @@ type FleetUpdateAgentResult struct {
 	Error             string `json:"error,omitempty"`
 }
 
-// IsHomebrewInstall reports whether the controller binary is managed by Homebrew.
-// When true, the controller must be updated via `brew upgrade cenvero-fleet`
-// rather than the built-in self-updater.
-func IsHomebrewInstall(executablePath string) bool {
-	p := strings.ToLower(executablePath)
-	return strings.Contains(p, "/homebrew/") ||
-		strings.Contains(p, "/cellar/") ||
-		strings.Contains(p, "/linuxbrew/")
-}
-
-// RuntimeIsHomebrewInstall checks the currently running binary path, not the stored config value.
-func RuntimeIsHomebrewInstall() bool {
-	exec, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	return IsHomebrewInstall(exec)
-}
-
 type homebrewHintCache struct {
 	CheckedAt time.Time `json:"checked_at"`
 	Latest    string    `json:"latest"`
@@ -114,20 +95,20 @@ func UpdateAvailable(configDir, manifestURL, channel string, policy update.Polic
 	return ""
 }
 
-// UpgradeCommand returns the correct upgrade command for how this binary was
-// installed: Homebrew vs a self-managed `fleet update apply`.
-func UpgradeCommand() string {
-	if RuntimeIsHomebrewInstall() {
-		return "brew update && brew upgrade cenvero-fleet"
-	}
-	return "fleet update apply"
-}
-
 // AgentVersionMismatch names a managed server whose last-observed agent version
 // differs from this controller's version.
 type AgentVersionMismatch struct {
 	Server       string `json:"server"`
 	AgentVersion string `json:"agent_version"`
+}
+
+// agentSupportsUnattendedUpdateActivation reports whether Fleet can replace,
+// restart, and subsequently observe the managed agent without operator action.
+// Windows replacement is supported, but service restart/reverification is not;
+// macOS also has no managed service restart path today. Keep unattended updates
+// Linux-only until those activation paths exist.
+func agentSupportsUnattendedUpdateActivation(goos string) bool {
+	return strings.EqualFold(strings.TrimSpace(goos), "linux")
 }
 
 // AgentsNeedingSync returns the managed servers whose last-observed agent
@@ -258,13 +239,16 @@ func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string, allowU
 	if executablePath == "" {
 		executablePath, _ = os.Executable()
 	}
-	if IsHomebrewInstall(executablePath) {
-		// Controller is managed by Homebrew — skip self-update entirely.
-		// Agents are still updated below.
+	manager := DetectInstallManager(executablePath)
+	if manager.ManagesController() {
+		// The package manager owns the controller executable. Never mutate it
+		// behind the manager's package database; managed agents remain a separate
+		// Fleet-owned rollout below.
 		controllerResult = update.ApplyResult{
 			Applied: false,
 			Version: version.Version,
-			Note:    "managed by Homebrew — run `brew upgrade cenvero-fleet` to update the controller",
+			Note: fmt.Sprintf("managed by %s — run `%s` to update the controller",
+				manager.DisplayName(), manager.UpgradeCommand()),
 		}
 	} else {
 		var err error
@@ -356,10 +340,16 @@ func (a *App) applyAgentUpdate(ctx context.Context, server ServerRecord) FleetUp
 	}
 
 	if strings.TrimSpace(applied.Version) != "" {
-		server.Observed.AgentVersion = applied.Version
-		server.Observed.LastSeen = time.Now().UTC()
-		server.Observed.LastError = ""
-		server.Agent.UpdatedAt = time.Now().UTC()
+		if applied.Applied {
+			server.Agent.UpdatedAt = time.Now().UTC()
+		}
+		// A replacement without a managed restart is only delivered, not yet
+		// observed live. Preserve the prior observed version until reconnect.
+		if !applied.Applied || applied.RestartScheduled {
+			server.Observed.AgentVersion = applied.Version
+			server.Observed.LastSeen = time.Now().UTC()
+			server.Observed.LastError = ""
+		}
 		if server.Agent.ServiceName == "" && applied.ServiceName != "" {
 			server.Agent.ServiceName = applied.ServiceName
 		}
@@ -416,13 +406,14 @@ func agentServiceName(server ServerRecord) string {
 }
 
 type SyncAgentResult struct {
-	Server         string `json:"server"`
-	AgentVersion   string `json:"agent_version"`
-	WantedVersion  string `json:"wanted_version"`
-	AlreadySynced  bool   `json:"already_synced,omitempty"`
-	Updated        bool   `json:"updated,omitempty"`
-	RestartHandled bool   `json:"restart_handled,omitempty"`
-	Error          string `json:"error,omitempty"`
+	Server            string `json:"server"`
+	AgentVersion      string `json:"agent_version"`
+	WantedVersion     string `json:"wanted_version"`
+	AlreadySynced     bool   `json:"already_synced,omitempty"`
+	Updated           bool   `json:"updated,omitempty"`
+	RestartHandled    bool   `json:"restart_handled,omitempty"`
+	ActivationPending bool   `json:"activation_pending,omitempty"`
+	Error             string `json:"error,omitempty"`
 }
 
 type FleetSyncAgentResult struct {
@@ -437,7 +428,8 @@ type FleetSyncAgentResult struct {
 const syncAgentParallelism = 8
 
 // SyncAgentProgress is one streamed status update for a single server during a
-// SyncAgent run. State is one of: "start", "updated", "uptodate", "error".
+// SyncAgent run. State is one of: "start", "updated", "pending-activation",
+// "uptodate", "error".
 type SyncAgentProgress struct {
 	Server string
 	State  string
@@ -447,8 +439,9 @@ type SyncAgentProgress struct {
 }
 
 // SyncAgent checks whether each managed server's agent version matches the
-// controller version and, if not, triggers an update + service restart. Pass
-// serverNames=nil to target every registered server.
+// controller version and, if not, triggers verified update delivery. Platforms
+// with a managed restart path activate automatically; others report activation
+// as pending. Pass serverNames=nil to target every registered server.
 //
 // Servers are synced CONCURRENTLY (bounded by syncAgentParallelism) so a large
 // fleet updates in parallel rather than one-at-a-time — but SYNCHRONOUSLY: the
@@ -510,6 +503,8 @@ func (a *App) SyncAgent(ctx context.Context, serverNames []string, progress func
 				p.State, p.Err = "error", r.Error
 			case r.AlreadySynced:
 				p.State = "uptodate"
+			case r.ActivationPending:
+				p.State = "pending-activation"
 			default:
 				p.State = "updated"
 			}
@@ -542,9 +537,12 @@ func (a *App) syncAgentOne(ctx context.Context, server ServerRecord) SyncAgentRe
 		base.Error = applied.Error
 		return base
 	}
-	base.AgentVersion = applied.Version
 	base.Updated = applied.Applied
 	base.RestartHandled = applied.RestartScheduled
+	base.ActivationPending = applied.Applied && !applied.RestartScheduled
+	if !base.ActivationPending {
+		base.AgentVersion = applied.Version
+	}
 	return base
 }
 
