@@ -61,7 +61,7 @@ catch {
 finally {
     if ($installAttempted) {
         try {
-            & $winget.Source uninstall --id Cenvero.Fleet --exact --silent --disable-interactivity
+            & $winget.Source uninstall --id Cenvero.Fleet --exact --silent --accept-source-agreements --disable-interactivity
             if ($LASTEXITCODE -ne 0) {
                 $cleanupFailure = "local WinGet uninstall failed: $LASTEXITCODE"
             }
