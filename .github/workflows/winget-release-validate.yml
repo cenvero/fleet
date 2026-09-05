@@ -1,0 +1,101 @@
+name: Validate published WinGet release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable Fleet release tag to validate (for example, v2.4.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare published WinGet manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Validate published stable release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release_tag must be a stable vMAJOR.MINOR.PATCH tag"
+            exit 1
+          }
+          git fetch --quiet origin main "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          git merge-base --is-ancestor "${RELEASE_TAG}^{commit}" origin/main || {
+            echo "::error::release tag is not on main history"
+            exit 1
+          }
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json isDraft,isPrerelease,tagName |
+            jq -er --arg tag "${RELEASE_TAG}" \
+              'select(.isDraft == false and .isPrerelease == false and .tagName == $tag) | .tagName' |
+            grep -Fx "${RELEASE_TAG}" >/dev/null
+      - name: Download, authenticate, and generate WinGet 1.12 manifests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y minisign
+          version="${RELEASE_TAG#v}"
+          x64_name="fleet_${version}_windows_amd64.zip"
+          arm64_name="fleet_${version}_windows_arm64.zip"
+          mkdir -p winget/assets
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --dir winget/assets \
+            --pattern "${x64_name}" --pattern "${x64_name}.minisig" \
+            --pattern "${arm64_name}" --pattern "${arm64_name}.minisig"
+          x64_path="winget/assets/${x64_name}"
+          arm64_path="winget/assets/${arm64_name}"
+          test -f "${x64_path}" && test -f "${x64_path}.minisig"
+          test -f "${arm64_path}" && test -f "${arm64_path}.minisig"
+          public_key="$(git show "${RELEASE_TAG}^{commit}:public/signing.pub" | awk 'NF{line=$0}END{print line}')"
+          test -n "${public_key}"
+          minisign -Vm "${x64_path}" -P "${public_key}" -x "${x64_path}.minisig" >/dev/null
+          minisign -Vm "${arm64_path}" -P "${public_key}" -x "${arm64_path}.minisig" >/dev/null
+          test "$(sed -n '3s/^trusted comment: //p' "${x64_path}.minisig")" = \
+            "cenvero-fleet fleet ${RELEASE_TAG} windows-amd64"
+          test "$(sed -n '3s/^trusted comment: //p' "${arm64_path}.minisig")" = \
+            "cenvero-fleet fleet ${RELEASE_TAG} windows-arm64"
+          x64_sha="$(sha256sum "${x64_path}" | awk '{print $1}')"
+          arm64_sha="$(sha256sum "${arm64_path}" | awk '{print $1}')"
+          output="winget/manifests/c/Cenvero/Fleet/${version}"
+          ./scripts/generate-winget-manifests.sh \
+            "${version}" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${x64_name}" "${x64_sha}" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${arm64_name}" "${arm64_sha}" \
+            "${output}"
+          ./scripts/validate-winget-manifests.sh "${output}" "${x64_path}" "${arm64_path}"
+      - name: Upload WinGet manifest bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: winget-manifests-${{ inputs.release_tag }}-${{ github.run_id }}
+          path: winget/manifests
+
+  validate:
+    name: Validate WinGet install/uninstall
+    runs-on: windows-latest
+    needs: prepare
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: winget-manifests-${{ inputs.release_tag }}-${{ github.run_id }}
+          path: winget/manifests
+      - name: Validate and smoke-test local manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          $manifestDir = Join-Path $PWD "winget/manifests/c/Cenvero/Fleet/$version"
+          ./scripts/smoke-test-winget-release.ps1 -ManifestDirectory $manifestDir -ExpectedVersion $version
