@@ -62,8 +62,16 @@ finally {
     if ($installAttempted) {
         try {
             & $winget.Source uninstall --id Cenvero.Fleet --exact --silent --accept-source-agreements --disable-interactivity
-            if ($LASTEXITCODE -ne 0) {
-                $cleanupFailure = "local WinGet uninstall failed: $LASTEXITCODE"
+            $uninstallExitCode = $LASTEXITCODE
+            $packageNotFoundExitCode = -1978335212 # 0x8A150014 as signed int32
+            if ($uninstallExitCode -eq $packageNotFoundExitCode) {
+                # A local-manifest portable install is not catalog-correlated by
+                # identifier yet, so remove that exact display name via WinGet.
+                & $winget.Source uninstall --name 'Cenvero Fleet' --exact --silent --accept-source-agreements --disable-interactivity
+                $uninstallExitCode = $LASTEXITCODE
+            }
+            if ($uninstallExitCode -ne 0) {
+                $cleanupFailure = "local WinGet uninstall failed: $uninstallExitCode"
             }
         }
         catch {
