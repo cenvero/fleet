@@ -93,7 +93,7 @@ If your change affects how operators or maintainers use the project, update the 
 Examples:
 
 - CLI behavior changes: update `README.md` and the relevant page in `docs/`
-- Release tooling changes: update `README.md`, `docs/releases-and-updates.md`, and the local maintainer guide
+- Release tooling changes: update `README.md`, `docs/releases-and-updates.md`, the [WinGet publishing guide](docs/winget-publishing.md), and the local maintainer guide
 - Security-sensitive behavior changes: update `SECURITY.md` and the relevant operational docs
 
 ## Testing Expectations

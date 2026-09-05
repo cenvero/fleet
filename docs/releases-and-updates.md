@@ -131,7 +131,26 @@ The repository already includes the code-side release plumbing for:
 - signature sync
 - manifest generation
 - release asset validation
+- WinGet 1.12 portable-manifest generation and real Windows lifecycle validation
 - Pages deployment workflow
+
+For every stable tag, follow [Publishing Stable Releases to WinGet](winget-publishing.md). The release workflow uploads a `winget-manifests-v<version>` artifact and proves it on `windows-latest`, but Microsoft catalog publication remains an explicit maintainer step with external validation and moderation.
+
+Prepare the exact successful release artifact without mutating GitHub:
+
+```bash
+./scripts/prepare-winget-submission.sh v2.4.2
+```
+
+After reviewing the resulting metadata and three manifests, use the interactive local-credential helper:
+
+```bash
+./scripts/submit-winget-release.sh \
+  v2.4.2 \
+  /tmp/cenvero-fleet-winget-v2.4.2
+```
+
+The submit helper revalidates signatures, trusted comments, archives, and hashes; stages exactly three files; shows the complete diff; and requires typed confirmation before it pushes a fork branch or opens the Microsoft pull request. It refuses CI/non-interactive use and never handles a bot token. A release is not officially available from the `winget` source until Microsoft merges that pull request and its catalog propagates.
 
 Maintainers should provision the signing key, release secrets, and GitHub release environment before publishing public tags. The local maintainer material is the right place for the exact operational checklist.
 

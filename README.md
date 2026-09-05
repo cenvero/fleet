@@ -2,6 +2,9 @@
 
 Command your fleet.
 
+> [!IMPORTANT]
+> Before doing anything with Cenvero Fleet—installing, configuring, operating, contributing, or publishing a release—read this README in full. Maintainers publishing a stable version must also follow the [WinGet publishing guide](docs/winget-publishing.md).
+
 Cenvero Fleet is a self-hosted, operator-owned fleet management platform for Linux, macOS, and Windows servers. The controller runs on infrastructure you choose, stores its state in a directory you control, and manages remote nodes over encrypted SSH-based channels using both direct and reverse transport modes.
 
 The full product name is **Cenvero Fleet** in prose and documentation. The controller binary is `fleet`, and the remote agent binary is `fleet-agent`.
@@ -401,6 +404,8 @@ fleet update check
 fleet update apply
 fleet update rollback
 ```
+
+On a WinGet installation, `fleet update apply`, rollback, channel selection, and executable removal defer to Windows Package Manager. Use `winget upgrade --id Cenvero.Fleet --exact --source winget` for the controller and `fleet sync-agent` for managed agents. WinGet refreshes source metadata but does not run background package upgrades automatically; unattended controller upgrades require an operator-managed Scheduled Task or enterprise deployment policy, run under the same user that installed the package.
 
 Release artifacts are minisign-signed, and both the installers and the updater verify signatures and checksums before swapping binaries. Signature verification is **fail-closed on every channel**: a manifest entry with no minisign signature is refused (a SHA-256 checksum alone is never accepted in its place). Updates are also **anti-rollback protected** — the updater refuses a target older than the running version or below the channel's `min_supported` floor — and downloads are confined to an `https`-only scheme allowlist with size/decompression bounds.
 

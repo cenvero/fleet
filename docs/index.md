@@ -12,6 +12,7 @@ The docs are written to match the current repository state and focus on the real
 - [Agentic Fleet (AI control)](agentic.md)
 - [Operations Guide](operations.md)
 - [Releases and Updates](releases-and-updates.md)
+- [Publishing Stable Releases to WinGet](winget-publishing.md)
 
 ## What These Docs Cover
 
