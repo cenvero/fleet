@@ -195,7 +195,7 @@ func TestPaneNavigationClampsAtAdvertisedBrowseBoundary(t *testing.T) {
 func TestStartBatchRejectsWindowsTopLevelCollisionsBeforeTransfer(t *testing.T) {
 	m := filesModel{
 		left:  paneState{pathStyle: core.TargetPathPOSIX, cwd: "/src", selected: map[int]bool{}},
-		right: paneState{pathStyle: core.TargetPathWindows, root: `C:\Data`, cwd: `C:\Data`, selected: map[int]bool{}},
+		right: paneState{remote: true, pathStyle: core.TargetPathWindows, root: `C:\Data`, cwd: `C:\Data`, selected: map[int]bool{}},
 		chans: make(map[int]*transferChans),
 	}
 	items := []fileItem{{name: "README"}, {name: "Readme"}}

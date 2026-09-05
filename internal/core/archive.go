@@ -571,7 +571,7 @@ func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			kind = fileKindDirectory
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, 0:
 			kind = fileKindRegular
 		default:
 			return nil, fmt.Errorf("refusing archive member %q: symlinks, hardlinks, and special files are unsupported", hdr.Name)

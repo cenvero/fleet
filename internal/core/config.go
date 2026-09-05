@@ -97,7 +97,7 @@ func ResolveConfigDir(explicit string) string {
 	}
 	native := DefaultConfigDir("")
 	locator := filepath.Join(native, activeConfigFileName)
-	if data, err := os.ReadFile(locator); err == nil {
+	if data, err := os.ReadFile(locator); err == nil { // #nosec G304 -- locator is a fixed filename under the resolved user-native config directory
 		active := strings.TrimSpace(string(data))
 		if filepath.IsAbs(active) && IsInitialized(active) {
 			return filepath.Clean(active)
@@ -156,7 +156,7 @@ func SaveActiveConfigDir(configDir string) error {
 // ClearActiveConfigDir removes the locator only when it names configDir.
 func ClearActiveConfigDir(configDir string) error {
 	locator := filepath.Join(DefaultConfigDir(""), activeConfigFileName)
-	data, err := os.ReadFile(locator)
+	data, err := os.ReadFile(locator) // #nosec G304 -- locator is a fixed filename under the resolved user-native config directory
 	if os.IsNotExist(err) {
 		return nil
 	}

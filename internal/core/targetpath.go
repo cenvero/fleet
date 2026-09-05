@@ -216,7 +216,7 @@ func ValidateTargetPathComponent(style TargetPathStyle, name string) error {
 		return fmt.Errorf("name contains a character invalid on Windows")
 	}
 	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
-		return fmt.Errorf("Windows names must not end in a dot or space")
+		return fmt.Errorf("windows names must not end in a dot or space")
 	}
 	stem := name
 	if dot := strings.IndexByte(stem, '.'); dot >= 0 {
