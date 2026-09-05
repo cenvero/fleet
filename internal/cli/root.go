@@ -88,9 +88,7 @@ func NewRootCommand() *cobra.Command {
 			return cmd.Help()
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if configDir == "" {
-				configDir = core.DefaultConfigDir("")
-			}
+			configDir = core.ResolveConfigDir(configDir)
 			// Commands that are always allowed before init
 			switch cmd.Name() {
 			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
@@ -697,6 +695,9 @@ func newInitCommand(configDir *string) *cobra.Command {
 				})
 				if err != nil {
 					return err
+				}
+				if err := core.SaveActiveConfigDir(result.Config.ConfigDir); err != nil {
+					return fmt.Errorf("save active config directory: %w", err)
 				}
 				return writeJSON(cmd, result)
 			}
@@ -2301,6 +2302,27 @@ The archive can be used to restore or migrate a fleet controller installation.`,
 	return cmd
 }
 
+func selfManagedUninstallTarget(executablePath string) (string, error) {
+	if strings.TrimSpace(executablePath) == "" {
+		return "", errors.New("running executable path is empty")
+	}
+	resolved, err := filepath.EvalSymlinks(executablePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve running executable path: %w", err)
+	}
+	return resolved, nil
+}
+
+func deferredSelfManagedRemovalCommand(goos, binaryPath string) (string, bool) {
+	if goos != "windows" {
+		return "", false
+	}
+	// PowerShell single-quoted strings represent an apostrophe by doubling it.
+	// -LiteralPath prevents wildcard interpretation of operator-controlled paths.
+	quotedPath := "'" + strings.ReplaceAll(binaryPath, "'", "''") + "'"
+	return "Remove-Item -LiteralPath " + quotedPath + " -Force", true
+}
+
 func newSelfUninstallCommand(configDir *string) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
@@ -2345,6 +2367,9 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove config dir %s: %v\n", *configDir, err)
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "Removed config directory: %s\n", *configDir)
+				if err := core.ClearActiveConfigDir(*configDir); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not clear active config selection: %v\n", err)
+				}
 			}
 
 			// Package-manager-owned binaries must be removed by their manager so its
@@ -2385,21 +2410,31 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 				return nil
 			}
 
-			// Find and remove the fleet binary
-			binaryPath, err := exec.LookPath("fleet")
+			// Remove exactly the executable running this command. Never consult PATH:
+			// another Fleet installation may be found there and must not be touched.
+			executablePath, err := os.Executable()
 			if err != nil {
-				// Try the path of the running executable as fallback
-				binaryPath, err = os.Executable()
-				if err != nil {
-					fmt.Fprintln(cmd.ErrOrStderr(), "warning: could not locate fleet binary; remove it manually")
-					return nil
-				}
-				binaryPath, _ = filepath.EvalSymlinks(binaryPath)
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: could not locate the running fleet binary; remove it manually")
+				return nil
+			}
+			binaryPath, err := selfManagedUninstallTarget(executablePath)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve the running fleet binary: %v; remove it manually\n", err)
+				return nil
+			}
+
+			if removalCommand, deferred := deferredSelfManagedRemovalCommand(runtime.GOOS, binaryPath); deferred {
+				out := cmd.OutOrStdout()
+				fmt.Fprintln(out, "The running Fleet executable cannot be removed safely on Windows.")
+				fmt.Fprintln(out, "After this Fleet process exits, run in PowerShell:")
+				fmt.Fprintln(out)
+				fmt.Fprintf(out, "  %s\n", removalCommand)
+				return nil
 			}
 
 			if err := os.Remove(binaryPath); err != nil {
 				if os.IsPermission(err) {
-					// Try with sudo on unix
+					// Try with sudo on Unix.
 					sudoErr := exec.Command("sudo", "rm", "-f", binaryPath).Run() // #nosec G204 -- fixed executable/flags; binaryPath is an argv element, not shell text
 					if sudoErr != nil {
 						fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove %s (permission denied). Run: sudo rm -f %s\n", binaryPath, binaryPath)

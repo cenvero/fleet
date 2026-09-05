@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -166,6 +164,9 @@ func (a *App) ListRemoteDir(serverName, remotePath string) (proto.FileListResult
 
 // RemoteMkdir creates a directory on a managed server.
 func (a *App) RemoteMkdir(serverName, remotePath string) error {
+	if err := a.validateRemoteTargetPath(serverName, remotePath); err != nil {
+		return err
+	}
 	return a.simpleFileOp(serverName, proto.ActionFileMkdir, proto.FileMkdirPayload{Path: remotePath}, "file.mkdir", remotePath)
 }
 
@@ -176,7 +177,18 @@ func (a *App) RemoteDelete(serverName, remotePath string, recursive bool) error 
 
 // RemoteRename renames/moves a path on a managed server.
 func (a *App) RemoteRename(serverName, from, to string) error {
+	if err := a.validateRemoteTargetPath(serverName, to); err != nil {
+		return err
+	}
 	return a.simpleFileOp(serverName, proto.ActionFileRename, proto.FileRenamePayload{From: from, To: to}, "file.rename", from+" -> "+to)
+}
+
+func (a *App) validateRemoteTargetPath(serverName, target string) error {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return err
+	}
+	return ValidateTargetPath(TargetPathStyleForServer(server), target)
 }
 
 func (a *App) simpleFileOp(serverName, action string, payload any, auditAction, target string) error {
@@ -407,8 +419,12 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		return proto.FileFinalizeResult{}, err
 	}
 	resolved := a.resolveTransferOptions(server, opts)
-	target, err := resolveUploadRemotePath(resolved.RemoteDir, remotePath, localPath)
+	style := TargetPathStyleForServer(server)
+	target, err := resolveUploadRemotePath(style, resolved.RemoteDir, remotePath, localPath)
 	if err != nil {
+		return proto.FileFinalizeResult{}, err
+	}
+	if err := ValidateTargetPath(style, target); err != nil {
 		return proto.FileFinalizeResult{}, err
 	}
 
@@ -673,15 +689,19 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 		return proto.FileStatResult{}, err
 	}
 	resolved := a.resolveTransferOptions(server, opts)
+	style := TargetPathStyleForServer(server)
 	if opts.localRoot != "" {
-		if !safeRel(opts.localRel) {
+		if !safeRel(filepath.FromSlash(opts.localRel)) {
 			return proto.FileStatResult{}, fmt.Errorf("refusing unsafe local destination %q", opts.localRel)
 		}
-		localPath = filepath.Join(opts.localRoot, filepath.Clean(opts.localRel))
+		localPath = filepath.Join(opts.localRoot, filepath.FromSlash(opts.localRel))
 	} else if localPath == "" {
-		localPath = filepath.Base(remotePath)
+		localPath = style.Base(remotePath)
 	} else if info, err := os.Lstat(localPath); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		localPath = filepath.Join(localPath, path.Base(remotePath))
+		localPath = filepath.Join(localPath, style.Base(remotePath))
+	}
+	if err := ValidateTargetPath(NativePathStyle(), localPath); err != nil {
+		return proto.FileStatResult{}, err
 	}
 
 	conn, err := a.openTransferConn(server, resolved.Parallel)
@@ -694,8 +714,8 @@ func (a *App) DownloadFile(serverName, remotePath, localPath string, opts FileTr
 	if err != nil {
 		return proto.FileStatResult{}, fmt.Errorf("stat remote file: %w", err)
 	}
-	if stat.Entry.IsDir {
-		return proto.FileStatResult{}, fmt.Errorf("%s is a directory; recursive download is not supported", remotePath)
+	if err := requireRemoteRegular(stat.Entry, remotePath); err != nil {
+		return proto.FileStatResult{}, err
 	}
 	totalSize := stat.Entry.Size
 	// The size here is reported by the remote agent. Bound it before it sizes a
@@ -943,18 +963,18 @@ func resumeDownloadChunks(conn *transferConn, remotePath string, chunks []chunkS
 
 // ---- small helpers ----
 
-func resolveUploadRemotePath(remoteDir, remotePath, localPath string) (string, error) {
+func resolveUploadRemotePath(style TargetPathStyle, remoteDir, remotePath, localPath string) (string, error) {
 	base := filepath.Base(localPath)
 	switch {
 	case remotePath == "":
 		if remoteDir == "" {
 			return "", fmt.Errorf("remote path required: no default remote dir is configured (set one with 'fleet file defaults set' or pass an explicit remote path)")
 		}
-		return path.Join(remoteDir, base), nil
-	case strings.HasSuffix(remotePath, "/"):
-		return path.Join(remotePath, base), nil
+		return style.Join(remoteDir, base), nil
+	case style.HasTrailingSeparator(remotePath):
+		return style.Join(remotePath, base), nil
 	default:
-		return remotePath, nil
+		return style.Clean(remotePath), nil
 	}
 }
 

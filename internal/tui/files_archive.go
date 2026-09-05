@@ -99,11 +99,11 @@ func (m filesModel) submitCompress() (tea.Model, tea.Cmd) {
 		m.status = "cancelled"
 		return m, nil
 	}
-	if strings.ContainsAny(name, "/\\") {
-		m.status = "invalid archive name"
+	pane := m.paneRefConst(side)
+	if err := core.ValidateTargetPathComponent(pane.pathStyle, name); err != nil {
+		m.status = "invalid archive name: " + err.Error()
 		return m, nil
 	}
-	pane := m.paneRefConst(side)
 	app := m.app
 	source := pane.source
 	dir := pane.cwd
@@ -135,7 +135,7 @@ func (m filesModel) extractFocused(side int) (tea.Model, tea.Cmd) {
 		m.status = it.name + " is not a recognised archive"
 		return m, nil
 	}
-	full := joinPath(pane.cwd, it.name, pane.remote)
+	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	app := m.app
 	source := pane.source
 	m.status = "extracting " + it.name + "…"
@@ -185,7 +185,7 @@ func (m filesModel) runChmod(side int, name, mode string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	pane := m.paneRefConst(side)
-	full := joinPath(pane.cwd, name, pane.remote)
+	full := joinPath(pane.cwd, name, pane.pathStyle)
 	if err := m.app.ChmodPath(pane.source, full, mode); err != nil {
 		m.status = "chmod failed: " + err.Error()
 		return m, nil
@@ -211,7 +211,7 @@ func (m filesModel) checksumFocused(side int) (tea.Model, tea.Cmd) {
 		m.status = "cannot checksum a directory"
 		return m, nil
 	}
-	full := joinPath(pane.cwd, it.name, pane.remote)
+	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	app := m.app
 	source := pane.source
 	m.status = "computing SHA-256 of " + it.name + "…"
@@ -243,34 +243,45 @@ func (m filesModel) onChecksumDone(msg checksumDoneMsg) (tea.Model, tea.Cmd) {
 // Duplicate (copy a file to a "<name> copy.<ext>" sibling)
 // ============================================================================
 
-// duplicateFocused copies the focused file to a uniquely-named sibling in the
-// same pane. For a server pane it relays through core.CopyFile (same src/dst
-// server); for Local it does a local stream copy. Runs off the UI thread.
+// duplicateFocused copies the focused file or directory to a uniquely-named
+// sibling in the same pane. Directory copies preserve hidden and empty entries
+// and refuse symlinks through the core recursive transfer policy.
 func (m filesModel) duplicateFocused(side int) (tea.Model, tea.Cmd) {
 	pane := m.paneRefConst(side)
 	it := m.focusedItem(side)
 	if it.name == "" || it.name == ".." {
-		m.status = "select a file to duplicate"
-		return m, nil
-	}
-	if it.isDir {
-		m.status = "cannot duplicate a directory"
+		m.status = "select an item to duplicate"
 		return m, nil
 	}
 	existing := make(map[string]bool, len(pane.entries))
 	for _, e := range pane.entries {
-		existing[e.name] = true
+		key := e.name
+		if pane.pathStyle.IsWindows() {
+			key = strings.ToLower(key)
+		}
+		existing[key] = true
 	}
-	dupName := duplicateName(it.name, existing)
-	src := joinPath(pane.cwd, it.name, pane.remote)
-	dst := joinPath(pane.cwd, dupName, pane.remote)
+	dupName := duplicateName(it.name, existing, pane.pathStyle)
+	if err := core.ValidateTargetPathComponent(pane.pathStyle, dupName); err != nil {
+		m.status = "duplicate failed: " + err.Error()
+		return m, nil
+	}
+	src := joinPath(pane.cwd, it.name, pane.pathStyle)
+	dst := joinPath(pane.cwd, dupName, pane.pathStyle)
 	app := m.app
 	source := pane.source
+	isDir := it.isDir
 	m.status = "duplicating " + it.name + "…"
 	return m, func() tea.Msg {
 		var err error
 		if source == "" {
-			err = copyLocalFile(src, dst)
+			if isDir {
+				err = core.CopyLocalTreeAtomic(src, dst)
+			} else {
+				err = copyLocalFile(src, dst)
+			}
+		} else if isDir {
+			_, err = app.CopyDir(source, src, source, dst, core.FileTransferOptions{}, nil)
 		} else {
 			_, err = app.CopyFile(source, src, source, dst, core.FileTransferOptions{}, nil)
 		}
@@ -281,7 +292,7 @@ func (m filesModel) duplicateFocused(side int) (tea.Model, tea.Cmd) {
 // duplicateName builds a Finder-style "<base> copy.<ext>" sibling name, bumping a
 // numeric suffix ("<base> copy 2.<ext>", …) until it doesn't collide with any
 // existing name in the directory.
-func duplicateName(name string, existing map[string]bool) string {
+func duplicateName(name string, existing map[string]bool, style core.TargetPathStyle) string {
 	ext := filepath.Ext(name)
 	// Treat multi-part archive suffixes (.tar.gz) as a single extension so the
 	// "copy" tag lands before the whole suffix.
@@ -292,14 +303,25 @@ func duplicateName(name string, existing map[string]bool) string {
 			break
 		}
 	}
+	exists := func(candidate string) bool {
+		if !style.IsWindows() {
+			return existing[candidate]
+		}
+		for entry := range existing {
+			if strings.EqualFold(entry, candidate) {
+				return true
+			}
+		}
+		return false
+	}
 	base := name[:len(name)-len(ext)]
 	candidate := base + " copy" + ext
-	if !existing[candidate] {
+	if !exists(candidate) {
 		return candidate
 	}
 	for i := 2; ; i++ {
 		candidate = fmt.Sprintf("%s copy %d%s", base, i, ext)
-		if !existing[candidate] {
+		if !exists(candidate) {
 			return candidate
 		}
 	}

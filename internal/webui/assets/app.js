@@ -75,22 +75,169 @@ function fmtTime(iso) {
   return `${mon} ${day}, ${d.getFullYear()}`;
 }
 
-function joinPath(dir, name) {
-  if (dir.endsWith("/")) return dir + name;
-  return dir + "/" + name;
+function normalizePathStyle(style) {
+  return style === "windows" ? "windows" : "posix";
 }
 
-function parentPath(p) {
-  if (p === "/" || p === "") return "/";
-  const trimmed = p.replace(/\/+$/, "");
-  const idx = trimmed.lastIndexOf("/");
-  return idx <= 0 ? "/" : trimmed.slice(0, idx);
+function splitWindowsPath(input) {
+  const value = String(input || "").replace(/\//g, "\\");
+  const unc = value.match(/^\\\\([^\\]+)\\([^\\]+)(.*)$/);
+  if (unc) return { volume: "\\\\" + unc[1] + "\\" + unc[2], rest: unc[3] || "", rooted: true };
+  const drive = value.match(/^([A-Za-z]:)(.*)$/);
+  if (drive) return { volume: drive[1], rest: drive[2] || "", rooted: drive[2].startsWith("\\") };
+  return { volume: "", rest: value, rooted: value.startsWith("\\") };
 }
 
-function baseName(p) {
-  const t = p.replace(/\/+$/, "");
-  const idx = t.lastIndexOf("/");
-  return idx < 0 ? t : t.slice(idx + 1);
+function cleanPath(input, style) {
+  style = normalizePathStyle(style);
+  if (style === "posix") {
+    const value = String(input || "");
+    const rooted = value.startsWith("/");
+    const parts = [];
+    for (const part of value.split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (parts.length && parts[parts.length - 1] !== "..") parts.pop();
+        else if (!rooted) parts.push(part);
+      } else parts.push(part);
+    }
+    if (rooted) return "/" + parts.join("/");
+    return parts.join("/") || ".";
+  }
+
+  const parsed = splitWindowsPath(input);
+  const parts = [];
+  for (const part of parsed.rest.split(/\\+/)) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (parts.length && parts[parts.length - 1] !== "..") parts.pop();
+      else if (!parsed.rooted) parts.push(part);
+    } else parts.push(part);
+  }
+  const body = parts.join("\\");
+  if (parsed.rooted) return parsed.volume + "\\" + body;
+  return parsed.volume + body || ".";
+}
+
+function joinPath(dir, name, style) {
+  style = normalizePathStyle(style);
+  if (style === "windows") {
+    const next = splitWindowsPath(name);
+    if ((next.volume && next.rooted) || next.volume) return cleanPath(name, style);
+    return cleanPath(String(dir || "").replace(/[\\/]+$/, "") + "\\" + String(name || "").replace(/^[\\/]+/, ""), style);
+  }
+  if (String(name || "").startsWith("/")) return cleanPath(name, style);
+  return cleanPath(String(dir || "").replace(/\/+$/, "") + "/" + String(name || "").replace(/^\/+/, ""), style);
+}
+
+function pathWithin(root, target, style) {
+  style = normalizePathStyle(style);
+  root = cleanPath(root, style);
+  target = cleanPath(target, style);
+  if (style === "windows") {
+    const r = splitWindowsPath(root);
+    const t = splitWindowsPath(target);
+    if (!r.rooted || !t.rooted || r.volume.toLowerCase() !== t.volume.toLowerCase()) return false;
+    const rp = r.rest.split(/\\+/).filter(Boolean);
+    const tp = t.rest.split(/\\+/).filter(Boolean);
+    return rp.length <= tp.length && rp.every((part, i) => part.toLowerCase() === tp[i].toLowerCase());
+  }
+  return root === "/" || target === root || target.startsWith(root.replace(/\/+$/, "") + "/");
+}
+
+function rootPath(p, style, fallback = "") {
+  style = normalizePathStyle(style);
+  if (fallback) return cleanPath(fallback, style);
+  if (style === "posix") return "/";
+  let parsed = splitWindowsPath(cleanPath(p, style));
+  if (!parsed.volume || !parsed.rooted) parsed = splitWindowsPath("C:\\");
+  return parsed.volume && parsed.rooted ? parsed.volume + "\\" : "C:\\";
+}
+
+function parentPath(p, style, fallback = "") {
+  style = normalizePathStyle(style);
+  const clean = cleanPath(p, style);
+  const root = rootPath(clean, style, fallback);
+  if (!pathWithin(root, clean, style) || clean.toLowerCase() === root.toLowerCase()) return root;
+  let parent;
+  if (style === "posix") {
+    const idx = clean.lastIndexOf("/");
+    parent = idx <= 0 ? "/" : clean.slice(0, idx);
+  } else {
+    const parsed = splitWindowsPath(clean);
+    const parts = parsed.rest.split(/\\+/).filter(Boolean);
+    parts.pop();
+    parent = parts.length ? parsed.volume + "\\" + parts.join("\\") : rootPath(clean, style);
+  }
+  return pathWithin(root, parent, style) ? parent : root;
+}
+
+function baseName(p, style) {
+  style = normalizePathStyle(style);
+  const clean = cleanPath(p, style);
+  if (clean.toLowerCase() === rootPath(clean, style).toLowerCase()) return style === "windows" ? "\\" : "/";
+  const sep = style === "windows" ? "\\" : "/";
+  const idx = clean.lastIndexOf(sep);
+  return idx < 0 ? clean : clean.slice(idx + 1);
+}
+
+function pathBreadcrumbs(p, style, fallback = "") {
+  style = normalizePathStyle(style);
+  const clean = cleanPath(p, style);
+  const root = rootPath(clean, style, fallback);
+  if (!pathWithin(root, clean, style)) return [{ label: root, path: root }];
+  let rest;
+  if (style === "windows") {
+    const rootParts = splitWindowsPath(root).rest.split(/\\+/).filter(Boolean);
+    const cleanParts = splitWindowsPath(clean).rest.split(/\\+/).filter(Boolean);
+    rest = cleanParts.slice(rootParts.length);
+  } else {
+    const suffix = root === "/" ? clean : clean.slice(root.length);
+    rest = suffix.split("/").filter(Boolean);
+  }
+  const crumbs = [{ label: root, path: root }];
+  let current = root;
+  for (const segment of rest) {
+    current = joinPath(current, segment, style);
+    crumbs.push({ label: segment, path: current });
+  }
+  return crumbs;
+}
+
+// componentNameError mirrors the backend's authoritative one-component rule.
+// Both separators are forbidden for every source style; Windows sources also
+// enforce Win32-invalid characters, trailing dot/space, and DOS device names.
+function componentNameError(name, style) {
+  name = String(name == null ? "" : name);
+  style = normalizePathStyle(style);
+  if (!name) return "Name is required";
+  if (name === "." || name === "..") return "Name must not be “" + name + "”";
+  if (/^[A-Za-z]:[\\/]/.test(name) || /^[\\/]{2}/.test(name)) return "Name must not be an absolute path";
+  if (/[\\/]/.test(name)) return "Name must be one path component";
+  if(/[\u0000-\u001f\u007f-\u009f]/u.test(name)) return "Name must not contain control characters";
+  if (style !== "windows") return "";
+  if (/[<>:\"|?*]/.test(name)) return "Name contains a character invalid on Windows";
+  if (/[. ]$/.test(name)) return "Windows names must not end in a dot or space";
+  const stem = name.split(".", 1)[0].replace(/[. ]+$/g, "");
+  if (/^(con|prn|aux|nul|conin\$|conout\$|(?:com|lpt)(?:[1-9¹²³]))$/i.test(stem)) {
+    return "This is a reserved Windows name";
+  }
+  return "";
+}
+
+function batchNamespaceError(items, style, caseInsensitive = normalizePathStyle(style) === "windows") {
+  style = normalizePathStyle(style);
+  const seen = new Map();
+  for (const item of items) {
+    const err = componentNameError(item.name, style);
+    if (err) return "“" + item.name + "”: " + err;
+    const key = caseInsensitive ? item.name.toLowerCase() : item.name;
+    if (seen.has(key) && seen.get(key) !== item.name) {
+      return "Destination name collision: “" + seen.get(key) + "” and “" + item.name + "”";
+    }
+    seen.set(key, item.name);
+  }
+  return "";
 }
 
 // isArchiveFile reports whether a name looks like a supported archive, so the
@@ -145,7 +292,12 @@ const ICONS = {
 function newPaneState(server) {
   return {
     server: server || "",
-    path: "/",
+    os: "",
+    pathStyle: "posix",
+    caseInsensitive: false,
+    initialRoot: "/",
+    browseRoot: "/",
+    path: "",
     items: [],            // raw listing from the server (already dir-first sorted base)
     sel: new Set(),
     hidden: false,
@@ -159,6 +311,7 @@ function newPaneState(server) {
 const MAX_PANES = 6;
 
 const state = {
+  local: { name: "", reachable: true, os: "", path_style: "posix", case_insensitive: false, initial_root: "/", browse_root: "/" },
   servers: [],
   panes: [newPaneState(""), newPaneState("")],
   active: 0,
@@ -172,6 +325,24 @@ function pane(i) { return state.panes[i]; }
 function other(i) {
   if (state.panes.length < 2) return i;
   return (i + 1) % state.panes.length;
+}
+
+function sourceInfo(server) {
+  if (!server) return state.local;
+  return state.servers.find((source) => source.name === server) || null;
+}
+
+function applyPaneSource(p, server) {
+  const source = sourceInfo(server) || state.local;
+  p.server = server || "";
+  p.os = source.os || "";
+  p.pathStyle = normalizePathStyle(source.path_style);
+  p.caseInsensitive = Boolean(source.case_insensitive || p.pathStyle === "windows");
+  p.initialRoot = source.initial_root || (p.pathStyle === "windows" ? "C:\\" : "/");
+  p.browseRoot = source.browse_root || (p.pathStyle === "windows" ? "C:\\" : "/");
+  if (!pathWithin(p.browseRoot, p.initialRoot, p.pathStyle)) p.initialRoot = p.browseRoot;
+  p.path = p.initialRoot;
+  p.sel.clear();
 }
 
 // ----------------------------------------------------------------- toast
@@ -288,7 +459,9 @@ function addPane() {
   }
   const reachable = state.servers.filter((s) => s.reachable);
   const defServer = reachable[0] ? reachable[0].name : "";
-  state.panes.push(newPaneState(defServer));
+  const next = newPaneState(defServer);
+  applyPaneSource(next, defServer);
+  state.panes.push(next);
   const idx = state.panes.length - 1;
   buildPanes();
   setActive(idx);
@@ -314,13 +487,11 @@ function wirePane(i) {
 
   r.server.addEventListener("change", (e) => {
     setActive(i);
-    p.server = e.target.value;
-    p.path = "/";
-    p.sel.clear();
+    applyPaneSource(p, e.target.value);
     loadListing(i);
   });
 
-  r.back.addEventListener("click", () => { setActive(i); navigate(i, parentPath(p.path)); });
+  r.back.addEventListener("click", () => { setActive(i); navigate(i, parentPath(p.path, p.pathStyle, p.browseRoot)); });
   r.refresh.addEventListener("click", () => { setActive(i); loadListing(i); });
   r.mkdir.addEventListener("click", () => { setActive(i); promptMkdir(i); });
   r.newfile.addEventListener("click", () => { setActive(i); promptNewFile(i); });
@@ -423,21 +594,28 @@ function renderSort(i) {
 // ----------------------------------------------------------------- servers
 
 async function loadServers() {
-  let servers = [];
+  let payload;
   try {
-    servers = await getJSON("/api/servers");
+    payload = await getJSON("/api/servers");
   } catch (e) {
     toast("Failed to load servers: " + e.message, "error");
     return;
   }
-  state.servers = servers;
+  // The object shape carries controller-local metadata separately from managed
+  // targets. The array fallback keeps a graceful error path for stale backends.
+  state.local = Array.isArray(payload) ? state.local : (payload.local || state.local);
+  state.servers = Array.isArray(payload) ? payload : (payload.servers || []);
+  const servers = state.servers;
+
   // Default panes: pane 0 = Local, pane 1 = first reachable server (or Local
-  // when no servers are configured / reachable). Only seed defaults the very
-  // first time; later panes keep whatever the user picked.
+  // when no servers are configured / reachable). Every source starts at the
+  // backend-advertised root, which may be a cwd, drive root, or UNC share.
   const reachable = servers.filter((s) => s.reachable);
   const firstServer = reachable[0] || servers[0];
-  pane(0).server = "";
-  if (state.panes.length > 1) pane(1).server = firstServer ? firstServer.name : "";
+  applyPaneSource(pane(0), "");
+  if (state.panes.length > 1) applyPaneSource(pane(1), firstServer ? firstServer.name : "");
+  for (let i = 2; i < state.panes.length; i++) applyPaneSource(pane(i), pane(i).server);
+
   // Build each pane's source dropdown ("Local" + every configured server).
   for (let i = 0; i < state.panes.length; i++) populateServerSelect(i);
   await Promise.all(state.panes.map((_, i) => loadListing(i)));
@@ -465,6 +643,7 @@ async function loadListing(i) {
   }
   p.loading = false;
   p.path = result.path || p.path;
+  if (typeof result.case_insensitive === "boolean") p.caseInsensitive = result.case_insensitive;
   // keep selections that still exist
   const names = new Set((result.entries || []).map((x) => x.name));
   for (const n of Array.from(p.sel)) if (!names.has(n)) p.sel.delete(n);
@@ -539,29 +718,21 @@ function renderCrumbs(i) {
   const p = pane(i);
   const c = state.els[i].crumbs;
   c.innerHTML = "";
-  const parts = p.path.split("/").filter(Boolean);
-  const rootBtn = document.createElement("button");
-  rootBtn.className = "crumb" + (parts.length === 0 ? " current" : "");
-  rootBtn.textContent = "/";
-  rootBtn.dataset.path = "/";
-  if (parts.length) rootBtn.addEventListener("click", () => navigate(i, "/"));
-  c.appendChild(rootBtn);
-
-  let acc = "";
-  parts.forEach((seg, idx) => {
-    acc += "/" + seg;
-    const sep = document.createElement("span");
-    sep.className = "crumb-sep";
-    sep.textContent = "›";
-    c.appendChild(sep);
-    const b = document.createElement("button");
-    const last = idx === parts.length - 1;
-    b.className = "crumb" + (last ? " current" : "");
-    b.textContent = seg;
-    const target = acc;
-    b.dataset.path = target;
-    if (!last) b.addEventListener("click", () => navigate(i, target));
-    c.appendChild(b);
+  const crumbs = pathBreadcrumbs(p.path, p.pathStyle, p.browseRoot);
+  crumbs.forEach((crumb, idx) => {
+    if (idx > 0) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "›";
+      c.appendChild(sep);
+    }
+    const button = document.createElement("button");
+    const last = idx === crumbs.length - 1;
+    button.className = "crumb" + (last ? " current" : "");
+    button.textContent = crumb.label;
+    button.dataset.path = crumb.path;
+    if (!last) button.addEventListener("click", () => navigate(i, crumb.path));
+    c.appendChild(button);
   });
 }
 
@@ -755,7 +926,7 @@ function wireRow(i, row, item) {
   row.addEventListener("dblclick", () => {
     setActive(i);
     if (item.is_dir) {
-      navigate(i, joinPath(p.path, item.name));
+      navigate(i, joinPath(p.path, item.name, p.pathStyle));
     } else if (isTextFile(item.name)) {
       openEditor(i, item);
     } else {
@@ -778,7 +949,7 @@ function wireRow(i, row, item) {
 
 function downloadOne(i, item) {
   const p = pane(i);
-  const url = api("/api/download", { server: p.server, path: joinPath(p.path, item.name) });
+  const url = api("/api/download", { server: p.server, path: joinPath(p.path, item.name, p.pathStyle) });
   const a = document.createElement("a");
   a.href = url.toString();
   a.download = item.name;
@@ -796,15 +967,16 @@ function actDownload(i) {
 // ----------------------------------------------------------------- mkdir / rename / delete
 
 function promptMkdir(i) {
+  const p = pane(i);
   openInputModal({
     title: "New folder",
-    desc: "Create a folder in " + pane(i).path,
+    desc: "Create a folder in " + p.path,
     value: "untitled folder",
     okLabel: "Create",
+    validate: (name) => componentNameError(name, p.pathStyle),
     onOk: async (name) => {
-      const p = pane(i);
       try {
-        await postJSON("/api/mkdir", { server: p.server, path: joinPath(p.path, name) });
+        await postJSON("/api/mkdir", { server: p.server, dir: p.path, name });
         toast("Created " + name, "success");
         loadListing(i);
       } catch (e) {
@@ -815,15 +987,16 @@ function promptMkdir(i) {
 }
 
 function promptNewFile(i) {
+  const p = pane(i);
   openInputModal({
     title: "New file",
-    desc: "Create an empty file in " + pane(i).path,
+    desc: "Create an empty file in " + p.path,
     value: "untitled.txt",
     okLabel: "Create",
+    validate: (name) => componentNameError(name, p.pathStyle),
     onOk: async (name) => {
-      const p = pane(i);
       try {
-        await postJSON("/api/touch", { server: p.server, path: joinPath(p.path, name) });
+        await postJSON("/api/touch", { server: p.server, dir: p.path, name });
         toast("Created " + name, "success");
         await loadListing(i);
         // Open the new file straight in the editor for convenience.
@@ -839,16 +1012,17 @@ function actRename(i) {
   const sel = selectedItems(i);
   if (sel.length !== 1) return;
   const item = sel[0];
+  const p = pane(i);
   openInputModal({
     title: "Rename",
     desc: "Rename “" + item.name + "”",
     value: item.name,
     okLabel: "Rename",
+    validate: (name) => componentNameError(name, p.pathStyle),
     onOk: async (name) => {
       if (name === item.name) return;
-      const p = pane(i);
       try {
-        await postJSON("/api/mv", { server: p.server, from: joinPath(p.path, item.name), to: joinPath(p.path, name) });
+        await postJSON("/api/mv", { server: p.server, from: joinPath(p.path, item.name, p.pathStyle), name });
         toast("Renamed to " + name, "success");
         p.sel.clear();
         loadListing(i);
@@ -876,7 +1050,7 @@ function actDelete(i) {
         try {
           await postJSON("/api/rm", {
             server: p.server,
-            path: joinPath(p.path, item.name),
+            path: joinPath(p.path, item.name, p.pathStyle),
             recursive: item.is_dir ? "true" : "false",
           });
           ok++;
@@ -906,6 +1080,11 @@ async function runTransfer(srcIdx, items, dstIdx, dstDir, kind) {
   const sp = pane(srcIdx);
   const dp = pane(dstIdx);
   const hasDir = items.some((it) => it.is_dir);
+  const namespaceError = batchNamespaceError(items, dp.pathStyle, dp.caseInsensitive);
+  if (namespaceError) {
+    toast(namespaceError, "error");
+    return;
+  }
 
   // same-server + same dir guard
   if (sp.server === dp.server && sp.path === dstDir) {
@@ -925,8 +1104,8 @@ async function runTransfer(srcIdx, items, dstIdx, dstDir, kind) {
   }
 
   for (const item of items) {
-    const srcPath = joinPath(sp.path, item.name);
-    const dstPath = joinPath(dstDir, item.name);
+    const srcPath = joinPath(sp.path, item.name, sp.pathStyle);
+    const dstPath = joinPath(dstDir, item.name, dp.pathStyle);
     const recursive = item.is_dir;
     const endpoint = kind === "move" ? "/api/move" : "/api/copy";
     let resp;
@@ -954,15 +1133,15 @@ async function runTransfer(srcIdx, items, dstIdx, dstDir, kind) {
 // same-pane move (rename within a server) — drop onto a folder in same pane.
 async function moveIntoFolder(i, items, destName) {
   const p = pane(i);
-  const destPath = joinPath(p.path, destName);
+  const destPath = joinPath(p.path, destName, p.pathStyle);
   let moved = 0;
   for (const item of items) {
     if (item.name === destName) continue;
     try {
       await postJSON("/api/mv", {
         server: p.server,
-        from: joinPath(p.path, item.name),
-        to: joinPath(destPath, item.name),
+        from: joinPath(p.path, item.name, p.pathStyle),
+        to: joinPath(destPath, item.name, p.pathStyle),
       });
       moved++;
     } catch (e) {
@@ -978,7 +1157,13 @@ async function moveIntoFolder(i, items, destName) {
 
 async function uploadFiles(i, fileList) {
   const p = pane(i);
-  for (const file of fileList) {
+  const files = Array.from(fileList);
+  const namespaceError = batchNamespaceError(files.map((file) => ({ name: file.name })), p.pathStyle, p.caseInsensitive);
+  if (namespaceError) {
+    toast(namespaceError, "error");
+    return;
+  }
+  for (const file of files) {
     await uploadOneFile(i, p, file);
   }
 }
@@ -1234,7 +1419,7 @@ function openContextMenu(i, item, x, y) {
 
   if (item) {
     if (item.is_dir) {
-      add(makeMenuItem("Open", ICONS.open, () => navigate(i, joinPath(p.path, item.name))));
+      add(makeMenuItem("Open", ICONS.open, () => navigate(i, joinPath(p.path, item.name, p.pathStyle))));
     } else {
       if (isTextFile(item.name)) {
         add(makeMenuItem("Edit", ICONS.edit, () => openEditor(i, item), { disabled: multi }));
@@ -1293,7 +1478,7 @@ function showProperties(i, item) {
   const rows = [
     ["Name", item.name],
     ["Type", item.is_dir ? "Folder" : item.is_symlink ? "Symbolic link" : "File"],
-    ["Path", joinPath(p.path, item.name)],
+    ["Path", joinPath(p.path, item.name, p.pathStyle)],
     ["Size", item.is_dir ? "—" : humanSize(item.size) + " (" + (item.size || 0).toLocaleString() + " bytes)"],
     ["Modified", fmtTime(item.mod_time) || "—"],
     ["Mode", item.mode != null ? "0" + (item.mode & 0o777).toString(8) : "—"],
@@ -1345,7 +1530,7 @@ function mkBtn(label, cls, handler) {
   return b;
 }
 
-function openInputModal({ title, desc, value, okLabel, onOk }) {
+function openInputModal({ title, desc, value, okLabel, validate, onOk }) {
   const modal = openModalShell();
   const h = document.createElement("h3"); h.textContent = title; modal.appendChild(h);
   if (desc) { const d = document.createElement("p"); d.className = "modal-desc"; d.textContent = desc; modal.appendChild(d); }
@@ -1360,8 +1545,14 @@ function openInputModal({ title, desc, value, okLabel, onOk }) {
   actions.append(cancel, ok);
   modal.appendChild(actions);
   function submit() {
-    const v = input.value.trim();
-    if (!v) { input.focus(); return; }
+    const raw = input.value;
+    const v = validate ? raw : raw.trim();
+    const validationError = validate ? validate(v) : (!v ? "A value is required" : "");
+    if (validationError) {
+      toast(validationError, "error");
+      input.focus();
+      return;
+    }
     closeModal();
     onOk(v);
   }
@@ -1569,7 +1760,8 @@ async function onDragUp(e) {
   }
 
   if (target.kind === "folder") {
-    const dstDir = joinPath(pane(target.paneIdx).path, target.name);
+    const targetPane = pane(target.paneIdx);
+    const dstDir = joinPath(targetPane.path, target.name, targetPane.pathStyle);
     if (target.paneIdx === srcIdx) {
       // same-pane drop on folder → move (rename)
       await moveIntoFolder(srcIdx, items, target.name);
@@ -1593,8 +1785,8 @@ async function moveSelectionToDir(i, items, dstDir) {
     try {
       await postJSON("/api/mv", {
         server: p.server,
-        from: joinPath(p.path, item.name),
-        to: joinPath(dstDir, item.name),
+        from: joinPath(p.path, item.name, p.pathStyle),
+        to: joinPath(dstDir, item.name, p.pathStyle),
       });
       moved++;
     } catch (e) {
@@ -1747,13 +1939,13 @@ function setupKeyboard() {
     if (e.key === "Enter" && p.sel.size === 1) {
       const item = p.items.find((x) => p.sel.has(x.name));
       if (item) {
-        if (item.is_dir) navigate(i, joinPath(p.path, item.name));
+        if (item.is_dir) navigate(i, joinPath(p.path, item.name, p.pathStyle));
         else if (isTextFile(item.name)) openEditor(i, item);
         else downloadOne(i, item);
       }
       return;
     }
-    if (e.key === "Backspace") { navigate(i, parentPath(p.path)); return; }
+    if (e.key === "Backspace") { navigate(i, parentPath(p.path, p.pathStyle, p.browseRoot)); return; }
     if ((e.key === "ArrowDown" || e.key === "ArrowUp") && p.items.length) {
       e.preventDefault();
       moveSelectionByArrow(i, e.key === "ArrowDown" ? 1 : -1, e.shiftKey);
@@ -1781,7 +1973,8 @@ function moveSelectionByArrow(i, dir, extend) {
 // hidden textarea + execCommand where the async Clipboard API is unavailable
 // (it needs a secure context; http://localhost qualifies in most browsers).
 async function copyPath(i, item) {
-  const full = joinPath(pane(i).path, item.name);
+  const p = pane(i);
+  const full = joinPath(p.path, item.name, p.pathStyle);
   let ok = false;
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1821,12 +2014,17 @@ async function loadArchiveFormats() {
 async function actCompress(i) {
   const items = selectedItems(i);
   if (!items.length) { toast("Select items to compress", "error"); return; }
+  const p = pane(i);
+  for (const item of items) {
+    const error = componentNameError(item.name, p.pathStyle);
+    if (error) { toast("Cannot archive “" + item.name + "”: " + error, "error"); return; }
+  }
   const formats = await loadArchiveFormats();
   openCompressModal({
     items,
     formats,
+    pathStyle: p.pathStyle,
     onOk: async (archive, format, names) => {
-      const p = pane(i);
       const params = new URLSearchParams();
       params.set("server", p.server);
       params.set("dir", p.path);
@@ -1848,7 +2046,7 @@ async function actCompress(i) {
 async function actExtract(i, item) {
   const p = pane(i);
   try {
-    await postJSON("/api/extract", { server: p.server, path: joinPath(p.path, item.name) });
+    await postJSON("/api/extract", { server: p.server, path: joinPath(p.path, item.name, p.pathStyle) });
     toast("Extracted " + item.name, "success");
     loadListing(i);
   } catch (e) {
@@ -1868,7 +2066,7 @@ function actChmod(i, item) {
     onOk: async (mode) => {
       if (!/^[0-7]{3,4}$/.test(mode.trim())) { toast("Mode must be octal (e.g. 644)", "error"); return; }
       try {
-        await postJSON("/api/chmod", { server: p.server, path: joinPath(p.path, item.name), mode: mode.trim() });
+        await postJSON("/api/chmod", { server: p.server, path: joinPath(p.path, item.name, p.pathStyle), mode: mode.trim() });
         toast("Set mode " + mode.trim(), "success");
         loadListing(i);
       } catch (e) {
@@ -1885,7 +2083,7 @@ async function actChecksum(i, item) {
   toast("Computing SHA-256…");
   let out;
   try {
-    out = await getJSON("/api/checksum", { server: p.server, path: joinPath(p.path, item.name) });
+    out = await getJSON("/api/checksum", { server: p.server, path: joinPath(p.path, item.name, p.pathStyle) });
   } catch (e) {
     toast("Checksum failed: " + e.message, "error");
     return;
@@ -1896,8 +2094,13 @@ async function actChecksum(i, item) {
 // actDuplicate copies the selected item to a "<name> copy.<ext>" sibling.
 async function actDuplicate(i, item) {
   const p = pane(i);
+  const validationError = componentNameError(item.name, p.pathStyle);
+  if (validationError) {
+    toast("Duplicate failed: " + validationError, "error");
+    return;
+  }
   try {
-    await postJSON("/api/duplicate", { server: p.server, path: joinPath(p.path, item.name) });
+    await postJSON("/api/duplicate", { server: p.server, path: joinPath(p.path, item.name, p.pathStyle) });
     toast("Duplicated " + item.name, "success");
     loadListing(i);
   } catch (e) {
@@ -1920,7 +2123,7 @@ async function postForm(pathname, params) {
 // openCompressModal — a small dialog with a format <select> and an archive-name
 // input. The name's extension auto-tracks the chosen format until the user edits
 // the base manually.
-function openCompressModal({ items, formats, onOk }) {
+function openCompressModal({ items, formats, pathStyle, onOk }) {
   const names = items.map((it) => it.name);
   const base = defaultArchiveBase(items);
   const modal = openModalShell();
@@ -1963,8 +2166,13 @@ function openCompressModal({ items, formats, onOk }) {
   modal.appendChild(actions);
 
   function submit() {
-    const archive = input.value.trim();
-    if (!archive) { input.focus(); return; }
+    const archive = input.value;
+    const validationError = componentNameError(archive, pathStyle);
+    if (validationError) {
+      toast(validationError, "error");
+      input.focus();
+      return;
+    }
     closeModal();
     onOk(archive, select.value, names);
   }
@@ -2391,7 +2599,7 @@ const editor = {
 
 async function openEditor(i, item) {
   const p = pane(i);
-  const full = joinPath(p.path, item.name);
+  const full = joinPath(p.path, item.name, p.pathStyle);
   const overlay = $("#editor-overlay");
   const ta = $("#ed-input");
   const name = $("#ed-name");
@@ -2481,7 +2689,7 @@ async function saveEditor() {
   const item = editor.item;
   const ta = $("#ed-input");
   const content = ta.value;
-  const full = joinPath(p.path, item.name);
+  const full = joinPath(p.path, item.name, p.pathStyle);
   const saveBtn = $("#ed-save");
   saveBtn.disabled = true;
   saveBtn.textContent = "Saving…";

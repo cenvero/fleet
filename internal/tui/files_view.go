@@ -5,7 +5,6 @@ package tui
 
 import (
 	"fmt"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -525,7 +524,7 @@ func (m filesModel) renderPaneHeader(side, cw int, focused bool) string {
 	if crumbW < 6 {
 		crumbW = 6
 	}
-	crumb := renderBreadcrumb(pane.cwd, pane.remote, crumbW)
+	crumb := renderBreadcrumbWithin(pane.cwd, pane.root, pane.pathStyle, crumbW)
 
 	line := src + "  " + crumb
 	// right-align the count + selection
@@ -537,22 +536,35 @@ func (m filesModel) renderPaneHeader(side, cw int, focused bool) string {
 	return line + strings.Repeat(" ", pad) + count + sel
 }
 
+// renderBreadcrumbWithin renders only paths at or below root. It falls back to
+// filesystem-root breadcrumbs for legacy pane states with no boundary.
+func renderBreadcrumbWithin(cwd, root string, style core.TargetPathStyle, width int) string {
+	segs := breadcrumbSegmentsWithin(cwd, root, style)
+	return renderBreadcrumbSegments(segs, width)
+}
+
+func breadcrumbSegmentsWithin(cwd, root string, style core.TargetPathStyle) []string {
+	if root == "" {
+		return breadcrumbSegments(cwd, style)
+	}
+	root = style.Clean(root)
+	rel, err := style.Relative(root, style.Clean(cwd))
+	if err != nil || rel == "." {
+		return []string{root}
+	}
+	return append([]string{root}, strings.Split(rel, "/")...)
+}
+
 // renderBreadcrumb renders a path as accented segments separated by ›, trimming
 // leading segments to fit the width.
-func renderBreadcrumb(cwd string, remote bool, width int) string {
-	sep := func(p string) []string {
-		if remote {
-			p = path.Clean(p)
-		} else {
-			p = filepath.Clean(p)
-		}
-		if p == "/" || p == "." {
-			return []string{"/"}
-		}
-		parts := strings.Split(strings.Trim(p, "/"), "/")
-		return append([]string{"/"}, parts...)
+func renderBreadcrumb(cwd string, style core.TargetPathStyle, width int) string {
+	return renderBreadcrumbSegments(breadcrumbSegments(cwd, style), width)
+}
+
+func renderBreadcrumbSegments(segs []string, width int) string {
+	if len(segs) == 0 {
+		return ""
 	}
-	segs := sep(cwd)
 	// Build from the right until we run out of width.
 	sepGlyph := fmCrumbSep.Render(" › ")
 	var rendered []string
@@ -561,11 +573,7 @@ func renderBreadcrumb(cwd string, remote bool, width int) string {
 		if i == len(segs)-1 {
 			style = fmCrumbCur
 		}
-		txt := s
-		if s == "/" {
-			txt = "/"
-		}
-		rendered = append(rendered, style.Render(txt))
+		rendered = append(rendered, style.Render(s))
 	}
 	full := strings.Join(rendered, sepGlyph)
 	if lipgloss.Width(full) <= width {
@@ -580,6 +588,28 @@ func renderBreadcrumb(cwd string, remote bool, width int) string {
 	}
 	// Fall back to a plain truncated tail.
 	return fmCrumbCur.Render(truncate(segs[len(segs)-1], width))
+}
+
+// breadcrumbSegments splits an absolute target path without consulting the
+// controller filesystem. The first segment is the target root (/, C:\, or a
+// UNC share root), followed by each directory component.
+func breadcrumbSegments(cwd string, style core.TargetPathStyle) []string {
+	current := style.Clean(cwd)
+	if current == "." || style.IsRoot(current) {
+		return []string{current}
+	}
+
+	var tail []string
+	for !style.IsRoot(current) {
+		parent := style.Dir(current)
+		base := style.Base(current)
+		if parent == current || base == "." || base == "" {
+			return append([]string{current}, tail...)
+		}
+		tail = append([]string{base}, tail...)
+		current = parent
+	}
+	return append([]string{current}, tail...)
 }
 
 // renderRow draws one big, full-width file row.

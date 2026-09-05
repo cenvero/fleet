@@ -380,7 +380,7 @@ func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
 		{key: "e", label: "Edit", action: "edit", enabled: canEdit},
 		{key: "c", label: "Copy to other pane", action: "copy", enabled: onRow},
 		{key: "m", label: "Move to other pane", action: "move", enabled: onRow},
-		{key: "D", label: "Duplicate", action: "duplicate", enabled: onRow && !isDir},
+		{key: "D", label: "Duplicate", action: "duplicate", enabled: onRow},
 		{key: "r", label: "Rename", action: "rename", enabled: onRow},
 		{key: "d", label: "Delete", action: "delete", enabled: onRow},
 		{key: "z", label: "Compress…", action: "compress", enabled: onRow},
@@ -494,13 +494,15 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	pane := m.paneRefConst(side)
-	switch m.prompt {
-	case promptNewFolder:
-		if strings.ContainsAny(name, "/\\") {
-			m.status = "invalid folder name"
+	if m.prompt != promptChmod {
+		if err := core.ValidateTargetPathComponent(pane.pathStyle, name); err != nil {
+			m.status = "invalid name: " + err.Error()
 			return m, nil
 		}
-		target := joinPath(pane.cwd, name, pane.remote)
+	}
+	switch m.prompt {
+	case promptNewFolder:
+		target := joinPath(pane.cwd, name, pane.pathStyle)
 		if pane.remote {
 			if err := m.app.RemoteMkdir(pane.source, target); err != nil {
 				m.status = "mkdir failed: " + err.Error()
@@ -515,11 +517,7 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 		m.status = "created folder " + name
 		return m, m.reload(side)
 	case promptNewFile:
-		if strings.ContainsAny(name, "/\\") {
-			m.status = "invalid file name"
-			return m, nil
-		}
-		target := joinPath(pane.cwd, name, pane.remote)
+		target := joinPath(pane.cwd, name, pane.pathStyle)
 		if pane.remote {
 			// Stage an empty controller temp and upload it to the exact path.
 			tmp, err := os.CreateTemp("", "fleet-new-*")
@@ -543,12 +541,8 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 		m.status = "created file " + name
 		return m, m.reload(side)
 	case promptRename:
-		if strings.ContainsAny(name, "/\\") {
-			m.status = "invalid name"
-			return m, nil
-		}
-		from := joinPath(pane.cwd, m.promptItem.name, pane.remote)
-		to := joinPath(pane.cwd, name, pane.remote)
+		from := joinPath(pane.cwd, m.promptItem.name, pane.pathStyle)
+		to := joinPath(pane.cwd, name, pane.pathStyle)
 		if pane.remote {
 			if err := m.app.RemoteRename(pane.source, from, to); err != nil {
 				m.status = "rename failed: " + err.Error()
@@ -598,7 +592,7 @@ func (m filesModel) runDelete() (tea.Model, tea.Cmd) {
 	m.overlay = overlayNone
 	var firstErr error
 	for _, it := range m.deleteItems {
-		target := joinPath(pane.cwd, it.name, pane.remote)
+		target := joinPath(pane.cwd, it.name, pane.pathStyle)
 		var err error
 		if pane.remote {
 			err = m.app.RemoteDelete(pane.source, target, it.isDir)
@@ -629,7 +623,7 @@ func (m filesModel) openProperties(side int) (tea.Model, tea.Cmd) {
 		m.status = "select an item to inspect"
 		return m, nil
 	}
-	full := joinPath(pane.cwd, it.name, pane.remote)
+	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	kind := "File"
 	if it.isDir {
 		kind = "Directory"
@@ -831,14 +825,14 @@ func snapCmd() tea.Cmd {
 
 func (m filesModel) sameDirMove(drag *dragState, dstDir fileItem) (tea.Model, tea.Cmd) {
 	pane := m.paneRefConst(drag.fromSide)
-	dstBase := joinPath(pane.cwd, dstDir.name, pane.remote)
+	dstBase := joinPath(pane.cwd, dstDir.name, pane.pathStyle)
 	var firstErr error
 	for _, it := range drag.items {
 		if sameItem(it, dstDir) {
 			continue
 		}
-		from := joinPath(pane.cwd, it.name, pane.remote)
-		to := joinPath(dstBase, it.name, pane.remote)
+		from := joinPath(pane.cwd, it.name, pane.pathStyle)
+		to := joinPath(dstBase, it.name, pane.pathStyle)
 		var err error
 		if pane.remote {
 			err = m.app.RemoteRename(pane.source, from, to)
@@ -869,7 +863,37 @@ func (m filesModel) startBatch(fromSide, toSide int, items []fileItem, kind dirT
 	if fromSide == toSide || len(items) == 0 {
 		return m, nil
 	}
+	dstPane := m.paneRefConst(toSide)
 	destDir := m.destDir(toSide, targetIdx)
+	if err := core.ValidateTargetPath(dstPane.pathStyle, destDir); err != nil {
+		m.status = "invalid destination: " + err.Error()
+		return m, nil
+	}
+	seen := make(map[string]string, len(items))
+	caseInsensitive := dstPane.pathStyle.IsWindows()
+	if !dstPane.remote {
+		var err error
+		caseInsensitive, err = core.LocalPathCaseInsensitive(destDir)
+		if err != nil {
+			m.status = "cannot inspect destination: " + err.Error()
+			return m, nil
+		}
+	}
+	for _, item := range items {
+		if err := core.ValidateTargetPathComponent(dstPane.pathStyle, item.name); err != nil {
+			m.status = "destination cannot represent " + item.name + ": " + err.Error()
+			return m, nil
+		}
+		key := item.name
+		if caseInsensitive {
+			key = strings.ToLower(key)
+		}
+		if previous, ok := seen[key]; ok && previous != item.name {
+			m.status = fmt.Sprintf("destination name collision: %s and %s", previous, item.name)
+			return m, nil
+		}
+		seen[key] = item.name
+	}
 
 	var cmds []tea.Cmd
 	var dirItem *fileItem
@@ -905,7 +929,7 @@ func (m filesModel) destDir(toSide, targetIdx int) string {
 	if targetIdx >= 0 && targetIdx < len(pane.entries) {
 		dst := pane.entries[targetIdx]
 		if dst.isDir && dst.name != ".." {
-			return joinPath(pane.cwd, dst.name, pane.remote)
+			return joinPath(pane.cwd, dst.name, pane.pathStyle)
 		}
 	}
 	return pane.cwd
@@ -916,7 +940,7 @@ func (m filesModel) destDir(toSide, targetIdx int) string {
 func (m *filesModel) transferOne(fromSide, toSide int, it fileItem, destDir string, kind dirTransferKind) tea.Cmd {
 	src := m.paneRefConst(fromSide)
 	dst := m.paneRefConst(toSide)
-	srcPath := joinPath(src.cwd, it.name, src.remote)
+	srcPath := joinPath(src.cwd, it.name, src.pathStyle)
 
 	// Vet remote-derived names before composing a LOCAL destination path.
 	var dstPath string
@@ -928,7 +952,7 @@ func (m *filesModel) transferOne(fromSide, toSide int, it fileItem, destDir stri
 		}
 		dstPath = safe
 	} else {
-		dstPath = joinPath(destDir, it.name, true)
+		dstPath = joinPath(destDir, it.name, dst.pathStyle)
 	}
 
 	id := m.nextID
@@ -1039,7 +1063,7 @@ func (m filesModel) openDirConfirm(fromSide, toSide int, it fileItem, destDir st
 	m.pendingDirTo = toSide
 	m.confirmText = m.dirConfirmText()
 	// Kick off the async estimate.
-	srcPath := joinPath(src.cwd, it.name, src.remote)
+	srcPath := joinPath(src.cwd, it.name, src.pathStyle)
 	return m.withDirScan(src.source, srcPath)
 }
 
@@ -1090,7 +1114,7 @@ func (m filesModel) runDirTransfer() (tea.Model, tea.Cmd) {
 	destDir := m.pendingDirDest
 	src := m.paneRefConst(fromSide)
 	dst := m.paneRefConst(toSide)
-	srcPath := joinPath(src.cwd, pd.item.name, src.remote)
+	srcPath := joinPath(src.cwd, pd.item.name, src.pathStyle)
 
 	var dstPath string
 	if !dst.remote {
@@ -1102,7 +1126,7 @@ func (m filesModel) runDirTransfer() (tea.Model, tea.Cmd) {
 		}
 		dstPath = safe
 	} else {
-		dstPath = joinPath(destDir, pd.item.name, true)
+		dstPath = joinPath(destDir, pd.item.name, dst.pathStyle)
 	}
 
 	id := m.nextID

@@ -49,9 +49,13 @@ func TestDuplicateName(t *testing.T) {
 		for _, e := range c.existing {
 			set[e] = true
 		}
-		if got := duplicateName(c.name, set); got != c.want {
+		if got := duplicateName(c.name, set, core.TargetPathPOSIX); got != c.want {
 			t.Fatalf("duplicateName(%q, %v) = %q, want %q", c.name, c.existing, got, c.want)
 		}
+	}
+	windowsExisting := map[string]bool{"NOTES COPY.TXT": true}
+	if got := duplicateName("notes.txt", windowsExisting, core.TargetPathWindows); got != "notes copy 2.txt" {
+		t.Fatalf("Windows duplicateName case collision = %q", got)
 	}
 }
 
@@ -169,4 +173,19 @@ func TestCopyLocalFileReplacesSymlinkEntry(t *testing.T) {
 	if got, _ := os.ReadFile(dst); string(got) != "copy" {
 		t.Fatalf("copy content mismatch: %q", got)
 	}
+}
+
+func TestContextMenuEnablesDirectoryDuplicate(t *testing.T) {
+	t.Parallel()
+	m := filesModel{left: paneState{entries: []fileItem{{name: "folder", isDir: true}}}}
+	m = m.openContextMenu(0, 0, 1, 1)
+	for _, item := range m.menuItems {
+		if item.action == "duplicate" {
+			if !item.enabled {
+				t.Fatal("directory Duplicate is disabled in context menu")
+			}
+			return
+		}
+	}
+	t.Fatal("Duplicate action missing from context menu")
 }

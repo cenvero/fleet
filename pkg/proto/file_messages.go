@@ -27,12 +27,22 @@ const (
 	ActionFileRename    = "file.rename"
 )
 
+// FileEntryType values classify directory entries independently of permission
+// bits. Older agents omit Type; current agents always populate it.
+const (
+	FileEntryTypeRegular   = "file"
+	FileEntryTypeDirectory = "directory"
+	FileEntryTypeSymlink   = "symlink"
+	FileEntryTypeOther     = "other"
+)
+
 // FileEntry describes a single directory entry on a managed node.
 type FileEntry struct {
 	Name      string    `json:"name"`
 	Path      string    `json:"path"`
 	Size      int64     `json:"size"`
 	Mode      uint32    `json:"mode"`
+	Type      string    `json:"type,omitempty"`
 	IsDir     bool      `json:"is_dir"`
 	IsSymlink bool      `json:"is_symlink,omitempty"`
 	ModTime   time.Time `json:"mod_time"`
@@ -46,8 +56,9 @@ type FileListPayload struct {
 }
 
 type FileListResult struct {
-	Path    string      `json:"path"`
-	Entries []FileEntry `json:"entries"`
+	Path            string      `json:"path"`
+	Entries         []FileEntry `json:"entries"`
+	CaseInsensitive *bool       `json:"case_insensitive,omitempty"`
 }
 
 type FileStatPayload struct {

@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/cenvero/fleet/internal/logs"
+	"github.com/cenvero/fleet/pkg/proto"
 )
 
 // ChmodPath sets octal permissions (e.g. "755") on a path. server=="" → local.
@@ -30,6 +31,13 @@ func (a *App) ChmodPath(server, p, octalMode string) error {
 	}
 	if server == "" {
 		return os.Chmod(p, os.FileMode(m)) // #nosec G302 -- operator-chosen mode
+	}
+	record, err := a.GetServer(server)
+	if err != nil {
+		return err
+	}
+	if TargetPathStyleForServer(record).IsWindows() {
+		return fmt.Errorf("chmod is unsupported on Windows managed nodes")
 	}
 	return a.runRemoteShell(server, fmt.Sprintf("chmod %s %s", shellQuote(octalMode), shellQuote(p)))
 }
@@ -48,17 +56,60 @@ func (a *App) ChecksumPath(server, p string) (string, error) {
 		}
 		return hex.EncodeToString(h.Sum(nil)), nil
 	}
-	res, err := a.ExecCommand(server, "sha256sum "+shellQuote(p))
+	return a.remoteFileSHA256(server, p)
+}
+
+// remoteFileSHA256 hashes a bounded, stat-sized stream of file.read RPCs. It
+// avoids depending on sha256sum, PowerShell, or any target shell utility.
+func (a *App) remoteFileSHA256(serverName, remotePath string) (string, error) {
+	server, err := a.GetServer(serverName)
 	if err != nil {
 		return "", err
 	}
-	if res.ExitCode != 0 {
-		return "", fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+	stat, err := a.StatRemoteFile(serverName, remotePath)
+	if err != nil {
+		return "", err
 	}
-	if fields := strings.Fields(res.Stdout); len(fields) > 0 {
-		return fields[0], nil
+	if err := requireRemoteRegular(stat.Entry, remotePath); err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("empty checksum output")
+	if stat.Entry.Size < 0 || stat.Entry.Size > maxTransferFileBytes {
+		return "", fmt.Errorf("invalid remote file size %d", stat.Entry.Size)
+	}
+	h := sha256.New()
+	for offset := int64(0); offset < stat.Entry.Size; {
+		length := min(int64(proto.MaxRawChunkBytes), stat.Entry.Size-offset)
+		resp, err := a.callRPC(server, proto.Envelope{
+			Action: proto.ActionFileRead,
+			Payload: proto.FileReadPayload{
+				Path: remotePath, Offset: offset, Length: length,
+				Binary: serverSupportsBinaryFrames(server),
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		if resp.Error != nil {
+			return "", fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		chunk, err := proto.DecodePayload[proto.FileReadResult](resp.Payload)
+		if err != nil {
+			return "", err
+		}
+		proto.AttachBinary(&chunk, resp)
+		if int64(len(chunk.Data)) != length {
+			return "", fmt.Errorf("remote checksum read at %d returned %d bytes, want %d", offset, len(chunk.Data), length)
+		}
+		sum := sha256.Sum256(chunk.Data)
+		if chunk.SHA256 != "" && hex.EncodeToString(sum[:]) != chunk.SHA256 {
+			return "", fmt.Errorf("remote checksum chunk mismatch at offset %d", offset)
+		}
+		if _, err := h.Write(chunk.Data); err != nil {
+			return "", err
+		}
+		offset += length
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ArchiveFormats are the compression formats offered by the file managers.
@@ -81,6 +132,33 @@ func FormatFromName(name string) string {
 	default:
 		return "tar.gz"
 	}
+}
+
+func archiveFormatExtension(format string) string {
+	switch format {
+	case "zip":
+		return ".zip"
+	case "tar.gz", "tgz":
+		return ".tar.gz"
+	case "tar.bz2":
+		return ".tar.bz2"
+	case "tar.xz":
+		return ".tar.xz"
+	case "tar":
+		return ".tar"
+	default:
+		return ".tar"
+	}
+}
+
+func archiveNameExtension(name string) string {
+	low := strings.ToLower(name)
+	for _, suffix := range []string{".tar.bz2", ".tar.gz", ".tar.xz", ".tgz", ".zip", ".tar"} {
+		if strings.HasSuffix(low, suffix) {
+			return suffix
+		}
+	}
+	return ".tar"
 }
 
 // compressCmd builds the shell command that creates `archive` (a bare name) under
@@ -173,14 +251,13 @@ func extractArgv(archivePath, dir string) (tool string, args []string) {
 	return "tar", []string{"-xf", archivePath, "-C", dir}
 }
 
-// CompressPaths creates an archive of `names` inside `dir`. server=="" runs on the
-// controller locally via a direct tool exec (no shell); otherwise it runs on that
-// server's agent. Operands are "./"-prefixed so a flag-shaped file name can't be
-// read as an option.
+// CompressPaths creates an archive of `names` inside `dir`. Local archives use
+// controller tools directly; remote archives relay selected members through a
+// private controller directory so no target shell or POSIX utility is required.
 func (a *App) CompressPaths(server, dir string, names []string, archiveName, format string) error {
 	if server == "" {
 		if format == "zip" {
-			_ = os.Remove(filepath.Join(dir, path.Base(archiveName))) // zip appends; start fresh
+			_ = os.Remove(filepath.Join(dir, filepath.Base(archiveName))) // zip appends; start fresh
 		}
 		tool, args, err := compressArgv(names, archiveName, format)
 		if err != nil {
@@ -189,16 +266,119 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 		if err := runLocalTool(dir, tool, args); err != nil {
 			return err
 		}
-	} else {
-		cmd, err := compressCmd(dir, names, archiveName, format)
-		if err != nil {
-			return err
+		a.auditArchive("file.compress", server, filepath.Join(dir, archiveName))
+		return nil
+	}
+
+	record, err := a.GetServer(server)
+	if err != nil {
+		return err
+	}
+	style := TargetPathStyleForServer(record)
+	listing, err := a.ListRemoteDirHidden(server, dir, true)
+	if err != nil {
+		return fmt.Errorf("list remote archive directory %s: %w", dir, err)
+	}
+	listed := make(map[string]proto.FileEntry, len(listing.Entries))
+	archiveKey := func(name string) string {
+		if style.IsWindows() {
+			return strings.ToLower(name)
 		}
-		if err := a.runRemoteShell(server, cmd); err != nil {
-			return err
+		return name
+	}
+	for _, entry := range listing.Entries {
+		listed[archiveKey(entry.Name)] = entry
+	}
+	type selectedArchiveMember struct {
+		base       string
+		remotePath string
+		isDir      bool
+	}
+	selected := make([]selectedArchiveMember, 0, len(names))
+	stageEntries := make(map[string]fileMeta)
+	selectedKeys := make(map[string]bool)
+	localNames := make([]string, 0, len(names))
+	for _, name := range names {
+		base := style.Base(name)
+		if err := ValidateTargetPathComponent(style, base); err != nil {
+			return fmt.Errorf("invalid archive member name %q: %w", name, err)
+		}
+		key := archiveKey(base)
+		if selectedKeys[key] {
+			return fmt.Errorf("duplicate archive member name %q", base)
+		}
+		selectedKeys[key] = true
+		remotePath := style.Join(dir, base)
+		if entry, ok := listed[key]; ok && (entry.IsSymlink || entry.Type == proto.FileEntryTypeSymlink) {
+			return fmt.Errorf("refusing symlink archive member %s", remotePath)
+		}
+		stat, err := a.StatRemoteFile(server, remotePath)
+		if err != nil {
+			return fmt.Errorf("stat archive member %s: %w", remotePath, err)
+		}
+		if stat.Entry.Type == "" {
+			return fmt.Errorf("refusing unclassified archive member %s: agent must be updated to report file types", remotePath)
+		}
+		if stat.Entry.IsSymlink || stat.Entry.Type == proto.FileEntryTypeSymlink || stat.Entry.Type == proto.FileEntryTypeOther {
+			return fmt.Errorf("refusing non-regular archive member %s", remotePath)
+		}
+		kind := fileKindRegular
+		if stat.Entry.IsDir || stat.Entry.Type == proto.FileEntryTypeDirectory {
+			kind = fileKindDirectory
+		}
+		stageEntries[base] = fileMeta{kind: kind}
+		if kind == fileKindDirectory {
+			tree, err := a.scanRemoteDir(server, remotePath)
+			if err != nil {
+				return fmt.Errorf("scan archive directory %s: %w", remotePath, err)
+			}
+			for rel, meta := range tree {
+				stageEntries[path.Join(base, rel)] = meta
+			}
+		}
+		selected = append(selected, selectedArchiveMember{base: base, remotePath: remotePath, isDir: kind == fileKindDirectory})
+		localNames = append(localNames, base)
+	}
+	if err := validateTreeForLocalDestination(stageEntries, os.TempDir()); err != nil {
+		return fmt.Errorf("controller staging cannot represent selected archive members: %w", err)
+	}
+	localArchiveName := style.Base(archiveName)
+	if err := ValidateTargetPathComponent(style, localArchiveName); err != nil {
+		return fmt.Errorf("invalid archive name: %w", err)
+	}
+
+	stageDir, err := os.MkdirTemp("", "fleet-remote-compress-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+	for _, member := range selected {
+		localPath := filepath.Join(stageDir, member.base)
+		if member.isDir {
+			if _, err := a.DownloadDir(server, member.remotePath, localPath, FileTransferOptions{}, nil); err != nil {
+				return fmt.Errorf("download archive directory %s: %w", member.remotePath, err)
+			}
+		} else if _, err := a.DownloadFile(server, member.remotePath, localPath, FileTransferOptions{}, nil); err != nil {
+			return fmt.Errorf("download archive member %s: %w", member.remotePath, err)
 		}
 	}
-	a.auditArchive("file.compress", server, path.Join(dir, archiveName))
+
+	localOutputName := "fleet-archive" + archiveFormatExtension(format)
+	if format == "zip" {
+		_ = os.Remove(filepath.Join(stageDir, localOutputName))
+	}
+	tool, args, err := compressArgv(localNames, localOutputName, format)
+	if err != nil {
+		return err
+	}
+	if err := runLocalTool(stageDir, tool, args); err != nil {
+		return err
+	}
+	remoteArchive := style.Join(dir, localArchiveName)
+	if _, err := a.UploadFile(server, filepath.Join(stageDir, localOutputName), remoteArchive, FileTransferOptions{}, nil); err != nil {
+		return fmt.Errorf("upload remote archive: %w", err)
+	}
+	a.auditArchive("file.compress", server, remoteArchive)
 	return nil
 }
 
@@ -217,12 +397,21 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 //     any member is absolute or contains a ".." component; only an all-safe
 //     archive is handed to the (shell-quoted) tar/unzip tool.
 func (a *App) ExtractArchive(server, archivePath string) error {
-	destDir := path.Dir(archivePath)
 	if server == "" {
+		destDir := filepath.Dir(archivePath)
+		if err := validateArchiveNamespaceForLocal(archivePath, destDir); err != nil {
+			return err
+		}
 		if err := a.extractLocal(archivePath, destDir); err != nil {
 			return err
 		}
 	} else {
+		record, err := a.GetServer(server)
+		if err != nil {
+			return err
+		}
+		style := TargetPathStyleForServer(record)
+		destDir := style.Dir(archivePath)
 		// Remote extraction is relayed through the hardened file RPC surface rather
 		// than an unsandboxed shell extractor. The archive is downloaded to a
 		// private controller directory, extracted with os.Root confinement, then
@@ -233,11 +422,14 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 			return err
 		}
 		defer os.RemoveAll(stageDir)
-		localArchive := filepath.Join(stageDir, path.Base(archivePath))
+		localArchive := filepath.Join(stageDir, "fleet-source"+archiveNameExtension(style.Base(archivePath)))
 		if _, err := a.DownloadFile(server, archivePath, localArchive, FileTransferOptions{}, nil); err != nil {
 			return fmt.Errorf("download archive for extraction: %w", err)
 		}
 		extracted := filepath.Join(stageDir, "members")
+		if err := validateArchiveNamespaceForLocal(localArchive, extracted, style); err != nil {
+			return fmt.Errorf("archive namespace is not representable: %w", err)
+		}
 		if err := os.Mkdir(extracted, 0o700); err != nil {
 			return err
 		}
@@ -255,7 +447,11 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 			if err != nil || rel == "." {
 				return err
 			}
-			return a.RemoteMkdir(server, path.Join(destDir, filepath.ToSlash(rel)))
+			key, err := cleanRelativeKey(filepath.ToSlash(rel))
+			if err != nil {
+				return err
+			}
+			return a.RemoteMkdir(server, style.Join(destDir, key))
 		}); err != nil {
 			return fmt.Errorf("create extracted directories: %w", err)
 		}
@@ -264,6 +460,148 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 		}
 	}
 	a.auditArchive("file.extract", server, archivePath)
+	return nil
+}
+
+// validateArchiveNamespace reads an archive's member manifest without writing
+// any member and verifies that every path is represented injectively by each
+// destination style. For relayed extraction this includes both the controller's
+// staging filesystem and the managed target, so a Windows controller fails
+// clearly rather than losing case-distinct POSIX members while staging them.
+func validateArchiveNamespace(archivePath string, styles ...TargetPathStyle) error {
+	entries, err := archiveNamespaceEntries(archivePath)
+	if err != nil {
+		return err
+	}
+	for _, style := range styles {
+		if err := validateTreeForStyle(entries, style); err != nil {
+			return fmt.Errorf("archive members cannot be represented on %s paths: %w", style, err)
+		}
+	}
+	return nil
+}
+
+func validateArchiveNamespaceForLocal(archivePath, destination string, targetStyles ...TargetPathStyle) error {
+	entries, err := archiveNamespaceEntries(archivePath)
+	if err != nil {
+		return err
+	}
+	if err := validateTreeForLocalDestination(entries, destination); err != nil {
+		return fmt.Errorf("archive members cannot be represented on the local destination: %w", err)
+	}
+	for _, style := range targetStyles {
+		if err := validateTreeForStyle(entries, style); err != nil {
+			return fmt.Errorf("archive members cannot be represented on %s paths: %w", style, err)
+		}
+	}
+	return nil
+}
+
+func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
+	entries := make(map[string]fileMeta)
+	low := strings.ToLower(archivePath)
+	if strings.HasSuffix(low, ".zip") {
+		zr, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return nil, fmt.Errorf("open zip manifest: %w", err)
+		}
+		defer zr.Close()
+		for _, member := range zr.File {
+			info := member.FileInfo()
+			kind := fileKindRegular
+			if info.IsDir() {
+				kind = fileKindDirectory
+			} else if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("refusing archive member %q: symlinks and special files are unsupported", member.Name)
+			}
+			if err := addArchiveNamespaceEntry(entries, member.Name, kind); err != nil {
+				return nil, err
+			}
+		}
+		return entries, nil
+	}
+
+	if strings.HasSuffix(low, ".tar.xz") {
+		if err := validateTarXZMembers(archivePath); err != nil {
+			return nil, err
+		}
+		out, err := exec.Command("tar", "-tf", archivePath).Output() // #nosec G204 -- constant tool and operator-selected local archive
+		if err != nil {
+			return nil, fmt.Errorf("list archive members: %w", err)
+		}
+		for _, name := range splitMemberLines(string(out)) {
+			kind := fileKindRegular
+			if strings.HasSuffix(strings.ReplaceAll(name, "\\", "/"), "/") {
+				kind = fileKindDirectory
+			}
+			if err := addArchiveNamespaceEntry(entries, name, kind); err != nil {
+				return nil, err
+			}
+		}
+		return entries, nil
+	}
+
+	f, err := os.Open(archivePath) // #nosec G304 -- operator-chosen archive path
+	if err != nil {
+		return nil, fmt.Errorf("open archive manifest: %w", err)
+	}
+	defer f.Close()
+	var src io.Reader = f
+	switch {
+	case strings.HasSuffix(low, ".tar.gz"), strings.HasSuffix(low, ".tgz"):
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, fmt.Errorf("open gzip manifest: %w", err)
+		}
+		defer gz.Close()
+		src = gz
+	case strings.HasSuffix(low, ".tar.bz2"):
+		src = bzip2.NewReader(f)
+	}
+	tr := tar.NewReader(src)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read archive manifest: %w", err)
+		}
+		var kind fileKind
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			kind = fileKindDirectory
+		case tar.TypeReg, tar.TypeRegA:
+			kind = fileKindRegular
+		default:
+			return nil, fmt.Errorf("refusing archive member %q: symlinks, hardlinks, and special files are unsupported", hdr.Name)
+		}
+		if err := addArchiveNamespaceEntry(entries, hdr.Name, kind); err != nil {
+			return nil, err
+		}
+	}
+	return entries, nil
+}
+
+func addArchiveNamespaceEntry(entries map[string]fileMeta, name string, kind fileKind) error {
+	if !archiveMemberSafe(name) {
+		return fmt.Errorf("refusing archive member %q: member escapes the destination", name)
+	}
+	key := path.Clean(strings.ReplaceAll(name, "\\", "/"))
+	if key == "." { // conventional archive root marker
+		return nil
+	}
+	key, err := cleanRelativeKey(key)
+	if err != nil {
+		return fmt.Errorf("refusing archive member %q: %w", name, err)
+	}
+	if previous, exists := entries[key]; exists {
+		if previous.kind == fileKindDirectory && kind == fileKindDirectory {
+			return nil
+		}
+		return fmt.Errorf("refusing duplicate or conflicting archive member %q", key)
+	}
+	entries[key] = fileMeta{kind: kind}
 	return nil
 }
 
@@ -328,10 +666,11 @@ func archiveMemberSafe(name string) bool {
 	}
 	// Normalise separators: tar uses "/" but a crafted name may embed "\".
 	slashed := strings.ReplaceAll(name, "\\", "/")
-	if path.IsAbs(slashed) || strings.HasPrefix(slashed, "/") {
+	// Reject POSIX, rooted-backslash, drive-letter, and UNC absolute paths
+	// lexically; filepath.IsAbs alone only understands the controller OS.
+	if path.IsAbs(slashed) || strings.HasPrefix(slashed, "/") || TargetPathWindows.IsAbs(name) {
 		return false
 	}
-	// Reject a drive-letter / UNC style absolute path too (defensive).
 	if filepath.IsAbs(name) {
 		return false
 	}

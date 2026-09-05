@@ -58,8 +58,28 @@ func Hello(mode transport.Mode) proto.HelloPayload {
 		OS:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
 		Transport:    mode.String(),
+		FileRoot:     nativeFileRoot(),
 		Capabilities: DetectCapabilities(),
 	}
+}
+
+// nativeFileRoot returns the first normalized configured file root when file
+// operations are confined. Otherwise it returns an absolute system root in the
+// agent's own path syntax. The optional hello field lets controllers browse a
+// Windows system drive that is not C: while remaining backward-compatible with
+// older agents.
+func nativeFileRoot() string {
+	if root := firstAllowedFileRoot(); root != "" {
+		return root
+	}
+	if runtime.GOOS == "windows" {
+		drive := strings.TrimSpace(os.Getenv("SystemDrive"))
+		if len(drive) >= 2 && drive[1] == ':' {
+			return strings.ToUpper(drive[:1]) + `:\`
+		}
+		return `C:\`
+	}
+	return "/"
 }
 
 func NewRootCommand() *cobra.Command {
@@ -121,6 +141,7 @@ func NewRootCommand() *cobra.Command {
 		Short: "Print the initial hello payload as JSON",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+			SetAllowedFileRoots(fileRoots)
 			parsedMode, err := transport.ParseMode(mode)
 			if err != nil {
 				return err

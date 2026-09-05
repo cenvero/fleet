@@ -12,7 +12,6 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -295,6 +294,11 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
+			record, err := app.GetServer(server)
+			if err != nil {
+				return err
+			}
+			style := core.TargetPathStyleForServer(record)
 			opts, err := transferOptsFromFlags(parallel, chunkSize)
 			if err != nil {
 				return err
@@ -305,7 +309,7 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer func() { _ = os.RemoveAll(tmpDir) }()
-			tmpPath := filepath.Join(tmpDir, path.Base(remotePath))
+			tmpPath := filepath.Join(tmpDir, style.Base(remotePath))
 
 			if _, err := app.DownloadFile(server, remotePath, tmpPath, opts, nil); err != nil {
 				return fmt.Errorf("download for edit: %w", err)
@@ -755,6 +759,23 @@ func newFileServerMoveCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
+func splitRemoteCompressPaths(style core.TargetPathStyle, archive string, items []string) (dir, archiveBase string, names []string, err error) {
+	dir = style.Dir(archive)
+	archiveBase = style.Base(archive)
+	if archiveBase == "." || archiveBase == style.Separator() || strings.ContainsAny(archiveBase, `/\`) {
+		return "", "", nil, fmt.Errorf("invalid archive path %q", archive)
+	}
+	names = make([]string, len(items))
+	for i, item := range items {
+		base := style.Base(item)
+		if item != base || base == ".." || base == "." || strings.ContainsAny(base, `/\`) {
+			return "", "", nil, fmt.Errorf("invalid item %q: items must be plain names in the archive's directory (no path separators or '..')", item)
+		}
+		names[i] = base
+	}
+	return dir, archiveBase, names, nil
+}
+
 // maxCompressItems caps the number of items a single `file compress` may include.
 // Each item is interpolated as an argument into the remote archive command, so an
 // unbounded list is a remote argv/DoS amplifier; the cap is generous for real use.
@@ -777,27 +798,25 @@ func newFileCompressCommand(configDir *string) *cobra.Command {
 			}
 			defer app.Close()
 			server, archive, items := args[0], args[1], args[2:]
-			// Bound the item count: every item becomes an argument on the remote
-			// archive command line, so an unbounded list is a remote arg/DoS amplifier.
+			// Bound the item count: every item becomes an archive operand, so an
+			// unbounded list is a transfer and argv/DoS amplifier.
 			if len(items) > maxCompressItems {
 				return fmt.Errorf("too many items (%d): compress accepts at most %d in one call", len(items), maxCompressItems)
 			}
+			record, err := app.GetServer(server)
+			if err != nil {
+				return err
+			}
+			style := core.TargetPathStyleForServer(record)
+			dir, archiveBase, names, err := splitRemoteCompressPaths(style, archive, items)
+			if err != nil {
+				return err
+			}
 			f := format
 			if f == "" {
-				f = core.FormatFromName(archive)
+				f = core.FormatFromName(archiveBase)
 			}
-			names := make([]string, len(items))
-			for i, it := range items {
-				// Items live in the SAME directory as <archive> (path.Dir(archive)); an
-				// item that names a different directory or escapes via `..` is not a
-				// sibling and must be rejected rather than silently base-named into the
-				// archive dir.
-				if it != path.Base(it) || it == ".." || it == "." || strings.Contains(it, "/") {
-					return fmt.Errorf("invalid item %q: items must be plain names in the archive's directory (no path separators or '..')", it)
-				}
-				names[i] = path.Base(it)
-			}
-			if err := app.CompressPaths(server, path.Dir(archive), names, path.Base(archive), f); err != nil {
+			if err := app.CompressPaths(server, dir, names, archiveBase, f); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "created %s\n", archive)

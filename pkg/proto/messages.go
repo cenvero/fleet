@@ -181,6 +181,7 @@ type HelloPayload struct {
 	OS           string   `json:"os"`
 	Arch         string   `json:"arch"`
 	Transport    string   `json:"transport"`
+	FileRoot     string   `json:"file_root,omitempty"`
 	Capabilities []string `json:"capabilities"`
 }
 

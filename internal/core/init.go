@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -168,10 +169,113 @@ func Initialize(opts InitOptions) (InitResult, error) {
 	}, nil
 }
 
+type initConfigChoice struct {
+	Path        string
+	Description string
+}
+
+// initConfigChoices returns controller-local configuration locations for a
+// target operating system. It is deliberately pure so path presentation can be
+// tested without running the tests on that operating system.
+func initConfigChoices(goos string, env map[string]string, home string) []initConfigChoice {
+	legacyDir := posixPathJoin(home, ".cenvero-fleet")
+	switch goos {
+	case "windows":
+		legacyDir = windowsPathJoin(home, ".cenvero-fleet")
+		localAppData := strings.TrimSpace(env["LOCALAPPDATA"])
+		if localAppData == "" {
+			localAppData = windowsPathJoin(home, "AppData", "Local")
+		}
+		programData := strings.TrimSpace(env["PROGRAMDATA"])
+		if programData == "" {
+			systemDrive := strings.TrimSpace(env["SystemDrive"])
+			if systemDrive == "" {
+				systemDrive = "C:"
+			}
+			programData = windowsPathJoin(systemDrive, "ProgramData")
+		}
+		return []initConfigChoice{
+			{Path: windowsPathJoin(localAppData, "Cenvero Fleet"), Description: "recommended, per-user"},
+			{Path: legacyDir, Description: "legacy per-user location"},
+			{Path: windowsPathJoin(programData, "Cenvero Fleet"), Description: "system-wide, requires administrator"},
+		}
+	case "darwin":
+		return []initConfigChoice{
+			{Path: posixPathJoin(home, "Library", "Application Support", "Cenvero Fleet"), Description: "recommended, per-user"},
+			{Path: legacyDir, Description: "legacy per-user location"},
+			{Path: "/Library/Application Support/Cenvero Fleet", Description: "system-wide, requires administrator"},
+		}
+	default:
+		return []initConfigChoice{
+			{Path: legacyDir, Description: "recommended, per-user"},
+			{Path: "/etc/cenvero-fleet", Description: "system-wide, requires sudo"},
+			{Path: "/opt/cenvero-fleet"},
+		}
+	}
+}
+
+func posixPathJoin(base string, elements ...string) string {
+	joined := strings.TrimRight(base, "/")
+	if joined == "" && strings.HasPrefix(base, "/") {
+		joined = "/"
+	}
+	for _, element := range elements {
+		element = strings.Trim(element, "/")
+		if element == "" {
+			continue
+		}
+		switch joined {
+		case "":
+			joined = element
+		case "/":
+			joined += element
+		default:
+			joined += "/" + element
+		}
+	}
+	return joined
+}
+
+func windowsPathJoin(base string, elements ...string) string {
+	joined := strings.TrimRight(strings.ReplaceAll(base, "/", `\`), `\`)
+	for _, element := range elements {
+		element = strings.Trim(strings.ReplaceAll(element, "/", `\`), `\`)
+		if element == "" {
+			continue
+		}
+		if joined == "" {
+			joined = element
+		} else {
+			joined += `\` + element
+		}
+	}
+	return joined
+}
+
+func writeInitConfigChoices(out io.Writer, goos string, choices []initConfigChoice) {
+	if goos != "windows" && goos != "darwin" {
+		fmt.Fprintf(out, "  [1] %s              (recommended, per-user)\n", choices[0].Path)
+		fmt.Fprintln(out, "  [2] /etc/cenvero-fleet            (system-wide, requires sudo)")
+		fmt.Fprintln(out, "  [3] /opt/cenvero-fleet")
+		fmt.Fprintln(out, "  [4] Custom path")
+		return
+	}
+	for i, choice := range choices {
+		fmt.Fprintf(out, "  [%d] %s  (%s)\n", i+1, choice.Path, choice.Description)
+	}
+	fmt.Fprintln(out, "  [4] Custom path")
+}
+
 func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (InitResult, error) {
 	reader := bufio.NewReader(in)
 	home, _ := os.UserHomeDir()
-	defaultDir := DefaultConfigDir(home)
+	env := map[string]string{
+		"LOCALAPPDATA": os.Getenv("LOCALAPPDATA"),
+		"PROGRAMDATA":  os.Getenv("PROGRAMDATA"),
+		"SystemDrive":  os.Getenv("SystemDrive"),
+	}
+	configChoices := initConfigChoices(runtime.GOOS, env, home)
+	defaultDir := configChoices[0].Path
 
 	fmt.Fprintln(out, "┌─────────────────────────────────────────────────────────────┐")
 	fmt.Fprintln(out, "│  Welcome to Cenvero Fleet v1.0                              │")
@@ -182,20 +286,16 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 
 	fmt.Fprintln(out, "Step 1 of 7 — Configuration directory")
 	fmt.Fprintln(out, "─────────────────────────────────────")
-	fmt.Fprintf(out, "  [1] %s              (recommended, per-user)\n", defaultDir)
-	fmt.Fprintln(out, "  [2] /etc/cenvero-fleet            (system-wide, requires sudo)")
-	fmt.Fprintln(out, "  [3] /opt/cenvero-fleet")
-	fmt.Fprintln(out, "  [4] Custom path")
+	writeInitConfigChoices(out, runtime.GOOS, configChoices)
 	choice, err := prompt(reader, out, "  Choice [1]: ", "1")
 	if err != nil {
 		return InitResult{}, err
 	}
 	configDir := defaultDir
 	switch choice {
-	case "2":
-		configDir = "/etc/cenvero-fleet"
-	case "3":
-		configDir = "/opt/cenvero-fleet"
+	case "2", "3":
+		index, _ := strconv.Atoi(choice)
+		configDir = configChoices[index-1].Path
 	case "4":
 		configDir, err = prompt(reader, out, "  Custom path: ", defaultDir)
 		if err != nil {
@@ -379,7 +479,7 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		return InitResult{}, fmt.Errorf("invalid session reconnect grace: %w", perr)
 	}
 
-	return Initialize(InitOptions{
+	result, err := Initialize(InitOptions{
 		ConfigDir:             configDir,
 		Alias:                 alias,
 		DefaultMode:           mode,
@@ -395,6 +495,13 @@ func RunInitInteractive(in io.Reader, out io.Writer, executablePath string) (Ini
 		JobLogRetention:       jobLogRetention,
 		SessionReconnectGrace: sessionGrace,
 	})
+	if err != nil {
+		return InitResult{}, err
+	}
+	if err := SaveActiveConfigDir(result.Config.ConfigDir); err != nil {
+		return result, fmt.Errorf("save active config directory: %w", err)
+	}
+	return result, nil
 }
 
 // validateRetentionInput accepts the disabled sentinels ("0"/"off"/"never"/

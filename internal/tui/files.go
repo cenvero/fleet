@@ -6,8 +6,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -114,18 +112,33 @@ func resolveSources(args []string, available []core.ServerRecord) (left, right s
 
 func newPaneSource(app *core.App, source string) paneState {
 	remote := source != ""
-	cwd := "/"
+	style := core.NativePathStyle()
+	root := style.DefaultRoot()
+	cwd := style.DefaultRoot()
 	if remote {
-		cwd = "/"
-		if d, err := app.FileTransferDefaultsFor(source); err == nil && d.RemoteDir != "" {
-			cwd = d.RemoteDir
+		style = core.TargetPathPOSIX
+		root = style.DefaultRoot()
+		cwd = style.DefaultRoot()
+		if server, err := app.GetServer(source); err == nil {
+			// Include the effective configured RemoteDir (server override or global
+			// default) before deriving style and the initial browse location.
+			if defaults, defaultsErr := app.FileTransferDefaultsFor(source); defaultsErr == nil {
+				server.FileTransfer.RemoteDir = defaults.RemoteDir
+			}
+			style = core.TargetPathStyleForServer(server)
+			root = core.RemotePathBoundary(server)
+			cwd = core.InitialRemotePath(server)
 		}
-	} else {
-		if wd, err := os.Getwd(); err == nil && wd != "" {
-			cwd = wd
-		}
+	} else if wd, err := os.Getwd(); err == nil && wd != "" {
+		cwd = style.Clean(wd)
 	}
-	return paneState{source: source, remote: remote, cwd: cwd, loading: true, selected: map[int]bool{}}
+	if _, err := style.Relative(root, cwd); err != nil {
+		cwd = root
+	}
+	return paneState{
+		source: source, remote: remote, pathStyle: style, root: root, cwd: cwd,
+		loading: true, selected: map[int]bool{},
+	}
 }
 
 // ---- core types ----
@@ -149,17 +162,19 @@ type fileItem struct {
 }
 
 type paneState struct {
-	source   string // "" = local, else server name
-	remote   bool
-	cwd      string
-	entries  []fileItem // the visible (filtered + sorted) listing
-	allItems []fileItem // the full directory listing before filtering
-	index    int
-	scroll   int
-	loading  bool
-	err      error
-	selected map[int]bool // multi-selection (excludes "..")
-	view     viewMode     // list (default) or grid/icons
+	source    string // "" = local, else server name
+	remote    bool
+	pathStyle core.TargetPathStyle
+	root      string // highest browsable path (target-advertised file root)
+	cwd       string
+	entries   []fileItem // the visible (filtered + sorted) listing
+	allItems  []fileItem // the full directory listing before filtering
+	index     int
+	scroll    int
+	loading   bool
+	err       error
+	selected  map[int]bool // multi-selection (excludes "..")
+	view      viewMode     // list (default) or grid/icons
 
 	// sort + filter
 	sortBy   sortKey
@@ -523,7 +538,11 @@ func (m *filesModel) reapplyPane(side int) {
 
 	sortItems(filtered, pane.sortBy, pane.sortDesc)
 
-	atRoot := pane.cwd == "/" || (!pane.remote && filepath.Dir(pane.cwd) == pane.cwd)
+	root := paneBrowseRoot(pane)
+	atRoot := pane.pathStyle.Clean(pane.cwd) == pane.pathStyle.Clean(root)
+	if pane.pathStyle.IsWindows() {
+		atRoot = strings.EqualFold(pane.pathStyle.Clean(pane.cwd), pane.pathStyle.Clean(root))
+	}
 	if atRoot {
 		pane.entries = filtered
 	} else {
@@ -587,7 +606,7 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if pane.source != msg.source {
 			return m, nil
 		}
-		pane.cwd = msg.cwd
+		pane.cwd = pane.pathStyle.Clean(msg.cwd)
 		pane.allItems = msg.items
 		pane.err = msg.err
 		pane.loading = false
@@ -888,9 +907,28 @@ func (m *filesModel) cycleView(side int) {
 	m.clampScroll(side)
 }
 
+func paneBrowseRoot(pane *paneState) string {
+	if pane.root != "" {
+		return pane.pathStyle.Clean(pane.root)
+	}
+	current := pane.pathStyle.Clean(pane.cwd)
+	for !pane.pathStyle.IsRoot(current) {
+		parent := pane.pathStyle.Dir(current)
+		if parent == current {
+			return pane.pathStyle.DefaultRoot()
+		}
+		current = parent
+	}
+	return current
+}
+
 func (m filesModel) enterParent(side int) (tea.Model, tea.Cmd) {
 	pane := m.paneRef(side)
-	parent := parentDir(pane.cwd, pane.remote)
+	root := paneBrowseRoot(pane)
+	parent := parentDir(pane.cwd, pane.pathStyle)
+	if _, err := pane.pathStyle.Relative(root, parent); err != nil {
+		parent = pane.pathStyle.Clean(root)
+	}
 	if parent == pane.cwd {
 		return m, nil
 	}
@@ -912,7 +950,7 @@ func (m filesModel) activate(side int) (tea.Model, tea.Cmd) {
 		return m.enterParent(side)
 	}
 	if item.isDir {
-		next := joinPath(pane.cwd, item.name, pane.remote)
+		next := joinPath(pane.cwd, item.name, pane.pathStyle)
 		pane.cwd = next
 		pane.index, pane.scroll = 0, 0
 		pane.loading = true
@@ -1091,18 +1129,12 @@ func (m filesModel) gridDims() (cols, visRows int) {
 
 // ---- path helpers ----
 
-func parentDir(cwd string, remote bool) string {
-	if remote {
-		return path.Dir(cwd)
-	}
-	return filepath.Dir(cwd)
+func parentDir(cwd string, style core.TargetPathStyle) string {
+	return style.Dir(cwd)
 }
 
-func joinPath(cwd, name string, remote bool) string {
-	if remote {
-		return path.Join(cwd, name)
-	}
-	return filepath.Join(cwd, name)
+func joinPath(cwd, name string, style core.TargetPathStyle) string {
+	return style.Join(cwd, name)
 }
 
 func onOff(b bool) string {

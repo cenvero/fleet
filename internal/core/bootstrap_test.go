@@ -288,3 +288,39 @@ func TestRandomBootstrapTokenPropagatesEntropyFailure(t *testing.T) {
 		t.Fatalf("randomBootstrapToken token = %q after entropy failure, want empty", token)
 	}
 }
+
+func TestBootstrapManagedPathsRemainPOSIX(t *testing.T) {
+	cfg := resolvedBootstrapConfig{
+		agentListenAddr: "0.0.0.0:2222",
+		serviceName:     defaultServiceName,
+		enrollTokenPath: TargetPathPOSIX.Join(defaultStateDir, "enroll.token"),
+	}
+	unit, err := buildAgentServiceUnit(ServerRecord{Name: "linux", Mode: transport.ModeDirect}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"/var/lib/cenvero-fleet-agent/ssh_host_ed25519_key",
+		"/var/lib/cenvero-fleet-agent/authorized_keys",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("service unit missing POSIX path %q: %s", want, unit)
+		}
+	}
+	if strings.Contains(unit, `\\`) {
+		t.Fatalf("Linux service unit contains a backslash path: %s", unit)
+	}
+}
+
+func TestValidateBootstrapServiceName(t *testing.T) {
+	for _, good := range []string{"cenvero-fleet-agent", "fleet_agent@blue", "fleet.agent:1"} {
+		if err := validateBootstrapServiceName(good); err != nil {
+			t.Errorf("valid service name %q rejected: %v", good, err)
+		}
+	}
+	for _, bad := range []string{"../evil", `dir\\evil`, "fleet agent", "x.service", "$(touch-pwned)", "-H", "--no-block", ""} {
+		if err := validateBootstrapServiceName(bad); err == nil {
+			t.Errorf("unsafe service name %q accepted", bad)
+		}
+	}
+}

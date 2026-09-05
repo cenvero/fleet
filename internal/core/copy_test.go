@@ -87,12 +87,22 @@ func TestServerToServerCopyMove(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("A"), 0o644)
 	_ = os.WriteFile(filepath.Join(srcDir, "sub", "b.txt"), []byte("B"), 0o644)
+	_ = os.WriteFile(filepath.Join(srcDir, ".hidden"), []byte("H"), 0o644)
+	if err := os.MkdirAll(filepath.Join(srcDir, "empty", "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	dstDir := filepath.Join(base, "tree-copy")
-	if n, err := rig.app.CopyDir("loopback", srcDir, "loopback2", dstDir, FileTransferOptions{}, nil); err != nil || n != 2 {
+	if n, err := rig.app.CopyDir("loopback", srcDir, "loopback2", dstDir, FileTransferOptions{}, nil); err != nil || n != 3 {
 		t.Fatalf("CopyDir n=%d err=%v", n, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dstDir, "sub", "b.txt")); string(b) != "B" {
 		t.Fatalf("recursive copy wrong: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dstDir, ".hidden")); string(b) != "H" {
+		t.Fatalf("hidden copy wrong: %q", b)
+	}
+	if info, err := os.Stat(filepath.Join(dstDir, "empty", "nested")); err != nil || !info.IsDir() {
+		t.Fatalf("copied empty directory missing: info=%v err=%v", info, err)
 	}
 
 	// MoveFile within one server == rename (source removed).
@@ -121,5 +131,57 @@ func TestServerToServerCopyMove(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(xDst); string(b) != "X" {
 		t.Fatalf("cross-moved content = %q", b)
+	}
+}
+
+func TestCopyDirRefusesRemoteSymlink(t *testing.T) {
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	if err := rig.app.AddServer(ServerRecord{
+		Name: "loopback2", Address: "127.0.0.1", Port: 2222, Mode: transport.ModeDirect, User: "cenvero-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	target := filepath.Join(src, "target.txt")
+	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(src, "link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, err := rig.app.CopyDir("loopback", src, "loopback2", filepath.Join(t.TempDir(), "dst"), FileTransferOptions{}, nil); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("CopyDir symlink error = %v", err)
+	}
+}
+
+func TestCopyFileValidatesDestinationBeforeRelay(t *testing.T) {
+	rig := newTransferRig(t)
+	server, err := rig.app.GetServer("loopback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Observed.OS = "windows"
+	if err := rig.app.SaveServer(server); err != nil {
+		t.Fatal(err)
+	}
+	relayPattern := filepath.Join(rig.app.ConfigDir, "tmp", "fleet-relay-*")
+	before, err := filepath.Glob(relayPattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rig.app.CopyFile("missing-source-server", "/source", "loopback", `C:\Data\CON`, FileTransferOptions{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid destination path") {
+		t.Fatalf("CopyFile destination error = %v", err)
+	}
+	after, err := filepath.Glob(relayPattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("relay files changed before destination validation: before=%v after=%v", before, after)
 	}
 }

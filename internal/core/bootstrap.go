@@ -36,7 +36,7 @@ const (
 )
 
 func defaultDirectAuthorizedKeysPath() string {
-	return filepath.Join(defaultStateDir, "authorized_keys")
+	return TargetPathPOSIX.Join(defaultStateDir, "authorized_keys")
 }
 
 type BootstrapExecutor interface {
@@ -252,6 +252,9 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 	if serviceName == "" {
 		serviceName = defaultServiceName
 	}
+	if err := validateBootstrapServiceName(serviceName); err != nil {
+		return resolvedBootstrapConfig{}, err
+	}
 
 	agentListenAddr := strings.TrimSpace(opts.AgentListenAddr)
 	agentPort := server.Port
@@ -317,8 +320,31 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		tempScriptPath:         "/tmp/cenvero-" + token + ".sh",
 		tempAuthorizedKeysPath: "/tmp/cenvero-" + token + ".keys",
 		tempEnrollTokenPath:    "/tmp/cenvero-" + token + ".enroll",
-		enrollTokenPath:        filepath.Join(defaultStateDir, "enroll.token"),
+		enrollTokenPath:        TargetPathPOSIX.Join(defaultStateDir, "enroll.token"),
 	}, nil
+}
+
+// validateBootstrapServiceName accepts a systemd unit basename, not a path or
+// shell fragment. Bootstrap appends ".service" itself and interpolates the name
+// into a managed Linux path, so separators and other punctuation are refused.
+func validateBootstrapServiceName(name string) error {
+	if len(name) == 0 || len(name) > 256 {
+		return fmt.Errorf("invalid bootstrap service name %q: must be 1-256 characters", name)
+	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("invalid bootstrap service name %q: may not start with '-'", name)
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || strings.ContainsRune("_@.:-", r) {
+			continue
+		}
+		return fmt.Errorf("invalid bootstrap service name %q: contains unsupported character %q", name, r)
+	}
+	if strings.HasSuffix(name, ".service") {
+		return fmt.Errorf("invalid bootstrap service name %q: omit the .service suffix", name)
+	}
+	return nil
 }
 
 // randomBootstrapToken returns a 16-character hex token for use in temp file
@@ -385,7 +411,7 @@ func buildAgentServiceUnit(server ServerRecord, cfg resolvedBootstrapConfig) (st
 		execStart = fmt.Sprintf("%s serve --listen %s --host-key %s --authorized-keys %s",
 			defaultAgentBinaryPath,
 			shellQuote(cfg.agentListenAddr),
-			shellQuote(filepath.Join(defaultStateDir, "ssh_host_ed25519_key")),
+			shellQuote(TargetPathPOSIX.Join(defaultStateDir, "ssh_host_ed25519_key")),
 			shellQuote(defaultDirectAuthorizedKeysPath()),
 		)
 	case transport.ModeReverse:
@@ -393,8 +419,8 @@ func buildAgentServiceUnit(server ServerRecord, cfg resolvedBootstrapConfig) (st
 			defaultAgentBinaryPath,
 			shellQuote(cfg.controllerAddress),
 			shellQuote(server.Name),
-			shellQuote(filepath.Join(defaultStateDir, "ssh_host_ed25519_key")),
-			shellQuote(filepath.Join(defaultStateDir, "controller_known_hosts")),
+			shellQuote(TargetPathPOSIX.Join(defaultStateDir, "ssh_host_ed25519_key")),
+			shellQuote(TargetPathPOSIX.Join(defaultStateDir, "controller_known_hosts")),
 			shellQuote(cfg.controllerFingerprint),
 			shellQuote(cfg.enrollTokenPath),
 		)

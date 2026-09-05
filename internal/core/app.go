@@ -1276,6 +1276,7 @@ func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server Server
 		OS:                 hello.OS,
 		Arch:               hello.Arch,
 		Transport:          hello.Transport,
+		FileRoot:           hello.FileRoot,
 		HostKeyFingerprint: session.HostKeyFingerprint,
 	}
 	_ = a.SaveServer(server)

@@ -3,7 +3,11 @@
 
 package cli
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cenvero/fleet/internal/core"
+)
 
 func TestParseSize(t *testing.T) {
 	ok := map[string]int64{
@@ -29,6 +33,40 @@ func TestParseSize(t *testing.T) {
 	for _, bad := range []string{"9223372036854775807M", "-5M", "99999999999999999999G", "abc"} {
 		if _, err := parseSize(bad); err == nil {
 			t.Fatalf("parseSize(%q) expected error", bad)
+		}
+	}
+}
+
+func TestSplitRemoteCompressPathsUsesServerStyle(t *testing.T) {
+	tests := []struct {
+		name        string
+		style       core.TargetPathStyle
+		archive     string
+		items       []string
+		wantDir     string
+		wantArchive string
+	}{
+		{"posix", core.TargetPathPOSIX, "/srv/site.tar.gz", []string{"public", "index.html"}, "/srv", "site.tar.gz"},
+		{"windows drive", core.TargetPathWindows, `D:\sites\site.zip`, []string{"public", "index.html"}, `D:\sites`, "site.zip"},
+		{"windows UNC", core.TargetPathWindows, `\\host\share\logs.zip`, []string{"app.log"}, `\\host\share\`, "logs.zip"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, archive, names, err := splitRemoteCompressPaths(tt.style, tt.archive, tt.items)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dir != tt.wantDir || archive != tt.wantArchive {
+				t.Fatalf("split = dir %q archive %q, want %q %q", dir, archive, tt.wantDir, tt.wantArchive)
+			}
+			if len(names) != len(tt.items) {
+				t.Fatalf("names = %#v", names)
+			}
+		})
+	}
+	for _, item := range []string{`sub/file`, `sub\file`, ".."} {
+		if _, _, _, err := splitRemoteCompressPaths(core.TargetPathWindows, `C:\out.zip`, []string{item}); err == nil {
+			t.Errorf("unsafe Windows item %q accepted", item)
 		}
 	}
 }

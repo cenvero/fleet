@@ -7,7 +7,10 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +80,7 @@ func TestArchiveMemberSafe(t *testing.T) {
 		"../evil", "../../etc/passwd", "a/../../b", "/etc/passwd",
 		"/abs/path", "dir/../../x", "..", "", "   ",
 		"a/../..", `..\windows`, `dir\..\..\evil`,
+		`C:\Windows\System32\evil.dll`, `D:/absolute/file`, `\\server\share\evil`,
 	}
 	for _, m := range unsafe {
 		if archiveMemberSafe(m) {
@@ -450,5 +454,210 @@ func TestExtractZipNativeRejectsIntermediateSymlinkEscape(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "payload.txt")); !os.IsNotExist(err) {
 		t.Fatalf("archive escaped through intermediate symlink: %v", err)
+	}
+}
+
+func TestRemoteChecksumPortableAndWindowsChmodUnsupported(t *testing.T) {
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	remotePath := filepath.Join(t.TempDir(), "payload.bin")
+	content := []byte("portable checksum through file RPC")
+	if err := os.WriteFile(remotePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := rig.app.GetServer("loopback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Observed.OS = "windows"
+	record.FileTransfer.RemoteDir = `C:\Temp`
+	if err := rig.app.SaveServer(record); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := rig.app.ChecksumPath("loopback", remotePath)
+	if err != nil {
+		t.Fatalf("ChecksumPath: %v", err)
+	}
+	wantBytes := sha256.Sum256(content)
+	want := hex.EncodeToString(wantBytes[:])
+	if got != want {
+		t.Fatalf("ChecksumPath = %q, want %q", got, want)
+	}
+	if err := rig.app.ChmodPath("loopback", remotePath, "600"); err == nil || !strings.Contains(err.Error(), "unsupported on Windows") {
+		t.Fatalf("Windows chmod error = %v, want clear unsupported error", err)
+	}
+}
+
+func TestCompressPathsRemoteRelay(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	remoteDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(remoteDir, "a.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(remoteDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "sub", "b.txt"), []byte("bravo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "sub", ".hidden"), []byte("hidden"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(remoteDir, "sub", "empty", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.app.CompressPaths("loopback", remoteDir, []string{"a.txt", "sub"}, "bundle.tar", "tar"); err != nil {
+		t.Fatalf("CompressPaths remote relay: %v", err)
+	}
+	archivePath := filepath.Join(remoteDir, "bundle.tar")
+	f, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	members := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		members[strings.TrimSuffix(strings.TrimPrefix(hdr.Name, "./"), "/")] = true
+	}
+	for _, want := range []string{"a.txt", "sub/b.txt", "sub/.hidden", "sub/empty/nested"} {
+		if !members[want] {
+			t.Fatalf("relay archive missing %q; members=%v", want, members)
+		}
+	}
+}
+
+func TestCompressPathsRemoteRelayRefusesSymlink(t *testing.T) {
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	remoteDir := t.TempDir()
+	target := filepath.Join(remoteDir, "target.txt")
+	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(remoteDir, "link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := rig.app.CompressPaths("loopback", remoteDir, []string{"link"}, "bundle.tar", "tar"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("CompressPaths symlink error = %v", err)
+	}
+}
+
+func TestValidateArchiveNamespaceRejectsWindowsCollisionsBeforeExtraction(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "collision.zip")
+	zf, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(zf)
+	for _, name := range []string{"README", "Readme", "CON", "x:stream"} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zf.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateArchiveNamespace(archivePath, TargetPathWindows); err == nil {
+		t.Fatal("Windows archive namespace accepted case-colliding or invalid members")
+	}
+	if err := validateArchiveNamespace(archivePath, TargetPathPOSIX); err != nil {
+		t.Fatalf("POSIX archive namespace rejected valid case-distinct members: %v", err)
+	}
+	localDest := t.TempDir()
+	caseInsensitive, err := LocalPathCaseInsensitive(localDest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localErr := validateArchiveNamespaceForLocal(archivePath, localDest)
+	if caseInsensitive && localErr == nil {
+		t.Fatal("case-insensitive local archive destination accepted colliding members")
+	}
+	if !caseInsensitive && localErr != nil {
+		t.Fatalf("case-sensitive local archive destination rejected POSIX members: %v", localErr)
+	}
+}
+
+func TestValidateArchiveNamespaceRejectsFileAncestorConflict(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "conflict.tar")
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	for _, member := range []struct {
+		name string
+		body string
+	}{{"node", "file"}, {"node/child", "child"}} {
+		if err := tw.WriteHeader(&tar.Header{Name: member.name, Mode: 0o600, Size: int64(len(member.body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(member.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateArchiveNamespace(archivePath, TargetPathPOSIX); err == nil {
+		t.Fatal("archive file/ancestor conflict was accepted")
+	}
+}
+
+func TestArchiveNeutralStagingExtensions(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]string{
+		"CON.ZIP":    ".zip",
+		"aux.tar.gz": ".tar.gz",
+		"x.tar.bz2":  ".tar.bz2",
+		"x.tar.xz":   ".tar.xz",
+		"plain.tar":  ".tar",
+	} {
+		if got := archiveNameExtension(name); got != want {
+			t.Errorf("archiveNameExtension(%q) = %q, want %q", name, got, want)
+		}
+	}
+	for format, want := range map[string]string{
+		"zip": ".zip", "tar.gz": ".tar.gz", "tar.bz2": ".tar.bz2", "tar.xz": ".tar.xz", "tar": ".tar",
+	} {
+		if got := archiveFormatExtension(format); got != want {
+			t.Errorf("archiveFormatExtension(%q) = %q, want %q", format, got, want)
+		}
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -242,14 +243,49 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	type serverInfo struct {
-		Name      string `json:"name"`
-		Reachable bool   `json:"reachable"`
-		Mode      string `json:"mode"`
+	type sourceInfo struct {
+		Name            string               `json:"name"`
+		Reachable       bool                 `json:"reachable"`
+		Mode            string               `json:"mode,omitempty"`
+		OS              string               `json:"os"`
+		PathStyle       core.TargetPathStyle `json:"path_style"`
+		InitialRoot     string               `json:"initial_root"`
+		BrowseRoot      string               `json:"browse_root"`
+		CaseInsensitive bool                 `json:"case_insensitive"`
 	}
-	out := make([]serverInfo, 0, len(servers))
+	localCaseInsensitive, err := core.LocalPathCaseInsensitive(initialLocalPath())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := struct {
+		Local   sourceInfo   `json:"local"`
+		Servers []sourceInfo `json:"servers"`
+	}{
+		Local: sourceInfo{
+			Reachable:       true,
+			OS:              runtime.GOOS,
+			PathStyle:       core.NativePathStyle(),
+			InitialRoot:     initialLocalPath(),
+			BrowseRoot:      core.NativePathStyle().DefaultRoot(),
+			CaseInsensitive: localCaseInsensitive,
+		},
+		Servers: make([]sourceInfo, 0, len(servers)),
+	}
 	for _, srv := range servers {
-		out = append(out, serverInfo{Name: srv.Name, Reachable: srv.Observed.Reachable, Mode: string(srv.Mode)})
+		if defaults, defaultsErr := s.app.FileTransferDefaultsFor(srv.Name); defaultsErr == nil {
+			srv.FileTransfer.RemoteDir = defaults.RemoteDir
+		}
+		out.Servers = append(out.Servers, sourceInfo{
+			Name:            srv.Name,
+			Reachable:       srv.Observed.Reachable,
+			Mode:            string(srv.Mode),
+			OS:              srv.Observed.OS,
+			PathStyle:       core.TargetPathStyleForServer(srv),
+			InitialRoot:     core.InitialRemotePath(srv),
+			BrowseRoot:      core.RemotePathBoundary(srv),
+			CaseInsensitive: core.TargetPathStyleForServer(srv).IsWindows(),
+		})
 	}
 	writeJSON(w, out)
 }
@@ -292,18 +328,73 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
+// initialLocalPath returns a valid controller-native starting directory. The
+// current working directory is preferable to a filesystem-wide root; if it is
+// unavailable, fall back to the native path style's default root.
+func initialLocalPath() string {
+	if cwd, err := os.Getwd(); err == nil {
+		if clean := filepath.Clean(cwd); filepath.IsAbs(clean) {
+			return clean
+		}
+	}
+	return core.NativePathStyle().DefaultRoot()
+}
+
 // cleanLocalPath validates a controller-side path: it must be absolute, and is
-// returned in cleaned form. An empty path defaults to "/" so the Local pane has
-// a sensible root. Relative paths are rejected so a `dir` from the browser can't
-// be resolved against the controller's working directory.
+// returned in cleaned form. An empty path starts in the controller's native
+// working directory rather than assuming a POSIX root on every host. Relative
+// paths are rejected so browser input cannot be resolved implicitly.
 func cleanLocalPath(p string) (string, error) {
-	if p == "" {
-		p = "/"
+	if strings.TrimSpace(p) == "" {
+		p = initialLocalPath()
 	}
 	if !filepath.IsAbs(p) {
 		return "", fmt.Errorf("path must be absolute")
 	}
 	return filepath.Clean(p), nil
+}
+
+// targetPathStyle selects lexical path operations from managed-node metadata.
+// It deliberately never infers a remote style from the controller OS.
+func (s *Server) targetPathStyle(server string) (core.TargetPathStyle, error) {
+	if server == "" {
+		return core.NativePathStyle(), nil
+	}
+	record, err := s.app.GetServer(server)
+	if err != nil {
+		return "", err
+	}
+	return core.TargetPathStyleForServer(record), nil
+}
+
+// validatePathComponent keeps the backend-authoritative name-only contract while
+// sharing the exact target rules with core transfers and the TUI.
+func validatePathComponent(style core.TargetPathStyle, name string) error {
+	return core.ValidateTargetPathComponent(style, name)
+}
+
+// nameOnlyPath validates name using the source pane's path style and joins it
+// to an absolute directory without allowing the name to replace that directory.
+func (s *Server) nameOnlyPath(server, dir, name string) (string, error) {
+	style, err := s.targetPathStyle(server)
+	if err != nil {
+		return "", err
+	}
+	if err := validatePathComponent(style, name); err != nil {
+		return "", err
+	}
+	if server == "" {
+		clean, err := cleanLocalPath(dir)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(clean, name), nil
+	}
+	clean := style.Clean(dir)
+	if !style.IsAbs(clean) {
+		return "", fmt.Errorf("dir must be an absolute path")
+	}
+	return style.Join(clean, name), nil
 }
 
 // listCacheTTL is deliberately short: it exists only to collapse the burst of
@@ -468,7 +559,11 @@ func listLocalDir(dir string, showHidden bool) (proto.FileListResult, error) {
 	if err != nil {
 		return proto.FileListResult{}, err
 	}
-	out := proto.FileListResult{Path: clean, Entries: make([]proto.FileEntry, 0, len(ents))}
+	caseInsensitive, err := core.LocalPathCaseInsensitive(clean)
+	if err != nil {
+		return proto.FileListResult{}, err
+	}
+	out := proto.FileListResult{Path: clean, Entries: make([]proto.FileEntry, 0, len(ents)), CaseInsensitive: &caseInsensitive}
 	for _, de := range ents {
 		name := de.Name()
 		if !showHidden && strings.HasPrefix(name, ".") {
@@ -478,11 +573,20 @@ func listLocalDir(dir string, showHidden bool) (proto.FileListResult, error) {
 		if err != nil {
 			continue // entry vanished between ReadDir and Info; skip it
 		}
+		entryType := proto.FileEntryTypeRegular
+		if de.IsDir() {
+			entryType = proto.FileEntryTypeDirectory
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			entryType = proto.FileEntryTypeSymlink
+		} else if !info.Mode().IsRegular() {
+			entryType = proto.FileEntryTypeOther
+		}
 		out.Entries = append(out.Entries, proto.FileEntry{
 			Name:      name,
 			Path:      filepath.Join(clean, name),
 			Size:      info.Size(),
-			Mode:      uint32(info.Mode().Perm()),
+			Mode:      uint32(info.Mode()),
+			Type:      entryType,
 			IsDir:     de.IsDir(),
 			IsSymlink: info.Mode()&os.ModeSymlink != 0,
 			ModTime:   info.ModTime(),
@@ -527,6 +631,21 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 			return
 		}
 		dstPath = clean
+		if err := core.ValidateTargetPath(core.NativePathStyle(), dstPath); err != nil {
+			writeError(w, err)
+			return
+		}
+	} else {
+		style, err := s.targetPathStyle(dstServer)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dstPath = style.Clean(dstPath)
+		if err := core.ValidateTargetPath(style, dstPath); err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 
 	id := s.hub.start()
@@ -628,23 +747,24 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	server := r.URL.Query().Get("server")
-	dir := path.Clean(r.URL.Query().Get("dir"))
-	name := path.Base(r.URL.Query().Get("name"))
-	if name == "" || name == "." || name == "/" {
-		http.Error(w, "name is required", http.StatusBadRequest)
-		return
-	}
-	// The agent re-validates every path, but reject a non-absolute target here
-	// too so a relative `dir` can't produce a surprising join.
-	if !path.IsAbs(dir) {
-		http.Error(w, "dir must be an absolute path", http.StatusBadRequest)
-		return
-	}
+	rawDir := r.URL.Query().Get("dir")
+	rawName := r.URL.Query().Get("name")
 
 	// A Local destination pane writes the uploaded bytes straight to disk on the
-	// controller — no spooling or agent round-trip needed.
+	// controller. All lexical operations use filepath so this works on the
+	// controller's native OS (including Windows drive paths).
 	if server == "" {
-		localPath := filepath.Join(filepath.Clean(dir), name)
+		dir, err := cleanLocalPath(rawDir)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if err := validatePathComponent(core.NativePathStyle(), rawName); err != nil {
+			http.Error(w, "invalid upload name: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		name := rawName
+		localPath := filepath.Join(dir, name)
 		out, err := core.CreateAtomicLocalFile(localPath, 0o600)
 		if err != nil {
 			writeError(w, symlinkClobberError(localPath, err))
@@ -663,6 +783,25 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remote lexical operations must follow the managed target, not the
+	// controller. This preserves Windows drive and UNC paths from any host OS.
+	style, err := s.targetPathStyle(server)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	dir := style.Clean(rawDir)
+	if err := validatePathComponent(style, rawName); err != nil {
+		http.Error(w, "invalid upload name: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	name := rawName
+	if !style.IsAbs(dir) {
+		http.Error(w, "dir must be an absolute path", http.StatusBadRequest)
+		return
+	}
+	remotePath := style.Join(dir, name)
+
 	// Spool the browser upload to a controller-side temp file (size-capped), then
 	// run the chunked/parallel/resumable transfer from there to the agent.
 	tmp, err := os.CreateTemp("", "fleet-webui-upload-*")
@@ -680,7 +819,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	_ = tmp.Close()
 
 	id := s.hub.start()
-	remotePath := path.Join(dir, name)
 	go func() {
 		defer os.Remove(tmpPath)
 		_, err := s.app.UploadFile(server, tmpPath, remotePath, core.FileTransferOptions{}, func(u core.ProgressUpdate) {
@@ -718,6 +856,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		return
 	}
+	style, err := s.targetPathStyle(server)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	tmp, err := os.CreateTemp("", "fleet-webui-download-*")
 	if err != nil {
 		writeError(w, err)
@@ -739,7 +882,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	info, _ := f.Stat()
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(remotePath)))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", style.Base(remotePath)))
 	if info != nil {
 		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	}
@@ -919,22 +1062,18 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 // handleTouch creates a new empty file. Local: O_EXCL so it won't clobber an
 // existing file; server: upload an empty temp to the target path.
 func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
-	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
-	if p == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
+	server := r.URL.Query().Get("server")
+	p, err := s.nameOnlyPath(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if server == "" { // Local
-		clean, err := cleanLocalPath(p)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
 		// Resolve the parent's symlinks so a symlinked intermediate directory can't
 		// redirect the create outside the named path; O_EXCL guards the final
 		// component against clobbering an existing file/symlink.
-		clean = resolveLocalWritePath(clean)
-		f, err := os.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path validated, parent symlinks resolved, O_EXCL on final
+		p = resolveLocalWritePath(p)
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path validated, parent symlinks resolved, O_EXCL on final
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1007,14 +1146,14 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
-	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
+	server := r.URL.Query().Get("server")
+	p, err := s.nameOnlyPath(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if server == "" { // Local
-		clean, err := cleanLocalPath(p)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if err := os.Mkdir(clean, 0o750); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
+		if err := os.Mkdir(p, 0o750); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			writeError(w, err)
 			return
 		}
@@ -1037,7 +1176,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		if clean == "/" {
+		if core.NativePathStyle().IsRoot(clean) {
 			writeError(w, fmt.Errorf("refusing to remove root"))
 			return
 		}
@@ -1064,9 +1203,52 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
-	server := r.URL.Query().Get("server")
-	from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
-	if server == "" { // Local rename
+	q := r.URL.Query()
+	server := q.Get("server")
+	from, to := q.Get("from"), q.Get("to")
+	if _, rename := q["name"]; rename {
+		style, err := s.targetPathStyle(server)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		name := q.Get("name")
+		if err := validatePathComponent(style, name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if server == "" {
+			clean, err := cleanLocalPath(from)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			from = clean
+			to = filepath.Join(filepath.Dir(clean), name)
+		} else {
+			from = style.Clean(from)
+			if !style.IsAbs(from) {
+				http.Error(w, "from must be an absolute path", http.StatusBadRequest)
+				return
+			}
+			to = style.Join(style.Dir(from), name)
+		}
+	} else {
+		style, err := s.targetPathStyle(server)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		name := style.Base(to)
+		if server == "" {
+			name = filepath.Base(to)
+		}
+		if err := validatePathComponent(style, name); err != nil {
+			http.Error(w, "invalid destination name: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if server == "" { // Local rename or same-pane move
 		cf, err := cleanLocalPath(from)
 		if err != nil {
 			writeError(w, err)
@@ -1102,27 +1284,49 @@ func (s *Server) handleCompress(w http.ResponseWriter, r *http.Request) {
 	}
 	server := r.Form.Get("server")
 	dir := r.Form.Get("dir")
-	archive := path.Base(r.Form.Get("archive"))
+	rawArchive := r.Form.Get("archive")
 	format := r.Form.Get("format")
-	names := r.Form["name"]
-	if archive == "" || archive == "." || archive == "/" {
-		http.Error(w, "archive name is required", http.StatusBadRequest)
-		return
-	}
+	names := append([]string(nil), r.Form["name"]...)
 	if len(names) == 0 {
 		http.Error(w, "at least one name is required", http.StatusBadRequest)
 		return
 	}
-	if format == "" {
-		format = core.FormatFromName(archive)
-	}
+
+	var style core.TargetPathStyle
 	if server == "" {
+		style = core.NativePathStyle()
 		clean, err := cleanLocalPath(dir)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
 		dir = clean
+	} else {
+		var err error
+		style, err = s.targetPathStyle(server)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dir = style.Clean(dir)
+		if !style.IsAbs(dir) {
+			http.Error(w, "dir must be an absolute path", http.StatusBadRequest)
+			return
+		}
+	}
+	if err := validatePathComponent(style, rawArchive); err != nil {
+		http.Error(w, "invalid archive name: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, name := range names {
+		if err := validatePathComponent(style, name); err != nil {
+			http.Error(w, "invalid selected name: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	archive := rawArchive
+	if format == "" {
+		format = core.FormatFromName(archive)
 	}
 	if err := s.app.CompressPaths(server, dir, names, archive, format); err != nil {
 		writeError(w, err)
@@ -1217,12 +1421,20 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		if err := validatePathComponent(core.NativePathStyle(), filepath.Base(clean)); err != nil {
+			http.Error(w, "invalid source name: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		info, err := os.Lstat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		dst := freeDuplicateName(clean, func(c string) bool { _, e := os.Lstat(c); return e == nil }) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
+		dst := freeLocalDuplicateName(clean, func(c string) bool { _, e := os.Lstat(c); return e == nil }) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
+		if err := validatePathComponent(core.NativePathStyle(), filepath.Base(dst)); err != nil {
+			http.Error(w, "invalid duplicate name: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		if info.IsDir() {
 			if err := copyLocalTree(clean, dst); err != nil {
 				writeError(w, err)
@@ -1235,29 +1447,102 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "ok", "path": dst})
 		return
 	}
-	dst := freeDuplicateName(p, func(c string) bool { _, e := s.app.StatRemoteFile(server, c); return e == nil })
-	if _, err := s.app.CopyFile(server, p, server, dst, core.FileTransferOptions{}, nil); err != nil {
+	style, err := s.targetPathStyle(server)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	dst, err := duplicateRemotePath(
+		style,
+		p,
+		func(candidate string) (proto.FileStatResult, error) { return s.app.StatRemoteFile(server, candidate) },
+		func(src, dst string) error {
+			_, err := s.app.CopyFile(server, src, server, dst, core.FileTransferOptions{}, nil)
+			return err
+		},
+		func(src, dst string) error {
+			_, err := s.app.CopyDir(server, src, server, dst, core.FileTransferOptions{}, nil)
+			return err
+		},
+	)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok", "path": dst})
 }
 
-// duplicateName derives a "<name> copy.<ext>" sibling path. It inserts " copy"
-// before the final extension (preserving compound suffixes like ".tar.gz" only
-// for the single trailing extension, matching Finder/Explorer behaviour).
-func duplicateName(p string) string {
-	dir := path.Dir(p)
-	base := path.Base(p)
-	ext := path.Ext(base)
-	stem := strings.TrimSuffix(base, ext)
-	return path.Join(dir, stem+" copy"+ext)
+// duplicateRemotePath derives an available sibling using the source target's
+// lexical style, then dispatches according to authoritative remote metadata.
+func duplicateRemotePath(
+	style core.TargetPathStyle,
+	p string,
+	stat func(string) (proto.FileStatResult, error),
+	copyFile func(string, string) error,
+	copyDir func(string, string) error,
+) (string, error) {
+	if err := validatePathComponent(style, style.Base(p)); err != nil {
+		return "", fmt.Errorf("invalid source name: %w", err)
+	}
+	source, err := stat(p)
+	if err != nil {
+		return "", fmt.Errorf("stat source: %w", err)
+	}
+	dst := freeTargetDuplicateName(style, p, func(candidate string) bool {
+		_, err := stat(candidate)
+		return err == nil
+	})
+	if err := validatePathComponent(style, style.Base(dst)); err != nil {
+		return "", fmt.Errorf("invalid duplicate name: %w", err)
+	}
+	if source.Entry.IsDir {
+		err = copyDir(p, dst)
+	} else {
+		err = copyFile(p, dst)
+	}
+	if err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
-// freeDuplicateName returns the first "<name> copy[ N].<ext>" sibling that does
-// not already exist (per `exists`), so Duplicate never clobbers a sibling.
-func freeDuplicateName(p string, exists func(string) bool) string {
-	dir, base := path.Dir(p), path.Base(p)
+// localDuplicateName derives a controller-native "<name> copy.<ext>" sibling.
+func localDuplicateName(p string) string {
+	dir := filepath.Dir(p)
+	base := filepath.Base(p)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return filepath.Join(dir, stem+" copy"+ext)
+}
+
+// targetDuplicateName derives the same sibling using managed-target lexical
+// operations, which keeps Windows drive and UNC paths intact on any controller.
+func targetDuplicateName(style core.TargetPathStyle, p string) string {
+	dir := style.Dir(p)
+	base := style.Base(p)
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return style.Join(dir, stem+" copy"+ext)
+}
+
+func freeLocalDuplicateName(p string, exists func(string) bool) string {
+	dir, base := filepath.Dir(p), filepath.Base(p)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 1; ; i++ {
+		suffix := " copy"
+		if i > 1 {
+			suffix = fmt.Sprintf(" copy %d", i)
+		}
+		candidate := filepath.Join(dir, stem+suffix+ext)
+		if !exists(candidate) {
+			return candidate
+		}
+	}
+}
+
+func freeTargetDuplicateName(style core.TargetPathStyle, p string, exists func(string) bool) string {
+	dir, base := style.Dir(p), style.Base(p)
 	ext := path.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 	for i := 1; ; i++ {
@@ -1265,9 +1550,9 @@ func freeDuplicateName(p string, exists func(string) bool) string {
 		if i > 1 {
 			suffix = fmt.Sprintf(" copy %d", i)
 		}
-		cand := path.Join(dir, stem+suffix+ext)
-		if !exists(cand) {
-			return cand
+		candidate := style.Join(dir, stem+suffix+ext)
+		if !exists(candidate) {
+			return candidate
 		}
 	}
 }

@@ -6,9 +6,7 @@ package core
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"sync"
 
 	"github.com/cenvero/fleet/internal/logs"
 	"github.com/cenvero/fleet/pkg/proto"
@@ -22,7 +20,8 @@ func (a *App) ListRemoteDirHidden(serverName, remotePath string, showHidden bool
 		return proto.FileListResult{}, err
 	}
 	if remotePath == "" {
-		remotePath = firstNonEmptyString(a.effectiveFileTransferDefaults(server).RemoteDir, "/")
+		server.FileTransfer.RemoteDir = a.effectiveFileTransferDefaults(server).RemoteDir
+		remotePath = InitialRemotePath(server)
 	}
 	resp, err := a.callRPC(server, proto.Envelope{
 		Action:  proto.ActionFileList,
@@ -41,9 +40,19 @@ func (a *App) ListRemoteDirHidden(serverName, remotePath string, showHidden bool
 // controller-side temp file: download src -> temp -> upload to dst. Works for any
 // server mode. Progress is reported as a single 0..100% bar across both legs.
 func (a *App) CopyFile(srcServer, srcPath, dstServer, dstPath string, opts FileTransferOptions, progress ProgressFunc) (proto.FileFinalizeResult, error) {
+	dstRecord, err := a.GetServer(dstServer)
+	if err != nil {
+		return proto.FileFinalizeResult{}, err
+	}
+	if err := ValidateTargetPath(TargetPathStyleForServer(dstRecord), dstPath); err != nil {
+		return proto.FileFinalizeResult{}, err
+	}
 	stat, err := a.StatRemoteFile(srcServer, srcPath)
 	if err != nil {
 		return proto.FileFinalizeResult{}, fmt.Errorf("stat source: %w", err)
+	}
+	if err := requireRemoteRegular(stat.Entry, srcPath); err != nil {
+		return proto.FileFinalizeResult{}, err
 	}
 	size := stat.Entry.Size
 	total := size * 2
@@ -129,24 +138,44 @@ func relayProgress(progress ProgressFunc, base, total int64) ProgressFunc {
 	}
 }
 
-// CopyDir recursively copies a directory tree from one server to another.
-// Returns the number of files copied.
+// CopyDir recursively copies a directory tree from one server to another,
+// preserving hidden and empty directories. Returns the number of regular files
+// copied (directories are not counted).
 func (a *App) CopyDir(srcServer, srcPath, dstServer, dstPath string, opts FileTransferOptions, progress ProgressFunc) (int, error) {
-	srcPath = path.Clean(srcPath)
-	dstPath = path.Clean(dstPath)
-	files, err := a.scanRemoteDir(srcServer, srcPath)
+	srcRecord, err := a.GetServer(srcServer)
 	if err != nil {
 		return 0, err
 	}
-	_ = a.RemoteMkdir(dstServer, dstPath)
-	created := map[string]bool{dstPath: true}
-	var cmu sync.Mutex
-	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
-		srcF := path.Join(srcPath, filepath.ToSlash(rel))
-		dstF := path.Join(dstPath, filepath.ToSlash(rel))
-		cmu.Lock()
-		a.ensureRemoteParent(dstServer, dstF, created)
-		cmu.Unlock()
+	dstRecord, err := a.GetServer(dstServer)
+	if err != nil {
+		return 0, err
+	}
+	srcStyle := TargetPathStyleForServer(srcRecord)
+	dstStyle := TargetPathStyleForServer(dstRecord)
+	srcPath = srcStyle.Clean(srcPath)
+	dstPath = dstStyle.Clean(dstPath)
+	if err := ValidateTargetPath(dstStyle, dstPath); err != nil {
+		return 0, err
+	}
+	entries, err := a.scanRemoteDir(srcServer, srcPath)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateTreeForStyle(entries, dstStyle); err != nil {
+		return 0, err
+	}
+	if err := a.RemoteMkdir(dstServer, dstPath); err != nil {
+		return 0, err
+	}
+	for _, rel := range sortedDirKeys(entries) {
+		if err := a.RemoteMkdir(dstServer, dstStyle.Join(dstPath, rel)); err != nil {
+			return 0, fmt.Errorf("create destination directory %s: %w", rel, err)
+		}
+	}
+	files := sortedFileKeys(entries)
+	return runParallelTransfers(files, sumSizes(entries), progress, func(rel string, fp ProgressFunc) error {
+		srcF := srcStyle.Join(srcPath, rel)
+		dstF := dstStyle.Join(dstPath, rel)
 		_, err := a.CopyFile(srcServer, srcF, dstServer, dstF, opts, fp)
 		return err
 	})
@@ -197,11 +226,18 @@ func (a *App) auditMove(srcServer, srcPath, dstServer, dstPath string) {
 // EstimateRemoteTree returns the file count and total bytes under a remote path
 // (bounded by scanRemoteDir's depth/file caps). Used for transfer confirmations.
 func (a *App) EstimateRemoteTree(serverName, remotePath string) (files int, bytes int64, err error) {
-	m, err := a.scanRemoteDir(serverName, path.Clean(remotePath))
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return 0, 0, err
+	}
+	m, err := a.scanRemoteDir(serverName, TargetPathStyleForServer(server).Clean(remotePath))
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, meta := range m {
+		if meta.isDir() {
+			continue
+		}
 		files++
 		bytes += meta.size
 	}
@@ -215,6 +251,9 @@ func EstimateLocalTree(dir string) (files int, bytes int64, err error) {
 		return 0, 0, err
 	}
 	for _, meta := range m {
+		if meta.isDir() {
+			continue
+		}
 		files++
 		bytes += meta.size
 	}

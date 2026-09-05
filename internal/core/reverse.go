@@ -812,6 +812,7 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 		OS:                 info.Hello.OS,
 		Arch:               info.Hello.Arch,
 		Transport:          info.Hello.Transport,
+		FileRoot:           info.Hello.FileRoot,
 		HostKeyFingerprint: info.HostKeyFingerprint,
 	}
 	_ = h.app.SaveServer(server)

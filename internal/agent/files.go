@@ -212,10 +212,18 @@ func validateTransferEntryPath(name string) (string, *RPCError) {
 // openTransferRoot returns a descriptor-backed root and a relative path beneath
 // it. With --file-root configured, opening from the allowed root closes the
 // validate/open TOCTOU for every intermediate component.
+func pathWithinFileRoot(root, real string) bool {
+	rel, err := filepath.Rel(root, real)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 func openTransferRoot(real string) (*os.Root, string, *RPCError) {
 	var rootPath string
 	for _, candidate := range allowedFileRoots {
-		if real == candidate || strings.HasPrefix(real, candidate+string(filepath.Separator)) {
+		if pathWithinFileRoot(candidate, real) {
 			if len(candidate) > len(rootPath) {
 				rootPath = candidate
 			}
@@ -303,6 +311,16 @@ func SetAllowedFileRoots(roots []string) {
 	allowedFileRoots = resolved
 }
 
+// firstAllowedFileRoot returns the first normalized sandbox root for
+// advertisement in the agent hello payload. An empty result means file access
+// is unrestricted and callers should advertise the native system root.
+func firstAllowedFileRoot() string {
+	if len(allowedFileRoots) == 0 {
+		return ""
+	}
+	return allowedFileRoots[0]
+}
+
 // withinAllowedRoots reports whether real is inside the configured sandbox (or
 // no sandbox is configured).
 func withinAllowedRoots(real string) bool {
@@ -310,7 +328,7 @@ func withinAllowedRoots(real string) bool {
 		return true
 	}
 	for _, root := range allowedFileRoots {
-		if real == root || strings.HasPrefix(real, root+string(filepath.Separator)) {
+		if pathWithinFileRoot(root, real) {
 			return true
 		}
 	}
@@ -370,6 +388,19 @@ func reapStalePartsRoot(root *os.Root, dirRel, keepName string, now time.Time) {
 	}
 }
 
+func fileEntryType(mode os.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return proto.FileEntryTypeSymlink
+	case mode.IsDir():
+		return proto.FileEntryTypeDirectory
+	case mode.IsRegular():
+		return proto.FileEntryTypeRegular
+	default:
+		return proto.FileEntryTypeOther
+	}
+}
+
 func (m *fileManager) List(_ context.Context, p proto.FileListPayload) (proto.FileListResult, error) {
 	real, rerr := validateTransferPath(p.Path)
 	if rerr != nil {
@@ -402,9 +433,10 @@ func (m *fileManager) List(_ context.Context, p proto.FileListPayload) (proto.Fi
 		}
 		if info, err := entry.Info(); err == nil {
 			fe.Size = info.Size()
-			fe.Mode = uint32(info.Mode().Perm())
+			fe.Mode = uint32(info.Mode())
 			fe.ModTime = info.ModTime().UTC()
 			fe.IsSymlink = info.Mode()&os.ModeSymlink != 0
+			fe.Type = fileEntryType(info.Mode())
 		}
 		result.Entries = append(result.Entries, fe)
 	}
@@ -428,17 +460,19 @@ func (m *fileManager) Stat(_ context.Context, p proto.FileStatPayload) (proto.Fi
 		return proto.FileStatResult{}, rerr
 	}
 	defer root.Close()
-	info, err := root.Stat(rel)
+	info, err := root.Lstat(rel)
 	if err != nil {
 		return proto.FileStatResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
 	return proto.FileStatResult{Entry: proto.FileEntry{
-		Name:    info.Name(),
-		Path:    real,
-		Size:    info.Size(),
-		Mode:    uint32(info.Mode().Perm()),
-		IsDir:   info.IsDir(),
-		ModTime: info.ModTime().UTC(),
+		Name:      info.Name(),
+		Path:      real,
+		Size:      info.Size(),
+		Mode:      uint32(info.Mode()),
+		Type:      fileEntryType(info.Mode()),
+		IsDir:     info.IsDir(),
+		IsSymlink: info.Mode()&os.ModeSymlink != 0,
+		ModTime:   info.ModTime().UTC(),
 	}}, nil
 }
 

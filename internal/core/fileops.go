@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -27,7 +27,9 @@ const dirTransferConcurrency = 8
 func sumSizes(m map[string]fileMeta) int64 {
 	var t int64
 	for _, meta := range m {
-		t += meta.size
+		if !meta.isDir() {
+			t += meta.size
+		}
 	}
 	return t
 }
@@ -125,6 +127,13 @@ func (a *App) CatRemoteFile(serverName, remotePath string, w io.Writer) (int64, 
 	if err != nil {
 		return 0, err
 	}
+	stat, err := a.StatRemoteFile(serverName, remotePath)
+	if err != nil {
+		return 0, err
+	}
+	if err := requireRemoteRegular(stat.Entry, remotePath); err != nil {
+		return 0, err
+	}
 	// Bound the number of round-trips too: a malicious agent could dribble back
 	// tiny (even 1-byte) chunks to stay under the byte ceiling for a very long
 	// time. Allow enough iterations to stream maxCatRemoteBytes at the protocol's
@@ -193,47 +202,86 @@ func (a *App) TailRemoteFile(serverName, remotePath string, tailLines int, searc
 	return proto.DecodePayload[proto.LogReadResult](resp.Payload)
 }
 
-// UploadDir recursively uploads every file under localDir into remoteDir,
-// preserving the tree. Returns the number of files uploaded.
+// UploadDir recursively uploads every regular file under localDir into
+// remoteDir and preserves empty directories. Returns the number of files
+// uploaded (directories are not counted).
 func (a *App) UploadDir(serverName, localDir, remoteDir string, opts FileTransferOptions, progress ProgressFunc) (int, error) {
-	localDir = filepath.Clean(localDir)
-	remoteDir = path.Clean(remoteDir)
-	files, err := scanLocalDir(localDir)
+	server, err := a.GetServer(serverName)
 	if err != nil {
 		return 0, err
 	}
-	created := map[string]bool{remoteDir: true}
-	var cmu sync.Mutex
-	_ = a.RemoteMkdir(serverName, remoteDir)
-	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
-		remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-		cmu.Lock()
-		a.ensureRemoteParent(serverName, remotePath, created)
-		cmu.Unlock()
-		_, err := a.UploadFile(serverName, filepath.Join(localDir, rel), remotePath, opts, fp)
+	style := TargetPathStyleForServer(server)
+	localDir = filepath.Clean(localDir)
+	remoteDir = style.Clean(remoteDir)
+	if err := ValidateTargetPath(style, remoteDir); err != nil {
+		return 0, err
+	}
+	entries, err := scanLocalDir(localDir)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateTreeForStyle(entries, style); err != nil {
+		return 0, err
+	}
+	if err := a.RemoteMkdir(serverName, remoteDir); err != nil {
+		return 0, err
+	}
+	for _, rel := range sortedDirKeys(entries) {
+		if err := a.RemoteMkdir(serverName, style.Join(remoteDir, rel)); err != nil {
+			return 0, fmt.Errorf("create remote directory %s: %w", rel, err)
+		}
+	}
+	files := sortedFileKeys(entries)
+	return runParallelTransfers(files, sumSizes(entries), progress, func(rel string, fp ProgressFunc) error {
+		remotePath := style.Join(remoteDir, rel)
+		_, err := a.UploadFile(serverName, filepath.Join(localDir, filepath.FromSlash(rel)), remotePath, opts, fp)
 		return err
 	})
 }
 
-// DownloadDir recursively downloads every file under remoteDir into localDir.
-// Remote-provided names are vetted with SafeLocalJoin so a compromised agent
-// cannot escape localDir. Returns the number of files downloaded.
+// DownloadDir recursively downloads every regular file under remoteDir into
+// localDir and preserves empty directories. Remote-provided names are vetted
+// with SafeLocalJoin and created through os.Root so a compromised agent cannot
+// escape localDir. Returns the number of files downloaded (directories are not
+// counted).
 func (a *App) DownloadDir(serverName, remoteDir, localDir string, opts FileTransferOptions, progress ProgressFunc) (int, error) {
-	remoteDir = path.Clean(remoteDir)
-	files, err := a.scanRemoteDir(serverName, remoteDir)
+	server, err := a.GetServer(serverName)
 	if err != nil {
+		return 0, err
+	}
+	style := TargetPathStyleForServer(server)
+	remoteDir = style.Clean(remoteDir)
+	localDir = filepath.Clean(localDir)
+	if err := ValidateTargetPath(NativePathStyle(), localDir); err != nil {
+		return 0, err
+	}
+	entries, err := a.scanRemoteDir(serverName, remoteDir)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateTreeForLocalDestination(entries, localDir); err != nil {
 		return 0, err
 	}
 	root, err := openVerifiedLocalDir(localDir, 0o750)
 	if err != nil {
 		return 0, err
 	}
-	_ = root.Close()
-	return runParallelTransfers(sortedRelKeys(files), sumSizes(files), progress, func(rel string, fp ProgressFunc) error {
-		if _, err := SafeLocalJoin(localDir, rel); err != nil {
+	for _, rel := range sortedDirKeys(entries) {
+		if err := root.MkdirAll(filepath.FromSlash(rel), 0o750); err != nil {
+			_ = root.Close()
+			return 0, fmt.Errorf("create local directory %s: %w", rel, err)
+		}
+	}
+	if err := root.Close(); err != nil {
+		return 0, err
+	}
+	files := sortedFileKeys(entries)
+	return runParallelTransfers(files, sumSizes(entries), progress, func(rel string, fp ProgressFunc) error {
+		localRel := filepath.FromSlash(rel)
+		if _, err := SafeLocalJoin(localDir, localRel); err != nil {
 			return err
 		}
-		remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
+		remotePath := style.Join(remoteDir, rel)
 		confined := opts
 		confined.localRoot = localDir
 		confined.localRel = rel
@@ -242,11 +290,31 @@ func (a *App) DownloadDir(serverName, remoteDir, localDir string, opts FileTrans
 	})
 }
 
-func sortedRelKeys(m map[string]fileMeta) []string {
+func sortedFileKeys(m map[string]fileMeta) []string {
 	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+	for k, meta := range m {
+		if !meta.isDir() {
+			out = append(out, k)
+		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+func sortedDirKeys(m map[string]fileMeta) []string {
+	out := make([]string, 0, len(m))
+	for k, meta := range m {
+		if meta.isDir() {
+			out = append(out, k)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		leftDepth := strings.Count(out[i], "/")
+		rightDepth := strings.Count(out[j], "/")
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return out[i] < out[j]
+	})
 	return out
 }

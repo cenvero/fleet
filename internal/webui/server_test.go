@@ -71,6 +71,72 @@ func TestWebUIRequiresToken(t *testing.T) {
 	}
 }
 
+func TestWebUIServerPathMetadata(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	if err := s.app.SaveServer(core.ServerRecord{
+		Name:         "linux-node",
+		Mode:         transport.ModeDirect,
+		Observed:     core.ServerObservation{Reachable: true, OS: "linux", FileRoot: "/srv"},
+		FileTransfer: core.FileTransferDefaults{RemoteDir: "/srv/files"},
+	}); err != nil {
+		t.Fatalf("save linux server: %v", err)
+	}
+	if err := s.app.SaveServer(core.ServerRecord{
+		Name:         "windows-node",
+		Mode:         transport.ModeDirect,
+		Observed:     core.ServerObservation{Reachable: true, OS: "windows", FileRoot: `\\fileserver\share\`},
+		FileTransfer: core.FileTransferDefaults{RemoteDir: `\\fileserver\share\team`},
+	}); err != nil {
+		t.Fatalf("save windows server: %v", err)
+	}
+
+	res, err := http.Get(ts.URL + "/api/servers?t=" + s.Token())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status %d: %s", res.StatusCode, body)
+	}
+	type sourceInfo struct {
+		Name            string               `json:"name"`
+		OS              string               `json:"os"`
+		PathStyle       core.TargetPathStyle `json:"path_style"`
+		InitialRoot     string               `json:"initial_root"`
+		BrowseRoot      string               `json:"browse_root"`
+		CaseInsensitive bool                 `json:"case_insensitive"`
+	}
+	var payload struct {
+		Local   sourceInfo   `json:"local"`
+		Servers []sourceInfo `json:"servers"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	localCaseInsensitive, err := core.LocalPathCaseInsensitive(initialLocalPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Local.PathStyle != core.NativePathStyle() || payload.Local.InitialRoot != initialLocalPath() || payload.Local.BrowseRoot != core.NativePathStyle().DefaultRoot() || payload.Local.CaseInsensitive != localCaseInsensitive {
+		t.Fatalf("local metadata = %+v, want style %q initial %q boundary %q caseInsensitive=%v", payload.Local, core.NativePathStyle(), initialLocalPath(), core.NativePathStyle().DefaultRoot(), localCaseInsensitive)
+	}
+	if payload.Local.OS == "" {
+		t.Fatalf("local OS must be exposed")
+	}
+	byName := make(map[string]sourceInfo, len(payload.Servers))
+	for _, source := range payload.Servers {
+		byName[source.Name] = source
+	}
+	if got := byName["linux-node"]; got.OS != "linux" || got.PathStyle != core.TargetPathPOSIX || got.InitialRoot != "/srv/files" || got.BrowseRoot != "/srv" || got.CaseInsensitive {
+		t.Fatalf("linux metadata = %+v", got)
+	}
+	if got := byName["windows-node"]; got.OS != "windows" || got.PathStyle != core.TargetPathWindows || got.InitialRoot != `\\fileserver\share\team` || got.BrowseRoot != `\\fileserver\share\` || !got.CaseInsensitive {
+		t.Fatalf("windows metadata = %+v", got)
+	}
+}
+
 func TestWebUIRejectsBadToken(t *testing.T) {
 	t.Parallel()
 	_, ts := newTestServer(t)
@@ -103,11 +169,14 @@ func TestWebUIServesIndex(t *testing.T) {
 
 func TestCleanLocalPath(t *testing.T) {
 	t.Parallel()
-	if got, err := cleanLocalPath(""); err != nil || got != "/" {
-		t.Fatalf("empty path: got %q err %v, want /", got, err)
+	if got, err := cleanLocalPath(""); err != nil || got != initialLocalPath() {
+		t.Fatalf("empty path: got %q err %v, want %q", got, err, initialLocalPath())
+	} else if info, statErr := os.Stat(got); statErr != nil || !info.IsDir() {
+		t.Fatalf("empty path did not resolve to an existing directory: info=%v err=%v", info, statErr)
 	}
-	if got, err := cleanLocalPath("/a/b/../c"); err != nil || got != "/a/c" {
-		t.Fatalf("clean: got %q err %v, want /a/c", got, err)
+	absolute := filepath.Join(initialLocalPath(), "a", "b", "..", "c")
+	if got, err := cleanLocalPath(absolute); err != nil || got != filepath.Join(initialLocalPath(), "a", "c") {
+		t.Fatalf("clean: got %q err %v", got, err)
 	}
 	if _, err := cleanLocalPath("relative/path"); err == nil {
 		t.Fatalf("expected relative path to be rejected")
@@ -133,6 +202,13 @@ func TestListLocalDir(t *testing.T) {
 	}
 	if res.Path != filepath.Clean(dir) {
 		t.Fatalf("path: got %q want %q", res.Path, filepath.Clean(dir))
+	}
+	wantCaseInsensitive, err := core.LocalPathCaseInsensitive(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CaseInsensitive == nil || *res.CaseInsensitive != wantCaseInsensitive {
+		t.Fatalf("case metadata = %v, want %v", res.CaseInsensitive, wantCaseInsensitive)
 	}
 	names := entryNames(res.Entries)
 	if names[".dotfile"] {
@@ -214,7 +290,7 @@ func TestWebUILocalMutations(t *testing.T) {
 	}
 
 	newDir := filepath.Join(dir, "made")
-	if code := post("/api/mkdir", url.Values{"path": {newDir}}); code != http.StatusOK {
+	if code := post("/api/mkdir", url.Values{"dir": {dir}, "name": {"made"}}); code != http.StatusOK {
 		t.Fatalf("mkdir status %d", code)
 	}
 	if fi, err := os.Stat(newDir); err != nil || !fi.IsDir() {
@@ -222,7 +298,7 @@ func TestWebUILocalMutations(t *testing.T) {
 	}
 
 	renamed := filepath.Join(dir, "renamed")
-	if code := post("/api/mv", url.Values{"from": {newDir}, "to": {renamed}}); code != http.StatusOK {
+	if code := post("/api/mv", url.Values{"from": {newDir}, "name": {"renamed"}}); code != http.StatusOK {
 		t.Fatalf("mv status %d", code)
 	}
 	if _, err := os.Stat(renamed); err != nil {
@@ -316,7 +392,7 @@ func TestWebUIReadWrite(t *testing.T) {
 	}
 
 	file := filepath.Join(dir, "note.txt")
-	if code, body := post("/api/touch", url.Values{"path": {file}}, ""); code != http.StatusOK {
+	if code, body := post("/api/touch", url.Values{"dir": {dir}, "name": {"note.txt"}}, ""); code != http.StatusOK {
 		t.Fatalf("touch status %d: %s", code, body)
 	}
 	if fi, err := os.Stat(file); err != nil || fi.Size() != 0 {
@@ -514,18 +590,33 @@ func TestWebUICompressExtract(t *testing.T) {
 	}
 }
 
-// TestDuplicateName checks the "<name> copy.<ext>" derivation.
-func TestDuplicateName(t *testing.T) {
+func TestDuplicateNamesUseSourcePathStyle(t *testing.T) {
 	t.Parallel()
-	cases := map[string]string{
-		"/a/b/note.txt": "/a/b/note copy.txt",
-		"/a/b/folder":   "/a/b/folder copy",
-		"/x/archive.gz": "/x/archive copy.gz",
+	local := filepath.Join(string(filepath.Separator), "a", "b", "note.txt")
+	if got, want := localDuplicateName(local), filepath.Join(string(filepath.Separator), "a", "b", "note copy.txt"); got != want {
+		t.Fatalf("localDuplicateName(%q) = %q, want %q", local, got, want)
 	}
-	for in, want := range cases {
-		if got := duplicateName(in); got != want {
-			t.Fatalf("duplicateName(%q) = %q, want %q", in, got, want)
+	tests := []struct {
+		style core.TargetPathStyle
+		in    string
+		want  string
+	}{
+		{core.TargetPathPOSIX, "/a/b/note.txt", "/a/b/note copy.txt"},
+		{core.TargetPathPOSIX, "/a/b/folder", "/a/b/folder copy"},
+		{core.TargetPathWindows, `C:\Users\Mona\note.txt`, `C:\Users\Mona\note copy.txt`},
+		{core.TargetPathWindows, `\\host\share\folder\archive.gz`, `\\host\share\folder\archive copy.gz`},
+	}
+	for _, tt := range tests {
+		if got := targetDuplicateName(tt.style, tt.in); got != tt.want {
+			t.Fatalf("targetDuplicateName(%q, %q) = %q, want %q", tt.style, tt.in, got, tt.want)
 		}
+	}
+	occupied := map[string]bool{`C:\Data\note copy.txt`: true}
+	got := freeTargetDuplicateName(core.TargetPathWindows, `C:\Data\note.txt`, func(candidate string) bool {
+		return occupied[candidate]
+	})
+	if got != `C:\Data\note copy 2.txt` {
+		t.Fatalf("freeTargetDuplicateName collision = %q", got)
 	}
 }
 
@@ -555,7 +646,7 @@ func TestCSRFOriginFailsClosed(t *testing.T) {
 	client := ts.Client()
 
 	postWith := func(headers map[string]string) int {
-		params := url.Values{"path": {filepath.Join(dir, "made-"+headers["case"])}}
+		params := url.Values{"dir": {dir}, "name": {"made-" + headers["case"]}}
 		params.Set("t", s.Token())
 		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/mkdir?"+params.Encode(), nil)
 		for k, v := range headers {

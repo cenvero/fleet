@@ -76,7 +76,7 @@ func (m filesModel) openEditor(side int) (tea.Model, tea.Cmd) {
 		m.status = "cannot edit a directory"
 		return m, nil
 	}
-	full := joinPath(pane.cwd, it.name, pane.remote)
+	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	m.overlay = overlayEditor
 	m.editor = editorState{
 		active: true, side: side, source: pane.source,

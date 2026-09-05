@@ -190,6 +190,7 @@ type ServerObservation struct {
 	OS                 string    `toml:"os,omitempty" json:"os,omitempty"`
 	Arch               string    `toml:"arch,omitempty" json:"arch,omitempty"`
 	Transport          string    `toml:"transport,omitempty" json:"transport,omitempty"`
+	FileRoot           string    `toml:"file_root,omitempty" json:"file_root,omitempty"`
 	HostKeyFingerprint string    `toml:"host_key_fingerprint,omitempty" json:"host_key_fingerprint,omitempty"`
 }
 

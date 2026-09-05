@@ -42,7 +42,33 @@ func validateSafeName(name string) error {
 	return nil
 }
 
-func DefaultConfigDir(home string) string {
+const activeConfigFileName = ".active-config"
+
+// platformDefaultConfigDir returns the native per-user controller directory
+// without consulting filesystem state. Linux preserves the historical location.
+func platformDefaultConfigDir(goos, home string, getenv func(string) string) string {
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home == "" {
+		return ".cenvero-fleet"
+	}
+	switch goos {
+	case "windows":
+		if getenv != nil {
+			if local := strings.TrimSpace(getenv("LOCALAPPDATA")); local != "" {
+				return filepath.Join(local, "Cenvero Fleet")
+			}
+		}
+		return filepath.Join(home, "AppData", "Local", "Cenvero Fleet")
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Cenvero Fleet")
+	default:
+		return filepath.Join(home, ".cenvero-fleet")
+	}
+}
+
+func legacyConfigDir(home string) string {
 	if home == "" {
 		home, _ = os.UserHomeDir()
 	}
@@ -50,6 +76,98 @@ func DefaultConfigDir(home string) string {
 		return ".cenvero-fleet"
 	}
 	return filepath.Join(home, ".cenvero-fleet")
+}
+
+// DefaultConfigDir returns the platform-native per-user location. Call
+// ResolveConfigDir at command boundaries to include environment, locator, and
+// legacy-install discovery.
+func DefaultConfigDir(home string) string {
+	return platformDefaultConfigDir(runtime.GOOS, home, os.Getenv)
+}
+
+// ResolveConfigDir applies controller directory precedence for a command:
+// explicit flag, FLEET_CONFIG_DIR, saved active selection, initialized native
+// default, initialized legacy directory, then the native default.
+func ResolveConfigDir(explicit string) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return filepath.Clean(explicit)
+	}
+	if env := strings.TrimSpace(os.Getenv("FLEET_CONFIG_DIR")); env != "" {
+		return filepath.Clean(env)
+	}
+	native := DefaultConfigDir("")
+	locator := filepath.Join(native, activeConfigFileName)
+	if data, err := os.ReadFile(locator); err == nil {
+		active := strings.TrimSpace(string(data))
+		if filepath.IsAbs(active) && IsInitialized(active) {
+			return filepath.Clean(active)
+		}
+	}
+	if IsInitialized(native) {
+		return native
+	}
+	legacy := legacyConfigDir("")
+	if filepath.Clean(legacy) != filepath.Clean(native) && IsInitialized(legacy) {
+		return legacy
+	}
+	return native
+}
+
+// SaveActiveConfigDir records an interactive non-default choice under the
+// native user directory. The locator contains one absolute path and is written
+// atomically with user-only permissions.
+func SaveActiveConfigDir(configDir string) error {
+	absolute, err := filepath.Abs(configDir)
+	if err != nil {
+		return err
+	}
+	absolute = filepath.Clean(absolute)
+	native := filepath.Clean(DefaultConfigDir(""))
+	locator := filepath.Join(native, activeConfigFileName)
+	if absolute == native {
+		if err := os.Remove(locator); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(native, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(native, ".active-config-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := io.WriteString(tmp, absolute+"\n"); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, locator)
+}
+
+// ClearActiveConfigDir removes the locator only when it names configDir.
+func ClearActiveConfigDir(configDir string) error {
+	locator := filepath.Join(DefaultConfigDir(""), activeConfigFileName)
+	data, err := os.ReadFile(locator)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	active := strings.TrimSpace(string(data))
+	if filepath.Clean(active) != filepath.Clean(configDir) {
+		return nil
+	}
+	return os.Remove(locator)
 }
 
 func DefaultConfig(configDir string) Config {

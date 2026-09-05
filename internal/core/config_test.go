@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,63 @@ func TestEnsureLayoutTightensExistingKeysDir(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o700 {
 		t.Errorf("existing keys/ not tightened: perm = %o, want 0700", perm)
+	}
+}
+
+func TestResolveConfigDirPrecedenceAndActiveLocator(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("FLEET_CONFIG_DIR", "")
+
+	custom := filepath.Join(t.TempDir(), "custom-controller")
+	if _, err := Initialize(InitOptions{
+		ConfigDir: custom, Alias: "fleet", DefaultMode: transport.ModeDirect,
+		CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveActiveConfigDir(custom); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveConfigDir(""); got != custom {
+		t.Fatalf("active config resolution = %q, want %q", got, custom)
+	}
+
+	envDir := filepath.Join(t.TempDir(), "from-env")
+	t.Setenv("FLEET_CONFIG_DIR", envDir)
+	if got := ResolveConfigDir(""); got != envDir {
+		t.Fatalf("environment config resolution = %q, want %q", got, envDir)
+	}
+	explicit := filepath.Join(t.TempDir(), "explicit")
+	if got := ResolveConfigDir(explicit); got != explicit {
+		t.Fatalf("explicit config resolution = %q, want %q", got, explicit)
+	}
+	t.Setenv("FLEET_CONFIG_DIR", "")
+	if err := ClearActiveConfigDir(custom); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveConfigDir(""); got == custom {
+		t.Fatalf("cleared active config still resolved to %q", got)
+	}
+}
+
+func TestResolveConfigDirDiscoversLegacyInstall(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("Linux native and legacy controller directories are identical")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("FLEET_CONFIG_DIR", "")
+	legacy := filepath.Join(home, ".cenvero-fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir: legacy, Alias: "fleet", DefaultMode: transport.ModeDirect,
+		CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveConfigDir(""); got != legacy {
+		t.Fatalf("legacy config resolution = %q, want %q", got, legacy)
 	}
 }

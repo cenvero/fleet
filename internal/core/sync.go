@@ -60,18 +60,28 @@ type SyncEvent struct {
 	Err   error
 }
 
+type fileKind uint8
+
+const (
+	fileKindRegular fileKind = iota
+	fileKindDirectory
+)
+
 type fileMeta struct {
+	kind        fileKind
 	modUnixNano int64
 	size        int64
 }
+
+func (m fileMeta) isDir() bool { return m.kind == fileKindDirectory }
 
 // syncPlan abstracts the writer/replica sides so one loop drives both push and
 // pull.
 type syncPlan struct {
 	scanWriter         func() (map[string]fileMeta, error)
 	scanReplica        func() (map[string]fileMeta, error)
-	copy               func(rel string) (int64, error) // writer -> replica
-	remove             func(rel string) error          // delete on replica
+	copy               func(rel string, meta fileMeta) (int64, error) // writer -> replica
+	remove             func(rel string, meta fileMeta) error          // delete on replica
 	ensureReplicaDir   func() error
 	transientCopyError func(error) bool
 }
@@ -80,14 +90,16 @@ type syncPlan struct {
 // The writer snapshot may still advance, but these entries force another
 // attempt even when the source metadata does not change again.
 type syncPending struct {
-	copies  map[string]struct{}
-	deletes map[string]struct{}
+	copies          map[string]struct{}
+	deletes         map[string]fileMeta
+	requiredDeletes map[string]bool
 }
 
 func newSyncPending() *syncPending {
 	return &syncPending{
-		copies:  make(map[string]struct{}),
-		deletes: make(map[string]struct{}),
+		copies:          make(map[string]struct{}),
+		deletes:         make(map[string]fileMeta),
+		requiredDeletes: make(map[string]bool),
 	}
 }
 
@@ -103,25 +115,34 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 	if events == nil {
 		events = func(SyncEvent) {}
 	}
-	if _, err := a.GetServer(serverName); err != nil {
+	server, err := a.GetServer(serverName)
+	if err != nil {
 		return err
 	}
+	style := TargetPathStyleForServer(server)
 	localDir = filepath.Clean(localDir)
-	remoteDir = path.Clean(remoteDir)
+	remoteDir = style.Clean(remoteDir)
 	interval := opts.Interval
 	if interval <= 0 {
 		interval = DefaultSyncInterval
 	}
 	pull := opts.From == SyncFromRemote
+	replicaStyle := style
+	replicaCaseInsensitive := style.IsWindows()
 
 	if pull {
-		// Writer is remote; create and descriptor-verify the local replica root.
-		root, err := openVerifiedLocalDir(localDir, 0o750)
-		if err != nil {
-			return fmt.Errorf("local directory: %w", err)
+		if err := ValidateTargetPath(NativePathStyle(), localDir); err != nil {
+			return err
 		}
-		_ = root.Close()
+		replicaStyle = NativePathStyle()
+		replicaCaseInsensitive, err = LocalPathCaseInsensitive(localDir)
+		if err != nil {
+			return err
+		}
 	} else {
+		if err := ValidateTargetPath(style, remoteDir); err != nil {
+			return err
+		}
 		// Writer is local; it must exist.
 		info, err := os.Stat(localDir)
 		if err != nil {
@@ -139,7 +160,7 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 		Details:  syncAuditDetails(serverName, localDir, remoteDir, opts),
 	})
 
-	plan := a.makeSyncPlan(serverName, localDir, remoteDir, opts, pull)
+	plan := a.makeSyncPlan(serverName, localDir, remoteDir, opts, pull, style)
 
 	prev := map[string]fileMeta{}
 	pending := newSyncPending()
@@ -148,6 +169,9 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 	defer ticker.Stop()
 	for {
 		writer, err := plan.scanWriter()
+		if err == nil {
+			err = validateTreeForStyleCase(writer, replicaStyle, replicaCaseInsensitive)
+		}
 		if err != nil {
 			// A local writer can legitimately delete a file while WalkDir is
 			// inspecting it. Abort this entire scan (never reconcile a partial
@@ -194,28 +218,38 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 	}
 }
 
-func (a *App) makeSyncPlan(serverName, localDir, remoteDir string, opts SyncOptions, pull bool) syncPlan {
+func (a *App) makeSyncPlan(serverName, localDir, remoteDir string, opts SyncOptions, pull bool, style TargetPathStyle) syncPlan {
 	xfer := FileTransferOptions{Parallel: opts.Parallel}
 	if pull {
 		return syncPlan{
 			scanWriter:  func() (map[string]fileMeta, error) { return a.scanRemoteDir(serverName, remoteDir) },
 			scanReplica: func() (map[string]fileMeta, error) { return scanLocalDir(localDir) },
-			copy: func(rel string) (int64, error) {
-				remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-				if _, err := SafeLocalJoin(localDir, rel); err != nil {
+			copy: func(rel string, meta fileMeta) (int64, error) {
+				localRel := filepath.FromSlash(rel)
+				if _, err := SafeLocalJoin(localDir, localRel); err != nil {
 					return 0, err
 				}
+				if meta.isDir() {
+					root, err := openVerifiedLocalDir(localDir, 0o750)
+					if err != nil {
+						return 0, err
+					}
+					defer root.Close()
+					return 0, root.MkdirAll(localRel, 0o750)
+				}
+				remotePath := style.Join(remoteDir, rel)
 				confined := xfer
 				confined.localRoot = localDir
 				confined.localRel = rel
 				res, err := a.DownloadFile(serverName, remotePath, "", confined, nil)
 				return res.Entry.Size, err
 			},
-			remove: func(rel string) error {
-				if _, err := SafeLocalJoin(localDir, rel); err != nil {
+			remove: func(rel string, _ fileMeta) error {
+				localRel := filepath.FromSlash(rel)
+				if _, err := SafeLocalJoin(localDir, localRel); err != nil {
 					return err
 				}
-				return RemoveLocalUnder(localDir, rel, false)
+				return RemoveLocalUnder(localDir, localRel, false)
 			},
 			ensureReplicaDir: func() error {
 				root, err := openVerifiedLocalDir(localDir, 0o750)
@@ -226,46 +260,104 @@ func (a *App) makeSyncPlan(serverName, localDir, remoteDir string, opts SyncOpti
 			},
 		}
 	}
-	createdRemoteDirs := map[string]bool{}
 	return syncPlan{
 		scanWriter:  func() (map[string]fileMeta, error) { return scanLocalDir(localDir) },
 		scanReplica: func() (map[string]fileMeta, error) { return a.scanRemoteDir(serverName, remoteDir) },
-		copy: func(rel string) (int64, error) {
-			remotePath := path.Join(remoteDir, filepath.ToSlash(rel))
-			a.ensureRemoteParent(serverName, remotePath, createdRemoteDirs)
-			res, err := a.UploadFile(serverName, filepath.Join(localDir, rel), remotePath, xfer, nil)
+		copy: func(rel string, meta fileMeta) (int64, error) {
+			remotePath := style.Join(remoteDir, rel)
+			if meta.isDir() {
+				return 0, a.RemoteMkdir(serverName, remotePath)
+			}
+			res, err := a.UploadFile(serverName, filepath.Join(localDir, filepath.FromSlash(rel)), remotePath, xfer, nil)
 			return res.Size, err
 		},
-		remove: func(rel string) error {
-			return a.RemoteDelete(serverName, path.Join(remoteDir, filepath.ToSlash(rel)), false)
+		remove: func(rel string, _ fileMeta) error {
+			return a.RemoteDelete(serverName, style.Join(remoteDir, rel), false)
 		},
 		ensureReplicaDir:   func() error { return a.RemoteMkdir(serverName, remoteDir) },
 		transientCopyError: func(err error) bool { return errors.Is(err, os.ErrNotExist) },
 	}
 }
 
-// syncReconcile copies new/changed writer files to the replica and (unless
-// NoDelete) removes replica files that the writer no longer has. It returns
-// true when every operation selected for this pass succeeded.
+// syncReconcile copies new/changed writer entries to the replica and (unless
+// NoDelete) removes replica entries that the writer no longer has. Deletions
+// run child-before-parent; directory creation runs parent-before-child; regular
+// files transfer only after their parent directories exist. It returns true
+// when every operation selected for this pass succeeded.
 func syncReconcile(writer, replica, prev map[string]fileMeta, first bool, opts SyncOptions, plan syncPlan, pending *syncPending, events func(SyncEvent)) bool {
 	complete := true
-	rels := make([]string, 0, len(writer))
-	for rel := range writer {
-		rels = append(rels, rel)
-		// A source path that reappeared must no longer be pending deletion.
-		delete(pending.deletes, rel)
+	base := prev
+	if first {
+		base = replica
 	}
-	sort.Strings(rels)
 
-	for _, rel := range rels {
+	// Remove absent entries and type conflicts before creating replacements.
+	// A complete writer scan is a prerequisite for calling syncReconcile, so an
+	// incomplete scan can never turn an omitted path into a deletion.
+	for rel, meta := range writer {
+		if pendingMeta, ok := pending.deletes[rel]; ok && pendingMeta.kind == meta.kind {
+			delete(pending.deletes, rel)
+			delete(pending.requiredDeletes, rel)
+		}
+	}
+	if opts.NoDelete {
+		for rel, meta := range pending.deletes {
+			if !pending.requiredDeletes[rel] || !syncDeleteRequired(writer, rel, meta) {
+				delete(pending.deletes, rel)
+				delete(pending.requiredDeletes, rel)
+			}
+		}
+	}
+	removeSet := make(map[string]fileMeta, len(pending.deletes))
+	requiredSet := make(map[string]bool)
+	for rel, meta := range pending.deletes {
+		removeSet[rel] = meta
+		requiredSet[rel] = pending.requiredDeletes[rel]
+	}
+	for rel, old := range base {
+		current, exists := writer[rel]
+		conflict := exists && current.kind != old.kind
+		if (!exists && !opts.NoDelete) || conflict {
+			removeSet[rel] = old
+			requiredSet[rel] = conflict
+		}
+		if conflict && old.isDir() && !current.isDir() {
+			prefix := rel + "/"
+			for child, childMeta := range base {
+				if strings.HasPrefix(child, prefix) {
+					removeSet[child] = childMeta
+					requiredSet[child] = true
+				}
+			}
+		}
+	}
+	for _, rel := range sortedMetaKeys(removeSet, true) {
+		meta := removeSet[rel]
+		if err := plan.remove(rel, meta); err != nil {
+			pending.deletes[rel] = meta
+			pending.requiredDeletes[rel] = requiredSet[rel]
+			complete = false
+			events(SyncEvent{Kind: SyncError, Path: rel, Err: err})
+			continue
+		}
+		delete(pending.deletes, rel)
+		delete(pending.requiredDeletes, rel)
+		events(SyncEvent{Kind: SyncDelete, Path: rel})
+	}
+
+	// Create directories first, then transfer regular files. Type-conflict
+	// removals that failed remain pending and block replacing that exact path.
+	for _, rel := range sortedMetaKeys(writer, false) {
 		meta := writer[rel]
+		if _, blocked := pending.deletes[rel]; blocked {
+			complete = false
+			continue
+		}
 		_, retry := pending.copies[rel]
 		needCopy := retry
 		if first {
-			// Override the replica where it is missing the file or its size
-			// differs (rsync-style quick check).
 			r, ok := replica[rel]
-			needCopy = needCopy || !ok || r.size != meta.size
+			needCopy = needCopy || !ok || r.kind != meta.kind || (!meta.isDir() && r.size != meta.size)
 		} else {
 			old, ok := prev[rel]
 			needCopy = needCopy || !ok || old != meta
@@ -273,7 +365,7 @@ func syncReconcile(writer, replica, prev map[string]fileMeta, first bool, opts S
 		if !needCopy {
 			continue
 		}
-		bytes, err := plan.copy(rel)
+		bytes, err := plan.copy(rel, meta)
 		if err != nil {
 			if plan.transientCopyError != nil && plan.transientCopyError(err) {
 				delete(pending.copies, rel)
@@ -296,93 +388,189 @@ func syncReconcile(writer, replica, prev map[string]fileMeta, first bool, opts S
 			delete(pending.copies, rel)
 		}
 	}
-
-	if opts.NoDelete {
-		// Deletion is disabled, including retries left by an earlier pass.
-		clear(pending.deletes)
-		return complete
-	}
-	// Delete replica files absent on the writer. On the first pass compare
-	// against the replica's actual contents (removes pre-existing extras);
-	// afterwards compare against the previous writer snapshot (removes files the
-	// writer deleted). Include earlier failures so they retry without another
-	// source-side change.
-	base := prev
-	if first {
-		base = replica
-	}
-	goneSet := make(map[string]struct{}, len(pending.deletes))
-	for rel := range pending.deletes {
-		if _, exists := writer[rel]; !exists {
-			goneSet[rel] = struct{}{}
-		}
-	}
-	for rel := range base {
-		if _, ok := writer[rel]; !ok {
-			goneSet[rel] = struct{}{}
-		}
-	}
-	gone := make([]string, 0, len(goneSet))
-	for rel := range goneSet {
-		gone = append(gone, rel)
-	}
-	sort.Strings(gone)
-	for _, rel := range gone {
-		if err := plan.remove(rel); err != nil {
-			pending.deletes[rel] = struct{}{}
-			complete = false
-			events(SyncEvent{Kind: SyncError, Path: rel, Err: err})
-			continue
-		}
-		delete(pending.deletes, rel)
-		events(SyncEvent{Kind: SyncDelete, Path: rel})
-	}
 	return complete
 }
 
-// ensureRemoteParent mkdir -p's the remote parent directory of remotePath once.
-func (a *App) ensureRemoteParent(serverName, remotePath string, createdDirs map[string]bool) {
-	dir := path.Dir(remotePath)
-	if dir == "" || dir == "." || createdDirs[dir] {
-		return
+// syncDeleteRequired reports whether a no-delete mirror must still remove an
+// entry to resolve a file/directory type collision. Descendants of a replica
+// directory being replaced by a writer file are required removals too.
+func syncDeleteRequired(writer map[string]fileMeta, rel string, replicaMeta fileMeta) bool {
+	if current, ok := writer[rel]; ok {
+		return current.kind != replicaMeta.kind
 	}
-	if err := a.RemoteMkdir(serverName, dir); err == nil {
-		createdDirs[dir] = true
+	parts := strings.Split(rel, "/")
+	for i := len(parts) - 1; i > 0; i-- {
+		ancestor := strings.Join(parts[:i], "/")
+		if current, ok := writer[ancestor]; ok && !current.isDir() {
+			return true
+		}
 	}
+	return false
 }
 
-// scanLocalDir returns every regular file under root as relpath -> {mtime,size}.
-// Directories and symlinks are skipped; .git metadata is excluded.
+// sortedMetaKeys orders directories parent-before-child and before regular
+// files for creation/copy. With deepestFirst it reverses that safety order so
+// files and child directories are removed before their parents.
+func sortedMetaKeys(entries map[string]fileMeta, deepestFirst bool) []string {
+	out := make([]string, 0, len(entries))
+	for rel := range entries {
+		out = append(out, rel)
+	}
+	depth := func(rel string) int { return strings.Count(rel, "/") }
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		ad, bd := depth(a), depth(b)
+		if ad != bd {
+			if deepestFirst {
+				return ad > bd
+			}
+			return ad < bd
+		}
+		if entries[a].isDir() != entries[b].isDir() {
+			if deepestFirst {
+				return !entries[a].isDir()
+			}
+			return entries[a].isDir()
+		}
+		return a < b
+	})
+	return out
+}
+
+// scanLocalDir returns every regular file and directory under root. Symlinks
+// and special files fail the entire scan so callers never operate on a partial
+// writer snapshot. Hidden entries are included.
 func scanLocalDir(root string) (map[string]fileMeta, error) {
 	out := map[string]fileMeta{}
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			if d.Name() == ".git" && p != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		if d.Type()&os.ModeSymlink != 0 {
-			return nil
+			return fmt.Errorf("refusing symlink in recursive tree: %s", p)
 		}
 		info, err := d.Info()
 		if err != nil {
 			return fmt.Errorf("stat %s: %w", p, err)
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink in recursive tree: %s", p)
+		}
+		if p == root {
+			if !info.IsDir() {
+				return fmt.Errorf("%s is not a directory", root)
+			}
+			return nil
+		}
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return fmt.Errorf("resolve relative path for %s: %w", p, err)
 		}
-		out[rel] = fileMeta{modUnixNano: info.ModTime().UnixNano(), size: info.Size()}
+		key, err := cleanRelativeKey(filepath.ToSlash(rel))
+		if err != nil {
+			return fmt.Errorf("resolve safe relative path for %s: %w", p, err)
+		}
+		if info.IsDir() {
+			out[key] = fileMeta{kind: fileKindDirectory}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular file in recursive tree: %s", p)
+		}
+		out[key] = fileMeta{kind: fileKindRegular, modUnixNano: info.ModTime().UnixNano(), size: info.Size()}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// cleanRelativeKey validates the internal slash-separated relative-key form.
+// Callers normalize their actual separator first (filepath.ToSlash locally;
+// TargetPathStyle.Relative remotely). A remaining backslash is therefore a
+// literal POSIX filename character that Windows cannot represent faithfully in
+// a mixed-target transfer; reject it instead of silently turning it into a
+// directory separator.
+func cleanRelativeKey(value string) (string, error) {
+	if value == "" || strings.ContainsAny(value, "\\\x00\n\r") {
+		return "", fmt.Errorf("unsafe or non-portable relative path %q", value)
+	}
+	if strings.HasPrefix(value, "/") || TargetPathWindows.IsAbs(value) {
+		return "", fmt.Errorf("unsafe relative path %q", value)
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("unsafe relative path %q", value)
+		}
+	}
+	clean := path.Clean(value)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("unsafe relative path %q", value)
+	}
+	return clean, nil
+}
+
+// validateTreeForStyle verifies that every slash-neutral relative entry can be
+// represented injectively on the destination. It runs before destination roots
+// or directories are created, preventing partial copies when a POSIX source has
+// names that collide or are invalid on a Windows target.
+func validateTreeForStyle(entries map[string]fileMeta, style TargetPathStyle) error {
+	return validateTreeForStyleCase(entries, style, style.IsWindows())
+}
+
+func validateTreeForLocalDestination(entries map[string]fileMeta, destination string) error {
+	caseInsensitive, err := LocalPathCaseInsensitive(destination)
+	if err != nil {
+		return err
+	}
+	return validateTreeForStyleCase(entries, NativePathStyle(), caseInsensitive)
+}
+
+func validateTreeForStyleCase(entries map[string]fileMeta, style TargetPathStyle, caseInsensitive bool) error {
+	// Some native POSIX-syntax filesystems (notably default macOS APFS) resolve
+	// components case-insensitively. Track implicit prefixes when either the path
+	// style or the concrete destination filesystem folds case.
+	normalized := make(map[string]string, len(entries))
+	metaByKey := make(map[string]fileMeta, len(entries))
+	for rel, meta := range entries {
+		clean, err := cleanRelativeKey(rel)
+		if err != nil {
+			return fmt.Errorf("invalid relative path %q: %w", rel, err)
+		}
+		parts := strings.Split(clean, "/")
+		for _, part := range parts {
+			if err := ValidateTargetPathComponent(style, part); err != nil {
+				return fmt.Errorf("destination cannot represent %q: %w", rel, err)
+			}
+		}
+		for i := range parts {
+			prefix := strings.Join(parts[:i+1], "/")
+			key := prefix
+			if caseInsensitive {
+				key = strings.ToLower(key)
+			}
+			if previous, exists := normalized[key]; exists && previous != prefix {
+				return fmt.Errorf("destination path collision between %q and %q", previous, prefix)
+			}
+			normalized[key] = prefix
+		}
+		key := clean
+		if caseInsensitive {
+			key = strings.ToLower(key)
+		}
+		metaByKey[key] = meta
+	}
+	for key := range metaByKey {
+		parts := strings.Split(key, "/")
+		for i := 1; i < len(parts); i++ {
+			ancestor := strings.Join(parts[:i], "/")
+			if ancestorMeta, exists := metaByKey[ancestor]; exists && !ancestorMeta.isDir() {
+				return fmt.Errorf("destination path %q conflicts with file %q", normalized[key], normalized[ancestor])
+			}
+		}
+	}
+	return nil
 }
 
 // maxRemoteScanDepth and maxRemoteScanFiles bound a recursive remote listing so
@@ -393,13 +581,49 @@ const (
 	maxRemoteScanFiles = 1_000_000
 )
 
+func requireRemoteRegular(entry proto.FileEntry, remotePath string) error {
+	kind, err := remoteEntryKind(entry)
+	if err != nil {
+		return err
+	}
+	if kind != fileKindRegular {
+		return fmt.Errorf("%s is a directory", remotePath)
+	}
+	return nil
+}
+
+func remoteEntryKind(entry proto.FileEntry) (fileKind, error) {
+	if entry.Type == "" {
+		return 0, fmt.Errorf("refusing unclassified remote entry %s: agent must be updated to report file types", entry.Path)
+	}
+	if entry.IsSymlink || entry.Type == proto.FileEntryTypeSymlink {
+		return 0, fmt.Errorf("refusing symlink in recursive remote tree: %s", entry.Path)
+	}
+	switch entry.Type {
+	case proto.FileEntryTypeDirectory:
+		return fileKindDirectory, nil
+	case proto.FileEntryTypeRegular:
+		return fileKindRegular, nil
+	case proto.FileEntryTypeOther:
+		return 0, fmt.Errorf("refusing special file in recursive remote tree: %s", entry.Path)
+	default:
+		return 0, fmt.Errorf("refusing unknown remote entry type %q for %s", entry.Type, entry.Path)
+	}
+}
+
 // scanRemoteDir recursively lists a remote directory tree as relpath ->
-// {mtime,size}. Listing errors fail the entire scan so a partial writer tree
-// can never be mistaken for deletions. Bounded in depth and total files; the
-// agent is not trusted to be honest about its tree.
+// metadata. Listing errors, symlinks, and unsafe entries fail the entire scan so
+// a partial writer tree can never be mistaken for deletions. Hidden entries are
+// always included. The walk is bounded in depth and total entries; the agent is
+// not trusted to be honest about its tree.
 func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error) {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return nil, err
+	}
+	style := TargetPathStyleForServer(server)
 	out := map[string]fileMeta{}
-	rootRes, err := a.ListRemoteDir(serverName, root)
+	rootRes, err := a.ListRemoteDirHidden(serverName, root, true)
 	if err != nil {
 		return nil, fmt.Errorf("list remote sync root %s: %w", root, err)
 	}
@@ -407,7 +631,7 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 	if resolvedRoot == "" {
 		resolvedRoot = root
 	}
-	prefix := strings.TrimSuffix(resolvedRoot, "/") + "/"
+	resolvedRoot = style.Clean(resolvedRoot)
 
 	var visit func(entries []proto.FileEntry, depth int) error
 	visit = func(entries []proto.FileEntry, depth int) error {
@@ -416,10 +640,23 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 		}
 		for _, e := range entries {
 			if len(out) >= maxRemoteScanFiles {
-				return fmt.Errorf("remote directory tree exceeds maximum of %d files", maxRemoteScanFiles)
+				return fmt.Errorf("remote directory tree exceeds maximum of %d entries", maxRemoteScanFiles)
 			}
-			if e.IsDir {
-				sub, err := a.ListRemoteDir(serverName, e.Path)
+			rel, err := style.Relative(resolvedRoot, e.Path)
+			if err != nil {
+				return fmt.Errorf("remote path %q is outside scan root %q: %w", e.Path, resolvedRoot, err)
+			}
+			key, err := cleanRelativeKey(rel)
+			if err != nil {
+				return fmt.Errorf("remote path %q is not safely representable: %w", e.Path, err)
+			}
+			kind, err := remoteEntryKind(e)
+			if err != nil {
+				return err
+			}
+			if kind == fileKindDirectory {
+				out[key] = fileMeta{kind: fileKindDirectory}
+				sub, err := a.ListRemoteDirHidden(serverName, e.Path, true)
 				if err != nil {
 					return fmt.Errorf("list remote sync directory %s: %w", e.Path, err)
 				}
@@ -428,13 +665,7 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 				}
 				continue
 			}
-			rel := strings.TrimPrefix(e.Path, prefix)
-			// A compromised agent could return a path that escapes the sync root;
-			// never let that reach a local write during pull.
-			if !safeRel(rel) {
-				continue
-			}
-			out[rel] = fileMeta{modUnixNano: e.ModTime.UnixNano(), size: e.Size}
+			out[key] = fileMeta{kind: fileKindRegular, modUnixNano: e.ModTime.UnixNano(), size: e.Size}
 		}
 		return nil
 	}

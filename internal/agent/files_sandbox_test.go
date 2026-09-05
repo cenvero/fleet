@@ -70,3 +70,15 @@ func TestReapStaleParts(t *testing.T) {
 		}
 	}
 }
+
+func TestPathWithinFileRootIncludesNativeRootDescendants(t *testing.T) {
+	t.Parallel()
+	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	descendant := filepath.Join(root, "tmp", "fleet", "file.txt")
+	if !pathWithinFileRoot(root, descendant) {
+		t.Fatalf("native root %q did not contain descendant %q", root, descendant)
+	}
+	if pathWithinFileRoot(filepath.Join(root, "allowed"), filepath.Join(root, "outside", "file.txt")) {
+		t.Fatal("unrelated path was accepted beneath allowed root")
+	}
+}

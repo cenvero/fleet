@@ -253,6 +253,7 @@ type instrumentedFileManager struct {
 	agent.FileManager
 	mu             sync.Mutex
 	writes         int
+	mkdirs         int
 	failAfter      int
 	truncateReadBy int64
 	neverEOFData   []byte // when set, Read returns this data with EOF never true
@@ -309,6 +310,19 @@ func (m *instrumentedFileManager) writeCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.writes
+}
+
+func (m *instrumentedFileManager) mkdirCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.mkdirs
+}
+
+func (m *instrumentedFileManager) Mkdir(ctx context.Context, p proto.FileMkdirPayload) (proto.FileOpResult, error) {
+	m.mu.Lock()
+	m.mkdirs++
+	m.mu.Unlock()
+	return m.FileManager.Mkdir(ctx, p)
 }
 
 func (m *instrumentedFileManager) Write(ctx context.Context, p proto.FileWritePayload) (proto.FileWriteResult, error) {
@@ -522,5 +536,33 @@ func TestWholeFileHashCancelJoinsWorker(t *testing.T) {
 		// joined
 	default:
 		t.Fatal("CancelAndWait returned before the hash worker exited")
+	}
+}
+
+func TestResolveUploadRemotePathUsesTargetStyle(t *testing.T) {
+	local := filepath.Join("local", "payload.txt")
+	tests := []struct {
+		name       string
+		style      TargetPathStyle
+		remoteDir  string
+		remotePath string
+		want       string
+	}{
+		{"posix default", TargetPathPOSIX, "/srv/incoming", "", "/srv/incoming/payload.txt"},
+		{"posix directory", TargetPathPOSIX, "", "/tmp/", "/tmp/payload.txt"},
+		{"windows default", TargetPathWindows, `D:\incoming`, "", `D:\incoming\payload.txt`},
+		{"windows backslash directory", TargetPathWindows, "", `C:\Temp\`, `C:\Temp\payload.txt`},
+		{"windows slash directory", TargetPathWindows, "", `C:/Temp/`, `C:\Temp\payload.txt`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveUploadRemotePath(tt.style, tt.remoteDir, tt.remotePath, local)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveUploadRemotePath() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
