@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -186,7 +187,7 @@ func writeInventoryTable(cmd *cobra.Command, inv core.Inventory) error {
 			disk,
 			dash(strings.Join(it.PublicIPs, ",")),
 			dash(joinPorts(it.ListenPorts)),
-			dash(it.AgentVersion),
+			version.DisplaySemVer(it.AgentVersion),
 			dash(formatTags(it.Tags)),
 		); err != nil {
 			return err

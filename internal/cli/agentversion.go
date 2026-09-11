@@ -6,7 +6,6 @@ package cli
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/cenvero/fleet/internal/version"
@@ -15,10 +14,9 @@ import (
 
 // newAgentVersionCommand builds `fleet agent version [--all|<server>]`.
 //
-// It reports the observed agent version per server, NORMALIZED (a leading 'v'
-// stripped and surrounding spaces trimmed) so "v2.1.0" and "2.1.0" compare
-// equal. Versions are flagged when they differ from the reference version: the
-// controller's own version, or — when the controller is a dev build — the most
+// It reports the observed agent version per server in one canonical v-prefixed
+// form so "v2.1.0" and "2.1.0" compare and display identically. Versions are
+// flagged when they differ from the reference version: the controller's own version, or — when the controller is a dev build — the most
 // common normalized agent version across the fleet.
 //
 // NOTE: no top-level `fleet agent` command exists yet. This returns a standalone
@@ -31,8 +29,9 @@ func newAgentVersionCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version [--all|<server>]",
 		Short: "Report agent versions per server and flag mismatches",
-		Long: "Report the observed agent version for each server, normalized so a leading 'v'\n" +
-			"and surrounding whitespace are ignored (so 'v2.1.0' and '2.1.0' are equal).\n\n" +
+		Long: "Report the observed agent version for each server in one canonical v-prefixed form\n" +
+			"(so 'v2.1.0' and '2.1.0' display and compare identically). Missing, sentinel,\n" +
+			"or malformed values are shown as unavailable and never become references.\n\n" +
 			"Versions are compared against a reference (the controller version, or the most\n" +
 			"common agent version when the controller is a dev build) and mismatches are\n" +
 			"flagged.\n\n" +
@@ -114,7 +113,12 @@ func runAgentVersion(cmd *cobra.Command, configDir, only string) error {
 			status = "unknown"
 		case reference != "" && r.Normalized != reference:
 			status = "MISMATCH"
+			if !r.Reachable {
+				status = "offline, MISMATCH"
+			}
 			mismatches++
+		case !r.Reachable:
+			status = "offline (cached)"
 		}
 		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", r.Server, display, status); err != nil {
 			return err
@@ -129,17 +133,14 @@ func runAgentVersion(cmd *cobra.Command, configDir, only string) error {
 	return nil
 }
 
-// normalizeAgentVersion trims surrounding whitespace and a single leading 'v'
-// (or 'V') so "v2.1.0", " 2.1.0 ", and "2.1.0" all normalize to "2.1.0".
-func normalizeAgentVersion(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "" {
+// normalizeAgentVersion returns the shared, strict, v-prefixed semver form.
+// Sentinels and malformed values are unavailable and never become references.
+func normalizeAgentVersion(raw string) string {
+	normalized, ok := version.NormalizeSemVer(raw)
+	if !ok {
 		return ""
 	}
-	if v[0] == 'v' || v[0] == 'V' {
-		v = strings.TrimSpace(v[1:])
-	}
-	return v
+	return normalized
 }
 
 // referenceVersion picks the version to compare against: the controller's own

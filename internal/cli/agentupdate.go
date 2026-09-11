@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -165,16 +166,17 @@ func updateBatch(cmd *cobra.Command, app *core.App, servers []string) error {
 			continue
 		}
 		a := res.Agents[0]
+		displayVersion := version.DisplaySemVer(a.AgentVersion)
 		switch {
 		case a.Error != "":
 			fmt.Fprintf(out, "  %-24s ERROR  %s\n", name, a.Error)
 			failed = append(failed, name)
 		case a.AlreadySynced:
-			fmt.Fprintf(out, "  %-24s up-to-date (%s)\n", name, a.AgentVersion)
+			fmt.Fprintf(out, "  %-24s up-to-date (%s)\n", name, displayVersion)
 		case a.Updated:
-			fmt.Fprintf(out, "  %-24s updated -> %s\n", name, a.AgentVersion)
+			fmt.Fprintf(out, "  %-24s updated -> %s\n", name, displayVersion)
 		default:
-			fmt.Fprintf(out, "  %-24s processed (%s)\n", name, a.AgentVersion)
+			fmt.Fprintf(out, "  %-24s processed (%s)\n", name, displayVersion)
 		}
 	}
 	if len(failed) > 0 {

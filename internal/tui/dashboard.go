@@ -13,6 +13,7 @@ import (
 	fleetalerts "github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/internal/logs"
+	"github.com/cenvero/fleet/internal/version"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
@@ -477,7 +478,7 @@ func renderServersTab(snapshot core.DashboardSnapshot, width, selected int) stri
 		fmt.Sprintf("Reachable: %s", yesNo(server.Observed.Reachable)),
 		fmt.Sprintf("Transport: %s", dashIfEmpty(server.Observed.Transport)),
 		fmt.Sprintf("Node: %s", dashIfEmpty(server.Observed.NodeName)),
-		fmt.Sprintf("Agent version: %s", dashIfEmpty(server.Observed.AgentVersion)),
+		fmt.Sprintf("Agent version: %s", version.DisplaySemVer(server.Observed.AgentVersion)),
 		fmt.Sprintf("OS/arch: %s", dashIfEmpty(strings.Trim(strings.Join([]string{server.Observed.OS, server.Observed.Arch}, "/"), "/"))),
 		fmt.Sprintf("Last seen: %s", dashIfEmpty(relativeTime(server.Observed.LastSeen))),
 		fmt.Sprintf("Host key: %s", truncate(dashIfEmpty(server.Observed.HostKeyFingerprint), 52)),

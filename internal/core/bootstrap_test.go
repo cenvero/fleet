@@ -5,14 +5,22 @@ package core
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/update"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestBootstrapServerDirectUploadsAgentAndUpdatesServer(t *testing.T) {
@@ -321,6 +329,464 @@ func TestValidateBootstrapServiceName(t *testing.T) {
 	for _, bad := range []string{"../evil", `dir\\evil`, "fleet agent", "x.service", "$(touch-pwned)", "-H", "--no-block", ""} {
 		if err := validateBootstrapServiceName(bad); err == nil {
 			t.Errorf("unsafe service name %q accepted", bad)
+		}
+	}
+}
+
+func TestBootstrapServerRetryUsesStoredInstallMetadataAndExplicitAgentPort(t *testing.T) {
+	t.Parallel()
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir: configDir, Alias: "fleet", DefaultMode: transport.ModeDirect,
+		CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app, err := Open(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	loginKey := filepath.Join(t.TempDir(), "bootstrap-key")
+	if err := app.AddServer(ServerRecord{
+		Name: "retry-node", Address: "192.0.2.50", Port: 22, Mode: transport.ModeDirect,
+		Agent: AgentInstall{Status: "failed", LoginUser: "ubuntu", LoginPort: 2200, LoginKey: loginKey},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agentBinary := filepath.Join(t.TempDir(), "fleet-agent")
+	if err := os.WriteFile(agentBinary, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executor := &fakeBootstrapExecutor{}
+	app.BootstrapExecutor = executor
+	result, err := app.BootstrapServer("retry-node", BootstrapOptions{AgentBinaryPath: agentBinary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.LoginUser != "ubuntu" || result.LoginPort != 2200 {
+		t.Fatalf("stored login metadata not reused: %+v", result)
+	}
+	if len(executor.requests) != 1 || executor.requests[0].PrivateKeyPath != loginKey {
+		t.Fatalf("stored login key not reused: %+v", executor.requests)
+	}
+	if !strings.Contains(result.ServiceUnit, "0.0.0.0:22") {
+		t.Fatalf("explicit agent port 22 was replaced: %s", result.ServiceUnit)
+	}
+	stored, err := app.GetServer("retry-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Port != 22 || stored.Agent.Status != "managed" {
+		t.Fatalf("retry result metadata=%+v", stored)
+	}
+}
+
+func TestBoundedCaptureDrainsAfterLimit(t *testing.T) {
+	capture := newBoundedCapture(4)
+	if n, err := capture.Write([]byte("abcdef")); err != nil || n != 6 {
+		t.Fatalf("Write()=(%d,%v), want full 6-byte drain", n, err)
+	}
+	if n, err := capture.Write([]byte("gh")); err != nil || n != 2 {
+		t.Fatalf("second Write()=(%d,%v), want full drain", n, err)
+	}
+	got, truncated := capture.snapshot()
+	if string(got) != "abcd" || !truncated {
+		t.Fatalf("snapshot=(%q,%t), want bounded abcd and truncation", got, truncated)
+	}
+}
+
+func newBootstrapTestSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+func startBootstrapTestSSHServer(t *testing.T, handler func(*ssh.ServerConn, <-chan ssh.NewChannel) error) (net.Conn, <-chan error) {
+	t.Helper()
+	return startBootstrapTestSSHServerWithSigner(t, newBootstrapTestSigner(t), handler)
+}
+
+func startBootstrapTestSSHServerWithSigner(t *testing.T, signer ssh.Signer, handler func(*ssh.ServerConn, <-chan ssh.NewChannel) error) (net.Conn, <-chan error) {
+	t.Helper()
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
+			return nil, nil
+		},
+	}
+	config.AddHostKey(signer)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer listener.Close()
+		serverConn, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		conn, channels, requests, err := ssh.NewServerConn(serverConn, config)
+		if err != nil {
+			done <- err
+			return
+		}
+		go ssh.DiscardRequests(requests)
+		err = handler(conn, channels)
+		_ = conn.Close()
+		done <- err
+	}()
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	return clientConn, done
+}
+
+func bootstrapTestRequest(t *testing.T) BootstrapRequest {
+	t.Helper()
+	return BootstrapRequest{
+		Address:          "bootstrap.test",
+		Port:             22,
+		User:             "tester",
+		Password:         "password",
+		KnownHostsPath:   filepath.Join(t.TempDir(), "known_hosts"),
+		AcceptNewHostKey: false,
+	}
+}
+
+func serveBootstrapTestExec(channels <-chan ssh.NewChannel) (string, error) {
+	newChannel, ok := <-channels
+	if !ok {
+		return "", fmt.Errorf("SSH connection closed before cleanup command")
+	}
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		return "", err
+	}
+	defer channel.Close()
+	request, ok := <-requests
+	if !ok || request.Type != "exec" {
+		return "", fmt.Errorf("expected cleanup exec request")
+	}
+	var payload struct{ Command string }
+	if err := ssh.Unmarshal(request.Payload, &payload); err != nil {
+		return "", err
+	}
+	if err := request.Reply(true, nil); err != nil {
+		return "", err
+	}
+	_, _ = io.Copy(io.Discard, channel)
+	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+	return payload.Command, nil
+}
+
+func TestSSHBootstrapExecutorCancellationInterruptsChannelOpen(t *testing.T) {
+	clientConn, serverDone := startBootstrapTestSSHServer(t, func(conn *ssh.ServerConn, _ <-chan ssh.NewChannel) error {
+		return conn.Wait()
+	})
+	executor := sshBootstrapExecutor{networkDialContext: func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}}
+	req := bootstrapTestRequest(t)
+	req.Uploads = []BootstrapUpload{{Path: "/tmp/cancel-stage", Mode: 0o600, Content: []byte("payload")}}
+	req.RunCommand = "true"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := executor.Bootstrap(ctx, req)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Bootstrap() error=%v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("channel-open cancellation took %s, want <= 2s", elapsed)
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSH test server did not stop after client cancellation")
+	}
+}
+
+func TestSSHBootstrapExecutorCancellationInterruptsExecRequest(t *testing.T) {
+	clientConn, serverDone := startBootstrapTestSSHServer(t, func(_ *ssh.ServerConn, channels <-chan ssh.NewChannel) error {
+		newChannel, ok := <-channels
+		if !ok {
+			return nil
+		}
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			return err
+		}
+		request, ok := <-requests
+		if !ok || request.Type != "exec" {
+			_ = channel.Close()
+			return fmt.Errorf("expected stalled exec request")
+		}
+		for range requests {
+		}
+		_ = channel.Close()
+		cleanup, err := serveBootstrapTestExec(channels)
+		if err != nil {
+			return err
+		}
+		if cleanup != "rm -f '/tmp/cancel-exec' '/tmp/cancel-exec.part'" {
+			return fmt.Errorf("unexpected cleanup command %q", cleanup)
+		}
+		return nil
+	})
+	executor := sshBootstrapExecutor{networkDialContext: func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}}
+	req := bootstrapTestRequest(t)
+	req.Uploads = []BootstrapUpload{{Path: "/tmp/cancel-exec", Mode: 0o600, Content: []byte("payload")}}
+	req.RunCommand = "true"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := executor.Bootstrap(ctx, req)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Bootstrap() error=%v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("exec-request cancellation took %s, want <= 2s", elapsed)
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSH test server did not stop after exec cancellation")
+	}
+}
+
+func TestSSHBootstrapExecutorCleansAttemptedPathsAfterUploadFailure(t *testing.T) {
+	commands := make(chan string, 4)
+	clientConn, serverDone := startBootstrapTestSSHServer(t, func(_ *ssh.ServerConn, channels <-chan ssh.NewChannel) error {
+		commandNumber := 0
+		for newChannel := range channels {
+			if newChannel.ChannelType() != "session" {
+				_ = newChannel.Reject(ssh.UnknownChannelType, "session required")
+				continue
+			}
+			channel, requests, err := newChannel.Accept()
+			if err != nil {
+				return err
+			}
+			request, ok := <-requests
+			if !ok || request.Type != "exec" {
+				_ = channel.Close()
+				return fmt.Errorf("expected exec request")
+			}
+			var payload struct{ Command string }
+			if err := ssh.Unmarshal(request.Payload, &payload); err != nil {
+				_ = channel.Close()
+				return err
+			}
+			commands <- payload.Command
+			commandNumber++
+			if err := request.Reply(true, nil); err != nil {
+				_ = channel.Close()
+				return err
+			}
+			_, _ = io.Copy(io.Discard, channel)
+			status := uint32(0)
+			if commandNumber == 2 {
+				status = 1
+			}
+			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
+			_ = channel.Close()
+			if commandNumber == 3 {
+				return nil
+			}
+		}
+		return nil
+	})
+	executor := sshBootstrapExecutor{networkDialContext: func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}}
+	req := bootstrapTestRequest(t)
+	req.Uploads = []BootstrapUpload{
+		{Path: "/tmp/fleet-first", Mode: 0o600, Content: []byte("first")},
+		{Path: "/tmp/fleet-second", Mode: 0o600, Content: []byte("second")},
+	}
+	req.RunCommand = "true"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := executor.Bootstrap(ctx, req); err == nil {
+		t.Fatal("Bootstrap() unexpectedly succeeded after second upload failure")
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("SSH test server: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSH test server did not observe cleanup command")
+	}
+	close(commands)
+	var got []string
+	for command := range commands {
+		got = append(got, command)
+	}
+	if len(got) != 3 {
+		t.Fatalf("commands=%#v, want two uploads followed by cleanup", got)
+	}
+	if !strings.Contains(got[0], "'/tmp/fleet-first'") || !strings.Contains(got[1], "'/tmp/fleet-second'") {
+		t.Fatalf("upload commands do not target expected paths: %#v", got[:2])
+	}
+	if got[2] != "rm -f '/tmp/fleet-first' '/tmp/fleet-first.part' '/tmp/fleet-second' '/tmp/fleet-second.part'" {
+		t.Fatalf("cleanup command=%q", got[2])
+	}
+}
+
+func TestRemoteUploadCommandRejectsTruncatedInputAtomically(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "fleet-stage")
+	upload := BootstrapUpload{Path: destination, Mode: 0o700, Content: []byte("complete-payload")}
+	cmd := exec.Command("/bin/sh", "-c", buildRemoteUploadCommand(upload))
+	cmd.Stdin = strings.NewReader("truncated")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("truncated upload unexpectedly succeeded: %q", output)
+	}
+	for _, path := range []string{destination, remoteUploadPartialPath(destination)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("truncated upload left %q behind, stat error=%v", path, err)
+		}
+	}
+}
+
+func TestSSHBootstrapExecutorCancellationInterruptsSessionWait(t *testing.T) {
+	reachedWait := make(chan struct{})
+	clientConn, serverDone := startBootstrapTestSSHServer(t, func(_ *ssh.ServerConn, channels <-chan ssh.NewChannel) error {
+		newChannel, ok := <-channels
+		if !ok {
+			return nil
+		}
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			return err
+		}
+		request, ok := <-requests
+		if !ok || request.Type != "exec" {
+			_ = channel.Close()
+			return fmt.Errorf("expected exec request")
+		}
+		if err := request.Reply(true, nil); err != nil {
+			_ = channel.Close()
+			return err
+		}
+		_, _ = io.Copy(io.Discard, channel)
+		close(reachedWait)
+		for range requests {
+		}
+		_ = channel.Close()
+		cleanup, err := serveBootstrapTestExec(channels)
+		if err != nil {
+			return err
+		}
+		if cleanup != "rm -f '/tmp/cancel-wait' '/tmp/cancel-wait.part'" {
+			return fmt.Errorf("unexpected cleanup command %q", cleanup)
+		}
+		return nil
+	})
+	executor := sshBootstrapExecutor{networkDialContext: func(context.Context, string, string) (net.Conn, error) {
+		return clientConn, nil
+	}}
+	req := bootstrapTestRequest(t)
+	req.Uploads = []BootstrapUpload{{Path: "/tmp/cancel-wait", Mode: 0o600, Content: []byte("payload")}}
+	req.RunCommand = "true"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := executor.Bootstrap(ctx, req)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Bootstrap() error=%v, want context deadline", err)
+	}
+	select {
+	case <-reachedWait:
+	default:
+		t.Fatal("server did not reach the stalled session.Wait phase")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("session.Wait cancellation took %s, want <= 2s", elapsed)
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSH test server did not stop after session.Wait cancellation")
+	}
+}
+
+func TestSSHBootstrapExecutorReconnectsForCleanupAfterChannelOpenCancellation(t *testing.T) {
+	signer := newBootstrapTestSigner(t)
+	firstConn, firstDone := startBootstrapTestSSHServerWithSigner(t, signer, func(conn *ssh.ServerConn, channels <-chan ssh.NewChannel) error {
+		if _, err := serveBootstrapTestExec(channels); err != nil {
+			return err
+		}
+		_ = conn.Wait()
+		return nil
+	})
+	cleanupCommands := make(chan string, 1)
+	secondConn, secondDone := startBootstrapTestSSHServerWithSigner(t, signer, func(_ *ssh.ServerConn, channels <-chan ssh.NewChannel) error {
+		command, err := serveBootstrapTestExec(channels)
+		if err == nil {
+			cleanupCommands <- command
+		}
+		return err
+	})
+	connections := make(chan net.Conn, 2)
+	connections <- firstConn
+	connections <- secondConn
+	executor := sshBootstrapExecutor{networkDialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		select {
+		case conn := <-connections:
+			return conn, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	req := bootstrapTestRequest(t)
+	req.Uploads = []BootstrapUpload{
+		{Path: "/tmp/reconnect-first", Mode: 0o600, Content: []byte("first")},
+		{Path: "/tmp/reconnect-second", Mode: 0o600, Content: []byte("second")},
+	}
+	req.RunCommand = "true"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := executor.Bootstrap(ctx, req)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Bootstrap() error=%v, want context deadline", err)
+	}
+	select {
+	case command := <-cleanupCommands:
+		want := "rm -f '/tmp/reconnect-first' '/tmp/reconnect-first.part' '/tmp/reconnect-second' '/tmp/reconnect-second.part'"
+		if command != want {
+			t.Fatalf("cleanup command=%q, want %q", command, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh SSH connection did not receive cleanup command")
+	}
+	for name, done := range map[string]<-chan error{"first": firstDone, "second": secondDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s SSH test server: %v", name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s SSH test server did not stop", name)
 		}
 	}
 }

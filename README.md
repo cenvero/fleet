@@ -130,8 +130,9 @@ fleet server add web-01 192.0.2.10 \
 ```
 
 The auto-install:
-- Detects the server arch via `uname -m`
-- Downloads the correct `fleet-agent` release binary
+- Detects the server arch via `uname -m` over the host-key-pinned SSH connection
+- Downloads only the matching `fleet-agent` archive, signature, and manifest **from the target server** using `wget` with `curl` fallback and bounded retries
+- Streams the downloaded payloads through SSH so the controller can fail-closed verify the exact release URL/target, minisign signature, trusted comment, size, and SHA-256 before installation; the controller does not fetch agent archives from GitHub itself
 - Installs it to `/opt/cenvero-fleet/fleet-agent`
 - Creates, enables, and starts `cenvero-fleet-agent.service` via systemd
 

@@ -172,6 +172,8 @@ func (s ServerRecord) WithoutEnrollSecret() ServerRecord {
 
 type AgentInstall struct {
 	Managed     bool      `toml:"managed" json:"managed"`
+	Status      string    `toml:"status,omitempty" json:"status,omitempty"`
+	LastError   string    `toml:"last_error,omitempty" json:"last_error,omitempty"`
 	BinaryPath  string    `toml:"binary_path,omitempty" json:"binary_path,omitempty"`
 	ServiceName string    `toml:"service_name,omitempty" json:"service_name,omitempty"`
 	LoginUser   string    `toml:"login_user,omitempty" json:"login_user,omitempty"`

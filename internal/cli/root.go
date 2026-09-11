@@ -954,7 +954,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 		Short: "Add a server to the fleet",
 		Args:  cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			scanner := bufio.NewScanner(os.Stdin)
+			scanner := bufio.NewScanner(cmd.InOrStdin())
 
 			prompt := func(label, def string) string {
 				if def != "" {
@@ -984,21 +984,37 @@ func newServerCommand(configDir *string) *cobra.Command {
 			if interactive {
 				fmt.Fprintln(cmd.OutOrStdout(), "Adding a server — press Enter to accept defaults.")
 				fmt.Fprintln(cmd.OutOrStdout())
+			}
+			if name == "" {
+				name = prompt("Server name", "")
 				if name == "" {
-					name = prompt("Server name", "")
-					if name == "" {
-						return fmt.Errorf("server name is required")
-					}
+					return fmt.Errorf("server name is required")
 				}
+			}
+
+			app, err := openApp(*configDir)
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			existingServers, err := app.ListServers()
+			if err != nil {
+				return err
+			}
+			for _, existing := range existingServers {
+				if existing.Name == name {
+					return fmt.Errorf("server %q already exists at %s:%d; retry its agent setup with 'fleet server bootstrap %s', or remove it with 'fleet server remove %s --force' before adding it again", name, existing.Address, existing.Port, name, name)
+				}
+			}
+
+			if address == "" {
+				address = prompt("IP address or hostname", "")
 				if address == "" {
-					address = prompt("IP address or hostname", "")
-					if address == "" {
-						return fmt.Errorf("address is required")
-					}
+					return fmt.Errorf("address is required")
 				}
-				if !cmd.Flags().Changed("mode") {
-					mode = prompt("Transport mode (direct/reverse)", "direct")
-				}
+			}
+			if interactive && !cmd.Flags().Changed("mode") {
+				mode = prompt("Transport mode (direct/reverse)", "direct")
 			}
 
 			parsedMode, err := transport.ParseMode(mode)
@@ -1009,19 +1025,8 @@ func newServerCommand(configDir *string) *cobra.Command {
 			// For direct mode: prompt for login credentials interactively
 			// unless --no-agent was passed or credentials were given as flags.
 			if parsedMode == transport.ModeDirect && !noAgent {
-				if loginUser == "" {
-					if interactive {
-						loginUser = prompt("Login user for agent install (leave blank to skip)", "root")
-					} else {
-						// non-interactive: ask on stdin since --login-user was not given
-						fmt.Fprintf(cmd.OutOrStdout(), "Login user for agent install [root] (--no-agent to skip): ")
-						scanner.Scan()
-						v := strings.TrimSpace(scanner.Text())
-						if v == "" {
-							v = "root"
-						}
-						loginUser = v
-					}
+				if loginUser == "" && interactive {
+					loginUser = prompt("Login user for agent install (--no-agent to skip)", "root")
 				}
 				if loginUser != "" && loginKey == "" && loginPassword == "" {
 					if interactive {
@@ -1046,24 +1051,25 @@ func newServerCommand(configDir *string) *cobra.Command {
 						}
 					}
 				}
-				if loginUser != "" && loginPort == 22 && interactive {
+				if loginUser != "" && loginPort == 22 && interactive && !cmd.Flags().Changed("login-port") {
 					lps := prompt("Login SSH port", "22")
 					lpi, err := strconv.Atoi(lps)
-					if err == nil {
-						loginPort = lpi
+					if err != nil {
+						return fmt.Errorf("invalid login port %q: must be 1-65535", lps)
 					}
+					loginPort = lpi
 				}
 				if loginUser != "" && !cmd.Flags().Changed("sudo") && interactive {
 					s := prompt("Use sudo? (yes/no)", "no")
 					useSudo = strings.HasPrefix(strings.ToLower(s), "y")
 				}
 			}
-
-			app, err := openApp(*configDir)
-			if err != nil {
-				return err
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("invalid agent port %d: must be 1-65535", port)
 			}
-			defer app.Close()
+			if loginUser != "" && (loginPort < 1 || loginPort > 65535) {
+				return fmt.Errorf("invalid login port %d: must be 1-65535", loginPort)
+			}
 
 			// Reverse-mode servers get a one-time enrollment token the agent must
 			// present on first connect before its key is pinned (closes the
@@ -1073,6 +1079,29 @@ func newServerCommand(configDir *string) *cobra.Command {
 				enrollSecret, err = core.GenerateEnrollSecret()
 				if err != nil {
 					return err
+				}
+			}
+
+			autoInstall := loginUser != "" && parsedMode == transport.ModeDirect && !noAgent
+			lp := loginPort
+			if lp == 0 {
+				lp = 22
+			}
+			if autoInstall {
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintf(cmd.OutOrStdout(), "The following will be installed on %s (%s:%d):\n", name, address, lp)
+				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent binary  →  /opt/cenvero-fleet/fleet-agent")
+				fmt.Fprintf(cmd.OutOrStdout(), "  • agent endpoint  →  %s:%d\n", address, port)
+				fmt.Fprintln(cmd.OutOrStdout(), "  • cenvero-fleet-agent.service  →  systemd unit (enabled on boot)")
+				fmt.Fprintln(cmd.OutOrStdout(), "  • authorized_keys entry for this controller's public key")
+				fmt.Fprintln(cmd.OutOrStdout())
+				fmt.Fprintln(cmd.OutOrStdout(), "To skip, press Ctrl+C now or re-run with --no-agent.")
+				fmt.Fprintf(cmd.OutOrStdout(), "Press Enter to continue: ")
+				if !scanner.Scan() {
+					if err := scanner.Err(); err != nil {
+						return fmt.Errorf("read install confirmation: %w", err)
+					}
+					return fmt.Errorf("agent install confirmation canceled; server was not added")
 				}
 			}
 
@@ -1088,32 +1117,31 @@ func newServerCommand(configDir *string) *cobra.Command {
 				return err
 			}
 
-			if loginUser != "" && parsedMode == transport.ModeDirect && !noAgent {
-				lp := loginPort
-				if lp == 0 {
-					lp = 22
-				}
-				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintf(cmd.OutOrStdout(), "The following will be installed on %s (%s:%d):\n", name, address, lp)
-				fmt.Fprintln(cmd.OutOrStdout(), "  • fleet-agent binary  →  /opt/cenvero-fleet/fleet-agent")
-				fmt.Fprintln(cmd.OutOrStdout(), "  • cenvero-fleet-agent.service  →  systemd unit (enabled on boot)")
-				fmt.Fprintln(cmd.OutOrStdout(), "  • authorized_keys entry for this controller's public key")
-				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "To skip, press Ctrl+C now or re-run with --no-agent.")
-				fmt.Fprintf(cmd.OutOrStdout(), "Press Enter to continue: ")
-				scanner.Scan()
-
+			if autoInstall {
 				fmt.Fprintf(cmd.OutOrStdout(), "\nInstalling agent on %s...\n", name)
 				// If the box was reinstalled/re-keyed since it was last pinned, a
 				// changed bootstrap host key would otherwise hard-fail. With
 				// --accept-new-host-key we re-pin automatically; on a terminal we ask.
 				app.HostKeyChangedPrompt = resolveHostKeyPrompt(cmd, acceptNewHostKey)
-				if err := app.AutoInstallAgent(name, loginUser, loginKey, loginPassword, lp, useSudo); err != nil {
-					return fmt.Errorf("agent install failed (server was added): %w\n"+
-						"Run 'fleet server bootstrap %s --login-user %s --accept-new-host-key' to retry manually", err, name, loginUser)
+				installCtx, stopInstall := signal.NotifyContext(cmd.Context(), os.Interrupt)
+				defer stopInstall()
+				installErr := app.AutoInstallAgentContext(installCtx, name, loginUser, loginKey, loginPassword, lp, useSudo)
+				if installErr != nil {
+					var completionErr *core.AgentInstallCompletionError
+					if errors.As(installErr, &completionErr) {
+						if completionErr.ManagedStateSaved {
+							return fmt.Errorf("agent installed and running on %s and controller state is managed, but the audit event could not be written: %w", name, completionErr.Err)
+						}
+						return fmt.Errorf("agent installed remotely on %s, but controller state needs reconciliation: %w\n"+
+							"Do not reinstall blindly; inspect 'fleet server show %s' and try 'fleet server reconnect %s'",
+							name, completionErr.Err, name, name)
+					}
+					return fmt.Errorf("agent install failed; server %q remains registered at %s:%d with install status failed: %w\n"+
+						"Retry with 'fleet server bootstrap %s --login-user %s --login-port %d --listen 0.0.0.0:%d --sudo=%t --accept-new-host-key', or remove it with 'fleet server remove %s --force' and add it again",
+						name, address, port, installErr, name, loginUser, lp, port, useSudo, name)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Agent installed and running. Connect with: fleet server reconnect %s\n", name)
-			} else if parsedMode == transport.ModeDirect && (noAgent || loginUser == "") {
+			} else if parsedMode == transport.ModeDirect {
 				record, _ := app.GetServer(name)
 				fmt.Fprintln(cmd.OutOrStdout(), core.AgentInstallInstructions(record, parsedMode))
 			}
@@ -1383,7 +1411,7 @@ If the server is unreachable or credentials have changed, use one of:
 		},
 	}
 	bootstrapCmd.Flags().StringVar(&bootstrapLoginUser, "login-user", "", "SSH login user used to bootstrap the remote host")
-	bootstrapCmd.Flags().IntVar(&bootstrapLoginPort, "login-port", 22, "SSH port used for the bootstrap login")
+	bootstrapCmd.Flags().IntVar(&bootstrapLoginPort, "login-port", 0, "SSH port used for bootstrap login (default: stored port or 22)")
 	bootstrapCmd.Flags().StringVar(&bootstrapLoginKey, "login-key", "", "SSH private key used for the bootstrap login")
 	bootstrapCmd.Flags().StringVar(&bootstrapAgentBinary, "agent-binary", "", "local fleet-agent binary to upload")
 	bootstrapCmd.Flags().StringVar(&bootstrapListenAddr, "listen", "", "agent listen address for direct mode")
@@ -2100,7 +2128,7 @@ func describeStaleAgents(stale []core.AgentVersionMismatch) string {
 	case 0:
 		return ""
 	case 1:
-		return fmt.Sprintf("1 managed agent is on a different version: %s (%s).", stale[0].Server, stale[0].AgentVersion)
+		return fmt.Sprintf("1 managed agent is on a different version: %s (%s).", stale[0].Server, version.DisplaySemVer(stale[0].AgentVersion))
 	default:
 		names := make([]string, 0, len(stale))
 		for _, s := range stale {
@@ -2507,9 +2535,16 @@ func writeServerTable(cmd *cobra.Command, servers []core.ServerRecord) error {
 		return err
 	}
 	for _, server := range servers {
-		status := "offline"
-		if server.Observed.Reachable {
+		status := "pending"
+		switch {
+		case server.Observed.Reachable:
 			status = "online"
+		case server.Agent.Status == "failed":
+			status = "install-failed"
+		case server.Agent.Status == "reconcile-required":
+			status = "reconcile-required"
+		case !server.Observed.LastSeen.IsZero() || server.Observed.LastError != "":
+			status = "offline"
 		}
 		osArch := strings.Trim(strings.Join([]string{server.Observed.OS, server.Observed.Arch}, "/"), "/")
 		if osArch == "" {
@@ -2519,11 +2554,8 @@ func writeServerTable(cmd *cobra.Command, servers []core.ServerRecord) error {
 		if node == "" {
 			node = "-"
 		}
-		version := server.Observed.AgentVersion
-		if version == "" {
-			version = "-"
-		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s:%d\t%s\t%s\t%s\t%s\n", server.Name, server.Mode, server.Address, server.Port, status, node, osArch, version); err != nil {
+		agentVersion := version.DisplaySemVer(server.Observed.AgentVersion)
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s:%d\t%s\t%s\t%s\t%s\n", server.Name, server.Mode, server.Address, server.Port, status, node, osArch, agentVersion); err != nil {
 			return err
 		}
 	}
