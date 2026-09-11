@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
@@ -43,6 +44,14 @@ type BootstrapExecutor interface {
 	Bootstrap(context.Context, BootstrapRequest) error
 }
 
+// BootstrapAgentRelease asks the SSH executor to have the target download the
+// exact release matching Version, verify it on the controller, and stage the
+// extracted binary at DestinationPath before RunCommand executes.
+type BootstrapAgentRelease struct {
+	Version         string
+	DestinationPath string
+}
+
 type BootstrapRequest struct {
 	Address          string
 	Port             int
@@ -58,6 +67,7 @@ type BootstrapRequest struct {
 	// nil, the static AcceptNewHostKey behavior applies (refuse a changed key
 	// unless the flag forces a re-pin).
 	HostKeyChangedPrompt func(host, oldFP, newFP string) bool
+	AgentRelease         *BootstrapAgentRelease
 	Uploads              []BootstrapUpload
 	RunCommand           string
 }
@@ -173,6 +183,7 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 	}
 	server.Agent = AgentInstall{
 		Managed:     true,
+		Status:      "managed",
 		BinaryPath:  defaultAgentBinaryPath,
 		ServiceName: resolved.serviceName,
 		LoginUser:   resolved.loginUser,
@@ -226,6 +237,9 @@ type resolvedBootstrapConfig struct {
 func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions) (resolvedBootstrapConfig, error) {
 	loginUser := strings.TrimSpace(opts.LoginUser)
 	if loginUser == "" {
+		loginUser = strings.TrimSpace(server.Agent.LoginUser)
+	}
+	if loginUser == "" {
 		if opts.PrintScript {
 			loginUser = "root"
 		} else {
@@ -235,10 +249,19 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 
 	loginPort := opts.LoginPort
 	if loginPort == 0 {
-		loginPort = 22
+		loginPort = server.Agent.LoginPort
+		if loginPort == 0 {
+			loginPort = 22
+		}
+	}
+	if loginPort < 1 || loginPort > 65535 {
+		return resolvedBootstrapConfig{}, fmt.Errorf("invalid bootstrap login port %d: must be 1-65535", loginPort)
 	}
 
 	loginKeyPath := strings.TrimSpace(opts.LoginKeyPath)
+	if loginKeyPath == "" {
+		loginKeyPath = strings.TrimSpace(server.Agent.LoginKey)
+	}
 	if loginKeyPath == "" {
 		loginKeyPath = a.serverPrivateKeyPath(server)
 	}
@@ -258,12 +281,15 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 
 	agentListenAddr := strings.TrimSpace(opts.AgentListenAddr)
 	agentPort := server.Port
-	if agentPort == 0 || agentPort == 22 {
+	if agentPort == 0 {
 		if a.Config.Runtime.DefaultAgentPort > 0 {
 			agentPort = a.Config.Runtime.DefaultAgentPort
 		} else {
 			agentPort = 2222
 		}
+	}
+	if agentPort < 1 || agentPort > 65535 {
+		return resolvedBootstrapConfig{}, fmt.Errorf("invalid agent port %d: must be 1-65535", agentPort)
 	}
 	if agentListenAddr == "" && server.Mode == transport.ModeDirect {
 		agentListenAddr = fmt.Sprintf("0.0.0.0:%d", agentPort)
@@ -390,6 +416,9 @@ func portFromAddress(addr string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("parse agent port %q: %w", portText, err)
 	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("invalid agent port %d: must be 1-65535", port)
+	}
 	return port, nil
 }
 
@@ -492,6 +521,58 @@ type sshBootstrapExecutor struct {
 	networkDialContext func(context.Context, string, string) (net.Conn, error)
 }
 
+func (e sshBootstrapExecutor) connect(ctx context.Context, req BootstrapRequest, authMethods []ssh.AuthMethod) (*ssh.Client, error) {
+	var hostKeyCallback ssh.HostKeyCallback
+	var err error
+	if req.HostKeyChangedPrompt != nil {
+		hostKeyCallback, err = transport.NewInteractiveHostKeyCallback(req.KnownHostsPath, req.HostKeyChangedPrompt, &transport.HostKeyState{})
+	} else {
+		hostKeyCallback, err = transport.NewTOFUHostKeyCallback(req.KnownHostsPath, req.AcceptNewHostKey, &transport.HostKeyState{})
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	address := net.JoinHostPort(req.Address, strconv.Itoa(req.Port))
+	config := &ssh.ClientConfig{
+		Config: ssh.Config{Ciphers: transport.SupportedCiphers()},
+		User:   req.User, Auth: authMethods, HostKeyCallback: hostKeyCallback,
+		Timeout: 10 * time.Second,
+	}
+	var rawConn net.Conn
+	if e.networkDialContext != nil {
+		rawConn, err = e.networkDialContext(ctx, "tcp", address)
+	} else {
+		rawConn, err = (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", address)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dial bootstrap target %s: %w", address, err)
+	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			_ = rawConn.Close()
+		}
+	}()
+
+	handshakeDeadline := time.Now().Add(config.Timeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	if err := rawConn.SetDeadline(handshakeDeadline); err != nil {
+		return nil, fmt.Errorf("set bootstrap ssh handshake deadline: %w", err)
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, address, config)
+	if err != nil {
+		return nil, fmt.Errorf("establish bootstrap ssh connection to %s: %w", address, err)
+	}
+	if err := rawConn.SetDeadline(time.Time{}); err != nil {
+		_ = sshConn.Close()
+		return nil, fmt.Errorf("clear bootstrap ssh handshake deadline: %w", err)
+	}
+	closeOnError = false
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
 func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapRequest) error {
 	var authMethods []ssh.AuthMethod
 	if req.Password != "" {
@@ -508,116 +589,271 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 		return fmt.Errorf("bootstrap: no authentication method provided (need --login-key or --login-password)")
 	}
 
-	var hostKeyCallback ssh.HostKeyCallback
-	var err error
-	if req.HostKeyChangedPrompt != nil {
-		// Interactive: pin a new host (TOFU), but prompt — and only re-pin on an
-		// explicit yes — when an existing pin no longer matches.
-		hostKeyCallback, err = transport.NewInteractiveHostKeyCallback(req.KnownHostsPath, req.HostKeyChangedPrompt, &transport.HostKeyState{})
-	} else {
-		hostKeyCallback, err = transport.NewTOFUHostKeyCallback(req.KnownHostsPath, req.AcceptNewHostKey, &transport.HostKeyState{})
-	}
+	client, err := e.connect(ctx, req, authMethods)
 	if err != nil {
 		return err
 	}
-
-	address := net.JoinHostPort(req.Address, strconv.Itoa(req.Port))
-	config := &ssh.ClientConfig{
-		Config: ssh.Config{
-			Ciphers: transport.SupportedCiphers(),
-		},
-		User:            req.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
-	}
-
-	var rawConn net.Conn
-	if e.networkDialContext != nil {
-		rawConn, err = e.networkDialContext(ctx, "tcp", address)
-	} else {
-		rawConn, err = (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", address)
-	}
-	if err != nil {
-		return fmt.Errorf("dial bootstrap target %s: %w", address, err)
-	}
-	defer rawConn.Close()
-
-	handshakeDeadline := time.Now().Add(config.Timeout)
-	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
-		handshakeDeadline = deadline
-	}
-	if err := rawConn.SetDeadline(handshakeDeadline); err != nil {
-		return fmt.Errorf("set bootstrap ssh handshake deadline: %w", err)
-	}
-	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, address, config)
-	if err != nil {
-		return fmt.Errorf("establish bootstrap ssh connection to %s: %w", address, err)
-	}
-	if err := rawConn.SetDeadline(time.Time{}); err != nil {
-		_ = sshConn.Close()
-		return fmt.Errorf("clear bootstrap ssh handshake deadline: %w", err)
-	}
-	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
 
+	bootstrapSucceeded := false
+	stagedPaths := make([]string, 0, len(req.Uploads)+1)
+	defer func() {
+		if bootstrapSucceeded || len(stagedPaths) == 0 {
+			return
+		}
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
+		cleanupErr := cleanupRemoteStagingFiles(cleanupCtx, client, stagedPaths)
+		cancelCleanup()
+		if cleanupErr == nil {
+			return
+		}
+		reconnectCtx, cancelReconnect := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelReconnect()
+		cleanupClient, err := e.connect(reconnectCtx, req, authMethods)
+		if err != nil {
+			return
+		}
+		defer cleanupClient.Close()
+		_ = cleanupRemoteStagingFiles(reconnectCtx, cleanupClient, stagedPaths)
+	}()
+
+	var releaseUpload *BootstrapUpload
+	if req.AgentRelease != nil {
+		destination := strings.TrimSpace(req.AgentRelease.DestinationPath)
+		if destination == "" {
+			return fmt.Errorf("agent release destination path is required")
+		}
+		for _, upload := range req.Uploads {
+			if upload.Path == destination {
+				return fmt.Errorf("agent release destination %q collides with a bootstrap upload", destination)
+			}
+		}
+		binary, err := fetchVerifiedAgentRelease(ctx, sshRemoteOutputRunner{client: client}, *req.AgentRelease)
+		if err != nil {
+			return fmt.Errorf("target agent release acquisition: %w", err)
+		}
+		releaseUpload = &BootstrapUpload{Path: destination, Mode: 0o700, Content: binary}
+	}
+
 	for _, upload := range req.Uploads {
+		stagedPaths = append(stagedPaths, upload.Path, remoteUploadPartialPath(upload.Path))
 		if err := uploadRemoteFile(ctx, client, upload); err != nil {
 			return err
 		}
 	}
-	return runRemoteCommand(ctx, client, req.RunCommand)
+	if releaseUpload != nil {
+		stagedPaths = append(stagedPaths, releaseUpload.Path, remoteUploadPartialPath(releaseUpload.Path))
+		if err := uploadRemoteFile(ctx, client, *releaseUpload); err != nil {
+			return err
+		}
+	}
+	if err := runRemoteCommand(ctx, client, req.RunCommand); err != nil {
+		return err
+	}
+	bootstrapSucceeded = true
+	return nil
+}
+
+func cleanupRemoteStagingFiles(ctx context.Context, client *ssh.Client, paths []string) error {
+	quoted := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path != "" {
+			quoted = append(quoted, shellQuote(path))
+		}
+	}
+	if len(quoted) == 0 {
+		return nil
+	}
+	return runRemoteCommand(ctx, client, "rm -f "+strings.Join(quoted, " "))
+}
+
+func remoteUploadPartialPath(path string) string {
+	return path + ".part"
+}
+
+func buildRemoteUploadCommand(upload BootstrapUpload) string {
+	return strings.Join([]string{
+		"set -eu",
+		"umask 077",
+		"DEST=" + shellQuote(upload.Path),
+		"PART=" + shellQuote(remoteUploadPartialPath(upload.Path)),
+		"EXPECTED=" + strconv.Itoa(len(upload.Content)),
+		`cleanup_upload() { rm -f "$PART"; }`,
+		`trap cleanup_upload 0`,
+		`trap 'exit 1' 1 2 13 15`,
+		`rm -f "$PART"`,
+		`cat > "$PART"`,
+		`ACTUAL=$(wc -c < "$PART")`,
+		`if [ "$ACTUAL" -ne "$EXPECTED" ]; then echo "incomplete bootstrap upload" >&2; exit 1; fi`,
+		fmt.Sprintf(`chmod %04o "$PART"`, upload.Mode.Perm()),
+		`mv -f "$PART" "$DEST"`,
+		`trap - 0 1 2 13 15`,
+	}, "\n")
 }
 
 func uploadRemoteFile(ctx context.Context, client *ssh.Client, upload BootstrapUpload) error {
-	command := fmt.Sprintf("umask 077 && cat > %s && chmod %04o %s", shellQuote(upload.Path), upload.Mode.Perm(), shellQuote(upload.Path))
-	return runRemoteCommandWithInput(ctx, client, command, bytes.NewReader(upload.Content))
+	return runRemoteCommandWithInput(ctx, client, buildRemoteUploadCommand(upload), bytes.NewReader(upload.Content))
 }
 
 func runRemoteCommand(ctx context.Context, client *ssh.Client, command string) error {
-	return runRemoteCommandWithInput(ctx, client, command, nil)
+	_, _, err := runRemoteCommandCapture(ctx, client, command, nil, 64<<10, 64<<10)
+	return err
 }
 
 func runRemoteCommandWithInput(ctx context.Context, client *ssh.Client, command string, input io.Reader) error {
-	session, err := client.NewSession()
-	if err != nil {
+	_, _, err := runRemoteCommandCapture(ctx, client, command, input, 64<<10, 64<<10)
+	return err
+}
+
+type sshRemoteOutputRunner struct {
+	client *ssh.Client
+}
+
+func (r sshRemoteOutputRunner) Output(ctx context.Context, command string, limit int64) ([]byte, error) {
+	stdout, _, err := runRemoteCommandCapture(ctx, r.client, command, nil, limit, 64<<10)
+	return stdout, err
+}
+
+type boundedCapture struct {
+	mu        sync.Mutex
+	limit     int64
+	data      []byte
+	truncated bool
+}
+
+func newBoundedCapture(limit int64) *boundedCapture {
+	if limit < 0 {
+		limit = 0
+	}
+	return &boundedCapture{limit: limit}
+}
+
+func (b *boundedCapture) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	remaining := b.limit - int64(len(b.data))
+	if remaining > 0 {
+		keep := int64(len(p))
+		if keep > remaining {
+			keep = remaining
+		}
+		b.data = append(b.data, p[:int(keep)]...)
+	}
+	if int64(originalLen) > remaining {
+		b.truncated = true
+	}
+	// Always report the full write so SSH continues draining the channel even
+	// after the retained diagnostic/payload limit has been reached.
+	return originalLen, nil
+}
+
+func (b *boundedCapture) snapshot() ([]byte, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.data...), b.truncated
+}
+
+type sshSessionResult struct {
+	session *ssh.Session
+	err     error
+}
+
+func newSSHSessionContext(ctx context.Context, client *ssh.Client) (*ssh.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := make(chan sshSessionResult, 1)
+	go func() {
+		session, err := client.NewSession()
+		result <- sshSessionResult{session: session, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = client.Close()
+		return nil, ctx.Err()
+	case opened := <-result:
+		return opened.session, opened.err
+	}
+}
+
+const sshSessionCancelGrace = 250 * time.Millisecond
+
+func closeSSHSessionOnCancel(client *ssh.Client, session *ssh.Session) {
+	closed := make(chan struct{})
+	go func() {
+		_ = session.Close()
+		close(closed)
+	}()
+	timer := time.NewTimer(sshSessionCancelGrace)
+	defer timer.Stop()
+	select {
+	case <-closed:
+	case <-timer.C:
+		_ = client.Close()
+	}
+}
+
+func startSSHSessionContext(ctx context.Context, client *ssh.Client, session *ssh.Session, command string) error {
+	if err := ctx.Err(); err != nil {
+		closeSSHSessionOnCancel(client, session)
 		return err
+	}
+	result := make(chan error, 1)
+	go func() { result <- session.Start(command) }()
+	select {
+	case <-ctx.Done():
+		closeSSHSessionOnCancel(client, session)
+		return ctx.Err()
+	case err := <-result:
+		return err
+	}
+}
+
+func runRemoteCommandCapture(ctx context.Context, client *ssh.Client, command string, input io.Reader, stdoutLimit, stderrLimit int64) ([]byte, []byte, error) {
+	session, err := newSSHSessionContext(ctx, client)
+	if err != nil {
+		return nil, nil, err
 	}
 	defer session.Close()
 
-	var output bytes.Buffer
-	session.Stdout = &output
-	session.Stderr = &output
-
+	stdoutCapture := newBoundedCapture(stdoutLimit)
+	stderrCapture := newBoundedCapture(stderrLimit)
+	session.Stdout = stdoutCapture
+	session.Stderr = stderrCapture
 	if input != nil {
-		stdin, err := session.StdinPipe()
-		if err != nil {
-			return err
-		}
-		go func() {
-			_, _ = io.Copy(stdin, input)
-			_ = stdin.Close()
-		}()
+		session.Stdin = input
+	}
+	if err := startSSHSessionContext(ctx, client, session, command); err != nil {
+		return nil, nil, err
 	}
 
 	done := make(chan error, 1)
-	go func() {
-		done <- session.Run(command)
-	}()
-
+	go func() { done <- session.Wait() }()
 	select {
 	case <-ctx.Done():
-		_ = session.Close()
-		return ctx.Err()
-	case err := <-done:
-		if err != nil {
-			text := strings.TrimSpace(output.String())
-			if text != "" {
-				return fmt.Errorf("remote command failed: %s: %w", text, err)
-			}
-			return err
+		closeSSHSessionOnCancel(client, session)
+		return nil, nil, ctx.Err()
+	case runErr := <-done:
+		stdout, stdoutTruncated := stdoutCapture.snapshot()
+		stderr, stderrTruncated := stderrCapture.snapshot()
+		if stdoutTruncated {
+			return nil, stderr, fmt.Errorf("remote command stdout exceeds %d bytes", stdoutLimit)
 		}
-		return nil
+		if stderrTruncated {
+			return nil, stderr, fmt.Errorf("remote command stderr exceeds %d bytes", stderrLimit)
+		}
+		if runErr != nil {
+			detail := strings.TrimSpace(string(stderr))
+			if detail == "" {
+				detail = strings.TrimSpace(string(stdout))
+			}
+			if detail != "" {
+				return stdout, stderr, fmt.Errorf("remote command failed: %s: %w", detail, runErr)
+			}
+			return stdout, stderr, runErr
+		}
+		return stdout, stderr, nil
 	}
 }
 

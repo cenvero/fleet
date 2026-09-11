@@ -185,7 +185,13 @@ func (a *App) AddServer(record ServerRecord) error {
 		return fmt.Errorf("invalid server name: %w", err)
 	}
 	if record.Port == 0 {
-		record.Port = 22
+		record.Port = a.Config.Runtime.DefaultAgentPort
+		if record.Port == 0 {
+			record.Port = 2222
+		}
+	}
+	if record.Port < 1 || record.Port > 65535 {
+		return fmt.Errorf("invalid agent port %d: must be 1-65535", record.Port)
 	}
 	if record.User == "" {
 		record.User = "root"
@@ -383,7 +389,7 @@ func (a *App) writeNewServerFile(server ServerRecord) error {
 	}
 	if err := os.Link(tmpPath, path); err != nil {
 		if os.IsExist(err) {
-			return fmt.Errorf("server %q already exists; use an explicit update command or remove it first", server.Name)
+			return fmt.Errorf("server %q already exists; retry its agent setup with 'fleet server bootstrap %s', or remove it with 'fleet server remove %s --force' before adding it again", server.Name, server.Name, server.Name)
 		}
 		return fmt.Errorf("publish server %s: %w", server.Name, err)
 	}

@@ -77,25 +77,16 @@ func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
 		return Manifest{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	body, err := getHTTPBodyWithRetry(
+		ctx,
+		parsed.String(),
+		func() *http.Client { return newUpdateHTTPClient(30 * time.Second) },
+		maxManifestBytes,
+		"manifest",
+		defaultHTTPGetRetryPolicy(),
+	)
 	if err != nil {
-		return Manifest{}, fmt.Errorf("create manifest request: %w", err)
-	}
-
-	client := newUpdateHTTPClient(10 * time.Second)
-	resp, err := client.Do(req)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("fetch manifest: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return Manifest{}, fmt.Errorf("unexpected manifest status %s", resp.Status)
-	}
-
-	body, err := readBoundedHTTPBody(resp.Body, maxManifestBytes, "manifest")
-	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, fmt.Errorf("fetch release manifest: %w", err)
 	}
 
 	var manifest Manifest

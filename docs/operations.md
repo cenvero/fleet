@@ -20,7 +20,7 @@ For Linux-first remote bootstrap with automatic agent installation:
 fleet server add web-01 192.0.2.10 --mode direct --login-user root --login-key ~/.ssh/id_ed25519
 ```
 
-This SSHes into the server, downloads the correct `fleet-agent` binary, installs it under `/opt/cenvero-fleet/`, and starts it as a systemd service.
+This SSHes into the server, detects its architecture, and makes the target download only the matching `fleet-agent` archive, signature, and release manifest (`wget` first, with `curl` fallback and retries). The payloads are streamed through the pinned SSH connection so the controller verifies minisign, trusted version/target binding, size, and SHA-256 before it installs the extracted binary under `/opt/cenvero-fleet/` and starts it as a systemd service. The controller machine does not download agent archives from GitHub during auto-install.
 
 **Changed bootstrap host key.** The bootstrap SSH host key is pinned on first install. If a
 later install finds a *different* key (the box was reinstalled or re-keyed — or, rarely, a

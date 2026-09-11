@@ -369,23 +369,14 @@ func downloadURLForHosts(ctx context.Context, rawURL string, approvedHosts map[s
 	if err := validateUpdateDestination(ctx, net.DefaultResolver, parsed); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("create download request: %w", err)
-	}
-	resp, err := newUpdateHTTPClientForHosts(30*time.Second, approvedHosts).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("download artifact: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected artifact status %s", resp.Status)
-	}
-	data, err := readBoundedHTTPBody(resp.Body, maxArtifactBytes, "artifact")
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
+	return getHTTPBodyWithRetry(
+		ctx,
+		parsed.String(),
+		func() *http.Client { return newUpdateHTTPClientForHosts(2*time.Minute, approvedHosts) },
+		maxArtifactBytes,
+		"artifact",
+		defaultHTTPGetRetryPolicy(),
+	)
 }
 
 func readBoundedHTTPBody(body io.Reader, limit int64, label string) ([]byte, error) {

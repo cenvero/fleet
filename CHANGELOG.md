@@ -54,6 +54,51 @@ Omit sections that have no entries for that release.
   pending activation and preserves the observed live version until restart and
   reconnect.
 
+## [v2.4.3] — 2026-09-11 (stable)
+
+Restores SSH-first Linux agent onboarding while retaining fail-closed release
+verification, and fixes onboarding state, port, version-display, and updater
+resilience regressions introduced in the v2.4 line.
+
+### Changed
+
+- Linux auto-install now opens the authenticated, host-key-pinned SSH connection
+  first, detects the target with `uname`, and makes that server download only its
+  matching agent manifest, archive, and signature. It prefers a BusyBox-compatible
+  three-attempt `wget` loop and falls back to bounded, retrying `curl`; the
+  controller no longer downloads GitHub agent archives during auto-install.
+- The target-fetched payload is streamed through the same SSH connection for
+  controller-side verification before the single extracted agent binary is
+  staged and installed.
+
+### Fixed
+
+- Transient updater and manifest HTTP failures now use bounded, cancellation-aware
+  retries without leaking signed URL query parameters in diagnostics.
+- Server onboarding rejects duplicate names before collecting credentials,
+  confirms before persistence, preserves configured login and agent ports, and
+  records explicit `installing`, `failed`, `managed`, and `reconcile-required`
+  states with non-secret retry metadata.
+- Post-install state or audit failures are no longer mislabeled as remote install
+  failures, and manual bootstrap retries reuse the stored non-secret connection
+  settings.
+- Agent versions and server lifecycle statuses are rendered consistently across
+  list, inventory, dashboard, update, and notification output.
+- SSH bootstrap cancellation now covers channel-open, exec-request, and command
+  wait stalls; failed uploads are cleaned locally or over a freshly pinned SSH
+  connection without masking the original error.
+
+### Security
+
+- Agent release selection remains bound to the exact product, semantic version,
+  Linux target, archive URL, and signature URL, with embedded-key minisign
+  verification, an exact trusted comment, declared and actual size checks,
+  SHA-256 verification, and bounded extraction of the regular `fleet-agent`
+  member.
+- Target acquisition now has one whole-operation deadline, target-side file-size
+  limits, bounded controller capture, interruption cleanup, and exact-size atomic
+  `.part` uploads so truncated staging files are never installed.
+
 ## [v2.3.0] — 2026-06-21 (stable)
 
 Shell-completion overhaul, two new operator-configurable lifecycle settings
