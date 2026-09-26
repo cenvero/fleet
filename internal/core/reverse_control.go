@@ -55,13 +55,14 @@ import (
 // Legacy mode. A CLI from before mutual authentication sends its request with
 // the raw token as the first member; the daemon checks that token before
 // reading the rest and serves the original request types (call, status,
-// disconnect) exactly as before. A daemon from before mutual authentication
-// answers the auth hello with "unauthorized"; a current CLI then falls back to
-// the legacy request for reverse-mode calls only, and only if the token file
-// was not written by a daemon that supports mutual authentication (tokens
-// carrying controlTokenMutualAuthPrefix): an impostor cannot downgrade a caller
-// whose token says the real daemon would have proved itself. Direct-mode relay
-// is never used without a daemon that proved itself.
+// disconnect) exactly as before. Every current daemon mints its token with
+// controlTokenMutualAuthPrefix; a caller holding such a token only ever uses
+// the handshake and never downgrades, so an impostor cannot talk it into
+// presenting the token. A token without the prefix was written by a daemon
+// from before mutual authentication, which can only be reached with the raw
+// token: a current CLI then sends the legacy request for reverse-mode calls
+// (the only route they have), exactly as an older CLI does, and does not try
+// the direct-mode relay at all.
 //
 // Binary framing (authenticated mode only): a daemon that lists
 // controlCapBinaryFrame in its capabilities accepts "call.framed", where
@@ -865,9 +866,10 @@ func (a *App) controlExchange(ctx context.Context, spec controlRequestSpec) (rev
 		}
 		resp, blob, err := a.controlExchangeOnce(ctx, spec, token)
 		switch {
-		case errors.Is(err, errControlImpostor) && peer.refreshToken(token):
-			// Most likely the daemon restarted with a new token; nothing was
-			// sent, so try once more with the token now on disk.
+		case (errors.Is(err, errControlImpostor) || errors.Is(err, errControlNotAuthenticated)) && peer.refreshToken(token):
+			// Most likely the daemon restarted (possibly as another version)
+			// with a new token; nothing was sent, so try once more with the
+			// token now on disk.
 			lastErr = err
 			continue
 		case err == nil && resp.Error != nil && resp.Error.Code == "unauthorized" && peer.refreshToken(token):
@@ -881,6 +883,17 @@ func (a *App) controlExchange(ctx context.Context, spec controlRequestSpec) (rev
 }
 
 func (a *App) controlExchangeOnce(ctx context.Context, spec controlRequestSpec, token string) (reverseControlResponse, []byte, error) {
+	if !tokenRequiresMutualAuth(token) {
+		// The token was written by a daemon from before mutual authentication
+		// (every current daemon marks its token), so whatever answers can
+		// only be reached with the raw token, which is all it ever had —
+		// exactly the request an older CLI sends. Nothing that needs a
+		// daemon which proved itself (the direct-mode relay) is attempted.
+		if spec.requireMutualAuth {
+			return reverseControlResponse{}, nil, &controlNotSentError{err: errControlNotAuthenticated}
+		}
+		return a.controlLegacyExchange(ctx, spec, token)
+	}
 	conn, stop, err := a.controlDial(ctx, spec.kind)
 	if err != nil {
 		return reverseControlResponse{}, nil, err
@@ -892,12 +905,9 @@ func (a *App) controlExchangeOnce(ctx context.Context, spec controlRequestSpec, 
 		if ctx.Err() != nil {
 			return reverseControlResponse{}, nil, &controlNotSentError{err: ctx.Err()}
 		}
-		if !errors.Is(err, errControlNotAuthenticated) || spec.requireMutualAuth || tokenRequiresMutualAuth(token) {
-			return reverseControlResponse{}, nil, &controlNotSentError{err: err}
-		}
-		// A daemon from before mutual authentication: it can only be reached
-		// with the raw token, which is all it ever had.
-		return a.controlLegacyExchange(ctx, spec, token)
+		// Never downgrade: the daemon that minted this token authenticates
+		// itself, so anything that does not is not that daemon.
+		return reverseControlResponse{}, nil, &controlNotSentError{err: err}
 	}
 	defer conn.Close()
 	defer stop()

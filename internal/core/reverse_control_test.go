@@ -149,7 +149,7 @@ func TestControlTokenIsCachedAndRefreshedAfterDaemonRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	tokenPath := filepath.Join(configDir, "data", "control.token")
-	if err := os.WriteFile(tokenPath, []byte("token-one"), 0o600); err != nil {
+	if err := os.WriteFile(tokenPath, []byte("ma1-token-one"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -170,7 +170,7 @@ func TestControlTokenIsCachedAndRefreshedAfterDaemonRestart(t *testing.T) {
 		go func() { defer close(done); _ = hub.ServeControl(ctx, listener) }()
 		return hub, func() { cancel(); _ = client.Close() }, done
 	}
-	_, stop1, done1 := serve(listener, "token-one")
+	_, stop1, done1 := serve(listener, "ma1-token-one")
 	call := func() error {
 		_, err := app.callReverseControlContext(context.Background(), "bench", proto.Envelope{Action: "metrics.collect"})
 		return err
@@ -193,10 +193,10 @@ func TestControlTokenIsCachedAndRefreshedAfterDaemonRestart(t *testing.T) {
 	if err != nil {
 		t.Skipf("could not re-listen on %s: %v", address, err)
 	}
-	if err := os.WriteFile(tokenPath, []byte("token-two"), 0o600); err != nil {
+	if err := os.WriteFile(tokenPath, []byte("ma1-token-two"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, stop2, done2 := serve(listener2, "token-two")
+	_, stop2, done2 := serve(listener2, "ma1-token-two")
 	defer func() { stop2(); <-done2 }()
 	if err := call(); err != nil {
 		t.Fatalf("call after the daemon restarted with a new token: %v", err)
@@ -242,7 +242,7 @@ func TestControlFramedWireFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	const token = "bench-control-token"
+	const token = benchControlToken
 	clientNonce := bytes.Repeat([]byte{7}, controlNonceBytes)
 	if _, err := fmt.Fprintf(conn, `{"auth":%q,"client_nonce":%q}`+"\n", controlAuthVersion, hex.EncodeToString(clientNonce)); err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestControlOldClientGetsBase64FromNewDaemon(t *testing.T) {
 		Envelope       proto.Envelope `json:"envelope,omitempty"`
 		EnvelopeBinary []byte         `json:"envelope_binary,omitempty"`
 	}
-	if err := json.NewEncoder(conn).Encode(oldRequest{Token: "bench-control-token", Type: "call", Server: "bench",
+	if err := json.NewEncoder(conn).Encode(oldRequest{Token: benchControlToken, Type: "call", Server: "bench",
 		Envelope: proto.Envelope{Action: proto.ActionFileRead, Payload: proto.FileReadPayload{Path: "/p", Binary: true}}}); err != nil {
 		t.Fatal(err)
 	}

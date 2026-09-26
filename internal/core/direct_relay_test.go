@@ -178,8 +178,8 @@ func TestDirectCallsFallBackForOldDaemon(t *testing.T) {
 	if !f.cli.sessions.has("web") {
 		t.Fatal("the CLI should have dialled the server itself")
 	}
-	if n := requests.Load(); n != 1 {
-		t.Fatalf("older daemon saw %d requests; want only the capability probe", n)
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("older daemon saw %d connections; a direct call must never be offered to a daemon that cannot authenticate itself", n)
 	}
 }
 

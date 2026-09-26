@@ -242,8 +242,8 @@ func TestControlDaemonRejectsWrongClientProof(t *testing.T) {
 
 	for name, proof := range map[string]func(serverNonce, clientNonce []byte) string{
 		"wrong token":  func(s, c []byte) string { return hex.EncodeToString(controlClientProof("not-the-token", s, c)) },
-		"daemon proof": func(s, c []byte) string { return hex.EncodeToString(controlDaemonProof("bench-control-token", c, s)) },
-		"replayed":     func(s, c []byte) string { return hex.EncodeToString(controlClientProof("bench-control-token", c, s)) },
+		"daemon proof": func(s, c []byte) string { return hex.EncodeToString(controlDaemonProof(benchControlToken, c, s)) },
+		"replayed":     func(s, c []byte) string { return hex.EncodeToString(controlClientProof(benchControlToken, c, s)) },
 		"empty":        func(s, c []byte) string { return "" },
 	} {
 		conn, err := net.Dial("tcp", app.Config.Runtime.ControlAddress)
@@ -318,7 +318,7 @@ func TestControlLegacyTokenOnlyServesLegacyRequests(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req, _ := json.Marshal(reverseControlRequest{Token: "bench-control-token", Type: kind, Server: "bench"})
+		req, _ := json.Marshal(reverseControlRequest{Token: benchControlToken, Type: kind, Server: "bench"})
 		_, _ = conn.Write(append(req, '\n'))
 		var resp reverseControlResponse
 		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
@@ -410,4 +410,49 @@ func TestDaemonRemovesItsControlTokenOnShutdown(t *testing.T) {
 	}
 	t.Run("own token", func(t *testing.T) { run(t, false) })
 	t.Run("replaced token", func(t *testing.T) { run(t, true) })
+}
+
+// With a token written by a daemon from before mutual authentication there is
+// no daemon that could prove itself, so the direct-mode relay does not even
+// connect: whatever listens on the control address sees nothing.
+func TestDirectRelaySkipsLegacyTokenEntirely(t *testing.T) {
+	f := newRelayFleet(t)
+	address := f.cli.Config.Runtime.ControlAddress
+	f.stopCtl()
+	if err := os.WriteFile(f.cli.controlTokenPath(), []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	imp := startImpostor(t, address, impostorForgedChallenge)
+	directRelayUnreachable.Delete(address)
+	result, err := f.cli.ExecCommandContext(context.Background(), "web", "printf direct")
+	if err != nil || result.Stdout != "direct" {
+		t.Fatalf("exec = %+v, %v", result, err)
+	}
+	if n := imp.conns.Load(); n != 0 {
+		t.Fatalf("the relay contacted the control address %d times with a legacy token", n)
+	}
+}
+
+// A long-running caller that cached a current daemon's token keeps working when
+// that daemon is replaced by an older version: the older daemon rejects the
+// handshake, the token on disk has changed, and the retry uses the legacy
+// request the older daemon understands.
+func TestControlFollowsDaemonDowngrade(t *testing.T) {
+	app, requests, _ := legacyDaemonApp(t, nil)
+	tokenPath := app.controlTokenPath()
+	if err := os.WriteFile(tokenPath, []byte(controlTokenMutualAuthPrefix+"from-the-newer-daemon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.controlPeer().cachedToken(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("legacy-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.callReverseControlContext(context.Background(), "srv", proto.Envelope{Action: proto.ActionFileRead}); err != nil {
+		t.Fatalf("call after the daemon was downgraded: %v", err)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Fatalf("older daemon saw %d connections; want the rejected handshake and the legacy request", n)
+	}
 }
