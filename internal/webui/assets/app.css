@@ -535,10 +535,13 @@ input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
   animation: slide-down var(--dur) var(--ease);
   min-width: 0;
 }
-.sel-count { font-weight: 600; font-size: var(--fs-sm); white-space: nowrap; color: var(--text); }
+.sel-count { font-weight: 600; font-size: var(--fs-sm); white-space: nowrap; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .sel-count .muted { color: var(--text-2); font-weight: 500; }
-.sel-actions { display: flex; gap: 4px; margin-left: auto; align-items: center; min-width: 0; }
-.sel-actions .btn { background: var(--surface); }
+.sel-actions { display: flex; gap: 4px; margin-left: auto; align-items: center; min-width: 0; flex: 0 1 auto; }
+.sel-actions .btn { background: var(--surface); flex: 0 1 auto; min-width: 30px; }
+/* Under pressure labels truncate; "More" never shrinks, so every action stays reachable. */
+.sel-actions .btn .lbl { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sel-actions .act-more, .sel-clear { flex-shrink: 0; }
 
 @keyframes slide-down { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
@@ -707,12 +710,10 @@ input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
 /* Labels collapse to icons as the pane narrows. They are visually hidden,
    never display:none, so each button keeps its accessible name. */
 @container pane (max-width: 800px) {
-  .sel-actions .act-compress .lbl, .sel-actions .act-rename .lbl {
-    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap;
-  }
-  .sel-actions .act-compress, .sel-actions .act-rename { padding: 0 8px; }
+  /* Secondary actions move to the "More" menu (which always lists them). */
+  .sel-actions .act-compress, .sel-actions .act-rename { display: none; }
 }
-@container pane (max-width: 680px) {
+@container pane (max-width: 620px) {
   .sel-actions .btn .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
   .sel-actions .btn { padding: 0 8px; }
 }
