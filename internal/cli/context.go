@@ -316,7 +316,7 @@ const contextWorkflows = "## Common workflows\n\n" +
 	"Run a command for a machine-readable result, with a timeout and retries:\n" +
 	"```\nfleet exec web-01 \"systemctl is-active nginx\" --json --timeout 30s --retry 2\nfleet exec --group role=web \"uname -r\" --json   # fan out by tag\n```\n\n" +
 	"Operate unattended with a scoped token + a stored secret:\n" +
-	"```\nfleet token create --name deploy --group role=web --allow exec,service --destructive\nfleet secret set deploy_key --generate 40\nFLEET_TOKEN=<id> fleet exec web-01 \"./deploy.sh\" --secret DEPLOY_KEY=@deploy_key --json\n```\n\n" +
+	"```\nfleet secret set deploy_key --generate 40\nfleet token create --name deploy --group role=web --allow exec,service --allow-secret deploy_key --destructive\nFLEET_TOKEN=<id> fleet exec web-01 \"./deploy.sh\" --secret DEPLOY_KEY=@deploy_key --json\n```\n\n" +
 	"Make a risky change safely (auto-reverts unless confirmed):\n" +
 	"```\nfleet guard web-01 \"ufw default deny incoming && ufw reload\" --revert-after 2m --revert-cmd \"ufw default allow incoming && ufw reload\"\nfleet confirm <id>     # keep the change; or: fleet revert <id> to undo now\n```\n\n" +
 	"Apply a multi-step change as a transactional playbook:\n" +

@@ -42,7 +42,6 @@ fleet file cat  <server> <path>                  # stream a file to stdout (chec
 fleet file tail <server> <path> [-n 200] [--search TEXT]
 fleet file diff <serverA:path> <serverB:path>    # unified line diff (exit 1 if they differ)
 fleet file diff --group <expr> <path>            # diff one path across every server matching the tag expression
-fleet file checksum <server> <path>              # SHA-256 of a remote file
 
 # Edit a remote file in $EDITOR (download → edit → atomic re-upload)
 fleet file edit <server:path>                    # $EDITOR, fallback vi/nano; skips upload if unchanged
@@ -59,13 +58,16 @@ fleet cp            <srcServer:path> <dstServer:path> [-r]   # top-level shortcu
 fleet file mkdir     <server> <path>
 fleet file rm        <server> <path> [--recursive]
 fleet file mv        <server> <from> <to>
-fleet file chmod     <server> <path> <mode>          # e.g. 0644
-fleet file duplicate <server> <src> <dst>            # copy a file in place on the server
 
 # Archive (runs the host's tar/zip on the target)
 fleet file compress <server> <archive> <item>...   # zip · tar.gz · tar.bz2 · tar.xz · tar
 fleet file extract  <server> <archivePath>          # into the archive's directory
 ```
+
+Permissions (chmod), SHA-256 checksums and duplicate are operations of the terminal and
+web file managers below; from the CLI use `fleet exec`, for example
+`fleet exec web-01 -- chmod 0644 /srv/www/index.html` or
+`fleet exec web-01 -- sha256sum /srv/releases/site.tar.gz`.
 
 Recursive transfers (`upload`/`download`/`copy`/`move -r`) move **several files in
 parallel** (a bounded worker pool) with aggregated progress, on top of each file's
