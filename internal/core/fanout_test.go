@@ -20,8 +20,13 @@ func TestForEachLimitBoundsConcurrencyAndVisitsAll(t *testing.T) {
 	for _, tc := range []struct{ n, limit, wantMax int }{
 		{0, 4, 0}, {1, 4, 1}, {10, 1, 1}, {50, 4, 4}, {50, 0, DefaultFanoutLimit}, {3, 10, 3},
 	} {
-		var inflight, maxInflight atomic.Int32
+		var inflight, maxInflight, started atomic.Int32
 		seen := make([]atomic.Int32, tc.n)
+		// The first wantMax calls rendezvous (bounded wait) so a pool that
+		// really runs them concurrently always reaches wantMax in flight,
+		// however the scheduler interleaves goroutines under -race or load; a
+		// sequential implementation times out and fails the "concurrent" check.
+		rendezvous := int32(tc.wantMax)
 		ForEachLimit(tc.n, tc.limit, func(i int) {
 			cur := inflight.Add(1)
 			for {
@@ -30,7 +35,12 @@ func TestForEachLimitBoundsConcurrencyAndVisitsAll(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(2 * time.Millisecond)
+			if started.Add(1) <= rendezvous {
+				deadline := time.Now().Add(5 * time.Second)
+				for maxInflight.Load() < rendezvous && time.Now().Before(deadline) {
+					time.Sleep(100 * time.Microsecond)
+				}
+			}
 			seen[i].Add(1)
 			inflight.Add(-1)
 		})
