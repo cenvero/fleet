@@ -128,6 +128,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/app.js", s.staticAsset("app.js", "text/javascript"))
 	mux.HandleFunc("/app.css", s.staticAsset("app.css", "text/css"))
+	mux.HandleFunc("/theme.js", s.staticAsset("theme.js", "text/javascript"))
+	mux.HandleFunc("/favicon.svg", s.staticAsset("favicon.svg", "image/svg+xml"))
 
 	mux.HandleFunc("/api/servers", s.guard(s.handleServers))
 	mux.HandleFunc("/api/formats", s.guard(s.handleFormats))

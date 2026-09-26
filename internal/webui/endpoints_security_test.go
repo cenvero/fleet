@@ -187,7 +187,7 @@ func TestNewEndpointsRejectRebindingHost(t *testing.T) {
 			t.Fatalf("%s %s with rebinding Host: status %d, want 403", ep.method, ep.path, res.StatusCode)
 		}
 	}
-	for _, p := range []string{"/", "/app.js"} {
+	for _, p := range []string{"/", "/app.js", "/theme.js", "/favicon.svg"} {
 		res := doReq(t, http.MethodGet, ts.URL+p, map[string]string{"Host": "attacker.example"})
 		if res.StatusCode != http.StatusForbidden {
 			t.Fatalf("GET %s with rebinding Host: status %d, want 403", p, res.StatusCode)
@@ -199,9 +199,11 @@ func TestStaticAssetsAndSecurityHeaders(t *testing.T) {
 	t.Parallel()
 	_, ts := newTestServer(t)
 	want := map[string]string{
-		"/":        "text/html; charset=utf-8",
-		"/app.js":  "text/javascript; charset=utf-8",
-		"/app.css": "text/css; charset=utf-8",
+		"/":            "text/html; charset=utf-8",
+		"/app.js":      "text/javascript; charset=utf-8",
+		"/app.css":     "text/css; charset=utf-8",
+		"/theme.js":    "text/javascript; charset=utf-8",
+		"/favicon.svg": "image/svg+xml; charset=utf-8",
 	}
 	for p, ctype := range want {
 		res := doReq(t, http.MethodGet, ts.URL+p, nil)
@@ -248,13 +250,13 @@ func TestIndexHasNoInlineCodeOrExternalResources(t *testing.T) {
 	if !onlyNamespaceURIs(html) {
 		t.Fatalf("index.html references an http:// resource")
 	}
-	for _, name := range []string{"assets/app.css"} {
+	for _, name := range []string{"assets/app.js", "assets/app.css", "assets/theme.js"} {
 		data, err := assets.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		text := string(data)
-		for _, bad := range []string{"https://", "eval(", "new Function(", "@import"} {
+		for _, bad := range []string{"https://", "eval(", "new Function(", "@import", "innerHTML = htmlDesc"} {
 			if strings.Contains(text, bad) {
 				t.Fatalf("%s references %q", name, bad)
 			}
