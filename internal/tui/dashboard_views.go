@@ -1318,6 +1318,17 @@ func (m *model) hotCombinedBox(r *drctx, body, at drect) []string {
 	return b.render()
 }
 
+// dashLoad formats a load average in at most 5 cells.
+func dashLoad(v float64) string {
+	switch {
+	case v >= 100:
+		return strconv.FormatFloat(v, 'f', 0, 64)
+	case v >= 10:
+		return strconv.FormatFloat(v, 'f', 1, 64)
+	}
+	return strconv.FormatFloat(v, 'f', 2, 64)
+}
+
 func dashMax64(vs ...float64) float64 {
 	out := vs[0]
 	for _, v := range vs[1:] {
@@ -1566,7 +1577,7 @@ func (m *model) serverCell(r *drctx, l *dline, c dcol, s *core.ServerRecord, sr 
 	case scLoad:
 		txt := "-"
 		if sr.hasMetrics {
-			txt = strconv.FormatFloat(s.Metrics.Load1, 'f', 2, 64)
+			txt = dashLoad(s.Metrics.Load1)
 		}
 		st := sNone
 		if stale || !sr.hasMetrics {
