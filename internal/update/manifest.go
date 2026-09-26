@@ -66,6 +66,20 @@ func ReadFile(path string) (Manifest, error) {
 }
 
 func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
+	return fetchManifest(ctx, manifestURL, defaultHTTPGetRetryPolicy())
+}
+
+// FetchOnce is Fetch with exactly one HTTP attempt and no retry back-off, for
+// latency-sensitive callers (the CLI's update notice) that bound the call with
+// a short context deadline and would rather skip than wait. The same URL,
+// destination and size policies apply.
+func FetchOnce(ctx context.Context, manifestURL string) (Manifest, error) {
+	policy := defaultHTTPGetRetryPolicy()
+	policy.attempts = 1
+	return fetchManifest(ctx, manifestURL, policy)
+}
+
+func fetchManifest(ctx context.Context, manifestURL string, policy httpGetRetryPolicy) (Manifest, error) {
 	if manifestURL == "" {
 		manifestURL = DefaultManifestURL
 	}
@@ -83,7 +97,7 @@ func Fetch(ctx context.Context, manifestURL string) (Manifest, error) {
 		func() *http.Client { return newUpdateHTTPClient(30 * time.Second) },
 		maxManifestBytes,
 		"manifest",
-		defaultHTTPGetRetryPolicy(),
+		policy,
 	)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("fetch release manifest: %w", err)

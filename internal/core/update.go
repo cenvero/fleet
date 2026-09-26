@@ -41,15 +41,40 @@ type FleetUpdateAgentResult struct {
 	Error             string `json:"error,omitempty"`
 }
 
+// homebrewHintCache is data/update-available.json. CheckedAt/Latest are the
+// original fields (the last SUCCESSFUL check and what it found) and keep their
+// meaning, so older binaries keep reading the file correctly. The remaining
+// fields are additive (older binaries ignore them): they record the last fetch
+// attempt, successful or not, so a failing/unreachable manifest is retried only
+// once per updateCheckInterval instead of on every command.
 type homebrewHintCache struct {
 	CheckedAt time.Time `json:"checked_at"`
 	Latest    string    `json:"latest"`
+
+	AttemptedAt time.Time `json:"attempted_at,omitempty"`
+	Failures    int       `json:"failures,omitempty"`
+	LastError   string    `json:"last_error,omitempty"`
 }
 
 // updateCheckInterval is how often the daemon refreshes the cached "is a newer
-// release available" result — and the TTL the CLI honors for the same cache, so
-// neither hammers the CDN.
+// release available" result — and the TTL the CLI honors for the same cache
+// (including after a failed attempt), so neither hammers the CDN.
 const updateCheckInterval = 10 * time.Minute
+
+// cliUpdateCheckBudget caps the one synchronous manifest fetch a CLI command
+// may make when the cache is stale: a single attempt, no retries. An offline or
+// firewalled controller pays this at most once per updateCheckInterval.
+const cliUpdateCheckBudget = 1500 * time.Millisecond
+
+// daemonUpdateCheckBudget bounds the daemon's background refresh, which may use
+// update.Fetch's retries since nobody is waiting on it.
+const daemonUpdateCheckBudget = 30 * time.Second
+
+// Manifest fetchers, replaceable in tests.
+var (
+	fetchManifestOnce  = update.FetchOnce
+	fetchManifestRetry = update.Fetch
+)
 
 const (
 	ansiYellow = "\033[33m"
@@ -59,8 +84,16 @@ const (
 // UpdateAvailable returns the latest version for the CONFIGURED channel when it is
 // strictly newer than the running binary, or "" if up to date, disabled, a
 // dev/unversioned build, or the manifest is unreachable. The manifest result is
-// cached for updateCheckInterval (data/update-available.json).
+// cached for updateCheckInterval (data/update-available.json); when the cache is
+// stale, one single-attempt fetch bounded by cliUpdateCheckBudget refreshes it,
+// and a failed attempt is recorded so the next one waits a full interval.
 func UpdateAvailable(configDir, manifestURL, channel string, policy update.Policy) string {
+	return updateAvailable(configDir, manifestURL, channel, policy, false)
+}
+
+// updateAvailable implements UpdateAvailable. daemon=true is the background
+// refresher (runUpdateChecker): it fetches with retries and a longer budget.
+func updateAvailable(configDir, manifestURL, channel string, policy update.Policy, daemon bool) string {
 	if policy == update.PolicyDisabled {
 		return ""
 	}
@@ -76,23 +109,94 @@ func UpdateAvailable(configDir, manifestURL, channel string, policy update.Polic
 	if data, err := os.ReadFile(cacheFile); err == nil { // #nosec G304 -- cache path is fixed beneath the controller data directory
 		_ = json.Unmarshal(data, &cache)
 	}
-	if time.Since(cache.CheckedAt) > updateCheckInterval {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		manifest, err := update.Fetch(ctx, manifestURL)
+	due := updateCheckDue(cache, time.Now())
+	if daemon {
+		// The daemon's ticker already spaces its calls one interval apart, so it
+		// refreshes whenever the last SUCCESS is (almost) an interval old — the
+		// slack keeps tick jitter from skipping every other refresh — and it
+		// keeps retrying on each tick while the manifest is unreachable.
+		due = time.Since(cache.CheckedAt) > updateCheckInterval-time.Minute
+	}
+	if due {
+		fetch, budget := fetchManifestOnce, cliUpdateCheckBudget
+		if daemon {
+			fetch, budget = fetchManifestRetry, daemonUpdateCheckBudget
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		manifest, err := fetch(ctx, manifestURL)
+		cancel()
+		now := time.Now().UTC()
+		cache.AttemptedAt = now
 		if err == nil {
 			if ch, ok := manifest.Channels[channel]; ok {
-				cache = homebrewHintCache{CheckedAt: time.Now().UTC(), Latest: ch.Version}
-				if data, err := json.Marshal(cache); err == nil {
-					_ = os.WriteFile(cacheFile, data, 0o600)
-				}
+				cache.CheckedAt, cache.Latest = now, ch.Version
+				cache.Failures, cache.LastError = 0, ""
+			} else {
+				err = fmt.Errorf("channel %q not in manifest", channel)
 			}
 		}
+		if err != nil {
+			// Keep the last known Latest (and CheckedAt): a transient failure must
+			// not hide a notice we already know about.
+			cache.Failures++
+			cache.LastError = truncateUpdateError(err.Error())
+		}
+		writeUpdateCache(cacheFile, cache)
 	}
 	if cache.Latest != "" && isNewerVersion(cache.Latest, version.Version) {
 		return cache.Latest
 	}
 	return ""
+}
+
+// updateCheckDue reports whether the CLI should fetch the manifest now: the last
+// attempt (or, for caches written by older binaries without attempted_at, the
+// last success) is older than updateCheckInterval.
+func updateCheckDue(cache homebrewHintCache, now time.Time) bool {
+	last := cache.AttemptedAt
+	if cache.CheckedAt.After(last) {
+		last = cache.CheckedAt
+	}
+	return now.Sub(last) > updateCheckInterval
+}
+
+func truncateUpdateError(msg string) string {
+	const limit = 300
+	if len(msg) > limit {
+		return msg[:limit]
+	}
+	return msg
+}
+
+// writeUpdateCache replaces the cache file atomically (temp file + rename), so
+// concurrent fleet processes never observe a torn document. Best-effort.
+func writeUpdateCache(path string, cache homebrewHintCache) {
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".update-available-*.tmp")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+	}
 }
 
 // AgentVersionMismatch names a managed server whose last-observed agent version
@@ -167,7 +271,7 @@ func (a *App) runUpdateChecker(ctx context.Context) {
 	}
 	var lastSeen string
 	check := func() {
-		latest := UpdateAvailable(a.ConfigDir, a.Config.ManifestURL, a.Config.Updates.Channel, a.Config.Updates.Policy)
+		latest := updateAvailable(a.ConfigDir, a.Config.ManifestURL, a.Config.Updates.Channel, a.Config.Updates.Policy, true)
 		if latest != "" && latest != lastSeen {
 			lastSeen = latest
 			_ = a.AuditLog.Append(logs.AuditEntry{
