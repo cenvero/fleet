@@ -61,7 +61,7 @@ func fmSanitize(s string) string {
 			b.WriteByte(' ')
 		case r == utf8.RuneError:
 			// Undecodable bytes (and a genuine U+FFFD) render as U+FFFD.
-			b.WriteRune('�')
+			b.WriteRune('\uFFFD')
 		case fmUnsafeRune(r):
 			b.WriteRune(fmControlPicture(r))
 		default:
@@ -77,9 +77,9 @@ func fmUnsafeRune(r rune) bool {
 		return true
 	}
 	switch r {
-	case '‎', '‏', // LRM / RLM
-		'‪', '‫', '‬', '‭', '‮', // embeddings / overrides
-		'⁦', '⁧', '⁨', '⁩': // isolates
+	case 0x200e, 0x200f, // LRM / RLM
+		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // embeddings / overrides
+		0x2066, 0x2067, 0x2068, 0x2069: // isolates
 		return true
 	}
 	return false
@@ -93,9 +93,9 @@ func fmControlPicture(r rune) rune {
 	case r < 0x20:
 		return 0x2400 + r
 	case r == 0x7f:
-		return '␡'
+		return '\u2421'
 	default:
-		return '�'
+		return '\uFFFD'
 	}
 }
 
@@ -184,7 +184,7 @@ func fmRuneWidth(r rune) int {
 		}
 		return 1
 	}
-	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || r == '‍' {
+	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || r == '\u200D' {
 		return 0
 	}
 	return lipgloss.Width(string(r))

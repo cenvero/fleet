@@ -33,13 +33,6 @@ var (
 	hlText    = lipgloss.NewStyle().Foreground(fmText)
 )
 
-// styleForToken picks a lipgloss style for a chroma token by its category. Using
-// Category() collapses the hundreds of token types into a handful of buckets we
-// have palette colours for.
-func styleForToken(t chroma.TokenType) lipgloss.Style {
-	return hlStyles[hlBucket(t)]
-}
-
 // hlBucket maps a token type onto one of the palette buckets below.
 func hlBucket(t chroma.TokenType) int {
 	// A few sub-types deserve their own colour for readability.

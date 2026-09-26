@@ -22,23 +22,21 @@ import (
 // ============================================================================
 
 var (
-	fmAccent   = fmColor("#00d4aa")
-	fmAccent2  = fmColor("#36f0c0")
-	fmInk      = fmColor("#04231d")
-	fmText     = fmColor("#e7ecef")
-	fmMutedC   = fmColor("#8fa7b3")
-	fmDimC     = fmColor("#5f7480")
-	fmBorderC  = fmColor("#1c2b36")
-	fmZebraC   = fmColor("#0c141d")
-	fmDirC     = fmColor("#7ad7ff")
-	fmDangerC  = fmColor("#ff6b6b")
-	fmWarnC    = fmColor("#ffce6b")
-	fmHeaderBg = fmColor("#0e1620")
-	fmPanelBg  = fmColor("#0d131b")
-	fmDropC    = fmColor("#36f0c0")
+	fmAccent  = fmColor("#00d4aa")
+	fmAccent2 = fmColor("#36f0c0")
+	fmInk     = fmColor("#04231d")
+	fmText    = fmColor("#e7ecef")
+	fmMutedC  = fmColor("#8fa7b3")
+	fmDimC    = fmColor("#5f7480")
+	fmBorderC = fmColor("#1c2b36")
+	fmZebraC  = fmColor("#0c141d")
+	fmDirC    = fmColor("#7ad7ff")
+	fmDangerC = fmColor("#ff6b6b")
+	fmWarnC   = fmColor("#ffce6b")
+	fmPanelBg = fmColor("#0d131b")
 
 	// Category colors for file-type icons (palette-consistent: teal/blue accents,
-	// soft warm tones). Used by iconFor for both list and grid views.
+	// soft warm tones). Used by iconKindFor for both list and grid views.
 	fmCodeC    = fmColor("#7ee787") // code: soft green
 	fmDocC     = fmColor("#a8c7e0") // docs/text: soft blue
 	fmDataC    = fmColor("#c8a8ff") // structured data: lavender
@@ -49,7 +47,6 @@ var (
 	fmConfigC  = fmColor("#9fb0bd") // config/dotfiles: cool grey
 	fmDocsRedC = fmColor("#ff8c8c") // pdf/rich docs: soft red
 
-	fmTag       = lipgloss.NewStyle().Foreground(fmDimC)
 	fmServerTag = lipgloss.NewStyle().Foreground(fmMutedC)
 
 	fmRule = lipgloss.NewStyle().Foreground(fmBorderC)
@@ -126,7 +123,9 @@ func (m filesModel) frameKey() string {
 			b.WriteByte('|')
 		}
 	}
-	put(int(m.ver), m.width, m.height, m.focus, boolInt(m.showHidden), m.hoverSide, m.hoverIndex)
+	b.WriteString(strconv.FormatUint(m.ver, 36))
+	b.WriteByte('|')
+	put(m.width, m.height, m.focus, boolInt(m.showHidden), m.hoverSide, m.hoverIndex)
 	b.WriteString(m.hoverTool)
 	b.WriteByte('|')
 	b.WriteString(m.status)
@@ -1094,11 +1093,6 @@ func centeredBlock(cw, rows int, p *fmPalette, lines []fmStyledLine) []string {
 	return out
 }
 
-// renderListBody is kept for callers/tests that want the joined body text.
-func (m filesModel) renderListBody(side, cw, rows int, isDropTarget bool) string {
-	return strings.Join(m.renderListLines(side, cw, rows, isDropTarget), "\n")
-}
-
 // renderListLines draws only the visible window of the listing (windowing):
 // a 50,000-entry directory costs the same per frame as a 50-entry one.
 func (m filesModel) renderListLines(side, cw, rows int, isDropTarget bool) []string {
@@ -1254,11 +1248,6 @@ func fmtTime(t time.Time) string {
 
 // ---- grid ----
 
-// renderGridBody draws a Finder-style icon grid (joined), kept for callers.
-func (m filesModel) renderGridBody(side, cw, rows int, isDropTarget bool) string {
-	return strings.Join(m.renderGridLines(side, cw, rows, isDropTarget, fmPal()), "\n")
-}
-
 // renderGridLines draws cells laid out in gridCols columns, each cell
 // gridCellH lines tall (big icon over a centered name).
 func (m filesModel) renderGridLines(side, cw, rows int, isDropTarget bool, p *fmPalette) []string {
@@ -1305,12 +1294,6 @@ func (m filesModel) renderGridLines(side, cw, rows int, isDropTarget bool, p *fm
 		lines = lines[:rows]
 	}
 	return lines
-}
-
-// renderGridCell draws a single icon+name cell (two lines joined by "\n").
-func (m filesModel) renderGridCell(side, i, cellW int, dropTargetPane bool) string {
-	a, b := m.renderGridCellLines(side, i, cellW, dropTargetPane, fmPal())
-	return a + "\n" + b
 }
 
 func (m filesModel) renderGridCellLines(side, i, cellW int, dropTargetPane bool, p *fmPalette) (string, string) {
@@ -1492,15 +1475,10 @@ func fmIconStyles() map[fmIconKind]lipgloss.Style {
 	}
 }
 
-// iconFor is the single source of truth for a file item's icon: it returns a
-// crisp, single-terminal-cell-wide glyph and a palette-consistent lipgloss style
-// (color, weight) describing its file-type category. Both the list view and the
-// grid/icon view use it (via iconKindFor) so the two stay in sync.
-func iconFor(item fileItem) (glyph string, style lipgloss.Style) {
-	g, k := iconKindFor(item)
-	return g, fmIconStyles()[k]
-}
-
+// iconKindFor is the single source of truth for a file item's icon: a crisp,
+// single-terminal-cell-wide glyph and its file-type category (which selects a
+// palette colour). The list view, the grid view, the preview and the dialogs
+// all use it so they stay in sync.
 func iconKindFor(item fileItem) (string, fmIconKind) {
 	switch {
 	case item.name == "..":
@@ -2470,13 +2448,6 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f%c", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
-// renderBreadcrumbWithin renders only paths at or below root. It falls back to
-// filesystem-root breadcrumbs for legacy pane states with no boundary.
-func renderBreadcrumbWithin(cwd, root string, style core.TargetPathStyle, width int) string {
-	segs := breadcrumbSegmentsWithin(cwd, root, style)
-	return renderBreadcrumbSegments(segs, width)
 }
 
 func breadcrumbSegmentsWithin(cwd, root string, style core.TargetPathStyle) []string {
