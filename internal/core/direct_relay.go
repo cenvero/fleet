@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"sync"
 	"time"
 
@@ -24,9 +23,11 @@ import (
 // private-key read and a TOML rewrite of the server record, before its single
 // RPC: about ten round trips, ~550 ms at 50 ms RTT. A running `fleet daemon`
 // already holds warm pooled connections (its metrics poller keeps them alive),
-// so when one is running a direct-mode call is handed to it over the
-// token-authenticated loopback control socket ("call.direct") and rides its
-// pool: one round trip to the server.
+// so when one is running a direct-mode call is handed to it over the loopback
+// control socket ("call.direct") and rides its pool: one round trip to the
+// server. The relay is only used with a daemon that has proved, per
+// connection, that it holds the control token (see reverse_control.go): an
+// impostor listening on the control address gets a nonce and nothing else.
 //
 // What does not change: every authorisation decision — RBAC token scope,
 // cmd-policy, approvals, secret resolution, redaction, audit — happens in the
@@ -39,8 +40,10 @@ import (
 // Holding the control token already implies read access to that config
 // directory (and so to the private key), so the relay grants nothing new.
 //
-// Fallback is automatic: no daemon, an older daemon without controlCapDirectCall,
-// a busy daemon, or a target mismatch all make the CLI dial the server itself.
+// Fallback is automatic and happens before anything but a nonce has left the
+// process: no daemon (its control token is removed when it stops), an older
+// daemon or anything else that cannot prove it holds the token, a busy daemon,
+// or a target mismatch all make the CLI dial the server itself.
 // FLEET_NO_DAEMON_RELAY=1 disables the relay for a process.
 
 // controlDirectTarget is the connection identity the caller resolved for a
@@ -117,26 +120,28 @@ func (a *App) tryDaemonDirectRelay(ctx context.Context, server ServerRecord, env
 	if until, ok := directRelayUnreachable.Load(address); ok && time.Now().Before(until.(time.Time)) {
 		return proto.Envelope{}, false, nil
 	}
-	peer := a.controlPeer()
-	if _, err := peer.cachedToken(); err != nil {
-		return proto.Envelope{}, false, nil // no daemon has ever run here
+	if _, err := a.controlPeer().cachedToken(); err != nil {
+		return proto.Envelope{}, false, nil // no daemon is running here
 	}
-	caps := a.controlCapabilitiesFor(ctx, peer)
-	if !slices.Contains(caps, controlCapDirectCall) {
-		if _, known := peer.capabilities(); !known {
-			directRelayUnreachable.Store(address, time.Now().Add(directRelayRetryAfter))
-		}
-		return proto.Envelope{}, false, nil
-	}
+	// controlCall only sends the envelope after whatever is listening on the
+	// control address has proved it holds the control token, and only if it
+	// advertises direct-call; an older daemon (or anything else) never sees
+	// more than a nonce.
 	target := a.directTargetFor(server)
 	out, err = a.controlCall(ctx, controlTypeCallDirect, server.Name, env, &target)
 	if err == nil {
 		return out, true, nil
 	}
-	var dialErr *controlDialError
+	var notSent *controlNotSentError
 	var respErr *controlResponseError
 	switch {
-	case errors.As(err, &dialErr):
+	case errors.As(err, &notSent):
+		if ctx.Err() != nil {
+			return proto.Envelope{}, true, ctx.Err()
+		}
+		// Unreachable, not authenticated, busy, or lacking the capability:
+		// nothing left this process. Dial the server ourselves, and do not
+		// knock again for a few seconds.
 		directRelayUnreachable.Store(address, time.Now().Add(directRelayRetryAfter))
 		return proto.Envelope{}, false, nil
 	case errors.Is(err, errControlUnsupported):

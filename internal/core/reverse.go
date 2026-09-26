@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
@@ -246,15 +248,20 @@ type ReverseHub struct {
 // transfer against a binary-frame-capable agent ships chunks with no bytes.
 //
 // That field is base64 inside JSON, which costs ~30 ms and ~17 MB of garbage
-// per 2 MiB chunk on each side. A daemon that advertises controlCapBinaryFrame
-// (in reply to a "hello") also accepts the "call.framed" request type, where
-// BinaryLength announces that the attachment follows the JSON line as raw
-// bytes; and a caller that lists controlCapBinaryFrame in Accept gets the
-// response's attachment the same way. Older daemons ignore Accept and reject
-// the unknown type before doing anything, so both directions fall back to the
-// original encoding.
+// per 2 MiB chunk on each side. On a mutually authenticated connection, a
+// daemon that advertises controlCapBinaryFrame in its auth challenge also
+// accepts the "call.framed" request type, where BinaryLength announces that
+// the attachment follows the JSON line as raw bytes; and a caller that lists
+// controlCapBinaryFrame in Accept gets the response's attachment the same way.
+// Legacy (raw-token) requests keep the original base64 encoding both ways.
 type reverseControlRequest struct {
-	Token          string         `json:"token"`
+	// ClientProof replaces Token on a mutually authenticated connection (see
+	// reverse_control.go). It is the first member so the daemon can check it
+	// before reading the rest of the request.
+	ClientProof string `json:"client_proof,omitempty"`
+	// Token is the legacy credential: a caller from before mutual
+	// authentication sends it as the first member.
+	Token          string         `json:"token,omitempty"`
 	Type           string         `json:"type"`
 	Server         string         `json:"server"`
 	Envelope       proto.Envelope `json:"envelope,omitempty"`
@@ -845,7 +852,11 @@ func (a *App) generateControlToken() (string, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate control token: %w", err)
 	}
-	token := hex.EncodeToString(raw)
+	// The prefix tells callers that this daemon performs mutual
+	// authentication, so they never fall back to presenting the token in the
+	// clear to whatever answers on the control address. Callers from before
+	// that treat the whole string as an opaque token, as they always have.
+	token := controlTokenMutualAuthPrefix + hex.EncodeToString(raw)
 	tokenPath := a.controlTokenPath()
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o750); err != nil {
 		return "", fmt.Errorf("create data dir for control token: %w", err)
@@ -893,10 +904,19 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	}
 	defer controlListener.Close()
 
+	// Shut down cleanly on SIGTERM (service managers) as well as the
+	// caller's own cancellation, so the token file below is removed.
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGTERM)
+	defer stopSignals()
+
 	controlToken, err := a.generateControlToken()
 	if err != nil {
 		return err
 	}
+	// Remove the token when the daemon stops. A token left behind is what a
+	// process later listening on the control address would be handed by
+	// callers that still speak the legacy protocol.
+	defer a.removeControlTokenIfOwned(controlToken)
 
 	hub := NewReverseHub(a, controlToken)
 	a.useHubInProcess(hub)

@@ -4,8 +4,13 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,31 +28,64 @@ import (
 
 // The daemon's control socket is how every other process on this machine — a
 // CLI invocation, the web UI, the TUI — reaches the reverse agents connected
-// to the daemon. It listens on loopback only and every request carries the
-// daemon's control token (data/control.token, 0600).
+// to the daemon, and (see direct_relay.go) the daemon's warm connections to
+// direct-mode servers. It listens on loopback only. Both ends know the
+// daemon's control token (data/control.token, 0600); nobody else does.
 //
-// Protocol: one request per connection. The caller writes a JSON
-// reverseControlRequest and a newline; the daemon writes a JSON
-// reverseControlResponse and a newline, then closes. The caller closing its end
-// early cancels the call.
+// One request per connection. The caller closing its end early cancels the
+// call.
 //
-// Binary framing (negotiated): a daemon that lists controlCapBinaryFrame in its
-// "hello" reply accepts request type "call.framed", where BinaryLength says the
-// envelope's attachment follows the request's newline as exactly that many raw
-// bytes. Independently, a caller that lists controlCapBinaryFrame in Accept
-// gets a response attachment the same way (BinaryLength + raw bytes after the
-// response's newline) instead of base64 in ResponseBinary. A daemon that does
-// not know about framing ignores Accept, and rejects "call.framed" before it
-// does anything, so a newer CLI falls back to base64 against an older daemon
-// and an older CLI (which never asks) keeps getting base64 from a newer one.
+// Mutual authentication. Anyone on the machine can connect to — or, while the
+// daemon is down, listen on — a loopback port, so each end must prove it holds
+// the token before the other sends anything of value:
+//
+//  1. caller → daemon: {"auth":"hmac-sha256-v1","client_nonce":N_c}   (no token)
+//  2. daemon → caller: {"auth":…,"server_nonce":N_s,"proof":P_d,"capabilities":…}
+//     P_d = HMAC-SHA256(token, "fleet-control-daemon" ‖ N_c ‖ N_s)
+//  3. the caller checks P_d in constant time and gives up unless it matches;
+//     only then does it send its request, carrying
+//     "client_proof": HMAC-SHA256(token, "fleet-control-client" ‖ N_s ‖ N_c)
+//     in place of the raw token.
+//  4. the daemon checks the client proof, then reads and serves the request.
+//
+// Fresh nonces from both sides make every proof single-use. Before a caller
+// has proved itself the daemon reads at most maxControlPreAuthBytes and waits
+// at most controlAuthTimeout.
+//
+// Legacy mode. A CLI from before mutual authentication sends its request with
+// the raw token as the first member; the daemon checks that token before
+// reading the rest and serves the original request types (call, status,
+// disconnect) exactly as before. A daemon from before mutual authentication
+// answers the auth hello with "unauthorized"; a current CLI then falls back to
+// the legacy request for reverse-mode calls only, and only if the token file
+// was not written by a daemon that supports mutual authentication (tokens
+// carrying controlTokenMutualAuthPrefix): an impostor cannot downgrade a caller
+// whose token says the real daemon would have proved itself. Direct-mode relay
+// is never used without a daemon that proved itself.
+//
+// Binary framing (authenticated mode only): a daemon that lists
+// controlCapBinaryFrame in its capabilities accepts "call.framed", where
+// BinaryLength says the envelope's attachment follows the request's newline as
+// exactly that many raw bytes. A caller that lists controlCapBinaryFrame in
+// Accept gets a response attachment the same way instead of base64 in
+// ResponseBinary; older callers never ask and keep getting base64.
 
 const (
 	maxControlRequestBytes = 32 << 20
 	controlIOTimeout       = 30 * time.Second
-	// maxConcurrentControlConnections bounds how many control requests the
-	// daemon reads and serves at once. Pre-authentication work per connection
-	// is bounded by maxControlRequestBytes and controlIOTimeout, so this is what
-	// bounds a local, token-less process's memory impact.
+	// maxControlPreAuthBytes bounds what the daemon reads from a connection
+	// before its peer has proved it holds the token: the auth hello, then the
+	// first member of the request (its client proof), or — for a legacy
+	// request — the first member carrying the raw token. Each is well under
+	// 200 bytes.
+	maxControlPreAuthBytes = 4 << 10
+	// controlAuthTimeout bounds the unauthenticated phase of a connection.
+	controlAuthTimeout = 5 * time.Second
+	// maxControlChallengeBytes bounds the daemon's reply to an auth hello as
+	// read by a caller (an impostor must not be able to make it buffer much).
+	maxControlChallengeBytes = 64 << 10
+	// maxConcurrentControlConnections bounds how many control connections the
+	// daemon reads and authenticates at once.
 	maxConcurrentControlConnections = 32
 	// maxQueuedControlConnections bounds how many further connections may wait
 	// for a handler slot. A waiting connection has not been read yet, so it
@@ -62,13 +100,22 @@ const (
 	maxInFlightControlCalls = 128
 )
 
+const (
+	controlAuthVersion = "hmac-sha256-v1"
+	controlNonceBytes  = 32
+	// controlTokenMutualAuthPrefix marks a control token written by a daemon
+	// that performs mutual authentication. A caller holding such a token never
+	// falls back to sending it in the clear.
+	controlTokenMutualAuthPrefix = "ma1-"
+)
+
 // controlSlotWait is how long a queued connection waits for a handler slot
 // before the daemon answers "busy". Excess connections used to be closed on the
 // spot, which reached the caller as a bare EOF — indistinguishable from the
 // server being offline. A variable so tests can shorten it.
 var controlSlotWait = 15 * time.Second
 
-// Control-protocol capabilities a daemon advertises in reply to "hello".
+// Control-protocol capabilities a daemon advertises in its auth challenge.
 const (
 	controlCapBinaryFrame = "binary-frame"
 	controlCapDirectCall  = "direct-call"
@@ -81,13 +128,67 @@ const (
 	controlTypeCallDirect = "call.direct"
 	controlTypeStatus     = "status"
 	controlTypeDisconnect = "disconnect"
-	controlTypeHello      = "hello"
 )
 
 // controlCapabilities lists what this daemon's control socket understands.
 func (h *ReverseHub) controlCapabilities() []string {
 	return []string{controlCapBinaryFrame, controlCapDirectCall}
 }
+
+// controlAuthHello opens a mutually authenticated exchange. "auth" must stay
+// the first member: the daemon tells the modes apart by the first member.
+type controlAuthHello struct {
+	Auth        string `json:"auth"`
+	ClientNonce string `json:"client_nonce"`
+}
+
+// controlAuthChallenge is the daemon's answer to an auth hello, or an error.
+type controlAuthChallenge struct {
+	Auth         string       `json:"auth,omitempty"`
+	ServerNonce  string       `json:"server_nonce,omitempty"`
+	Proof        string       `json:"proof,omitempty"`
+	Capabilities []string     `json:"capabilities,omitempty"`
+	Error        *proto.Error `json:"error,omitempty"`
+}
+
+func controlMAC(token, label string, first, second []byte) []byte {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(label))
+	mac.Write(first)
+	mac.Write(second)
+	return mac.Sum(nil)
+}
+
+// controlDaemonProof is what the daemon sends to prove it holds token.
+func controlDaemonProof(token string, clientNonce, serverNonce []byte) []byte {
+	return controlMAC(token, "fleet-control-daemon", clientNonce, serverNonce)
+}
+
+// controlClientProof is what a caller sends to prove it holds token.
+func controlClientProof(token string, serverNonce, clientNonce []byte) []byte {
+	return controlMAC(token, "fleet-control-client", serverNonce, clientNonce)
+}
+
+func newControlNonce() ([]byte, error) {
+	nonce := make([]byte, controlNonceBytes)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate control nonce: %w", err)
+	}
+	return nonce, nil
+}
+
+func decodeControlNonce(s string) ([]byte, bool) {
+	b, err := hex.DecodeString(s)
+	return b, err == nil && len(b) == controlNonceBytes
+}
+
+// tokenRequiresMutualAuth reports whether token was minted by a daemon that
+// performs mutual authentication, so it must never be sent in the clear.
+func tokenRequiresMutualAuth(token string) bool {
+	return strings.HasPrefix(token, controlTokenMutualAuthPrefix)
+}
+
+// --- daemon side --------------------------------------------------------------
 
 func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) error {
 	if err := requireLoopbackListener(listener); err != nil {
@@ -119,9 +220,22 @@ func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) er
 		case h.controlWaiters <- struct{}{}:
 			go h.waitForControlSlot(ctx, conn)
 		default:
-			_ = conn.Close()
+			// Even the queue is full. Say so rather than closing silently: a
+			// caller that sees "busy" knows nothing was done and can fall back
+			// (a direct-mode call dials the server itself). The reply fits in
+			// an empty socket buffer, so this never blocks the accept loop.
+			rejectControlBusy(conn, "fleet daemon control socket is overloaded; try again")
 		}
 	}
+}
+
+// rejectControlBusy answers a connection that will not be served and closes it.
+func rejectControlBusy(conn net.Conn, message string) {
+	_ = conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	_ = writeControlResponse(conn, reverseControlResponse{Error: &proto.Error{
+		Code: "control_busy", Message: message, Retry: true,
+	}}, nil)
+	_ = conn.Close()
 }
 
 // serveControlSlot handles one connection that holds a handler slot. The slot
@@ -145,11 +259,7 @@ func (h *ReverseHub) waitForControlSlot(ctx context.Context, conn net.Conn) {
 		h.serveControlSlot(conn)
 	case <-timer.C:
 		<-h.controlWaiters
-		_ = conn.SetDeadline(time.Now().Add(time.Second))
-		_ = writeControlResponse(conn, reverseControlResponse{Error: &proto.Error{
-			Code: "control_busy", Message: "fleet daemon control socket is busy; try again", Retry: true,
-		}}, nil)
-		_ = conn.Close()
+		rejectControlBusy(conn, "fleet daemon control socket is busy; try again")
 	case <-ctx.Done():
 		<-h.controlWaiters
 		_ = conn.Close()
@@ -185,6 +295,126 @@ func (h *ReverseHub) acquireCallSlot(wait bool) (release func(), ok bool) {
 	}
 }
 
+// firstJSONMember reads the opening of a JSON object from r — its first key
+// and that key's value — reading no more than max bytes. consumed is every
+// byte read from r, so the whole object can be parsed again from the start.
+func firstJSONMember(r io.Reader, max int) (key string, value json.RawMessage, consumed []byte, err error) {
+	var record bytes.Buffer
+	dec := json.NewDecoder(io.TeeReader(io.LimitReader(r, int64(max)), &record))
+	tok, err := dec.Token()
+	if err != nil {
+		return "", nil, record.Bytes(), err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return "", nil, record.Bytes(), fmt.Errorf("control message is not a JSON object")
+	}
+	tok, err = dec.Token()
+	if err != nil {
+		return "", nil, record.Bytes(), err
+	}
+	key, ok := tok.(string)
+	if !ok {
+		return "", nil, record.Bytes(), fmt.Errorf("control message is empty")
+	}
+	if err := dec.Decode(&value); err != nil {
+		return "", nil, record.Bytes(), err
+	}
+	return key, value, record.Bytes(), nil
+}
+
+type controlAuthMode int
+
+const (
+	controlAuthLegacy controlAuthMode = iota + 1
+	controlAuthMutual
+)
+
+// readControlRequest authenticates the connection and reads the request. On
+// failure it has already answered the caller. pending holds the bytes already
+// read past the request's JSON value; the stream then continues with limited,
+// the size-capped connection reader.
+func (h *ReverseHub) readControlRequest(conn net.Conn) (req reverseControlRequest, mode controlAuthMode, pending io.Reader, limited *io.LimitedReader, ok bool) {
+	fail := func(code, message string) (reverseControlRequest, controlAuthMode, io.Reader, *io.LimitedReader, bool) {
+		_ = writeControlError(conn, code, message)
+		return reverseControlRequest{}, 0, nil, nil, false
+	}
+	key, value, consumed, err := firstJSONMember(conn, maxControlPreAuthBytes)
+	if err != nil {
+		return fail("decode_error", "invalid control request")
+	}
+	var stream io.Reader = conn
+	switch key {
+	case "token":
+		// A caller from before mutual authentication. Every such CLI encodes
+		// the token as the first member, so it is checked before the rest of
+		// the request (up to maxControlRequestBytes) is read.
+		var token string
+		if json.Unmarshal(value, &token) != nil || subtle.ConstantTimeCompare([]byte(token), []byte(h.controlToken)) != 1 {
+			return fail("unauthorized", "invalid control token")
+		}
+		mode = controlAuthLegacy
+	case "auth":
+		var hello controlAuthHello
+		helloSrc := io.MultiReader(bytes.NewReader(consumed), io.LimitReader(conn, int64(maxControlPreAuthBytes)))
+		helloDec := json.NewDecoder(helloSrc)
+		if err := helloDec.Decode(&hello); err != nil {
+			return fail("decode_error", "invalid control auth hello")
+		}
+		clientNonce, valid := decodeControlNonce(hello.ClientNonce)
+		if hello.Auth != controlAuthVersion || !valid {
+			return fail("unauthorized", "unsupported control authentication")
+		}
+		serverNonce, err := newControlNonce()
+		if err != nil {
+			return fail("internal_error", "could not generate a nonce")
+		}
+		if err := writeControlMessage(conn, controlAuthChallenge{
+			Auth:         controlAuthVersion,
+			ServerNonce:  hex.EncodeToString(serverNonce),
+			Proof:        hex.EncodeToString(controlDaemonProof(h.controlToken, clientNonce, serverNonce)),
+			Capabilities: h.controlCapabilities(),
+		}, nil); err != nil {
+			return reverseControlRequest{}, 0, nil, nil, false
+		}
+		// The request follows on the same connection; its first member must
+		// be the caller's proof. (The stream continues with whatever the hello
+		// decoder read ahead, then whatever of its input it has not read yet.)
+		stream = io.MultiReader(helloDec.Buffered(), helloSrc, conn)
+		key, value, consumed, err = firstJSONMember(stream, maxControlPreAuthBytes)
+		if err != nil || key != "client_proof" {
+			return fail("unauthorized", "control request did not prove the caller holds the token")
+		}
+		var proofHex string
+		proof, decodeErr := []byte(nil), json.Unmarshal(value, &proofHex)
+		if decodeErr == nil {
+			proof, decodeErr = hex.DecodeString(proofHex)
+		}
+		if decodeErr != nil || !hmac.Equal(proof, controlClientProof(h.controlToken, serverNonce, clientNonce)) {
+			return fail("unauthorized", "invalid control proof")
+		}
+		mode = controlAuthMutual
+	default:
+		return fail("unauthorized", "control request must authenticate first")
+	}
+
+	// Authenticated: the rest of the request may be up to the full size.
+	_ = conn.SetDeadline(time.Now().Add(controlIOTimeout))
+	limited = &io.LimitedReader{R: stream, N: maxControlRequestBytes + 1 - int64(len(consumed))}
+	recorded := bytes.NewReader(consumed)
+	decoder := json.NewDecoder(io.MultiReader(recorded, limited))
+	if err := decoder.Decode(&req); err != nil {
+		return fail("decode_error", "invalid control request")
+	}
+	if limited.N <= 0 {
+		return fail("request_too_large", "control request exceeds limit or contains trailing data")
+	}
+	// pending is what has already been read off the connection past the
+	// request: the decoder's read-ahead, then whatever firstJSONMember
+	// recorded that the decoder has not reached. The stream continues with
+	// limited.
+	return req, mode, io.MultiReader(decoder.Buffered(), recorded), limited, true
+}
+
 // handleControl serves one control connection. releaseReadSlot, when set, is
 // called once the request has been read and authenticated.
 func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
@@ -192,36 +422,35 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 	if releaseReadSlot == nil {
 		releaseReadSlot = func() {}
 	}
-	_ = conn.SetDeadline(time.Now().Add(controlIOTimeout))
+	_ = conn.SetDeadline(time.Now().Add(controlAuthTimeout))
 
-	limited := &io.LimitedReader{R: conn, N: maxControlRequestBytes + 1}
-	decoder := json.NewDecoder(limited)
-	var req reverseControlRequest
-	if err := decoder.Decode(&req); err != nil {
-		_ = writeControlError(conn, "decode_error", "invalid control request")
+	req, mode, buffered, limited, ok := h.readControlRequest(conn)
+	if !ok {
 		return
 	}
-	buffered := decoder.Buffered()
-	if req.BinaryLength == nil {
-		trailing, _ := io.ReadAll(buffered)
-		if limited.N <= 0 || len(strings.TrimSpace(string(trailing))) != 0 {
-			_ = writeControlError(conn, "request_too_large", "control request exceeds limit or contains trailing data")
+	if mode == controlAuthLegacy {
+		// Legacy callers only ever used these; everything newer requires the
+		// mutually authenticated handshake.
+		switch req.Type {
+		case controlTypeCall, controlTypeStatus, controlTypeDisconnect:
+		default:
+			_ = writeControlError(conn, "unsupported_action", fmt.Sprintf("control request %q is not supported", req.Type))
 			return
 		}
-	} else if limited.N <= 0 {
-		_ = writeControlError(conn, "request_too_large", "control request exceeds limit or contains trailing data")
-		return
-	}
-
-	// Authenticate before reading any attachment, so a caller without the
-	// token cannot make the daemon buffer one.
-	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(h.controlToken)) != 1 {
-		_ = writeControlError(conn, "unauthorized", "invalid control token")
-		return
+		if req.BinaryLength != nil {
+			_ = writeControlError(conn, "decode_error", "legacy control requests cannot carry a raw attachment")
+			return
+		}
 	}
 
 	var attachment []byte
-	if req.BinaryLength != nil {
+	if req.BinaryLength == nil {
+		trailing, _ := io.ReadAll(buffered)
+		if len(strings.TrimSpace(string(trailing))) != 0 {
+			_ = writeControlError(conn, "request_too_large", "control request exceeds limit or contains trailing data")
+			return
+		}
+	} else {
 		if req.Type != controlTypeCallFramed && req.Type != controlTypeCallDirect {
 			_ = writeControlError(conn, "decode_error", fmt.Sprintf("control request %q cannot carry an attachment", req.Type))
 			return
@@ -236,7 +465,7 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 	// The request is fully read and authenticated: hand the read slot back so
 	// a slow call does not hold up other callers' requests.
 	releaseReadSlot()
-	framedResponse := slices.Contains(req.Accept, controlCapBinaryFrame)
+	framedResponse := mode == controlAuthMutual && slices.Contains(req.Accept, controlCapBinaryFrame)
 
 	var resp reverseControlResponse
 	var respAttachment []byte
@@ -305,8 +534,6 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 			resp.Error = &proto.Error{Code: "reverse_disconnect_failed", Message: err.Error()}
 			break
 		}
-	case controlTypeHello:
-		resp.Capabilities = h.controlCapabilities()
 	default:
 		resp.Error = &proto.Error{Code: "unsupported_action", Message: fmt.Sprintf("control request %q is not supported", req.Type)}
 	}
@@ -409,18 +636,13 @@ func readControlAttachment(buffered, rest io.Reader, n int) ([]byte, []byte, err
 
 // --- caller side -------------------------------------------------------------
 
-// controlPeer caches what this process knows about the daemon behind one
-// control address: its control token and its control-protocol capabilities.
-// Both used to be rediscovered on every call — each RPC re-read the token file
-// from disk — and the capabilities are what let a newer CLI use binary framing
-// without breaking against an older daemon.
+// controlPeer caches the control token of the daemon behind one control
+// address. It used to be re-read from disk on every call.
 type controlPeer struct {
 	mu        sync.Mutex
 	tokenPath string
 	token     string
 	haveToken bool
-	caps      []string
-	haveCaps  bool
 }
 
 var controlPeers sync.Map // control address + "\x00" + token path → *controlPeer
@@ -450,9 +672,9 @@ func (p *controlPeer) cachedToken() (string, error) {
 	return token, nil
 }
 
-// refreshToken re-reads the token after the daemon rejected the cached one
-// (it mints a new token every time it starts) and reports whether it changed,
-// i.e. whether retrying can help.
+// refreshToken re-reads the token after the daemon could not use the cached
+// one (it mints a new token every time it starts) and reports whether it
+// changed, i.e. whether retrying can help.
 func (p *controlPeer) refreshToken(rejected string) bool {
 	token, err := readControlTokenFile(p.tokenPath)
 	p.mu.Lock()
@@ -465,140 +687,17 @@ func (p *controlPeer) refreshToken(rejected string) bool {
 	return token != rejected
 }
 
-func (p *controlPeer) capabilities() ([]string, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.caps, p.haveCaps
-}
-
-func (p *controlPeer) setCapabilities(caps []string) {
-	p.mu.Lock()
-	p.caps, p.haveCaps = caps, true
-	p.mu.Unlock()
-}
-
-// forgetCapabilities drops what was learned about the daemon, e.g. because it
-// could not be reached (it may come back as a different version).
-func (p *controlPeer) forgetCapabilities() {
-	p.mu.Lock()
-	p.caps, p.haveCaps = nil, false
-	p.mu.Unlock()
-}
-
-// controlCapabilitiesFor asks the daemon what it supports, once per process.
-// An older daemon answers "hello" with unsupported_action, which is recorded
-// as "no optional capabilities".
-func (a *App) controlCapabilitiesFor(ctx context.Context, peer *controlPeer) []string {
-	if caps, ok := peer.capabilities(); ok {
-		return caps
-	}
-	token, err := peer.cachedToken()
-	if err != nil {
-		return nil
-	}
-	resp, _, err := a.controlRoundTrip(ctx, peer, reverseControlRequest{Token: token, Type: controlTypeHello}, nil)
-	if err != nil {
-		return nil
-	}
-	if resp.Error != nil {
-		if resp.Error.Code == "unauthorized" || resp.Error.Code == "control_busy" {
-			return nil // says nothing about the daemon's version
-		}
-		peer.setCapabilities([]string{})
-		return nil
-	}
-	caps := resp.Capabilities
-	if caps == nil {
-		caps = []string{}
-	}
-	peer.setCapabilities(caps)
-	return caps
-}
-
-// controlRoundTrip performs one request/response exchange on a fresh
-// connection to the daemon's control socket.
-func (a *App) controlRoundTrip(ctx context.Context, peer *controlPeer, req reverseControlRequest, attachment []byte) (reverseControlResponse, []byte, error) {
-	address := a.Config.Runtime.ControlAddress
-	if err := validateLoopbackControlAddress(address); err != nil {
-		return reverseControlResponse{}, nil, err
-	}
-	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", address)
-	if err != nil {
-		peer.forgetCapabilities()
-		if ctx.Err() != nil {
-			return reverseControlResponse{}, nil, ctx.Err()
-		}
-		return reverseControlResponse{}, nil, &controlDialError{err: fmt.Errorf("connect to local reverse control at %s: %w", address, err)}
-	}
-	defer conn.Close()
-	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stopCancel()
-	requested, hasDeadline := ctx.Deadline()
-	if hasDeadline && isControlCallType(req.Type) {
-		req.Envelope.DeadlineUnixMilli = requested.UnixMilli()
-	}
-	// The caller's context closes the connection the moment it ends (the
-	// AfterFunc above), which is what reports context.DeadlineExceeded. The
-	// socket deadline trails it slightly so it never races that and surfaces a
-	// bare "i/o timeout" instead; it only matters if the daemon stops answering.
-	const socketGrace = 2 * time.Second
-	if req.Type == controlTypeCallDirect {
-		// A relayed direct call is bounded by the caller's own deadline only,
-		// exactly as the call would be if this process made it itself.
-		deadline := time.Time{}
-		if hasDeadline {
-			deadline = requested.Add(socketGrace)
-		}
-		if err := conn.SetReadDeadline(deadline); err != nil {
-			return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
-		}
-		if err := conn.SetWriteDeadline(time.Now().Add(controlIOTimeout)); err != nil {
-			return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
-		}
-	} else {
-		deadline := time.Now().Add(controlIOTimeout)
-		if hasDeadline && requested.Before(deadline) {
-			deadline = requested.Add(socketGrace)
-		}
-		if err := conn.SetDeadline(deadline); err != nil {
-			return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
-		}
-	}
-
-	if err := writeControlMessage(conn, req, attachment); err != nil {
-		if ctx.Err() != nil {
-			return reverseControlResponse{}, nil, ctx.Err()
-		}
-		return reverseControlResponse{}, nil, err
-	}
-	decoder := json.NewDecoder(conn)
-	var resp reverseControlResponse
-	if err := decoder.Decode(&resp); err != nil {
-		if ctx.Err() != nil {
-			return reverseControlResponse{}, nil, ctx.Err()
-		}
-		return reverseControlResponse{}, nil, err
-	}
-	var blob []byte
-	if resp.BinaryLength != nil {
-		blob, _, err = readControlAttachment(decoder.Buffered(), conn, *resp.BinaryLength)
-		if err != nil {
-			if ctx.Err() != nil {
-				return reverseControlResponse{}, nil, ctx.Err()
-			}
-			return reverseControlResponse{}, nil, err
-		}
-	}
-	return resp, blob, nil
-}
-
-func isControlCallType(kind string) bool {
-	return kind == controlTypeCall || kind == controlTypeCallFramed || kind == controlTypeCallDirect
-}
-
-// errControlUnsupported reports that the daemon does not implement a request
-// type (it is older than this CLI).
-var errControlUnsupported = errors.New("fleet daemon does not support this control request")
+var (
+	// errControlNotAuthenticated: the daemon answered the auth hello with an
+	// error — it predates mutual authentication (or pretends to).
+	errControlNotAuthenticated = errors.New("fleet daemon does not support mutual authentication")
+	// errControlImpostor: whatever answered could not prove it holds the
+	// control token. Nothing but the auth hello was sent to it.
+	errControlImpostor = errors.New("the process on the control address could not prove it is the fleet daemon")
+	// errControlUnsupported reports that the daemon does not implement a
+	// request type (it is older than this CLI).
+	errControlUnsupported = errors.New("fleet daemon does not support this control request")
+)
 
 // controlDialError means the daemon's control socket could not be reached, so
 // nothing was sent.
@@ -606,6 +705,14 @@ type controlDialError struct{ err error }
 
 func (e *controlDialError) Error() string { return e.err.Error() }
 func (e *controlDialError) Unwrap() error { return e.err }
+
+// controlNotSentError wraps a failure that happened before the request left
+// this process: dialling, the authentication handshake, or the daemon lacking
+// what the request needs. The caller may safely do the work another way.
+type controlNotSentError struct{ err error }
+
+func (e *controlNotSentError) Error() string { return e.err.Error() }
+func (e *controlNotSentError) Unwrap() error { return e.err }
 
 // controlResponseError is an error the daemon reported. Its text is the
 // "<code>: <message>" form callers have always seen.
@@ -616,94 +723,263 @@ type controlResponseError struct {
 
 func (e *controlResponseError) Error() string { return e.Code + ": " + e.Message }
 
-// controlCall sends one RPC envelope through the daemon: kind is "call" for a
-// reverse agent or "call.direct" for a direct-mode server relayed over the
-// daemon's pool. It negotiates binary framing for attachments, retries once
-// with a fresh token if the daemon restarted, and falls back to base64 if an
-// older daemon has taken over the socket.
-func (a *App) controlCall(ctx context.Context, kind, serverName string, env proto.Envelope, direct *controlDirectTarget) (proto.Envelope, error) {
-	peer := a.controlPeer()
-	framed := false
-	if env.Binary != nil {
-		framed = slices.Contains(a.controlCapabilitiesFor(ctx, peer), controlCapBinaryFrame)
-	}
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		token, err := peer.cachedToken()
-		if err != nil {
-			return proto.Envelope{}, err
-		}
-		req := reverseControlRequest{
-			Token:    token,
-			Type:     kind,
-			Server:   serverName,
-			Envelope: env,
-			Accept:   []string{controlCapBinaryFrame},
-			Direct:   direct,
-		}
-		var attachment []byte
-		if env.Binary != nil {
-			if framed {
-				if kind == controlTypeCall {
-					req.Type = controlTypeCallFramed
-				}
-				n := len(env.Binary)
-				req.BinaryLength = &n
-				attachment = env.Binary
-			} else {
-				req.EnvelopeBinary = env.Binary
-			}
-		}
-		resp, blob, err := a.controlRoundTrip(ctx, peer, req, attachment)
-		if err != nil {
-			return proto.Envelope{}, err
-		}
-		if resp.Error != nil {
-			lastErr = &controlResponseError{Code: resp.Error.Code, Message: resp.Error.Message}
-			switch code := resp.Error.Code; {
-			case code == "unauthorized" && peer.refreshToken(token):
-				continue // the daemon restarted and minted a new token
-			case framed && (code == "unsupported_action" || code == "decode_error" || code == "request_too_large"):
-				// An older daemon rejected the framed request before acting
-				// on it. Remember that and resend the attachment as base64.
-				peer.setCapabilities([]string{})
-				framed = false
-				continue
-			case code == "unsupported_action" && kind != controlTypeCall:
-				return proto.Envelope{}, fmt.Errorf("%w: %s", errControlUnsupported, resp.Error.Message)
-			}
-			return proto.Envelope{}, lastErr
-		}
-		out, ok := resp.responseEnvelope()
-		if !ok {
-			return proto.Envelope{}, fmt.Errorf("reverse control did not return a response envelope")
-		}
-		if resp.BinaryLength != nil {
-			out.Binary = blob
-		}
-		return out, nil
-	}
-	return proto.Envelope{}, lastErr
+// controlSession is a connection on which the daemon has proved itself and
+// which is ready for one request.
+type controlSession struct {
+	reader io.Reader // what the handshake decoder read ahead, then the connection
+	proof  string    // this caller's proof, to send with the request
+	caps   []string
 }
 
-// controlSimple sends a request that carries no envelope (status, disconnect)
-// and retries once if the daemon restarted with a new token.
-func (a *App) controlSimple(kind, serverName string) (reverseControlResponse, error) {
+// controlHandshake runs the caller's side of mutual authentication on conn.
+// It sends only a nonce, and returns errControlImpostor unless the peer proves
+// it holds token.
+func controlHandshake(conn net.Conn, token string) (*controlSession, error) {
+	clientNonce, err := newControlNonce()
+	if err != nil {
+		return nil, err
+	}
+	if err := writeControlMessage(conn, controlAuthHello{Auth: controlAuthVersion, ClientNonce: hex.EncodeToString(clientNonce)}, nil); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(io.LimitReader(conn, maxControlChallengeBytes))
+	var challenge controlAuthChallenge
+	if err := decoder.Decode(&challenge); err != nil {
+		return nil, err
+	}
+	if challenge.Error != nil {
+		if challenge.Error.Code == "control_busy" {
+			return nil, &controlResponseError{Code: challenge.Error.Code, Message: challenge.Error.Message}
+		}
+		return nil, fmt.Errorf("%w (%s: %s)", errControlNotAuthenticated, challenge.Error.Code, challenge.Error.Message)
+	}
+	serverNonce, valid := decodeControlNonce(challenge.ServerNonce)
+	proof, proofErr := hex.DecodeString(challenge.Proof)
+	if challenge.Auth != controlAuthVersion || !valid || proofErr != nil ||
+		!hmac.Equal(proof, controlDaemonProof(token, clientNonce, serverNonce)) {
+		return nil, errControlImpostor
+	}
+	return &controlSession{
+		reader: io.MultiReader(decoder.Buffered(), conn),
+		proof:  hex.EncodeToString(controlClientProof(token, serverNonce, clientNonce)),
+		caps:   challenge.Capabilities,
+	}, nil
+}
+
+// controlRequestSpec describes one control exchange.
+type controlRequestSpec struct {
+	kind   string
+	server string
+	env    *proto.Envelope // nil for status/disconnect
+	direct *controlDirectTarget
+	// requireCapability, when set, is a capability the daemon must advertise;
+	// without it the request is not sent.
+	requireCapability string
+	// requireMutualAuth refuses the legacy raw-token fallback.
+	requireMutualAuth bool
+}
+
+// build assembles the request for a daemon with caps (nil in legacy mode).
+func (s controlRequestSpec) build(caps []string, legacy bool) (reverseControlRequest, []byte) {
+	req := reverseControlRequest{Type: s.kind, Server: s.server, Direct: s.direct}
+	if s.env == nil {
+		return req, nil
+	}
+	req.Envelope = *s.env
+	if legacy {
+		// Exactly what a CLI from before mutual authentication sends.
+		req.EnvelopeBinary = s.env.Binary
+		return req, nil
+	}
+	req.Accept = []string{controlCapBinaryFrame}
+	if s.env.Binary == nil {
+		return req, nil
+	}
+	if !slices.Contains(caps, controlCapBinaryFrame) {
+		req.EnvelopeBinary = s.env.Binary
+		return req, nil
+	}
+	if req.Type == controlTypeCall {
+		req.Type = controlTypeCallFramed
+	}
+	n := len(s.env.Binary)
+	req.BinaryLength = &n
+	return req, s.env.Binary
+}
+
+// controlDial connects to the daemon's control socket and arms the deadlines
+// appropriate for kind. The returned stop releases the context hook.
+func (a *App) controlDial(ctx context.Context, kind string) (net.Conn, func(), error) {
+	address := a.Config.Runtime.ControlAddress
+	if err := validateLoopbackControlAddress(address); err != nil {
+		return nil, nil, &controlNotSentError{err: err}
+	}
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, &controlNotSentError{err: ctx.Err()}
+		}
+		return nil, nil, &controlNotSentError{err: &controlDialError{err: fmt.Errorf("connect to local reverse control at %s: %w", address, err)}}
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	requested, hasDeadline := ctx.Deadline()
+	// The caller's context closes the connection the moment it ends (the
+	// AfterFunc above), which is what reports context.DeadlineExceeded. The
+	// socket deadline trails it slightly so it never races that and surfaces a
+	// bare "i/o timeout" instead; it only matters if the daemon stops answering.
+	const socketGrace = 2 * time.Second
+	var deadlineErr error
+	if kind == controlTypeCallDirect {
+		// A relayed direct call is bounded by the caller's own deadline only,
+		// exactly as the call would be if this process made it itself.
+		deadline := time.Time{}
+		if hasDeadline {
+			deadline = requested.Add(socketGrace)
+		}
+		deadlineErr = errors.Join(conn.SetReadDeadline(deadline), conn.SetWriteDeadline(time.Now().Add(controlIOTimeout)))
+	} else {
+		deadline := time.Now().Add(controlIOTimeout)
+		if hasDeadline && requested.Before(deadline) {
+			deadline = requested.Add(socketGrace)
+		}
+		deadlineErr = conn.SetDeadline(deadline)
+	}
+	if deadlineErr != nil {
+		stopCancel()
+		_ = conn.Close()
+		return nil, nil, &controlNotSentError{err: fmt.Errorf("set reverse control deadline: %w", deadlineErr)}
+	}
+	return conn, func() { stopCancel() }, nil
+}
+
+// controlExchange performs one control request: mutually authenticated when
+// the daemon supports it, or — only for callers that allow it and only with a
+// daemon that predates mutual authentication — the legacy raw-token request.
+func (a *App) controlExchange(ctx context.Context, spec controlRequestSpec) (reverseControlResponse, []byte, error) {
 	peer := a.controlPeer()
-	for attempt := 0; ; attempt++ {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
 		token, err := peer.cachedToken()
 		if err != nil {
-			return reverseControlResponse{}, err
+			return reverseControlResponse{}, nil, &controlNotSentError{err: err}
 		}
-		resp, _, err := a.controlRoundTrip(context.Background(), peer, reverseControlRequest{Token: token, Type: kind, Server: serverName}, nil)
-		if err != nil {
-			return reverseControlResponse{}, err
-		}
-		if resp.Error != nil && resp.Error.Code == "unauthorized" && attempt == 0 && peer.refreshToken(token) {
+		resp, blob, err := a.controlExchangeOnce(ctx, spec, token)
+		switch {
+		case errors.Is(err, errControlImpostor) && peer.refreshToken(token):
+			// Most likely the daemon restarted with a new token; nothing was
+			// sent, so try once more with the token now on disk.
+			lastErr = err
+			continue
+		case err == nil && resp.Error != nil && resp.Error.Code == "unauthorized" && peer.refreshToken(token):
+			// A legacy daemon rejected a stale token before acting on it.
+			lastErr = &controlResponseError{Code: resp.Error.Code, Message: resp.Error.Message}
 			continue
 		}
-		return resp, nil
+		return resp, blob, err
 	}
+	return reverseControlResponse{}, nil, lastErr
+}
+
+func (a *App) controlExchangeOnce(ctx context.Context, spec controlRequestSpec, token string) (reverseControlResponse, []byte, error) {
+	conn, stop, err := a.controlDial(ctx, spec.kind)
+	if err != nil {
+		return reverseControlResponse{}, nil, err
+	}
+	session, err := controlHandshake(conn, token)
+	if err != nil {
+		stop()
+		_ = conn.Close()
+		if ctx.Err() != nil {
+			return reverseControlResponse{}, nil, &controlNotSentError{err: ctx.Err()}
+		}
+		if !errors.Is(err, errControlNotAuthenticated) || spec.requireMutualAuth || tokenRequiresMutualAuth(token) {
+			return reverseControlResponse{}, nil, &controlNotSentError{err: err}
+		}
+		// A daemon from before mutual authentication: it can only be reached
+		// with the raw token, which is all it ever had.
+		return a.controlLegacyExchange(ctx, spec, token)
+	}
+	defer conn.Close()
+	defer stop()
+	if spec.requireCapability != "" && !slices.Contains(session.caps, spec.requireCapability) {
+		return reverseControlResponse{}, nil, &controlNotSentError{err: fmt.Errorf("%w: %s", errControlUnsupported, spec.requireCapability)}
+	}
+	req, attachment := spec.build(session.caps, false)
+	req.ClientProof = session.proof
+	return readControlReply(ctx, conn, session.reader, req, attachment)
+}
+
+// controlLegacyExchange sends the request the way a CLI from before mutual
+// authentication does.
+func (a *App) controlLegacyExchange(ctx context.Context, spec controlRequestSpec, token string) (reverseControlResponse, []byte, error) {
+	conn, stop, err := a.controlDial(ctx, spec.kind)
+	if err != nil {
+		return reverseControlResponse{}, nil, err
+	}
+	defer conn.Close()
+	defer stop()
+	req, _ := spec.build(nil, true)
+	req.Token = token
+	return readControlReply(ctx, conn, conn, req, nil)
+}
+
+// readControlReply writes req (and its attachment) and reads the response.
+func readControlReply(ctx context.Context, conn net.Conn, reader io.Reader, req reverseControlRequest, attachment []byte) (reverseControlResponse, []byte, error) {
+	if err := writeControlMessage(conn, req, attachment); err != nil {
+		if ctx.Err() != nil {
+			return reverseControlResponse{}, nil, ctx.Err()
+		}
+		return reverseControlResponse{}, nil, err
+	}
+	decoder := json.NewDecoder(reader)
+	var resp reverseControlResponse
+	if err := decoder.Decode(&resp); err != nil {
+		if ctx.Err() != nil {
+			return reverseControlResponse{}, nil, ctx.Err()
+		}
+		return reverseControlResponse{}, nil, err
+	}
+	var blob []byte
+	if resp.BinaryLength != nil {
+		var err error
+		blob, _, err = readControlAttachment(decoder.Buffered(), reader, *resp.BinaryLength)
+		if err != nil {
+			if ctx.Err() != nil {
+				return reverseControlResponse{}, nil, ctx.Err()
+			}
+			return reverseControlResponse{}, nil, err
+		}
+	}
+	return resp, blob, nil
+}
+
+// controlCall sends one RPC envelope through the daemon: kind is "call" for a
+// reverse agent or "call.direct" for a direct-mode server relayed over the
+// daemon's pool (which requires a daemon that proved itself and supports it).
+func (a *App) controlCall(ctx context.Context, kind, serverName string, env proto.Envelope, direct *controlDirectTarget) (proto.Envelope, error) {
+	spec := controlRequestSpec{kind: kind, server: serverName, env: &env, direct: direct}
+	if kind == controlTypeCallDirect {
+		spec.requireMutualAuth = true
+		spec.requireCapability = controlCapDirectCall
+	}
+	resp, blob, err := a.controlExchange(ctx, spec)
+	if err != nil {
+		return proto.Envelope{}, err
+	}
+	if resp.Error != nil {
+		if resp.Error.Code == "unsupported_action" && kind != controlTypeCall {
+			return proto.Envelope{}, fmt.Errorf("%w: %s", errControlUnsupported, resp.Error.Message)
+		}
+		return proto.Envelope{}, &controlResponseError{Code: resp.Error.Code, Message: resp.Error.Message}
+	}
+	out, ok := resp.responseEnvelope()
+	if !ok {
+		return proto.Envelope{}, fmt.Errorf("reverse control did not return a response envelope")
+	}
+	if resp.BinaryLength != nil {
+		out.Binary = blob
+	}
+	return out, nil
 }
 
 func (a *App) callReverseControlContext(ctx context.Context, serverName string, env proto.Envelope) (proto.Envelope, error) {
@@ -711,7 +987,7 @@ func (a *App) callReverseControlContext(ctx context.Context, serverName string, 
 }
 
 func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {
-	resp, err := a.controlSimple(controlTypeStatus, serverName)
+	resp, _, err := a.controlExchange(context.Background(), controlRequestSpec{kind: controlTypeStatus, server: serverName})
 	if err != nil {
 		return ReverseSessionInfo{}, err
 	}
@@ -725,7 +1001,7 @@ func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {
 }
 
 func (a *App) callReverseDisconnect(serverName string) error {
-	resp, err := a.controlSimple(controlTypeDisconnect, serverName)
+	resp, _, err := a.controlExchange(context.Background(), controlRequestSpec{kind: controlTypeDisconnect, server: serverName})
 	if err != nil {
 		return err
 	}
@@ -742,7 +1018,7 @@ func (a *App) controlTokenPath() string {
 func readControlTokenFile(path string) (string, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path is the controller's own data/control.token
 	if err != nil {
-		return "", fmt.Errorf("read control token: %w", err)
+		return "", fmt.Errorf("read control token (is `fleet daemon` running?): %w", err)
 	}
 	// Trim surrounding whitespace: the token is compared byte-for-byte with a
 	// constant-time compare, so a trailing newline introduced by an editor or a
@@ -750,4 +1026,15 @@ func readControlTokenFile(path string) (string, error) {
 	// diagnostic. generateControlToken writes no newline, so this is
 	// forward-compatible robustness, not a behavior change today.
 	return strings.TrimSpace(string(data)), nil
+}
+
+// removeControlTokenIfOwned deletes data/control.token on daemon shutdown if
+// it still holds this daemon's token, so no process keeps presenting a token
+// to whatever might listen on the control address next. A token written by a
+// daemon started since is left alone.
+func (a *App) removeControlTokenIfOwned(token string) {
+	path := a.controlTokenPath()
+	if current, err := readControlTokenFile(path); err == nil && subtle.ConstantTimeCompare([]byte(current), []byte(token)) == 1 {
+		_ = os.Remove(path)
+	}
 }

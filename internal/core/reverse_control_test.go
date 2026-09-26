@@ -6,9 +6,12 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -217,9 +220,6 @@ func TestControlBinaryFramingRoundTrip(t *testing.T) {
 	if err != nil || written.BytesWritten != int64(len(chunk)) {
 		t.Fatalf("agent received %d bytes (err=%v), want %d", written.BytesWritten, err, len(chunk))
 	}
-	if caps, known := app.controlPeer().capabilities(); !known || !slices.Contains(caps, controlCapBinaryFrame) {
-		t.Fatalf("daemon capabilities = %v (known=%v); binary framing was not negotiated", caps, known)
-	}
 
 	down, err := app.callReverseControlContext(context.Background(), "bench",
 		proto.Envelope{Action: proto.ActionFileRead, Payload: proto.FileReadPayload{Path: "/p", Length: int64(len(chunk)), Binary: true}})
@@ -231,7 +231,9 @@ func TestControlBinaryFramingRoundTrip(t *testing.T) {
 	}
 }
 
-// The framed wire format, spelled out: JSON line, then the raw attachment.
+// The authenticated, framed wire format, spelled out: auth hello, the daemon's
+// challenge and proof, then the request (client proof first) as a JSON line
+// followed by the raw attachment.
 func TestControlFramedWireFormat(t *testing.T) {
 	chunk := randomChunk(t, 4096)
 	app, _ := controlBenchFleet(t, chunk)
@@ -240,18 +242,40 @@ func TestControlFramedWireFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	const token = "bench-control-token"
+	clientNonce := bytes.Repeat([]byte{7}, controlNonceBytes)
+	if _, err := fmt.Fprintf(conn, `{"auth":%q,"client_nonce":%q}`+"\n", controlAuthVersion, hex.EncodeToString(clientNonce)); err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(conn)
+	var challenge controlAuthChallenge
+	if err := dec.Decode(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	serverNonce, ok := decodeControlNonce(challenge.ServerNonce)
+	proof, _ := hex.DecodeString(challenge.Proof)
+	if !ok || !hmac.Equal(proof, controlDaemonProof(token, clientNonce, serverNonce)) {
+		t.Fatalf("daemon did not prove it holds the token: %+v", challenge)
+	}
+	if !slices.Contains(challenge.Capabilities, controlCapBinaryFrame) {
+		t.Fatalf("daemon capabilities %v lack %s", challenge.Capabilities, controlCapBinaryFrame)
+	}
 	n := len(chunk)
-	req := reverseControlRequest{Token: "bench-control-token", Type: controlTypeCallFramed, Server: "bench",
+	req := reverseControlRequest{ClientProof: hex.EncodeToString(controlClientProof(token, serverNonce, clientNonce)),
+		Type: controlTypeCallFramed, Server: "bench",
 		Envelope: uploadEnvelope(chunk), Accept: []string{controlCapBinaryFrame}, BinaryLength: &n}
 	header, _ := json.Marshal(req)
-	if bytes.Contains(header, []byte("envelope_binary")) {
-		t.Fatal("a framed request must not also carry the attachment as base64")
+	if bytes.Contains(header, []byte("envelope_binary")) || bytes.Contains(header, []byte(token)) {
+		t.Fatal("a framed request must carry neither the token nor the attachment as base64")
+	}
+	if !bytes.HasPrefix(header, []byte(`{"client_proof":`)) {
+		t.Fatalf("the client proof must be the first member: %s", header[:40])
 	}
 	if _, err := conn.Write(append(append(header, '\n'), chunk...)); err != nil {
 		t.Fatal(err)
 	}
 	var resp reverseControlResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := json.NewDecoder(io.MultiReader(dec.Buffered(), conn)).Decode(&resp); err != nil {
 		t.Fatal(err)
 	}
 	if resp.Error != nil {
@@ -396,8 +420,9 @@ func legacyDaemonApp(t *testing.T, chunk []byte) (*App, *atomic.Int32, *atomic.I
 	return app, requests, &received
 }
 
-// A newer CLI against an older daemon: capabilities come back unknown, so the
-// attachment goes base64 as before, and a base64 response is decoded.
+// A newer CLI against an older daemon: the daemon rejects the auth hello, so
+// (for a reverse call, with a token that did not come from a mutually
+// authenticating daemon) the request goes the legacy way, attachment base64.
 func TestControlNewClientFallsBackForOldDaemon(t *testing.T) {
 	chunk := randomChunk(t, 256<<10)
 	app, _, received := legacyDaemonApp(t, chunk)
@@ -412,34 +437,9 @@ func TestControlNewClientFallsBackForOldDaemon(t *testing.T) {
 	if written, _ := proto.DecodePayload[proto.FileWriteResult](resp.Payload); written.BytesWritten != int64(len(chunk)) {
 		t.Fatalf("unexpected response payload %+v", written)
 	}
-	if caps, known := app.controlPeer().capabilities(); !known || len(caps) != 0 {
-		t.Fatalf("older daemon should be recorded as having no optional capabilities, got %v (known=%v)", caps, known)
-	}
 	down, err := app.callReverseControlContext(context.Background(), "srv", proto.Envelope{Action: proto.ActionFileRead})
 	if err != nil || !bytes.Equal(down.Binary, chunk) {
 		t.Fatalf("download through an older daemon: %d bytes, err=%v", len(down.Binary), err)
-	}
-}
-
-// A process that learned "binary framing" from a newer daemon, which was then
-// replaced by an older one, must fall back rather than fail or send an empty
-// chunk: the older daemon rejects the framed request before acting on it.
-func TestControlStaleCapabilitiesFallBackSafely(t *testing.T) {
-	chunk := randomChunk(t, 128<<10)
-	app, requests, received := legacyDaemonApp(t, chunk)
-	app.controlPeer().setCapabilities([]string{controlCapBinaryFrame})
-
-	if _, err := app.callReverseControlContext(context.Background(), "srv", uploadEnvelope(chunk)); err != nil {
-		t.Fatalf("upload after the daemon was downgraded: %v", err)
-	}
-	if received.Load() != int64(len(chunk)) {
-		t.Fatalf("older daemon received %d attachment bytes, want %d", received.Load(), len(chunk))
-	}
-	if requests.Load() != 2 {
-		t.Fatalf("expected one rejected framed request and one base64 retry, got %d requests", requests.Load())
-	}
-	if caps, _ := app.controlPeer().capabilities(); slices.Contains(caps, controlCapBinaryFrame) {
-		t.Fatal("stale binary-framing capability was not forgotten")
 	}
 }
 
