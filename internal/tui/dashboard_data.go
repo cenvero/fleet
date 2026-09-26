@@ -203,7 +203,7 @@ type dashFleetAgg struct {
 	hotCPU, hotMem, hotDisk          int
 	topCPU, topMem, topDisk          []int // row indices, hottest first
 	newestAgent                      string
-	agentOld, agentUnknown           int
+	agentOld, agentUnknown, agentDev int
 	alertingServers                  int
 }
 
@@ -322,9 +322,14 @@ func dashBuildBase(snap *core.DashboardSnapshot, allAlerts []fleetalerts.Alert, 
 				b.fleet.agentOld++
 			}
 		} else {
-			// Non-release builds ("dev") are shown as reported.
-			r.agent = dashIfEmpty(dashClean(strings.TrimSpace(s.Observed.AgentVersion)))
-			b.fleet.agentUnknown++
+			// The shared display form: "dev" for a development build, "-"
+			// for a version that is genuinely unknown.
+			r.agent = version.DisplaySemVer(s.Observed.AgentVersion)
+			if version.IsDevBuild(s.Observed.AgentVersion) {
+				b.fleet.agentDev++
+			} else {
+				b.fleet.agentUnknown++
+			}
 		}
 		r.tags = dashFormatTags(tags[s.Name])
 		r.hasMetrics = !s.Metrics.Timestamp.IsZero() || s.Metrics.CPUPercent > 0 || s.Metrics.MemoryPercent > 0 || s.Metrics.DiskPercent > 0

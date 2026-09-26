@@ -1124,16 +1124,22 @@ func (m *model) fleetBox(r *drctx, w, h int) []string {
 
 	l.reset(iw)
 	l.put(sMuted, "agents ")
-	if f.newestAgent != "" {
+	switch {
+	case f.newestAgent != "":
 		l.put(sBold, f.newestAgent)
-	} else {
+	case f.agentDev > 0:
+		l.put(sBold, "dev") // development builds report exactly "dev"
+	default:
 		l.put(sDim, "version unknown")
 	}
 	if f.agentOld > 0 {
 		l.put(sMuted, " · ")
 		l.put(sWarn, strconv.Itoa(f.agentOld)+" behind")
 	}
-	if f.agentUnknown > 0 && f.newestAgent != "" {
+	if f.agentDev > 0 && f.newestAgent != "" {
+		l.put(sMuted, " · "+strconv.Itoa(f.agentDev)+" dev")
+	}
+	if f.agentUnknown > 0 && (f.newestAgent != "" || f.agentDev > 0) {
 		l.put(sMuted, " · "+strconv.Itoa(f.agentUnknown)+" unknown")
 	}
 	lines = append(lines, l.String())

@@ -46,4 +46,23 @@ func TestDisplaySemVerUsesPlaceholderForUnavailable(t *testing.T) {
 	if got := DisplaySemVer("version unavailable"); got != "-" {
 		t.Fatalf("DisplaySemVer(unavailable)=%q", got)
 	}
+	for _, unknown := range []string{"", " ", "-", "unknown", "n/a", "V2.4.2", "devel"} {
+		if got := DisplaySemVer(unknown); got != "-" {
+			t.Fatalf("DisplaySemVer(%q)=%q, want -", unknown, got)
+		}
+	}
+}
+
+// TestDisplaySemVerShowsDevBuilds: a development build reports "dev", and
+// every surface shows that rather than the "-" of an unknown version.
+func TestDisplaySemVerShowsDevBuilds(t *testing.T) {
+	t.Parallel()
+	for _, dev := range []string{"dev", " dev ", "DEV"} {
+		if got := DisplaySemVer(dev); got != "dev" {
+			t.Fatalf("DisplaySemVer(%q)=%q, want dev", dev, got)
+		}
+		if _, ok := NormalizeSemVer(dev); ok {
+			t.Fatalf("a dev build must never normalize to a release version")
+		}
+	}
 }

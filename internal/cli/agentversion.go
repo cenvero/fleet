@@ -30,8 +30,9 @@ func newAgentVersionCommand(configDir *string) *cobra.Command {
 		Use:   "version [--all|<server>]",
 		Short: "Report agent versions per server and flag mismatches",
 		Long: "Report the observed agent version for each server in one canonical v-prefixed form\n" +
-			"(so 'v2.1.0' and '2.1.0' display and compare identically). Missing, sentinel,\n" +
-			"or malformed values are shown as unavailable and never become references.\n\n" +
+			"(so 'v2.1.0' and '2.1.0' display and compare identically). A development build\n" +
+			"shows as 'dev'; missing, sentinel, or malformed values show as '-'. Neither is\n" +
+			"ever compared or used as the reference.\n\n" +
 			"Versions are compared against a reference (the controller version, or the most\n" +
 			"common agent version when the controller is a dev build) and mismatches are\n" +
 			"flagged.\n\n" +
@@ -103,12 +104,11 @@ func runAgentVersion(cmd *cobra.Command, configDir, only string) error {
 	}
 	mismatches := 0
 	for _, r := range rows {
-		display := r.Normalized
-		if display == "" {
-			display = "-"
-		}
+		display := version.DisplaySemVer(r.Raw)
 		status := "ok"
 		switch {
+		case r.Normalized == "" && version.IsDevBuild(r.Raw):
+			status = "dev build (not compared)"
 		case r.Normalized == "":
 			status = "unknown"
 		case reference != "" && r.Normalized != reference:
