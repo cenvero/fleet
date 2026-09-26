@@ -273,3 +273,35 @@ func TestDashboardLogTailReadsCacheWithoutAuditing(t *testing.T) {
 		t.Fatalf("expected an error for an untracked service")
 	}
 }
+
+func TestDashboardDataSkipLogPreviewsListsSourcesOnly(t *testing.T) {
+	t.Parallel()
+	app := newDashboardTestApp(t)
+	if err := app.AddServer(ServerRecord{Name: "web-01", Address: "10.0.0.1", Services: []ServiceRecord{
+		{Name: "nginx.service", LogPath: "/var/log/nginx/access.log"},
+		{Name: "cron.service"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.aggregatedLogs().Append("web-01", "nginx.service", []proto.LogLine{{Number: 1, Text: "hello"}}); err != nil {
+		t.Fatal(err)
+	}
+	full, err := app.DashboardData(DashboardOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.CachedLogs) != 1 || !full.CachedLogs[0].Available {
+		t.Fatalf("full previews = %+v", full.CachedLogs)
+	}
+	partial, err := app.DashboardData(DashboardOptions{SkipLogPreviews: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partial.CachedLogs) != 0 {
+		t.Fatalf("SkipLogPreviews read %d previews", len(partial.CachedLogs))
+	}
+	want := []DashboardLogSource{{Server: "web-01", Service: "nginx.service", LogPath: "/var/log/nginx/access.log"}}
+	if !reflect.DeepEqual(partial.LogSources, want) || !reflect.DeepEqual(full.LogSources, want) {
+		t.Fatalf("log sources = %+v / %+v", partial.LogSources, full.LogSources)
+	}
+}

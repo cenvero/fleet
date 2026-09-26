@@ -34,6 +34,15 @@ type DashboardOptions struct {
 	RecentAudit int
 	// LogTailLines is how many cached lines each log preview carries.
 	LogTailLines int
+	// SkipLogPreviews leaves CachedLogs empty instead of reading the cached
+	// log of every tracked service (each can hold megabytes across rotated
+	// files); LogSources still lists them. A console that refreshes every few
+	// seconds reads the one log it is showing on demand instead.
+	SkipLogPreviews bool
+	// ServerCache, when set, serves unchanged server files from previously
+	// decoded records instead of decoding every file again (see
+	// ServerListCache). The live dashboard keeps one per session.
+	ServerCache *ServerListCache
 }
 
 func (o DashboardOptions) withDefaults() DashboardOptions {
@@ -128,6 +137,16 @@ type DashboardData struct {
 	AlertStats AlertStats `json:"alert_stats"`
 	// Tags maps server name -> tag key -> value.
 	Tags map[string]map[string]string `json:"tags"`
+	// LogSources lists every tracked service with a log path, sorted by
+	// server then service, whether or not previews were read.
+	LogSources []DashboardLogSource `json:"log_sources"`
+}
+
+// DashboardLogSource is a tracked service whose log the controller caches.
+type DashboardLogSource struct {
+	Server  string `json:"server"`
+	Service string `json:"service"`
+	LogPath string `json:"log_path"`
 }
 
 // DashboardSnapshot returns the classic dashboard snapshot with the default
@@ -147,7 +166,7 @@ func (a *App) DashboardSnapshot() (DashboardSnapshot, error) {
 func (a *App) DashboardData(opts DashboardOptions) (DashboardData, error) {
 	opts = opts.withDefaults()
 
-	servers, err := a.ListServers()
+	servers, err := a.listServersCached(opts.ServerCache)
 	if err != nil {
 		return DashboardData{}, err
 	}
@@ -175,9 +194,12 @@ func (a *App) DashboardData(opts DashboardOptions) (DashboardData, error) {
 	if err != nil {
 		return DashboardData{}, err
 	}
-	cachedLogs, err := a.cachedLogPreviews(servers, opts.LogTailLines)
-	if err != nil {
-		return DashboardData{}, err
+	var cachedLogs []CachedLogPreview
+	if !opts.SkipLogPreviews {
+		cachedLogs, err = a.cachedLogPreviews(servers, opts.LogTailLines)
+		if err != nil {
+			return DashboardData{}, err
+		}
 	}
 
 	summary := DashboardSummary{
@@ -209,7 +231,26 @@ func (a *App) DashboardData(opts DashboardOptions) (DashboardData, error) {
 		Alerts:     allAlerts,
 		AlertStats: stats,
 		Tags:       NewTagStore(a.ConfigDir).AllTags(),
+		LogSources: dashboardLogSources(servers),
 	}, nil
+}
+
+func dashboardLogSources(servers []ServerRecord) []DashboardLogSource {
+	out := make([]DashboardLogSource, 0, countTrackedServicesWithLogs(servers))
+	for _, server := range servers {
+		for _, service := range server.Services {
+			if service.LogPath != "" {
+				out = append(out, DashboardLogSource{Server: server.Name, Service: service.Name, LogPath: service.LogPath})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Server == out[j].Server {
+			return out[i].Service < out[j].Service
+		}
+		return out[i].Server < out[j].Server
+	})
+	return out
 }
 
 // dashboardStatus is Status() for a server count the caller already has, so the
