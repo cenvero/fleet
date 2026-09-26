@@ -876,7 +876,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case proto.ActionFileStat:
 			handleFileRPC(encode, request, s.fileManager().Stat)
 		case proto.ActionFileRead:
-			handleFileRPC(encode, request, s.fileManager().Read)
+			handleFileRead(encode, request, s.fileManager())
 		case proto.ActionFileOpenWrite:
 			handleFileRPC(encode, request, s.fileManager().OpenWrite)
 		case proto.ActionFileWrite:
@@ -891,6 +891,12 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			handleFileRPC(encode, request, s.fileManager().Delete)
 		case proto.ActionFileRename:
 			handleFileRPC(encode, request, s.fileManager().Rename)
+		case proto.ActionFilePut:
+			handleFileRPC(encode, request, s.fileManager().Put)
+		case proto.ActionFileCopy:
+			handleFileRPC(encode, request, s.fileManager().Copy)
+		case proto.ActionFileTree:
+			handleFileRPC(encode, request, s.fileManager().Tree)
 		default:
 			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,

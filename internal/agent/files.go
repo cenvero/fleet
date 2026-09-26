@@ -5,12 +5,14 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +42,31 @@ type FileManager interface {
 	Mkdir(context.Context, proto.FileMkdirPayload) (proto.FileOpResult, error)
 	Delete(context.Context, proto.FileDeletePayload) (proto.FileOpResult, error)
 	Rename(context.Context, proto.FileRenamePayload) (proto.FileOpResult, error)
+	Put(context.Context, proto.FilePutPayload) (proto.FileFinalizeResult, error)
+	Copy(context.Context, proto.FileCopyPayload) (proto.FileFinalizeResult, error)
+	Tree(context.Context, proto.FileTreePayload) (proto.FileTreeResult, error)
+}
+
+// fileCapabilities lists the optional file-transfer protocol features this
+// agent implements. They are advertised in the hello so controllers only use
+// them where supported.
+func fileCapabilities() []string {
+	return []string{
+		proto.CapabilityFileChunkDigests,
+		proto.CapabilityFilePut,
+		proto.CapabilityFileReadStat,
+		proto.CapabilityFileCopy,
+		proto.CapabilityFileTree,
+	}
+}
+
+// chunkRecord is a byte range of an upload's temp file whose content this
+// process verified against a SHA-256 — either because it checked the chunk's
+// checksum before writing it, or because it hashed the range from disk for a
+// resume probe.
+type chunkRecord struct {
+	length int64
+	sum    [sha256.Size]byte
 }
 
 // activeUpload tracks one in-flight upload. Its temp file is opened once and
@@ -54,11 +81,94 @@ type activeUpload struct {
 	root      *os.Root
 	tempPath  string
 	finalPath string
+	rawPath   string // the destination exactly as open_write received it
 	tempRel   string
 	finalRel  string
 	totalSize int64
 	mode      uint32
 	done      bool
+
+	// records remembers every verified chunk (offset -> length/checksum) so
+	// finalize can check the assembled file against the controller's chunk
+	// list, and a resume can skip re-reading the prefix. Records never
+	// overlap: a write drops any record it overlaps before touching the bytes.
+	recMu   sync.Mutex
+	records map[int64]chunkRecord
+	// grid is the length of the first record. While every record is aligned
+	// to it (the normal case: one controller, one chunk size) an overlapping
+	// record can only live at the same offset, so the overlap check is O(1).
+	grid    int64
+	aligned bool
+}
+
+func (au *activeUpload) dropOverlapsLocked(offset, length int64) {
+	if len(au.records) == 0 {
+		return
+	}
+	if au.aligned && au.grid > 0 && offset%au.grid == 0 && length <= au.grid {
+		delete(au.records, offset)
+		return
+	}
+	end := offset + length
+	for off, rec := range au.records {
+		if off < end && offset < off+rec.length {
+			delete(au.records, off)
+		}
+	}
+}
+
+// record replaces whatever is known about [offset, offset+length) with a
+// verified checksum.
+func (au *activeUpload) record(offset, length int64, sum [sha256.Size]byte) {
+	au.recMu.Lock()
+	defer au.recMu.Unlock()
+	au.dropOverlapsLocked(offset, length)
+	if au.records == nil {
+		au.records = make(map[int64]chunkRecord)
+	}
+	if len(au.records) == 0 {
+		au.grid, au.aligned = length, true
+	} else if au.aligned && (au.grid <= 0 || offset%au.grid != 0 || length > au.grid) {
+		au.aligned = false
+	}
+	au.records[offset] = chunkRecord{length: length, sum: sum}
+}
+
+// forget drops everything known about [offset, offset+length); used before
+// bytes whose checksum was not verified are written there.
+func (au *activeUpload) forget(offset, length int64) {
+	au.recMu.Lock()
+	au.dropOverlapsLocked(offset, length)
+	au.recMu.Unlock()
+}
+
+func (au *activeUpload) lookup(offset, length int64) (string, bool) {
+	au.recMu.Lock()
+	defer au.recMu.Unlock()
+	rec, ok := au.records[offset]
+	if !ok || rec.length != length {
+		return "", false
+	}
+	return hex.EncodeToString(rec.sum[:]), true
+}
+
+// maxReportedChunks bounds FileOpenWriteResult.Chunks so the reply always fits
+// in one envelope. Ranges beyond it are simply verified with file.probe.
+const maxReportedChunks = 65536
+
+// sortedRecords returns the records ordered by offset.
+func (au *activeUpload) sortedRecords(limit int) []proto.FileRangeChecksum {
+	au.recMu.Lock()
+	defer au.recMu.Unlock()
+	out := make([]proto.FileRangeChecksum, 0, min(len(au.records), max(limit, 0)))
+	for off, rec := range au.records {
+		out = append(out, proto.FileRangeChecksum{Offset: off, Length: rec.length, SHA256: hex.EncodeToString(rec.sum[:])})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Offset < out[j].Offset })
+	if limit >= 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 type fileManager struct {
@@ -88,6 +198,76 @@ func defaultFileManager() FileManager {
 // upload state.
 func NewFileManager() FileManager {
 	return &fileManager{active: make(map[string]*activeUpload)}
+}
+
+// ---- buffers ----
+
+// transferBufSize is the largest chunk the default controller moves in one
+// frame. Read buffers up to this size are recycled; larger (legacy 8 MiB)
+// requests fall back to a one-off allocation.
+const transferBufSize = 2 * 1024 * 1024
+
+var transferBufPool = sync.Pool{New: func() any {
+	b := make([]byte, transferBufSize)
+	return &b
+}}
+
+// ioBufSize is the buffer used for streaming hashes and copies. The 32 KiB
+// io.Copy default costs a syscall per 32 KiB, which dominated re-hashing large
+// files.
+const ioBufSize = 1024 * 1024
+
+var ioBufPool = sync.Pool{New: func() any {
+	b := make([]byte, ioBufSize)
+	return &b
+}}
+
+// hashRange streams length bytes at offset through SHA-256 with a pooled
+// buffer. It never allocates a buffer the size of the range.
+func hashRange(r io.ReaderAt, offset, length int64) ([sha256.Size]byte, error) {
+	var sum [sha256.Size]byte
+	bufp := ioBufPool.Get().(*[]byte)
+	defer ioBufPool.Put(bufp)
+	h := sha256.New()
+	n, err := io.CopyBuffer(h, io.NewSectionReader(r, offset, length), *bufp)
+	if err != nil {
+		return sum, err
+	}
+	if n != length {
+		return sum, io.ErrUnexpectedEOF
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
+}
+
+// hashWorkers bounds how many ranges one probe hashes concurrently. Re-hashing
+// a resumed prefix used to run on a single core.
+func hashWorkers(n int) int {
+	return max(1, min(n, runtime.GOMAXPROCS(0), 8))
+}
+
+// ---- path validation ----
+
+// hasDotComponent reports whether a raw path names a "." or ".." component.
+// Such paths are refused for every mutating operation BEFORE the path is
+// cleaned: `rm -r /srv/app/../..` must never quietly become `rm -r /`. GNU rm
+// refuses these operands for the same reason.
+func hasDotComponent(p string) bool {
+	start := 0
+	for i := 0; i <= len(p); i++ {
+		if i < len(p) && !os.IsPathSeparator(p[i]) && p[i] != '/' {
+			continue
+		}
+		if part := p[start:i]; part == "." || part == ".." {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
+func dotComponentError() *RPCError {
+	return &RPCError{Code: "invalid_path", Message: `path must not contain "." or ".." components`}
 }
 
 // validateTransferPath resolves an EXISTING path (read/stat/list/delete/rename
@@ -131,6 +311,9 @@ func validateWriteTarget(path string) (string, *RPCError) {
 	}
 	if !filepath.IsAbs(path) {
 		return "", &RPCError{Code: "invalid_path", Message: "path must be absolute"}
+	}
+	if hasDotComponent(path) {
+		return "", dotComponentError()
 	}
 	clean := filepath.Clean(path)
 	dir := filepath.Dir(clean)
@@ -189,13 +372,18 @@ func recheckFinalComponent(real string) *RPCError {
 
 // validateTransferEntryPath validates an existing directory entry without
 // dereferencing its final component. Delete and rename must act on a symlink
-// itself, not on the file or directory it points to.
+// itself, not on the file or directory it points to. It is used for every
+// operation that creates, replaces or removes an entry, so it also refuses "."
+// and ".." components before cleaning.
 func validateTransferEntryPath(name string) (string, *RPCError) {
 	if name == "" {
 		return "", &RPCError{Code: "missing_path", Message: "path is required"}
 	}
 	if !filepath.IsAbs(name) {
 		return "", &RPCError{Code: "invalid_path", Message: "path must be absolute"}
+	}
+	if hasDotComponent(name) {
+		return "", dotComponentError()
 	}
 	clean := filepath.Clean(name)
 	parent := filepath.Dir(clean)
@@ -260,6 +448,16 @@ func validTransferID(id string) bool {
 
 func invalidTransferID() *RPCError {
 	return &RPCError{Code: "invalid_transfer_id", Message: "transfer_id must be a bounded safe path component"}
+}
+
+// randomTempID names a one-shot temp file (file.put, file.copy) so concurrent
+// writers to the same destination can never share one.
+func randomTempID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 func checkBlockedTransferPath(real string) *RPCError {
@@ -401,6 +599,19 @@ func fileEntryType(mode os.FileMode) string {
 	}
 }
 
+func fileEntryFromInfo(name, path string, info os.FileInfo) proto.FileEntry {
+	return proto.FileEntry{
+		Name:      name,
+		Path:      path,
+		Size:      info.Size(),
+		Mode:      uint32(info.Mode()),
+		Type:      fileEntryType(info.Mode()),
+		IsDir:     info.IsDir(),
+		IsSymlink: info.Mode()&os.ModeSymlink != 0,
+		ModTime:   info.ModTime().UTC(),
+	}
+}
+
 func (m *fileManager) List(_ context.Context, p proto.FileListPayload) (proto.FileListResult, error) {
 	real, rerr := validateTransferPath(p.Path)
 	if rerr != nil {
@@ -450,6 +661,97 @@ func (m *fileManager) List(_ context.Context, p proto.FileListPayload) (proto.Fi
 	return result, nil
 }
 
+// Tree bounds for file.tree. The byte budget keeps the reply well inside
+// proto.MaxEnvelopeSize however long the paths are; a tree that does not fit
+// is reported as truncated and the controller lists it directory by directory.
+const (
+	maxTreeEntries    = 50_000
+	maxTreeDepth      = 64
+	maxTreeReplyBytes = 10 * 1024 * 1024
+	treeEntryOverhead = 192 // JSON field names, mode, size and timestamp
+)
+
+func (m *fileManager) Tree(_ context.Context, p proto.FileTreePayload) (proto.FileTreeResult, error) {
+	real, rerr := validateTransferPath(p.Path)
+	if rerr != nil {
+		return proto.FileTreeResult{}, rerr
+	}
+	root, rel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileTreeResult{}, rerr
+	}
+	defer root.Close()
+	maxEntries := maxTreeEntries
+	if p.MaxEntries > 0 && p.MaxEntries < maxEntries {
+		maxEntries = p.MaxEntries
+	}
+	maxDepth := maxTreeDepth
+	if p.MaxDepth > 0 && p.MaxDepth < maxDepth {
+		maxDepth = p.MaxDepth
+	}
+
+	type dirItem struct {
+		rel, abs string
+		depth    int
+	}
+	result := proto.FileTreeResult{Path: real}
+	truncated := func() (proto.FileTreeResult, error) {
+		return proto.FileTreeResult{Path: real, Truncated: true}, nil
+	}
+	budget := maxTreeReplyBytes
+	stack := []dirItem{{rel: rel, abs: real}}
+	for len(stack) > 0 {
+		item := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		dir, err := root.Open(item.rel)
+		if err != nil {
+			return proto.FileTreeResult{}, &RPCError{Code: "list_failed", Message: err.Error()}
+		}
+		entries, err := dir.ReadDir(-1)
+		_ = dir.Close()
+		if err != nil {
+			return proto.FileTreeResult{}, &RPCError{Code: "list_failed", Message: err.Error()}
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		var subdirs []dirItem
+		for _, entry := range entries {
+			name := entry.Name()
+			if !p.ShowHidden && strings.HasPrefix(name, ".") {
+				continue
+			}
+			abs := filepath.Join(item.abs, name)
+			info, err := entry.Info() // lstat semantics: never follows a symlink
+			if err != nil {
+				return proto.FileTreeResult{}, &RPCError{Code: "list_failed", Message: err.Error()}
+			}
+			budget -= len(abs) + len(name) + treeEntryOverhead
+			if len(result.Entries) >= maxEntries || budget < 0 {
+				return truncated()
+			}
+			result.Entries = append(result.Entries, fileEntryFromInfo(name, abs, info))
+			if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				if item.depth+1 > maxDepth {
+					return truncated()
+				}
+				// Descending must honour exactly what a file.list of this
+				// directory would: pseudo filesystems stay off limits.
+				if rerr := checkBlockedTransferPath(abs); rerr != nil {
+					return proto.FileTreeResult{}, rerr
+				}
+				subdirs = append(subdirs, dirItem{rel: filepath.Join(item.rel, name), abs: abs, depth: item.depth + 1})
+			}
+		}
+		// Push in reverse so directories are visited in name order.
+		for i := len(subdirs) - 1; i >= 0; i-- {
+			stack = append(stack, subdirs[i])
+		}
+	}
+	if result.Entries == nil {
+		result.Entries = []proto.FileEntry{}
+	}
+	return result, nil
+}
+
 func (m *fileManager) Stat(_ context.Context, p proto.FileStatPayload) (proto.FileStatResult, error) {
 	real, rerr := validateTransferPath(p.Path)
 	if rerr != nil {
@@ -464,25 +766,53 @@ func (m *fileManager) Stat(_ context.Context, p proto.FileStatPayload) (proto.Fi
 	if err != nil {
 		return proto.FileStatResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
-	return proto.FileStatResult{Entry: proto.FileEntry{
-		Name:      info.Name(),
-		Path:      real,
-		Size:      info.Size(),
-		Mode:      uint32(info.Mode()),
-		Type:      fileEntryType(info.Mode()),
-		IsDir:     info.IsDir(),
-		IsSymlink: info.Mode()&os.ModeSymlink != 0,
-		ModTime:   info.ModTime().UTC(),
-	}}, nil
+	return proto.FileStatResult{Entry: fileEntryFromInfo(info.Name(), real, info)}, nil
 }
 
-func (m *fileManager) Read(_ context.Context, p proto.FileReadPayload) (proto.FileReadResult, error) {
+func (m *fileManager) Read(ctx context.Context, p proto.FileReadPayload) (proto.FileReadResult, error) {
+	res, _, err := m.read(ctx, p, false)
+	return res, err
+}
+
+// readPooled is Read with a recycled buffer: the caller must invoke release
+// once the result's Data has been encoded (and never touch Data afterwards).
+func (m *fileManager) readPooled(ctx context.Context, p proto.FileReadPayload) (proto.FileReadResult, func(), error) {
+	return m.read(ctx, p, true)
+}
+
+func noRelease() {}
+
+// pooledFileReader is implemented by the default file manager: its reads reuse
+// chunk buffers, which must be handed back once the reply has been encoded.
+type pooledFileReader interface {
+	readPooled(context.Context, proto.FileReadPayload) (proto.FileReadResult, func(), error)
+}
+
+// handleFileRead serves file.read, recycling the chunk buffer after the reply
+// is on the wire. Other FileManager implementations are served unchanged.
+func handleFileRead(encode func(proto.Envelope) error, request proto.Envelope, fm FileManager) {
+	pr, ok := fm.(pooledFileReader)
+	if !ok {
+		handleFileRPC(encode, request, fm.Read)
+		return
+	}
+	release := noRelease
+	handleFileRPC(encode, request, func(ctx context.Context, p proto.FileReadPayload) (proto.FileReadResult, error) {
+		res, rel, err := pr.readPooled(ctx, p)
+		release = rel
+		return res, err
+	})
+	// handleFileRPC encodes synchronously, so nothing references the buffer now.
+	release()
+}
+
+func (m *fileManager) read(_ context.Context, p proto.FileReadPayload, pooled bool) (proto.FileReadResult, func(), error) {
 	real, rerr := validateTransferPath(p.Path)
 	if rerr != nil {
-		return proto.FileReadResult{}, rerr
+		return proto.FileReadResult{}, noRelease, rerr
 	}
 	if p.Offset < 0 {
-		return proto.FileReadResult{}, &RPCError{Code: "invalid_offset", Message: "offset must be non-negative"}
+		return proto.FileReadResult{}, noRelease, &RPCError{Code: "invalid_offset", Message: "offset must be non-negative"}
 	}
 	length := p.Length
 	if length <= 0 || length > proto.MaxRawChunkBytes {
@@ -490,30 +820,53 @@ func (m *fileManager) Read(_ context.Context, p proto.FileReadPayload) (proto.Fi
 	}
 	root, rel, rerr := openTransferRoot(real)
 	if rerr != nil {
-		return proto.FileReadResult{}, rerr
+		return proto.FileReadResult{}, noRelease, rerr
 	}
 	defer root.Close()
+	var entry *proto.FileEntry
+	if p.Stat {
+		info, err := root.Lstat(rel)
+		if err != nil {
+			return proto.FileReadResult{}, noRelease, &RPCError{Code: "stat_failed", Message: err.Error()}
+		}
+		fe := fileEntryFromInfo(info.Name(), real, info)
+		entry = &fe
+		if !info.Mode().IsRegular() {
+			// Report what the path is and let the controller refuse it; there
+			// are no bytes to return for a directory or special file.
+			return proto.FileReadResult{Offset: p.Offset, EOF: true, Entry: entry}, noRelease, nil
+		}
+	}
 	file, err := root.Open(rel)
 	if err != nil {
-		return proto.FileReadResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
+		return proto.FileReadResult{}, noRelease, &RPCError{Code: "open_failed", Message: err.Error()}
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return proto.FileReadResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+		return proto.FileReadResult{}, noRelease, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
 	if p.Offset >= info.Size() {
-		return proto.FileReadResult{Offset: p.Offset, Length: 0, EOF: true}, nil
+		return proto.FileReadResult{Offset: p.Offset, Length: 0, EOF: true, Entry: entry}, noRelease, nil
 	}
 	// Overflow-safe clamp (p.Offset < info.Size() here, so the subtraction is
 	// non-negative and p.Offset+length can't be relied upon — it may overflow).
 	if length > info.Size()-p.Offset {
 		length = info.Size() - p.Offset
 	}
-	buf := make([]byte, length)
+	var buf []byte
+	release := noRelease
+	if pooled && length <= transferBufSize {
+		bufp := transferBufPool.Get().(*[]byte)
+		buf = (*bufp)[:length]
+		release = func() { transferBufPool.Put(bufp) }
+	} else {
+		buf = make([]byte, length)
+	}
 	n, err := file.ReadAt(buf, p.Offset)
 	if err != nil && err != io.EOF {
-		return proto.FileReadResult{}, &RPCError{Code: "read_failed", Message: err.Error()}
+		release()
+		return proto.FileReadResult{}, noRelease, &RPCError{Code: "read_failed", Message: err.Error()}
 	}
 	buf = buf[:n]
 	sum := sha256.Sum256(buf)
@@ -523,7 +876,19 @@ func (m *fileManager) Read(_ context.Context, p proto.FileReadPayload) (proto.Fi
 		Data:   buf,
 		SHA256: hex.EncodeToString(sum[:]),
 		EOF:    p.Offset+int64(n) >= info.Size(),
-	}, nil
+		Entry:  entry,
+	}, release, nil
+}
+
+// targetIsDirectory refuses to write a file over an existing directory. It runs
+// before any temp file is created, so a mistaken destination costs one round
+// trip and leaves nothing behind (the controller then retries inside the
+// directory, like cp/scp).
+func targetIsDirectory(root *os.Root, rel string) *RPCError {
+	if info, err := root.Lstat(rel); err == nil && info.IsDir() {
+		return &RPCError{Code: "target_is_directory", Message: "destination is an existing directory"}
+	}
+	return nil
 }
 
 func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload) (proto.FileOpenWriteResult, error) {
@@ -548,7 +913,7 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		if info, err := existing.f.Stat(); err == nil {
 			size = info.Size()
 		}
-		return proto.FileOpenWriteResult{TempPath: existing.tempPath, ResumeOffset: size}, nil
+		return proto.FileOpenWriteResult{TempPath: existing.tempPath, ResumeOffset: size, Chunks: existing.sortedRecords(maxReportedChunks)}, nil
 	}
 
 	root, finalRel, rerr := openTransferRoot(real)
@@ -559,6 +924,10 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 	if filepath.Dir(tempRel) != filepath.Dir(finalRel) || !validTransferID(p.TransferID) {
 		_ = root.Close()
 		return proto.FileOpenWriteResult{}, invalidTransferID()
+	}
+	if rerr := targetIsDirectory(root, finalRel); rerr != nil {
+		_ = root.Close()
+		return proto.FileOpenWriteResult{}, rerr
 	}
 	temp := filepath.Join(root.Name(), tempRel)
 	if err := checkBlockedTransferPath(temp); err != nil {
@@ -594,7 +963,7 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		mode = 0o644
 	}
 	m.active[p.TransferID] = &activeUpload{
-		f: f, root: root, tempPath: temp, finalPath: real,
+		f: f, root: root, tempPath: temp, finalPath: real, rawPath: p.Path,
 		tempRel: tempRel, finalRel: finalRel,
 		totalSize: p.TotalSize, mode: mode,
 	}
@@ -620,12 +989,17 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 	if !ok {
 		return proto.FileWriteResult{}, &RPCError{Code: "unknown_transfer", Message: "no open upload for transfer id; call file.open_write first"}
 	}
-	real, rerr := validateTransferEntryPath(p.Path)
-	if rerr != nil {
-		return proto.FileWriteResult{}, rerr
-	}
-	if real != au.finalPath {
-		return proto.FileWriteResult{}, &RPCError{Code: "transfer_conflict", Message: "transfer path does not match open upload"}
+	// The path only binds this write to the upload the transfer id was opened
+	// for; the bytes go to the already-open temp descriptor. The same string
+	// open_write validated needs no second symlink walk per chunk.
+	if p.Path != au.rawPath {
+		real, rerr := validateTransferEntryPath(p.Path)
+		if rerr != nil {
+			return proto.FileWriteResult{}, rerr
+		}
+		if real != au.finalPath {
+			return proto.FileWriteResult{}, &RPCError{Code: "transfer_conflict", Message: "transfer path does not match open upload"}
+		}
 	}
 	// Bound the write to the size declared at open_write. Without this a client
 	// could write at an arbitrary offset (e.g. 1 PiB) and allocate an enormous
@@ -641,11 +1015,14 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 	if dataLen < 0 || p.Offset > au.totalSize-dataLen {
 		return proto.FileWriteResult{}, &RPCError{Code: "offset_out_of_range", Message: "write extends beyond the declared file size"}
 	}
+	var sum [sha256.Size]byte
+	verified := false
 	if p.SHA256 != "" {
-		sum := sha256.Sum256(p.Data)
+		sum = sha256.Sum256(p.Data)
 		if hex.EncodeToString(sum[:]) != p.SHA256 {
 			return proto.FileWriteResult{}, &RPCError{Code: "checksum_mismatch", Message: "chunk checksum mismatch"}
 		}
+		verified = true
 	}
 	// RLock lets parallel writers run concurrently (their ranges are disjoint)
 	// while excluding Finalize, which closes the file under a full Lock.
@@ -654,11 +1031,25 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 	if au.done {
 		return proto.FileWriteResult{}, &RPCError{Code: "upload_finalized", Message: "upload has already been finalized"}
 	}
+	// Forget the old checksum of these bytes before changing them, so a
+	// concurrent reader of the records can never see a stale claim.
+	au.forget(p.Offset, dataLen)
 	n, err := au.f.WriteAt(p.Data, p.Offset)
 	if err != nil {
 		return proto.FileWriteResult{}, &RPCError{Code: "write_failed", Message: err.Error()}
 	}
+	if verified && dataLen > 0 {
+		au.record(p.Offset, dataLen, sum)
+	}
 	return proto.FileWriteResult{Offset: p.Offset, BytesWritten: int64(n)}, nil
+}
+
+// discardUpload closes and removes an upload's temp file. Called with au.mu
+// held for writing and the upload already removed from the active map.
+func discardUpload(au *activeUpload) {
+	au.done = true
+	_ = au.f.Close()
+	_ = au.root.Remove(au.tempRel)
 }
 
 func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
@@ -673,9 +1064,12 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 	au, ok := m.active[p.TransferID]
 	if !ok {
 		m.mu.Unlock()
+		if p.Abort {
+			return m.abortInactive(real, p.TransferID)
+		}
 		return proto.FileFinalizeResult{}, &RPCError{Code: "unknown_transfer", Message: "no open upload for transfer id"}
 	}
-	if real != au.finalPath || p.TotalSize != au.totalSize {
+	if real != au.finalPath || (!p.Abort && p.TotalSize != au.totalSize) {
 		m.mu.Unlock()
 		return proto.FileFinalizeResult{}, &RPCError{Code: "transfer_conflict", Message: "finalize path or size does not match open upload"}
 	}
@@ -685,42 +1079,59 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 
 	au.mu.Lock()
 	defer au.mu.Unlock()
+	if p.Abort {
+		discardUpload(au)
+		return proto.FileFinalizeResult{Path: au.finalPath}, nil
+	}
 	// Block any straggler write that already grabbed this au before we deleted
 	// it from the map: once finalize owns the lock, the file is being closed.
+	// Every failure below is terminal for this transfer, so the temp file is
+	// removed rather than left beside the destination.
+	fail := func(code, message string) (proto.FileFinalizeResult, error) {
+		discardUpload(au)
+		return proto.FileFinalizeResult{}, &RPCError{Code: code, Message: message}
+	}
 	au.done = true
 
 	if err := au.f.Sync(); err != nil {
-		_ = au.f.Close()
-		return proto.FileFinalizeResult{}, &RPCError{Code: "sync_failed", Message: err.Error()}
+		return fail("sync_failed", err.Error())
 	}
 	info, err := au.f.Stat()
 	if err != nil {
-		_ = au.f.Close()
-		return proto.FileFinalizeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+		return fail("stat_failed", err.Error())
 	}
 	if info.Size() != p.TotalSize {
-		_ = au.f.Close()
-		return proto.FileFinalizeResult{}, &RPCError{
-			Code:    "size_mismatch",
-			Message: fmt.Sprintf("expected %d bytes, assembled %d", p.TotalSize, info.Size()),
-		}
+		return fail("size_mismatch", fmt.Sprintf("expected %d bytes, assembled %d", p.TotalSize, info.Size()))
 	}
 
 	sum := p.WholeSHA256
-	if p.WholeSHA256 != "" {
-		if _, err := au.f.Seek(0, io.SeekStart); err != nil {
-			_ = au.f.Close()
-			return proto.FileFinalizeResult{}, &RPCError{Code: "seek_failed", Message: err.Error()}
+	var chunkDigest string
+	switch {
+	case p.ChunkDigest != "":
+		// Every byte was checked against its chunk checksum when it was
+		// written (or hashed from disk for a resume probe), and records never
+		// overlap. If the ordered records tile the file and their digest is
+		// the controller's, the assembled file is exactly the bytes the
+		// controller hashed — without reading it back.
+		got, err := proto.ChunkListDigest(p.TotalSize, au.sortedRecords(-1))
+		if err != nil {
+			return fail("chunk_digest_mismatch", "assembled file is not fully covered by verified chunks: "+err.Error())
 		}
+		if got != p.ChunkDigest {
+			return fail("chunk_digest_mismatch", "assembled chunk checksums do not match source")
+		}
+		chunkDigest = got
+	case p.WholeSHA256 != "":
 		h := sha256.New()
-		if _, err := io.Copy(h, au.f); err != nil {
-			_ = au.f.Close()
-			return proto.FileFinalizeResult{}, &RPCError{Code: "read_failed", Message: err.Error()}
+		bufp := ioBufPool.Get().(*[]byte)
+		_, err := io.CopyBuffer(h, io.NewSectionReader(au.f, 0, info.Size()), *bufp)
+		ioBufPool.Put(bufp)
+		if err != nil {
+			return fail("read_failed", err.Error())
 		}
 		got := hex.EncodeToString(h.Sum(nil))
 		if got != p.WholeSHA256 {
-			_ = au.f.Close()
-			return proto.FileFinalizeResult{}, &RPCError{Code: "whole_checksum_mismatch", Message: "assembled file checksum does not match source"}
+			return fail("whole_checksum_mismatch", "assembled file checksum does not match source")
 		}
 	}
 
@@ -730,12 +1141,32 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 	}
 	_ = au.f.Chmod(os.FileMode(mode)) // best effort; some filesystems disallow
 	if err := au.f.Close(); err != nil {
+		_ = au.root.Remove(au.tempRel)
 		return proto.FileFinalizeResult{}, &RPCError{Code: "close_failed", Message: err.Error()}
 	}
 	if err := au.root.Rename(au.tempRel, au.finalRel); err != nil {
+		_ = au.root.Remove(au.tempRel)
 		return proto.FileFinalizeResult{}, &RPCError{Code: "rename_failed", Message: err.Error()}
 	}
-	return proto.FileFinalizeResult{Path: au.finalPath, Size: info.Size(), SHA256: sum}, nil
+	return proto.FileFinalizeResult{Path: au.finalPath, Size: info.Size(), SHA256: sum, ChunkDigest: chunkDigest}, nil
+}
+
+// abortInactive removes the temp file of an upload this process has no open
+// state for (for example after an agent restart).
+func (m *fileManager) abortInactive(real, transferID string) (proto.FileFinalizeResult, error) {
+	root, finalRel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	defer root.Close()
+	tempRel := finalRel + ".fleet-" + transferID + ".part"
+	if filepath.Dir(tempRel) != filepath.Dir(finalRel) {
+		return proto.FileFinalizeResult{}, invalidTransferID()
+	}
+	if info, err := root.Lstat(tempRel); err == nil && info.Mode().IsRegular() {
+		_ = root.Remove(tempRel)
+	}
+	return proto.FileFinalizeResult{Path: real}, nil
 }
 
 func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.FileProbeResult, error) {
@@ -752,6 +1183,7 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 	}
 	defer root.Close()
 	probeRel := rel
+	var au *activeUpload
 	if p.TransferID != "" {
 		tempRel := rel + ".fleet-" + p.TransferID + ".part"
 		if filepath.Dir(tempRel) != filepath.Dir(rel) {
@@ -759,6 +1191,11 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 		}
 		if info, err := root.Lstat(tempRel); err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
 			probeRel = tempRel
+			m.mu.Lock()
+			if candidate, ok := m.active[p.TransferID]; ok && candidate.finalPath == real && candidate.tempRel == tempRel {
+				au = candidate
+			}
+			m.mu.Unlock()
 		} else if err != nil && !os.IsNotExist(err) {
 			return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 		}
@@ -772,32 +1209,234 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 		return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 	}
 	result := proto.FileProbeResult{Exists: true, CurrentSize: info.Size()}
-	if len(p.Ranges) > 0 {
-		const maxProbeRanges = 65536
-		ranges := p.Ranges
-		if len(ranges) > maxProbeRanges {
-			ranges = ranges[:maxProbeRanges]
-		}
-		file, err := root.Open(probeRel)
-		if err != nil {
-			return proto.FileProbeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
-		}
-		defer file.Close()
-		for _, r := range ranges {
-			if r.Length <= 0 || r.Length > proto.MaxRawChunkBytes || r.Offset < 0 || r.Length > info.Size() || r.Offset > info.Size()-r.Length {
-				continue
-			}
-			buf := make([]byte, r.Length)
-			if _, err := file.ReadAt(buf, r.Offset); err != nil {
-				continue
-			}
-			sum := sha256.Sum256(buf)
-			result.RangeChecksums = append(result.RangeChecksums, proto.FileRangeChecksum{
-				Offset: r.Offset, Length: r.Length, SHA256: hex.EncodeToString(sum[:]),
-			})
+	if len(p.Ranges) == 0 {
+		return result, nil
+	}
+	const maxProbeRanges = 65536
+	ranges := p.Ranges
+	if len(ranges) > maxProbeRanges {
+		ranges = ranges[:maxProbeRanges]
+	}
+	file, err := root.Open(probeRel)
+	if err != nil {
+		return proto.FileProbeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	defer file.Close()
+	if au != nil {
+		// Hold off writers while hashing so each digest we record describes
+		// bytes no concurrent write can be changing. Probes only run for a
+		// resume, before the ranges they cover are rewritten.
+		au.mu.Lock()
+		defer au.mu.Unlock()
+		if au.done {
+			au = nil
 		}
 	}
+
+	sums := make([]string, len(ranges))
+	var todo []int
+	for i, r := range ranges {
+		if r.Length <= 0 || r.Length > proto.MaxRawChunkBytes || r.Offset < 0 || r.Length > info.Size() || r.Offset > info.Size()-r.Length {
+			continue
+		}
+		if au != nil {
+			// A range this process verified needs no second read: the
+			// record is dropped before any write to those bytes.
+			if sum, ok := au.lookup(r.Offset, r.Length); ok {
+				sums[i] = sum
+				continue
+			}
+		}
+		todo = append(todo, i)
+	}
+	// Hash the rest from disk, spread across cores.
+	var wg sync.WaitGroup
+	next := make(chan int)
+	for range hashWorkers(len(todo)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				r := ranges[i]
+				sum, err := hashRange(file, r.Offset, r.Length)
+				if err != nil {
+					continue
+				}
+				sums[i] = hex.EncodeToString(sum[:])
+				if au != nil {
+					au.record(r.Offset, r.Length, sum)
+				}
+			}
+		}()
+	}
+	for _, i := range todo {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	for i, r := range ranges {
+		if sums[i] == "" {
+			continue
+		}
+		result.RangeChecksums = append(result.RangeChecksums, proto.FileRangeChecksum{
+			Offset: r.Offset, Length: r.Length, SHA256: sums[i],
+		})
+	}
 	return result, nil
+}
+
+// Put writes a whole small file in one round trip: private temp file beside the
+// destination, checksum verified, fsync, atomic rename — exactly what
+// open_write/write/finalize guarantee for larger files.
+func (m *fileManager) Put(_ context.Context, p proto.FilePutPayload) (proto.FileFinalizeResult, error) {
+	if len(p.Data) > proto.MaxRawChunkBytes {
+		return proto.FileFinalizeResult{}, &RPCError{
+			Code:    "chunk_too_large",
+			Message: fmt.Sprintf("file of %d bytes exceeds max %d for file.put", len(p.Data), proto.MaxRawChunkBytes),
+		}
+	}
+	real, rerr := validateTransferEntryPath(p.Path)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	sum := sha256.Sum256(p.Data)
+	digest := hex.EncodeToString(sum[:])
+	if p.SHA256 == "" || p.SHA256 != digest {
+		return proto.FileFinalizeResult{}, &RPCError{Code: "checksum_mismatch", Message: "file checksum mismatch"}
+	}
+	root, finalRel, rerr := openTransferRoot(real)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	defer root.Close()
+	mode := p.Mode
+	if mode == 0 {
+		mode = 0o644
+	}
+	size, err := writeAtomically(root, finalRel, os.FileMode(mode), func(f *os.File) (int64, error) {
+		n, err := f.Write(p.Data)
+		return int64(n), err
+	})
+	if err != nil {
+		return proto.FileFinalizeResult{}, err
+	}
+	return proto.FileFinalizeResult{Path: real, Size: size, SHA256: digest}, nil
+}
+
+// writeAtomically creates a fresh, private temp file next to finalRel, fills it
+// with fill, syncs it, applies mode and renames it over finalRel. A planted
+// symlink at the destination is replaced, never followed. On any failure the
+// temp file is removed.
+func writeAtomically(root *os.Root, finalRel string, mode os.FileMode, fill func(*os.File) (int64, error)) (int64, *RPCError) {
+	if rerr := targetIsDirectory(root, finalRel); rerr != nil {
+		return 0, rerr
+	}
+	id, err := randomTempID()
+	if err != nil {
+		return 0, &RPCError{Code: "internal_error", Message: err.Error()}
+	}
+	tempRel := finalRel + ".fleet-" + id + ".part"
+	if filepath.Dir(tempRel) != filepath.Dir(finalRel) {
+		return 0, invalidTransferID()
+	}
+	if rerr := checkBlockedTransferPath(filepath.Join(root.Name(), tempRel)); rerr != nil {
+		return 0, rerr
+	}
+	reapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
+	f, err := root.OpenFile(tempRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+	if err != nil {
+		return 0, &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	cleanup := func(code string, err error) (int64, *RPCError) {
+		_ = f.Close()
+		_ = root.Remove(tempRel)
+		return 0, &RPCError{Code: code, Message: err.Error()}
+	}
+	n, err := fill(f)
+	if err != nil {
+		var rerr *RPCError
+		if e, ok := err.(*RPCError); ok {
+			rerr = e
+		} else {
+			rerr = &RPCError{Code: "write_failed", Message: err.Error()}
+		}
+		_ = f.Close()
+		_ = root.Remove(tempRel)
+		return 0, rerr
+	}
+	if err := f.Sync(); err != nil {
+		return cleanup("sync_failed", err)
+	}
+	_ = f.Chmod(mode) // best effort; some filesystems disallow
+	if err := f.Close(); err != nil {
+		_ = root.Remove(tempRel)
+		return 0, &RPCError{Code: "close_failed", Message: err.Error()}
+	}
+	if err := root.Rename(tempRel, finalRel); err != nil {
+		_ = root.Remove(tempRel)
+		return 0, &RPCError{Code: "rename_failed", Message: err.Error()}
+	}
+	return n, nil
+}
+
+// Copy duplicates a regular file on this host without the bytes leaving it.
+// The source is resolved like a read (symlinks followed, sandbox enforced); the
+// destination is written like an upload.
+func (m *fileManager) Copy(_ context.Context, p proto.FileCopyPayload) (proto.FileFinalizeResult, error) {
+	src, rerr := validateTransferPath(p.From)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	dst, rerr := validateTransferEntryPath(p.To)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	srcRoot, srcRel, rerr := openTransferRoot(src)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	defer srcRoot.Close()
+	in, err := srcRoot.Open(srcRel)
+	if err != nil {
+		return proto.FileFinalizeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	defer in.Close()
+	srcInfo, err := in.Stat()
+	if err != nil {
+		return proto.FileFinalizeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+	}
+	if !srcInfo.Mode().IsRegular() {
+		return proto.FileFinalizeResult{}, &RPCError{Code: "not_regular", Message: "copy source is not a regular file"}
+	}
+	dstRoot, dstRel, rerr := openTransferRoot(dst)
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	defer dstRoot.Close()
+	if info, err := dstRoot.Stat(dstRel); err == nil && os.SameFile(info, srcInfo) {
+		return proto.FileFinalizeResult{}, &RPCError{Code: "same_file", Message: "source and destination are the same file"}
+	}
+	mode := os.FileMode(p.Mode)
+	if mode == 0 {
+		mode = srcInfo.Mode().Perm()
+	}
+	want := srcInfo.Size()
+	h := sha256.New()
+	size, rerr := writeAtomically(dstRoot, dstRel, mode, func(f *os.File) (int64, error) {
+		bufp := ioBufPool.Get().(*[]byte)
+		defer ioBufPool.Put(bufp)
+		// Copy exactly the size seen at open: a file that shrinks underneath
+		// us is an error, one that grows is copied as it was.
+		n, err := io.CopyBuffer(io.MultiWriter(f, h), io.NewSectionReader(in, 0, want), *bufp)
+		if err == nil && n != want {
+			err = &RPCError{Code: "source_changed", Message: fmt.Sprintf("source shrank during copy: copied %d of %d bytes", n, want)}
+		}
+		return n, err
+	})
+	if rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
+	}
+	return proto.FileFinalizeResult{Path: dst, Size: size, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 func (m *fileManager) Mkdir(_ context.Context, p proto.FileMkdirPayload) (proto.FileOpResult, error) {
@@ -839,6 +1478,11 @@ func (m *fileManager) Delete(_ context.Context, p proto.FileDeletePayload) (prot
 		return proto.FileOpResult{}, rerr
 	}
 	defer root.Close()
+	if rel == "." {
+		// Never remove a whole file root (or the filesystem root) as one
+		// operand; delete its contents individually instead.
+		return proto.FileOpResult{}, &RPCError{Code: "invalid_path", Message: "refusing to delete a file root"}
+	}
 	var err error
 	if p.Recursive {
 		err = root.RemoveAll(rel)
@@ -872,6 +1516,9 @@ func (m *fileManager) Rename(_ context.Context, p proto.FileRenamePayload) (prot
 	defer toRoot.Close()
 	if fromRoot.Name() != toRoot.Name() {
 		return proto.FileOpResult{}, &RPCError{Code: "rename_failed", Message: "cross-root rename is not permitted"}
+	}
+	if fromRel == "." || toRel == "." {
+		return proto.FileOpResult{}, &RPCError{Code: "invalid_path", Message: "refusing to rename a file root"}
 	}
 	if err := fromRoot.Rename(fromRel, toRel); err != nil {
 		return proto.FileOpResult{}, &RPCError{Code: "rename_failed", Message: err.Error()}

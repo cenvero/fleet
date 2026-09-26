@@ -43,6 +43,7 @@ func DetectCapabilities() []string {
 		// exact batch after durable controller-side persistence.
 		proto.CapabilityMetricsPeekAck,
 	}
+	caps = append(caps, fileCapabilities()...)
 	switch runtime.GOOS {
 	case "linux":
 		caps = append(caps, "service.manage", "firewall.manage", "port.manage")
