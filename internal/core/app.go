@@ -553,6 +553,35 @@ func (a *App) teardownAgentWithPassword(server ServerRecord, password string) er
 	return a.TeardownAgent(server)
 }
 
+// ProbeAgent returns the hello of the agent that is live right now: over a
+// fresh (unpooled) connection in direct mode — which also refreshes the
+// recorded observation — or from the daemon's current session in reverse mode.
+// Unlike the recorded Observed.AgentVersion, which an agent update records as
+// soon as it is applied, this reflects the version actually running. It
+// writes no audit entry, so it is cheap to poll.
+func (a *App) ProbeAgent(ctx context.Context, name string) (proto.HelloPayload, error) {
+	server, err := a.GetServer(name)
+	if err != nil {
+		return proto.HelloPayload{}, err
+	}
+	if server.Mode == transport.ModeReverse {
+		info, err := a.reverseStatus(name)
+		if err != nil {
+			return proto.HelloPayload{}, err
+		}
+		if !info.Connected {
+			return proto.HelloPayload{}, fmt.Errorf("reverse agent %s is not connected", name)
+		}
+		return info.Hello, nil
+	}
+	session, hello, err := a.openDirectSessionContext(ctx, server, false)
+	if err != nil {
+		return proto.HelloPayload{}, err
+	}
+	_ = session.Close()
+	return hello, nil
+}
+
 func (a *App) ReconnectServer(name string, acceptNewHostKey bool) error {
 	server, err := a.GetServer(name)
 	if err != nil {
@@ -984,9 +1013,80 @@ func (a *App) ExecCommandContext(ctx context.Context, serverName, command string
 	if err != nil {
 		return proto.ExecResult{}, err
 	}
+	return a.execPayloadContext(ctx, server, proto.ExecPayload{Command: command})
+}
+
+// ExecCommandEnvContext runs command with extra environment variables (e.g.
+// resolved --secret values) visible to the WHOLE command, not just its first
+// simple command. Agents advertising proto.CapabilityExecEnv get them in the
+// payload and set them on the process, so the values never appear on a command
+// line. Older POSIX agents get an `export VAR='value'; ` prefix instead. Older
+// Windows agents run commands through cmd.exe, where no quoting carries
+// arbitrary values safely, so the call is refused. Errors name variables only,
+// never values.
+func (a *App) ExecCommandEnvContext(ctx context.Context, serverName, command string, env map[string]string) (proto.ExecResult, error) {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	payload, err := execPayloadWithEnv(server, command, env)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	return a.execPayloadContext(ctx, server, payload)
+}
+
+// execPayloadWithEnv builds the shell.exec payload for command + env, choosing
+// the process-environment field or the POSIX export prefix (see
+// ExecCommandEnvContext).
+func execPayloadWithEnv(server ServerRecord, command string, env map[string]string) (proto.ExecPayload, error) {
+	if len(env) == 0 {
+		return proto.ExecPayload{Command: command}, nil
+	}
+	names := make([]string, 0, len(env))
+	for name := range env {
+		if !validShellEnvName(name) {
+			return proto.ExecPayload{}, fmt.Errorf("invalid environment variable name %q", name)
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	if slices.Contains(server.Capabilities, proto.CapabilityExecEnv) {
+		return proto.ExecPayload{Command: command, Env: env}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(server.Observed.OS), "windows") {
+		return proto.ExecPayload{}, fmt.Errorf("server %s runs an agent without environment support; update its agent to pass %s to a Windows command", server.Name, strings.Join(names, ", "))
+	}
+	var prefix strings.Builder
+	for _, name := range names {
+		prefix.WriteString("export ")
+		prefix.WriteString(name)
+		prefix.WriteString("=")
+		prefix.WriteString(shellQuote(env[name]))
+		prefix.WriteString("; ")
+	}
+	return proto.ExecPayload{Command: prefix.String() + command}, nil
+}
+
+func validShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) execPayloadContext(ctx context.Context, server ServerRecord, payload proto.ExecPayload) (proto.ExecResult, error) {
 	response, err := a.callRPCContext(ctx, server, proto.Envelope{
 		Action:  "shell.exec",
-		Payload: proto.ExecPayload{Command: command},
+		Payload: payload,
 	})
 	if err != nil {
 		return proto.ExecResult{}, err
@@ -1162,7 +1262,44 @@ func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, 
 	return a.callRPCContext(context.Background(), server, env)
 }
 
+// lastSeenRefreshAge bounds how often a successful call rewrites a server's
+// record just to refresh Observed.LastSeen: at most once per server per 30s,
+// however busy the server is.
+const lastSeenRefreshAge = 30 * time.Second
+
+// callRPCContext performs one control RPC and, when the agent answered,
+// refreshes the server's "last seen" (see noteServerSeen). Pooled and relayed
+// calls never redial, so without this LastSeen froze at the last dial.
 func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+	resp, err := a.callRPCContextRaw(ctx, server, env)
+	if err == nil {
+		a.noteServerSeen(server)
+	}
+	return resp, err
+}
+
+// noteServerSeen marks a server reachable and seen now, rewriting its record
+// only when the stored LastSeen is older than lastSeenRefreshAge (or it is
+// marked unreachable). It re-reads the record first so it never reverts fields
+// that changed during the call (e.g. a redial's fresh hello).
+func (a *App) noteServerSeen(server ServerRecord) {
+	fresh := func(s ServerRecord) bool {
+		return s.Observed.Reachable && time.Since(s.Observed.LastSeen) < lastSeenRefreshAge
+	}
+	if fresh(server) {
+		return
+	}
+	current, err := a.GetServer(server.Name)
+	if err != nil || fresh(current) {
+		return
+	}
+	current.Observed.Reachable = true
+	current.Observed.LastSeen = time.Now().UTC()
+	current.Observed.LastError = ""
+	_ = a.SaveServer(current)
+}
+
+func (a *App) callRPCContextRaw(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		env.DeadlineUnixMilli = deadline.UnixMilli()
 	}

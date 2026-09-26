@@ -69,6 +69,8 @@ func runPolicySet(cmd *cobra.Command, configDir, key, value string) error {
 		if err := store.SetPatterns(patterns); err != nil {
 			return err
 		}
+		// Count only: a redaction pattern may itself be a literal secret.
+		auditLocal(configDir, "policy.set", "controller", fmt.Sprintf("redact-patterns count=%d", len(patterns)))
 		fmt.Fprintf(out, "redact patterns set (%d)\n", len(patterns))
 		return nil
 	case "redact-defaults":
@@ -79,6 +81,7 @@ func runPolicySet(cmd *cobra.Command, configDir, key, value string) error {
 		if err := store.SetDefaults(enabled); err != nil {
 			return err
 		}
+		auditLocal(configDir, "policy.set", "controller", "redact-defaults "+onOff(enabled))
 		fmt.Fprintf(out, "redact defaults %s\n", onOff(enabled))
 		return nil
 	default:

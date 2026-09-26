@@ -80,6 +80,8 @@ func newApprovalsCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			auditLocal(*configDir, "approval.reject", approval.Server,
+				fmt.Sprintf("id=%s command=%q", approval.ID, redactForAudit(*configDir, approval.Command)))
 			fmt.Fprintf(cmd.OutOrStdout(), "rejected approval %s (%s on %s)\n", approval.ID, approval.Command, approval.Server)
 			return nil
 		},
@@ -145,6 +147,9 @@ func newApproveCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The run itself is audited by the child `fleet exec` (exec.run).
+			auditLocal(*configDir, "approval.approve", approval.Server,
+				fmt.Sprintf("id=%s command=%q", approval.ID, redactForAudit(*configDir, approval.Command)))
 			fmt.Fprintf(notes, "approved approval %s — running it now on %s\n", approval.ID, approval.Server)
 
 			tokenFlag, _ := cmd.Flags().GetString("token")

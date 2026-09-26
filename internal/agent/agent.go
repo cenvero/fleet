@@ -42,6 +42,9 @@ func DetectCapabilities() []string {
 		// Offline metrics remain queued until the controller explicitly acks the
 		// exact batch after durable controller-side persistence.
 		proto.CapabilityMetricsPeekAck,
+		// shell.exec honours ExecPayload.Env (e.g. --secret values reach the
+		// whole command via the process environment, not the command line).
+		proto.CapabilityExecEnv,
 	}
 	caps = append(caps, fileCapabilities()...)
 	switch runtime.GOOS {

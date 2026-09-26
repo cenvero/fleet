@@ -58,7 +58,7 @@ func TestUpdateBatchRunsServersConcurrentlyInOrder(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	start := time.Now()
-	err = updateBatch(cmd, app, servers)
+	_, err = updateBatch(cmd, app, servers)
 	elapsed := time.Since(start)
 	if err == nil || err.Error() != "1 server(s) failed: agent-4" {
 		t.Fatalf("updateBatch error = %v", err)

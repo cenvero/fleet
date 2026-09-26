@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/logs"
@@ -38,7 +39,9 @@ func (a *App) collectMetricsContext(ctx context.Context, serverName string, reco
 		return proto.MetricsSnapshot{}, err
 	}
 
-	response, err := a.callRPCContext(ctx, server, proto.Envelope{
+	// Raw call: this path saves the record itself below (with LastSeen), so
+	// the generic last-seen refresh would only add a second write.
+	response, err := a.callRPCContextRaw(ctx, server, proto.Envelope{
 		Action:  "metrics.collect",
 		Payload: proto.MetricsPayload{Server: serverName},
 	})
@@ -57,7 +60,16 @@ func (a *App) collectMetricsContext(ctx context.Context, serverName string, reco
 		return proto.MetricsSnapshot{}, err
 	}
 
+	// Re-read the record: the call may have redialled and recorded a fresh
+	// hello (agent version, capabilities), which saving the copy read before
+	// the call would silently revert. A successful poll is also a sighting.
+	if current, gerr := a.GetServer(serverName); gerr == nil {
+		server = current
+	}
 	server.Metrics = snapshot
+	server.Observed.Reachable = true
+	server.Observed.LastSeen = time.Now().UTC()
+	server.Observed.LastError = ""
 	if err := a.SaveServer(server); err != nil {
 		return proto.MetricsSnapshot{}, err
 	}

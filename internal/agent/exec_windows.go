@@ -55,6 +55,13 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	defer cancel()
 
 	cmd := exec.Command("cmd.exe", "/C", payload.Command) // #nosec G204 -- authenticated shell.exec RPC intentionally executes the operator command
+	if len(payload.Env) > 0 {
+		env, err := execEnvironment(payload.Env)
+		if err != nil {
+			return proto.ExecResult{}, err
+		}
+		cmd.Env = env
+	}
 	var stdout, stderr windowsCappedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

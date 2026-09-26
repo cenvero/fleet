@@ -171,6 +171,11 @@ func NewRootCommand() *cobra.Command {
 			// load it and authorize this invocation against its scope.
 			return enforceToken(cmd, configDir, tokenID)
 		},
+		// Runs only after a command's RunE succeeded (cobra skips it on error).
+		PersistentPostRunE: func(cmd *cobra.Command, _ []string) error {
+			notifyDestructiveOperation(cmd, configDir)
+			return nil
+		},
 	}
 
 	root.Version = version.Version
@@ -3021,23 +3026,33 @@ Examples:
 				return redactSecretValues(s, secrets)
 			}
 
-			// secretEnvPrefix builds the environment assignment prefix prepended to
-			// the remote command for actual execution: `VAR1=<quoted v1> ... `. The
-			// values are shell-quoted with the package shellQuote so arbitrary bytes
-			// are safe. This string contains secret VALUES and must NEVER be printed,
-			// echoed, or logged — only handed to app.ExecCommand.
-			secretEnvPrefix := func() string {
+			// secretEnv maps each --secret VAR to its resolved value for actual
+			// execution. It contains secret VALUES and must NEVER be printed,
+			// echoed, or logged — only handed to app.ExecCommandEnvContext, which
+			// makes the variables visible to the WHOLE remote command (a
+			// `VAR='v' cmd` prefix only reached the first simple command).
+			secretEnv := func() map[string]string {
 				if len(secrets) == 0 {
-					return ""
+					return nil
 				}
-				var b strings.Builder
+				env := make(map[string]string, len(secrets))
 				for _, sec := range secrets {
-					b.WriteString(sec.name)
-					b.WriteString("=")
-					b.WriteString(shellQuote(sec.value))
-					b.WriteString(" ")
+					env[sec.name] = sec.value
 				}
-				return b.String()
+				return env
+			}
+			execRemote := func(ctx context.Context, server, command string) (proto.ExecResult, error) {
+				if len(secrets) == 0 {
+					return app.ExecCommandContext(ctx, server, command)
+				}
+				r, err := app.ExecCommandEnvContext(ctx, server, command, secretEnv())
+				if err != nil {
+					// Defence in depth: never let a value slip out via an error.
+					if msg := redactSecretValues(err.Error(), secrets); msg != err.Error() {
+						err = redactedError{msg: msg, err: err}
+					}
+				}
+				return r, err
 			}
 
 			// secretDisplayPrefix builds the SAFE assignment prefix for echo/dry-run:
@@ -3078,10 +3093,9 @@ Examples:
 			// execTimedOut): the agent's own kill used to race the controller's
 			// deadline and surface as a bare exit -1 or a transport error.
 			runOnce := func(server, command string) (proto.ExecResult, bool, error) {
-				command = secretEnvPrefix() + command
 				if timeout <= 0 {
 					start := time.Now()
-					r, e := app.ExecCommandContext(commandCtx, server, command)
+					r, e := execRemote(commandCtx, server, command)
 					if e == nil && agentDefaultLimitHit(r, time.Since(start)) {
 						return proto.ExecResult{}, true,
 							fmt.Errorf("timed out after %s (the agent's default command limit): %w", agentDefaultExecTimeout, context.DeadlineExceeded)
@@ -3091,7 +3105,7 @@ Examples:
 				execCtx, cancel := context.WithTimeout(commandCtx, timeout)
 				defer cancel()
 				deadline, _ := execCtx.Deadline()
-				r, e := app.ExecCommandContext(execCtx, server, command)
+				r, e := execRemote(execCtx, server, command)
 				if execTimedOut(execCtx, commandCtx, timeout, deadline, time.Now(), r, e) {
 					return proto.ExecResult{}, true, fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
 				}
@@ -3171,6 +3185,7 @@ Examples:
 					if serr != nil {
 						return true, "", fmt.Errorf("stage approval: %w", serr)
 					}
+					_ = app.Audit("approval.stage", server, fmt.Sprintf("id=%s command=%q", id, redact(secretDisplayPrefix()+command)))
 					fmt.Fprintf(w.note, "staged approval %s for %s — run: fleet approve %s\n", id, server, id)
 					return true, id, nil
 				}
@@ -3227,6 +3242,9 @@ Examples:
 				// run, then redact, then handle on-fail.
 				r, timedOut, dur, agentErr := run(server, command)
 				j := toJSON(server, r, timedOut, agentErr, dur)
+				// Audit what ran: the displayed command (secret references, never
+				// values), redacted, with its exit code / timeout / error.
+				_ = app.Audit("exec.run", server, execAuditDetails(redact(secretDisplayPrefix()+command), j))
 				if idempotencyKey != "" {
 					if data, merr := json.Marshal(j); merr == nil {
 						_ = idemStore.Put(idemKey(server, command), string(data), time.Hour)
@@ -3252,6 +3270,7 @@ Examples:
 					}
 					or, oTimedOut, oDur, oAgentErr := run(server, onFail)
 					oj := toJSON(server, or, oTimedOut, oAgentErr, oDur)
+					_ = app.Audit("exec.run", server, execAuditDetails(redact(secretDisplayPrefix()+onFail), oj)+" on_fail=true")
 					if human {
 						printExecHuman(w.out, w.err, j, printHeader)
 						fmt.Fprintf(w.out, "--- on-fail: %s ---\n", onFail)

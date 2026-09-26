@@ -364,8 +364,17 @@ type ControllerKnownHostsResult struct {
 	Fingerprints []string `json:"fingerprints,omitempty"`
 }
 
+// CapabilityExecEnv is advertised by agents that apply ExecPayload.Env to the
+// environment of the process running the command.
+const CapabilityExecEnv = "exec.env"
+
 type ExecPayload struct {
 	Command string `json:"command"`
+	// Env holds extra environment variables (e.g. resolved --secret values) for
+	// the command's process, so they reach the whole command without being
+	// spliced into its command line. Controllers send it only to agents that
+	// advertise CapabilityExecEnv; older agents would silently ignore it.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 type ExecResult struct {
