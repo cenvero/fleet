@@ -1176,6 +1176,9 @@ FLEET_TOKEN=08f253baa4f39be3a2ac27d6c0c294fe fleet exec web-01 uptime
 - A server-scoped token may run only in-scope server commands and a small set of safe local ones. Controller management (`config`, `key`, `backup` …), fan-out reads and cross-server transfers it cannot fully check are denied.
 - A scoped token can never create or change tokens, and cannot [approve](https://fleet.cenvero.org/docs/#approvals) staged commands.
 - Token IDs are stored hashed in `tokens.json`; `token list` shows a short prefix only. Denied attempts are written to the audit log.
+- A scoped token cannot use the controller's own files — config directory, keys, `known_hosts`, token and secret stores, data, logs — as the local side of `file upload`/`download`, `sync`, `service logs --export` or `file edit --content` (Next release)
+
+> Tokens limit what an automation can do *through `fleet`*; they are not an operating-system boundary. A process running as the same OS user as the controller can read its key files directly. To contain an agent you don't fully trust, run it as a separate user that cannot read the controller's config directory.
 
 ## Secrets and redaction
 

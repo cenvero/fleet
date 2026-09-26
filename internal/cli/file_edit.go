@@ -12,12 +12,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
@@ -95,7 +95,7 @@ func newFileViewCommand(configDir *string) *cobra.Command {
 			for i := max(start, 1); i <= end; i++ {
 				line := strings.TrimRight(lines[i-1], "\r\n")
 				if tty {
-					line = terminalSafe(line)
+					line = safetext.Terminal(line, false)
 				}
 				fmt.Fprintf(out, "%6d\t%s\n", i, line)
 			}
@@ -107,34 +107,16 @@ func newFileViewCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
-// terminalSafe makes text that came from a server safe to print on a
-// terminal: control characters other than tab — ESC, which starts terminal
-// escape sequences, and the C1 controls among them — are shown as visible
-// escapes such as \x1b, and invalid UTF-8 as U+FFFD. It is applied only when
-// writing to a terminal; piped output (scripts, AI agents) stays byte-exact so
-// the text can be copied into --old.
-func terminalSafe(s string) string {
-	unsafe := func(r rune) bool { return (r < 0x20 && r != '\t') || (r >= 0x7f && r <= 0x9f) }
-	if !strings.ContainsFunc(s, unsafe) && utf8.ValidString(s) {
-		return s
-	}
-	var b strings.Builder
-	for _, r := range s {
-		if unsafe(r) {
-			fmt.Fprintf(&b, "\\x%02x", r)
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-// terminalSafeLines applies terminalSafe to each line of a diff, dropping the
-// "\r" of CRLF line endings rather than showing it.
+// terminalSafeLines makes a diff that carries file content from a server safe
+// to show on a terminal: control characters (ESC included), bidi overrides and
+// invalid UTF-8 in each line become visible escapes (safetext.Terminal), and
+// the "\r" of CRLF line endings is dropped rather than shown. It is applied
+// only when writing to a terminal; piped output (scripts, AI agents) stays
+// byte-exact so text can be copied into --old.
 func terminalSafeLines(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		lines[i] = terminalSafe(strings.TrimSuffix(l, "\r"))
+		lines[i] = safetext.Terminal(strings.TrimSuffix(l, "\r"), false)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -335,7 +317,7 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 			return nil
 		}
 		for _, it := range items {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %s → %s  %s  by %s\n", it.Time.Local().Format("2006-01-02 15:04:05"), it.Path, shortHash(it.OldSHA256), shortHash(it.NewSHA256), humanizeBytes(it.OldSize), firstNonEmpty(it.Operator, "?"))
+			fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %s → %s  %s  by %s\n", it.Time.Local().Format("2006-01-02 15:04:05"), safetext.Terminal(it.Path, false), safetext.Terminal(shortHash(it.OldSHA256), false), safetext.Terminal(shortHash(it.NewSHA256), false), humanizeBytes(it.OldSize), safetext.Terminal(firstNonEmpty(it.Operator, "?"), false))
 		}
 		return nil
 	case f.undo:
@@ -358,7 +340,7 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 	case fl.Changed("insert-after"):
 		req.Ops = []proto.FileEditOp{{Kind: proto.FileEditOpInsert, Line: f.insertAfter, Text: f.text}}
 	case fl.Changed("edits"):
-		data, err := readEditSource(cmd, app, f.editsPath)
+		data, err := readEditSource(cmd, configDir, app, f.editsPath)
 		if err != nil {
 			return err
 		}
@@ -369,7 +351,7 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 		if !f.create && req.BaseSHA256 == "" && !f.force {
 			return fmt.Errorf("replacing a whole file needs --expect-sha256 <hash from `fleet file view`> so it cannot overwrite a newer version (or --force to replace whatever is there, or --create for a new file)")
 		}
-		data, err := readEditSource(cmd, app, f.contentPath)
+		data, err := readEditSource(cmd, configDir, app, f.contentPath)
 		if err != nil {
 			return err
 		}
@@ -409,9 +391,15 @@ func isHexSHA256(s string) bool {
 }
 
 // readEditSource reads --content / --edits input from a file or stdin ("-").
-func readEditSource(cmd *cobra.Command, app *core.App, source string) ([]byte, error) {
+// A scoped token may not read the controller's own protected files this way:
+// sending the controller key as a file's content would hand out access to
+// every server, exactly as `file upload` would.
+func readEditSource(cmd *cobra.Command, configDir string, app *core.App, source string) ([]byte, error) {
 	if source == "-" {
 		return app.ReadEditInput(cmd.InOrStdin())
+	}
+	if err := refuseScopedProtectedPath(cmd, configDir, app, source, false); err != nil {
+		return nil, err
 	}
 	fh, err := os.Open(source) // #nosec G304 -- operator-chosen local input file
 	if err != nil {
@@ -444,8 +432,12 @@ func printEditResult(cmd *cobra.Command, server, remotePath string, res core.Edi
 		return writeJSON(cmd, res)
 	}
 	out := cmd.OutOrStdout()
+	// Everything below except the diff is metadata the agent reported (the
+	// resolved path, hashes, owner names); show any control characters in it
+	// as escapes, terminal or not.
+	clean := func(s string) string { return safetext.Terminal(s, false) }
 	if !res.Changed {
-		fmt.Fprintf(out, "no change: %s:%s already has that content (sha256 %s)\n", server, remotePath, res.NewSHA256)
+		fmt.Fprintf(out, "no change: %s:%s already has that content (sha256 %s)\n", server, remotePath, clean(res.NewSHA256))
 		return nil
 	}
 	if res.DryRun {
@@ -457,22 +449,22 @@ func printEditResult(cmd *cobra.Command, server, remotePath string, res core.Edi
 	}
 	target := server + ":" + remotePath
 	if res.Path != "" && res.Path != remotePath {
-		target += " → " + res.Path
+		target += " → " + clean(res.Path)
 	}
 	check := ""
 	if res.Verified {
 		check = ", verified on disk"
 	}
 	fmt.Fprintf(out, "%s %s (%s%s)\n", verb, target, changes, check)
-	fmt.Fprintf(out, "  sha256 %s → %s\n", firstNonEmpty(res.OldSHA256, "(new file)"), res.NewSHA256)
+	fmt.Fprintf(out, "  sha256 %s → %s\n", clean(firstNonEmpty(res.OldSHA256, "(new file)")), clean(res.NewSHA256))
 	fmt.Fprintf(out, "  size   %s → %s\n", humanizeBytes(res.OldSize), humanizeBytes(res.NewSize))
 	owner := ""
 	if res.Owner != "" {
-		owner = "  owner " + res.Owner + ":" + res.Group
+		owner = "  owner " + clean(res.Owner) + ":" + clean(res.Group)
 	}
 	kept := ""
 	if len(res.Preserved) > 0 {
-		kept = "  kept " + strings.Join(res.Preserved, ", ")
+		kept = "  kept " + clean(strings.Join(res.Preserved, ", "))
 	}
 	fmt.Fprintf(out, "  mode   %04o%s%s\n", res.Mode&0o7777, owner, kept)
 	if res.Diff != "" {

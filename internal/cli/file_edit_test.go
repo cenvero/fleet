@@ -104,23 +104,12 @@ func TestIsHexSHA256(t *testing.T) {
 	}
 }
 
-func TestTerminalSafe(t *testing.T) {
+func TestTerminalSafeLines(t *testing.T) {
 	t.Parallel()
-	cases := map[string]string{
-		"plain\ttext":           "plain\ttext",
-		"\x1b]0;pwned\x07title": `\x1b]0;pwned\x07title`,
-		"a\u009bb":              `a\x9bb`,
-		"raw\x9bbyte":           "raw\ufffdbyte",
-		"bad\xffbyte":           "bad\ufffdbyte",
-		"ünïcödé ok":            "ünïcödé ok",
-		"del\x7f":               `del\x7f`,
-	}
-	for in, want := range cases {
-		if got := terminalSafe(in); got != want {
-			t.Errorf("terminalSafe(%q) = %q, want %q", in, got, want)
-		}
-	}
-	if got := terminalSafeLines("-a\r\n+b\x1b[2J\r\n"); got != "-a\n+b\\x1b[2J\n" {
+	if got := terminalSafeLines("-a\r\n+b\x1b[2J\r\n+ok\u202etxt"); got != "-a\n+b\\x1b[2J\n+ok\\u202etxt" {
 		t.Errorf("terminalSafeLines = %q", got)
+	}
+	if got := terminalSafeLines(" plain\ttext\n"); got != " plain\ttext\n" {
+		t.Errorf("clean text changed: %q", got)
 	}
 }

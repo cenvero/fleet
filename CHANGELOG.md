@@ -214,6 +214,29 @@ Omit sections that have no entries for that release.
 
 ### Security
 
+- `fleet approve` and `fleet approvals list/reject` show staged commands and options with
+  hidden characters escaped (control characters, carriage returns, bidi overrides, zero-width
+  characters) and warn about them. A staged `curl …|sh #\r\x1b[2Kuptime` can no longer be
+  shown to the approver as `uptime`.
+- Scoped RBAC tokens can no longer use the controller's protected files (config directory,
+  keys, `known_hosts`, token and secret stores, data, logs, databases) as the local side of
+  `file upload`/`download`, `sync`, `service logs --export` or `file edit --content/--edits`.
+  A token scoped to one server could otherwise upload the controller's private key to it, or
+  download over `tokens.json` to rewrite its own scope. Unscoped use is unchanged.
+- A hostile agent can no longer break the audit log: fields are bounded before hashing. A
+  5 MB error from a reverse agent's metrics replay used to make every later audit read and
+  append fail.
+- Text an agent sends is neutralised before it reaches the operator's terminal or a server
+  record: error codes and messages, hello fields (bounded, capability list capped), and log
+  lines from `logs`, `service logs`, `file tail` and `journal` (`--export` keeps the exact
+  bytes). OSC 52 clipboard writes, title changes and line rewriting are shown as escapes.
+- Agent metrics text is bounded (1 KiB per field) and one connection's metrics replay is
+  capped. A hostile agent could otherwise store about 16 MiB per poll in the server record
+  and history.
+- Bootstrap, agent install and teardown stage files in a private `/tmp/cenvero-<random>/`
+  directory, created with `mkdir -m 0700` and removed afterwards, instead of predictable
+  files directly in `/tmp`. This closes a race in which a local user on the server could make
+  root write the agent binary or install script into a file that user owns.
 - The daemon's local control socket is mutually authenticated: callers no longer send
   the control token (or, with the direct-mode relay, commands and file data) to
   whatever listens on the control address before the daemon has proved it holds the

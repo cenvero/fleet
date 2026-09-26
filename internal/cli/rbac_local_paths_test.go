@@ -43,13 +43,16 @@ func TestScopedTokenCannotReachProtectedLocalPaths(t *testing.T) {
 		{"sync push of config dir", []string{"sync", "srv-01", dir, "/tmp/mirror"}},
 		{"sync pull over config dir parent", []string{"sync", "--from", "remote", "srv-01", parent, "/tmp/x"}},
 		{"service log export over known_hosts", []string{"service", "logs", "srv-01", "nginx", "--export", filepath.Join(dir, "keys", "known_hosts")}},
+		{"file edit content from controller key", []string{"file", "edit", "srv-01", "/tmp/k", "--content", key, "--force"}},
+		{"file edit create from controller key", []string{"file", "edit", "srv-01:/tmp/k", "--content", key, "--create"}},
+		{"file edit list from tokens.json", []string{"file", "edit", "srv-01", "/tmp/k", "--edits", filepath.Join(dir, "tokens.json")}},
 	}
 	for _, c := range denied {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("FLEET_TOKEN", tok.ID)
 			before := fake.calls.Load()
 			res := runExecFleet(t, dir, c.args...)
-			if res.err == nil || !strings.Contains(res.err.Error(), "denied") {
+			if res.err == nil || !strings.Contains(res.err.Error(), "controller's configuration directory or key files") {
 				t.Errorf("err = %v, want a scoped-token denial (stderr=%q)", res.err, res.stderr)
 			}
 			if n := fake.calls.Load() - before; n != 0 {
