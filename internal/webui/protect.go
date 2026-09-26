@@ -351,9 +351,23 @@ func (s *Server) cleanLocal(p string) (string, error) {
 	return clean, nil
 }
 
-// cleanLocalTree is cleanLocal for operations that act on a whole tree: it
-// also refuses a path that contains a protected location.
+// cleanLocalWrite is cleanLocal for a single-entry mutation (write, create,
+// chmod, archive output, extraction target): the raw path must be non-empty
+// and free of "." and ".." components before it is cleaned.
+func (s *Server) cleanLocalWrite(p string) (string, error) {
+	if err := validateLocalMutationPath(p); err != nil {
+		return "", err
+	}
+	return s.cleanLocal(p)
+}
+
+// cleanLocalTree is cleanLocalWrite for operations that act on a whole tree
+// (copy, move, rename, delete, duplicate): it also refuses a path that
+// contains a protected location.
 func (s *Server) cleanLocalTree(p string) (string, error) {
+	if err := validateLocalMutationPath(p); err != nil {
+		return "", err
+	}
 	clean, err := cleanLocalPath(p)
 	if err != nil {
 		return "", err
