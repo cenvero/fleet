@@ -14,6 +14,7 @@ Already on `main` and landing in the release after v2.4.3: a large performance p
 
 ### Highlights
 
+- **Edit files in place:** `fleet file view` and `fleet file edit` change a file on the server with an exact-text replace, an insert or new content — no download and re-upload. The file keeps its owner, mode, ACLs and SELinux label, is replaced atomically (a dropped connection never leaves half a file), is only changed if it is still the version you read, and can be undone. Built to be safe for AI agents. [Docs](https://fleet.cenvero.org/docs/#file-edit)
 - **Much faster at scale:** fleet-wide `exec`, metrics polling, `health`, `top` and agent updates run servers concurrently; CLI calls reuse a running daemon's warm connection (about 550 → 90 ms per command at 50 ms latency); transfers and `fleet sync` are several times faster over latency.
 - **Terminal dashboard** rebuilt as a live operations console with sparklines, filters and actions; the **terminal file manager** gains a transfer queue, previews, bookmarks and go-to.
 - **Redesigned web UI** with light and dark themes, a phone layout, a command palette, previews, streaming downloads and a read-only **Fleet overview**.

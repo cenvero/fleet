@@ -594,8 +594,10 @@ fleet file extract web-01 /srv/releases/site.tar.gz
 
 ### Edit and compare
 
+To change a file, edit it in place on the server — see [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
+
 ```sh
-# Opens $EDITOR (then vi, then nano); uploads atomically only if you changed something
+# Interactive: opens $EDITOR (then vi, then nano) and saves back only if you changed something
 fleet file edit web-01:/etc/nginx/nginx.conf
 
 # Unified diff; exit status 1 when the files differ
@@ -623,6 +625,61 @@ fleet-agent serve --listen 0.0.0.0:2222 --authorized-keys ~/fleet-controller.pub
 ```
 
 > `--file-root` bounds listing, reading, writing, creating, deleting and renaming. Archive, permission and checksum operations run through the agent's shell and are **not** confined by it — restrict the agent's user if you need a hard boundary.
+
+## Edit files in place (Next release)
+
+`fleet file edit` changes a file **on the server** without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.
+
+- **Exact edits** — `--old` must match the file exactly (whitespace, indentation and line breaks included) and exactly once unless you pass `--all`, so an edit never lands somewhere you did not intend. Add lines with `--insert-after N --text`, apply several edits all-or-nothing with `--edits`, or replace the whole file with `--content`.
+- **Only the version you read** — `fleet file view` prints the file's sha256; pass it as `--expect-sha256` and the edit is refused with `edit_conflict` if the file changed in between, even while the edit is being applied.
+- **Permissions kept** — the new content is written to a private temp file beside the original, fsynced, read back and checked against its sha256, and given the original's owner, group, mode (including set-uid/set-gid), POSIX ACLs, SELinux label and other extended attributes before one atomic rename replaces the original. If anything cannot be carried over, nothing changes. Editing through a symlink changes its target and keeps the link.
+- **Network drops** — the agent acts only on a request that arrived whole, so a dropped connection changes nothing and nobody ever sees a half-written file. A retry after a lost reply returns the first result instead of editing twice.
+- **Undo** — the previous version is kept on the controller; `--undo` restores it, but only while the file is still exactly what that edit produced.
+
+### View, then edit
+
+```sh
+# Numbered lines plus the file's sha256 (add --lines 20:60 or --json)
+fleet file view web-01 /etc/nginx/nginx.conf
+
+# Replace exact text, only if the file is still the version you viewed
+fleet file edit web-01 /etc/nginx/nginx.conf \
+    --old 'worker_connections 768;' --new 'worker_connections 2048;' \
+    --expect-sha256 <sha256>
+
+# Check the change; undo it if the test fails
+fleet exec web-01 "nginx -t && systemctl reload nginx"
+fleet file edit web-01 /etc/nginx/nginx.conf --undo
+```
+
+### Other kinds of edit
+
+```sh
+# Insert lines after line 2 (0 inserts at the top)
+fleet file edit web-01 /etc/hosts --insert-after 2 --text '10.0.0.5 db-01'
+
+# Several edits from a JSON list, applied in order, all or nothing; preview first
+fleet file edit web-01 /srv/app/.env --edits edits.json --dry-run
+
+# Replace the whole file, or create a new one
+fleet file edit web-01 /srv/app/config.yml --content ./config.yml --expect-sha256 <sha256>
+fleet file edit web-01 /etc/motd --content - --create --mode 0644 < motd.txt
+
+# What can be undone
+fleet file edit web-01 /etc/nginx/nginx.conf --history
+```
+
+An edit list looks like `[{"old":"a","new":"b"}, {"old":"x","new":"y","all":true}, {"kind":"insert","line":12,"text":"z"}]`. Every edit prints a unified diff, the old and new sha256, the size, mode and owner (`--json` for a structured result), and is recorded in the audit log. CRLF files keep their line endings. Binary files, hard-linked files and files the agent's user could not write itself are refused. With no flags, `fleet file edit` opens the file in `$EDITOR` and saves it back the same safe way; the editors in both file managers do too.
+
+### Settings
+
+| Command | Default | What it does |
+|---|---|---|
+| `fleet config set edit-backups 20` | 10 | Versions kept per file for `--undo` (0 turns the history off). |
+| `fleet config set edit-max-size 2M` | 8M | Largest file that can be viewed or edited (8 MiB at most). |
+| `fleet config set edit-require-hash on` | off | Every non-interactive edit of an existing file must pass `--expect-sha256`. |
+
+> In-place editing needs agents with `file.edit` support. Update older agents with `fleet agent update <server>`; until then the interactive editors fall back to the atomic upload, which does not keep the file's owner.
 
 ## File manager
 

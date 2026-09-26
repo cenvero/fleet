@@ -43,8 +43,15 @@ fleet file tail <server> <path> [-n 200] [--search TEXT]
 fleet file diff <serverA:path> <serverB:path>    # unified line diff (exit 1 if they differ)
 fleet file diff --group <expr> <path>            # diff one path across every server matching the tag expression
 
-# Edit a remote file in $EDITOR (download → edit → atomic re-upload)
-fleet file edit <server:path>                    # $EDITOR, fallback vi/nano; skips upload if unchanged
+# Edit a file in place on the server (see "Editing files in place" below)
+fleet file view <server> <path> [--lines 20:60] [--json]   # numbered lines + the file's sha256
+fleet file edit <server> <path> --old TEXT --new TEXT [--all] [--expect-sha256 H] [--dry-run] [--json]
+fleet file edit <server> <path> --insert-after N --text TEXT
+fleet file edit <server> <path> --edits edits.json            # several edits, all or nothing
+fleet file edit <server> <path> --content FILE --expect-sha256 H   # replace the whole file
+fleet file edit <server> <path> --content FILE --create [--mode 0644]
+fleet file edit <server> <path> --undo | --history
+fleet file edit <server:path>                    # interactive: $EDITOR, fallback vi/nano
 
 # Transfer (chunked, parallel, resumable; -r for whole directories)
 fleet file upload   <server> <local> [remote] [-r] [--parallel N] [--chunk-size 1920K]
@@ -106,6 +113,63 @@ directory begins.
 If `[remote]` is omitted (or ends in `/`), the file lands in the server's default
 remote directory under its local base name. Re-running an interrupted `upload`
 or `download` with the same arguments resumes it.
+
+## Editing files in place
+
+`fleet file edit` changes a file **on the server**, without downloading and
+re-uploading it — the agent applies the edit and saves it the way a careful
+editor does. It is built to be safe to hand to an AI agent:
+
+- **Exact edits.** `--old TEXT --new TEXT` must match the file exactly
+  (whitespace, indentation and line breaks included) and exactly once, unless
+  `--all` is given — an edit can never land somewhere you did not intend. When a
+  match fails because of indentation, the error says so. `--insert-after N --text`
+  adds lines after line N (0 = top). `--edits FILE|-` applies a JSON list of edits
+  in order, all or nothing:
+  `[{"old":"a","new":"b"}, {"old":"x","new":"y","all":true}, {"kind":"insert","line":12,"text":"z"}]`.
+  `--content FILE|-` replaces the whole file (it needs `--expect-sha256`, `--force`,
+  or `--create` for a new file).
+- **Only the version you looked at.** `fleet file view` prints the file's sha256;
+  pass it as `--expect-sha256` and the edit is refused with `edit_conflict` if the
+  file changed in between. A write by another program while the edit is being
+  applied is caught the same way. `fleet config set edit-require-hash on` makes the
+  hash mandatory for every non-interactive edit.
+- **Permissions kept.** The new content goes to a private temp file beside the
+  original, is fsynced and read back to verify its sha256, and gets the original's
+  owner, group, mode (including set-uid/set-gid/sticky), POSIX ACLs, SELinux label,
+  file capabilities and other extended attributes before it replaces the original
+  in one atomic rename (on Windows, `ReplaceFileW`, which keeps the ACL). If any of
+  that cannot be carried over, the edit fails and the file is left as it was.
+  Editing through a symlink changes its target and keeps the link. Hard-linked
+  files, binary files (for text edits) and files the agent user could not write
+  itself are refused.
+- **Network drops.** The agent only acts on a request once it has arrived whole,
+  so a connection that drops mid-edit changes nothing, and readers never see a
+  half-written file. Each edit carries an id: if the reply is lost, the controller
+  retries and the agent answers with the first result instead of editing twice.
+- **Undo.** The previous version of every edited file is kept on the controller
+  (`data/edit-history`, 10 versions per file by default — `fleet config set
+  edit-backups N`, 0 turns it off). `--undo` restores it, but only while the file is
+  still exactly what that edit produced; `--history` lists what is kept.
+- **Readable results.** Every edit prints a unified diff, the old and new sha256,
+  sizes, mode and owner (`--json` for a structured result), `--dry-run` shows the
+  diff without writing, and every edit is recorded in the audit log. CRLF files keep
+  their line endings. Files up to 8 MiB can be viewed and edited (`fleet config set
+  edit-max-size 2M` lowers the limit).
+
+```bash
+fleet file view web-01 /etc/nginx/nginx.conf
+fleet file edit web-01 /etc/nginx/nginx.conf \
+    --old 'worker_connections 768;' --new 'worker_connections 2048;' --expect-sha256 <sha256>
+fleet exec web-01 "nginx -t && systemctl reload nginx"
+fleet file edit web-01 /etc/nginx/nginx.conf --undo    # if the config test failed
+```
+
+The editors in both file managers save the same way: they keep the file's owner
+and permissions, and report a conflict instead of overwriting a file that changed
+on the server while it was open. Editing needs an agent with `file.edit` support;
+update older agents with `fleet agent update <server>` (until then the interactive
+editors fall back to the atomic upload, which does not keep the file's owner).
 
 ## Defaults (global and per-server)
 

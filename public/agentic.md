@@ -167,6 +167,10 @@ Raw SSH gives an agent a free-form shell with no structure, no discoverability a
 
 Yes — upload with `fleet file upload`, unpack with `fleet file extract`, run slow steps with `fleet job run` and `fleet job wait`, switch traffic behind `fleet guard`, and verify with `fleet svc status`, `fleet journal` and `fleet exec --json` health checks. See the [example above](https://fleet.cenvero.org/agentic.html#deploy).
 
+### Can an agent safely edit config files on a server?
+
+Yes (next release). The agent reads the file with `fleet file view`, which shows numbered lines and the file's sha256, and changes it in place with `fleet file edit --old … --new … --expect-sha256 …`. Nothing is downloaded or re-uploaded. The text must match exactly once, and the edit only applies to the version the agent read. The file keeps its owner, mode, ACLs and SELinux label and is replaced atomically, so a dropped connection never leaves half a file. Each edit prints a diff, is audited, and can be reverted with `--undo`. See [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
+
 ### Can one agent manage many servers at once?
 
 `fleet exec --all` fans out across the fleet and `fleet exec --group role=web` targets a tag expression, returning per-server JSON with exit codes. `fleet tag` defines the groups; `fleet health`, `fleet top` and `fleet inventory --json` give fleet-wide state.

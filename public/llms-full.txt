@@ -35,6 +35,7 @@ The documentation in this file follows the `main` branch. The latest stable rele
 - `fleet exec --parallel N`, `fleet top --group` filtering, `fleet notify add --allow-internal`, `fleet agent update --strict-health`, and `fleet job wait` exiting 1 when the job failed.
 - Direct-mode commands relaying through a running daemon's warm connection (`FLEET_NO_DAEMON_RELAY=1` turns it off), and the mutually authenticated daemon control socket.
 - `--secret` values reaching the whole remote command through its environment, and the audit log recording remote commands, approval decisions, policy changes and token and secret changes.
+- `fleet file view` and `fleet file edit`: in-place file editing on the server (exact-text replace, insert, whole content, `--expect-sha256`, `--dry-run`, `--undo`) that keeps the file's owner, mode, ACLs and SELinux label and replaces it atomically. It needs updated agents (the `file.edit` RPC). On v2.4.3, `fleet file edit <server:path>` only opens `$EDITOR` and re-uploads the file.
 - The rebuilt terminal dashboard (a live operations console with sparklines, filters and actions), the terminal file manager's transfer queue, previews, bookmarks and go-to, and the redesigned web UI (light and dark themes, phone layout, command palette, previews and a read-only Fleet overview).
 
 To see what an installed binary supports, run `fleet --version`, `fleet context` or `fleet ai <command>` — both reference commands are generated from the binary itself.
@@ -769,8 +770,10 @@ fleet file extract web-01 /srv/releases/site.tar.gz
 
 #### Edit and compare
 
+To change a file, edit it in place on the server — see [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
+
 ```sh
-# Opens $EDITOR (then vi, then nano); uploads atomically only if you changed something
+# Interactive: opens $EDITOR (then vi, then nano) and saves back only if you changed something
 fleet file edit web-01:/etc/nginx/nginx.conf
 
 # Unified diff; exit status 1 when the files differ
@@ -798,6 +801,61 @@ fleet-agent serve --listen 0.0.0.0:2222 --authorized-keys ~/fleet-controller.pub
 ```
 
 > `--file-root` bounds listing, reading, writing, creating, deleting and renaming. Archive, permission and checksum operations run through the agent's shell and are **not** confined by it — restrict the agent's user if you need a hard boundary.
+
+### Edit files in place (Next release)
+
+`fleet file edit` changes a file **on the server** without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.
+
+- **Exact edits** — `--old` must match the file exactly (whitespace, indentation and line breaks included) and exactly once unless you pass `--all`, so an edit never lands somewhere you did not intend. Add lines with `--insert-after N --text`, apply several edits all-or-nothing with `--edits`, or replace the whole file with `--content`.
+- **Only the version you read** — `fleet file view` prints the file's sha256; pass it as `--expect-sha256` and the edit is refused with `edit_conflict` if the file changed in between, even while the edit is being applied.
+- **Permissions kept** — the new content is written to a private temp file beside the original, fsynced, read back and checked against its sha256, and given the original's owner, group, mode (including set-uid/set-gid), POSIX ACLs, SELinux label and other extended attributes before one atomic rename replaces the original. If anything cannot be carried over, nothing changes. Editing through a symlink changes its target and keeps the link.
+- **Network drops** — the agent acts only on a request that arrived whole, so a dropped connection changes nothing and nobody ever sees a half-written file. A retry after a lost reply returns the first result instead of editing twice.
+- **Undo** — the previous version is kept on the controller; `--undo` restores it, but only while the file is still exactly what that edit produced.
+
+#### View, then edit
+
+```sh
+# Numbered lines plus the file's sha256 (add --lines 20:60 or --json)
+fleet file view web-01 /etc/nginx/nginx.conf
+
+# Replace exact text, only if the file is still the version you viewed
+fleet file edit web-01 /etc/nginx/nginx.conf \
+    --old 'worker_connections 768;' --new 'worker_connections 2048;' \
+    --expect-sha256 <sha256>
+
+# Check the change; undo it if the test fails
+fleet exec web-01 "nginx -t && systemctl reload nginx"
+fleet file edit web-01 /etc/nginx/nginx.conf --undo
+```
+
+#### Other kinds of edit
+
+```sh
+# Insert lines after line 2 (0 inserts at the top)
+fleet file edit web-01 /etc/hosts --insert-after 2 --text '10.0.0.5 db-01'
+
+# Several edits from a JSON list, applied in order, all or nothing; preview first
+fleet file edit web-01 /srv/app/.env --edits edits.json --dry-run
+
+# Replace the whole file, or create a new one
+fleet file edit web-01 /srv/app/config.yml --content ./config.yml --expect-sha256 <sha256>
+fleet file edit web-01 /etc/motd --content - --create --mode 0644 < motd.txt
+
+# What can be undone
+fleet file edit web-01 /etc/nginx/nginx.conf --history
+```
+
+An edit list looks like `[{"old":"a","new":"b"}, {"old":"x","new":"y","all":true}, {"kind":"insert","line":12,"text":"z"}]`. Every edit prints a unified diff, the old and new sha256, the size, mode and owner (`--json` for a structured result), and is recorded in the audit log. CRLF files keep their line endings. Binary files, hard-linked files and files the agent's user could not write itself are refused. With no flags, `fleet file edit` opens the file in `$EDITOR` and saves it back the same safe way; the editors in both file managers do too.
+
+#### Settings
+
+| Command | Default | What it does |
+|---|---|---|
+| `fleet config set edit-backups 20` | 10 | Versions kept per file for `--undo` (0 turns the history off). |
+| `fleet config set edit-max-size 2M` | 8M | Largest file that can be viewed or edited (8 MiB at most). |
+| `fleet config set edit-require-hash on` | off | Every non-interactive edit of an existing file must pass `--expect-sha256`. |
+
+> In-place editing needs agents with `file.edit` support. Update older agents with `fleet agent update <server>`; until then the interactive editors fall back to the atomic upload, which does not keep the file's owner.
 
 ### File manager
 
@@ -1960,6 +2018,10 @@ Raw SSH gives an agent a free-form shell with no structure, no discoverability a
 
 Yes — upload with `fleet file upload`, unpack with `fleet file extract`, run slow steps with `fleet job run` and `fleet job wait`, switch traffic behind `fleet guard`, and verify with `fleet svc status`, `fleet journal` and `fleet exec --json` health checks. See the [example above](https://fleet.cenvero.org/agentic.html#deploy).
 
+#### Can an agent safely edit config files on a server?
+
+Yes (next release). The agent reads the file with `fleet file view`, which shows numbered lines and the file's sha256, and changes it in place with `fleet file edit --old … --new … --expect-sha256 …`. Nothing is downloaded or re-uploaded. The text must match exactly once, and the edit only applies to the version the agent read. The file keeps its owner, mode, ACLs and SELinux label and is replaced atomically, so a dropped connection never leaves half a file. Each edit prints a diff, is audited, and can be reverted with `--undo`. See [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
+
 #### Can one agent manage many servers at once?
 
 `fleet exec --all` fans out across the fleet and `fleet exec --group role=web` targets a tag expression, returning per-server JSON with exit codes. `fleet tag` defines the groups; `fleet health`, `fleet top` and `fleet inventory --json` give fleet-wide state.
@@ -2000,6 +2062,7 @@ Already on `main` and landing in the release after v2.4.3: a large performance p
 
 #### Highlights
 
+- **Edit files in place:** `fleet file view` and `fleet file edit` change a file on the server with an exact-text replace, an insert or new content — no download and re-upload. The file keeps its owner, mode, ACLs and SELinux label, is replaced atomically (a dropped connection never leaves half a file), is only changed if it is still the version you read, and can be undone. Built to be safe for AI agents. [Docs](https://fleet.cenvero.org/docs/#file-edit)
 - **Much faster at scale:** fleet-wide `exec`, metrics polling, `health`, `top` and agent updates run servers concurrently; CLI calls reuse a running daemon's warm connection (about 550 → 90 ms per command at 50 ms latency); transfers and `fleet sync` are several times faster over latency.
 - **Terminal dashboard** rebuilt as a live operations console with sparklines, filters and actions; the **terminal file manager** gains a transfer queue, previews, bookmarks and go-to.
 - **Redesigned web UI** with light and dark themes, a phone layout, a command palette, previews, streaming downloads and a read-only **Fleet overview**.

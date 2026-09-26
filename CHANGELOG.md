@@ -36,6 +36,19 @@ Omit sections that have no entries for that release.
 
 ### Added
 
+- `fleet file edit` edits a file in place on the server, and `fleet file view` shows
+  it with line numbers and its sha256. The edit can be an exact-text replace (`--old/--new`,
+  unique unless `--all`), an insert (`--insert-after N --text`), a JSON list of edits
+  applied all or nothing (`--edits`), or new whole content (`--content`, `--create`).
+  The agent writes the result to a temp file, fsyncs it, verifies its SHA-256, gives it
+  the original's owner, group, mode, ACLs, SELinux label and extended attributes, and
+  swaps it in with one atomic rename. With `--expect-sha256` the edit applies only if
+  the file is still the version you read. A dropped connection never leaves a
+  half-written file, and a retry after a lost reply never applies the edit twice.
+  Edits show a diff, support `--dry-run` and `--json`, are audited, and can be
+  reverted with `--undo` (settings: `fleet config set edit-backups | edit-max-size |
+  edit-require-hash`). `fleet context` and the AI skills teach agents to use it. Needs
+  updated agents (new `file.edit` RPC).
 - `fleet version` (with `--json`) prints the controller version, OS and architecture.
 - `fleet start` runs the daemon in the background (output in `logs/daemon.log`) and
   `fleet stop` stops it; `fleet status` reports whether it is running. `fleet daemon`
@@ -78,6 +91,13 @@ Omit sections that have no entries for that release.
 
 ### Changed
 
+- The editors in the terminal and web file managers, and interactive `fleet file edit`,
+  now save through the agent's in-place edit. They keep the file's owner and permissions,
+  and report a conflict instead of overwriting a file that changed while it was open.
+  Older agents fall back to the previous upload. The web editor no longer converts CRLF
+  files to LF.
+- The README no longer lists `winget install`: the Cenvero.Fleet package has not been
+  published to the WinGet catalog yet.
 - WinGet owns controller update, rollback, channel, and uninstall lifecycle;
   managed agents remain Fleet-owned through `fleet sync-agent`.
 - WinGet uses catalog SHA-256 validation and Microsoft scanning. Direct installs
