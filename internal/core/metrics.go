@@ -14,6 +14,7 @@ import (
 
 	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/logs"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
@@ -59,6 +60,7 @@ func (a *App) collectMetricsContext(ctx context.Context, serverName string, reco
 	if err != nil {
 		return proto.MetricsSnapshot{}, err
 	}
+	snapshot = boundSnapshotText(snapshot)
 
 	// Re-read the record: the call may have redialled and recorded a fresh
 	// hello (agent version, capabilities), which saving the copy read before
@@ -93,6 +95,19 @@ func (a *App) collectMetricsContext(ctx context.Context, serverName string, reco
 		}
 	}
 	return snapshot, nil
+}
+
+// maxSnapshotText bounds each free-text field of an agent's metrics snapshot.
+const maxSnapshotText = 1 << 10
+
+// boundSnapshotText caps and neutralises the text an agent reports in a metrics
+// snapshot. Every poll stores the snapshot in the server record and the metrics
+// history, so an unbounded hostname or disk path from a hostile agent would
+// grow the controller's database by that much every poll interval.
+func boundSnapshotText(s proto.MetricsSnapshot) proto.MetricsSnapshot {
+	s.Hostname = safetext.Terminal(safetext.Bound(s.Hostname, maxSnapshotText), false)
+	s.DiskPath = safetext.Terminal(safetext.Bound(s.DiskPath, maxSnapshotText), false)
+	return s
 }
 
 func (a *App) persistMetricsSnapshot(serverName string, snapshot proto.MetricsSnapshot) error {
