@@ -42,6 +42,8 @@ type Server struct {
 	app   *core.App
 	token string
 	hub   *progressHub
+	// localGuard keeps the Local source out of the controller's config dir.
+	localGuard localGuard
 }
 
 // New builds a web UI server with a fresh random session token.
@@ -50,7 +52,11 @@ func New(app *core.App) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{app: app, token: token, hub: newProgressHub()}, nil
+	s := &Server{app: app, token: token, hub: newProgressHub()}
+	if app != nil {
+		s.localGuard = newLocalGuard(app.ConfigDir)
+	}
+	return s, nil
 }
 
 // Token returns the per-process access token.
@@ -253,7 +259,8 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		BrowseRoot      string               `json:"browse_root"`
 		CaseInsensitive bool                 `json:"case_insensitive"`
 	}
-	localCaseInsensitive, err := core.LocalPathCaseInsensitive(initialLocalPath())
+	localStart := s.initialLocalRoot()
+	localCaseInsensitive, err := core.LocalPathCaseInsensitive(localStart)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -266,7 +273,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 			Reachable:       true,
 			OS:              runtime.GOOS,
 			PathStyle:       core.NativePathStyle(),
-			InitialRoot:     initialLocalPath(),
+			InitialRoot:     localStart,
 			BrowseRoot:      core.NativePathStyle().DefaultRoot(),
 			CaseInsensitive: localCaseInsensitive,
 		},
@@ -303,6 +310,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	hs := "0"
 	if showHidden {
 		hs = "1"
+	}
+	if server == "" {
+		// Refuse protected locations before the cache is even consulted.
+		clean, err := s.cleanLocal(dir)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dir = clean
 	}
 	cacheKey := server + "\x00" + dir + "\x00" + hs
 	if result, ok := listCache.get(cacheKey); ok {
@@ -384,7 +400,7 @@ func (s *Server) nameOnlyPath(server, dir, name string) (string, error) {
 		return "", err
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(dir)
+		clean, err := s.cleanLocal(dir)
 		if err != nil {
 			return "", err
 		}
@@ -617,7 +633,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 	dstLocal := dstServer == ""
 	// Validate local endpoints up front so a bad path fails fast (and cleanly).
 	if srcLocal {
-		clean, err := cleanLocalPath(srcPath)
+		clean, err := s.cleanLocal(srcPath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -625,7 +641,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 		srcPath = clean
 	}
 	if dstLocal {
-		clean, err := cleanLocalPath(dstPath)
+		clean, err := s.cleanLocal(dstPath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -754,7 +770,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// controller. All lexical operations use filepath so this works on the
 	// controller's native OS (including Windows drive paths).
 	if server == "" {
-		dir, err := cleanLocalPath(rawDir)
+		dir, err := s.cleanLocal(rawDir)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -837,7 +853,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" { // Local: stream the controller's file directly.
-		clean, err := cleanLocalPath(remotePath)
+		clean, err := s.cleanLocal(remotePath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -919,7 +935,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 	var data []byte
 	if server == "" { // Local: the controller's own filesystem.
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1013,7 +1029,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" { // Local
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1065,7 +1081,7 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p, err := s.nameOnlyPath(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		badRequest(w, err)
 		return
 	}
 	if server == "" { // Local
@@ -1149,7 +1165,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p, err := s.nameOnlyPath(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		badRequest(w, err)
 		return
 	}
 	if server == "" { // Local
@@ -1171,7 +1187,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
 	recursive := r.URL.Query().Get("recursive") == "true"
 	if server == "" { // Local
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1218,9 +1234,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if server == "" {
-			clean, err := cleanLocalPath(from)
+			clean, err := s.cleanLocal(from)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				badRequest(w, err)
 				return
 			}
 			from = clean
@@ -1249,12 +1265,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if server == "" { // Local rename or same-pane move
-		cf, err := cleanLocalPath(from)
+		cf, err := s.cleanLocal(from)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		ct, err := cleanLocalPath(to)
+		ct, err := s.cleanLocal(to)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1295,7 +1311,7 @@ func (s *Server) handleCompress(w http.ResponseWriter, r *http.Request) {
 	var style core.TargetPathStyle
 	if server == "" {
 		style = core.NativePathStyle()
-		clean, err := cleanLocalPath(dir)
+		clean, err := s.cleanLocal(dir)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1343,7 +1359,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1369,7 +1385,7 @@ func (s *Server) handleChmod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1391,7 +1407,7 @@ func (s *Server) handleChecksum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1416,7 +1432,7 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1748,7 +1764,21 @@ func writeJSON(w http.ResponseWriter, payload any) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	if errors.Is(err, errProtectedPath) {
+		status = http.StatusForbidden
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadGateway)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// badRequest reports a validation failure (400), except that a refusal to
+// touch a protected path is a 403 like everywhere else.
+func badRequest(w http.ResponseWriter, err error) {
+	if errors.Is(err, errProtectedPath) {
+		writeError(w, err)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
