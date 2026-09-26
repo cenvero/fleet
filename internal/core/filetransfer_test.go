@@ -221,7 +221,9 @@ func TestUploadResumesAfterDrop(t *testing.T) {
 	}
 
 	// "Restart": fresh file manager (empty in-memory state), temp file persists.
+	// A restarted agent also drops its connections, so the pooled one goes too.
 	rig.fileMgr = &instrumentedFileManager{FileManager: agent.NewFileManager()}
+	rig.app.DisconnectPooledSessions()
 
 	if _, err := rig.app.UploadFile("loopback", localPath, remotePath, opts, nil); err != nil {
 		t.Fatalf("resume upload failed: %v", err)
@@ -258,6 +260,54 @@ type instrumentedFileManager struct {
 	truncateReadBy int64
 	neverEOFData   []byte // when set, Read returns this data with EOF never true
 	blankFinalize  bool   // when set, Finalize returns an empty SHA256 digest
+	calls          map[string]int
+}
+
+// count records one call of an RPC by name.
+func (m *instrumentedFileManager) count(name string) {
+	m.mu.Lock()
+	if m.calls == nil {
+		m.calls = map[string]int{}
+	}
+	m.calls[name]++
+	m.mu.Unlock()
+}
+
+func (m *instrumentedFileManager) callCount(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[name]
+}
+
+func (m *instrumentedFileManager) resetCalls() {
+	m.mu.Lock()
+	m.calls = nil
+	m.mu.Unlock()
+}
+
+func (m *instrumentedFileManager) Stat(ctx context.Context, p proto.FileStatPayload) (proto.FileStatResult, error) {
+	m.count("stat")
+	return m.FileManager.Stat(ctx, p)
+}
+
+func (m *instrumentedFileManager) List(ctx context.Context, p proto.FileListPayload) (proto.FileListResult, error) {
+	m.count("list")
+	return m.FileManager.List(ctx, p)
+}
+
+func (m *instrumentedFileManager) Tree(ctx context.Context, p proto.FileTreePayload) (proto.FileTreeResult, error) {
+	m.count("tree")
+	return m.FileManager.Tree(ctx, p)
+}
+
+func (m *instrumentedFileManager) Probe(ctx context.Context, p proto.FileProbePayload) (proto.FileProbeResult, error) {
+	m.count("probe")
+	return m.FileManager.Probe(ctx, p)
+}
+
+func (m *instrumentedFileManager) OpenWrite(ctx context.Context, p proto.FileOpenWritePayload) (proto.FileOpenWriteResult, error) {
+	m.count("open_write")
+	return m.FileManager.OpenWrite(ctx, p)
 }
 
 func (m *instrumentedFileManager) setFailAfter(n int) {
@@ -293,7 +343,32 @@ func (m *instrumentedFileManager) setBlankFinalize(b bool) {
 }
 
 func (m *instrumentedFileManager) Finalize(ctx context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
+	m.count("finalize")
 	res, err := m.FileManager.Finalize(ctx, p)
+	if err != nil {
+		return res, err
+	}
+	m.mu.Lock()
+	blank := m.blankFinalize
+	m.mu.Unlock()
+	if blank {
+		res.SHA256 = ""
+	}
+	return res, nil
+}
+
+// Put and Copy finish a transfer in one call, so they honour blankFinalize too.
+func (m *instrumentedFileManager) Put(ctx context.Context, p proto.FilePutPayload) (proto.FileFinalizeResult, error) {
+	m.count("put")
+	return m.maybeBlank(m.FileManager.Put(ctx, p))
+}
+
+func (m *instrumentedFileManager) Copy(ctx context.Context, p proto.FileCopyPayload) (proto.FileFinalizeResult, error) {
+	m.count("copy")
+	return m.maybeBlank(m.FileManager.Copy(ctx, p))
+}
+
+func (m *instrumentedFileManager) maybeBlank(res proto.FileFinalizeResult, err error) (proto.FileFinalizeResult, error) {
 	if err != nil {
 		return res, err
 	}
@@ -338,6 +413,7 @@ func (m *instrumentedFileManager) Write(ctx context.Context, p proto.FileWritePa
 }
 
 func (m *instrumentedFileManager) Read(ctx context.Context, p proto.FileReadPayload) (proto.FileReadResult, error) {
+	m.count("read")
 	m.mu.Lock()
 	never := m.neverEOFData
 	m.mu.Unlock()
