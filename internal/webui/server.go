@@ -20,6 +20,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -181,6 +182,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy",
 			"default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		// Isolate the page from other origins' windows and keep its responses
+		// (file bytes, previews, JSON) from being embedded cross-origin.
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -190,6 +196,7 @@ func securityHeaders(next http.Handler) http.Handler {
 func postOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -228,8 +235,11 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized: missing or bad token", http.StatusUnauthorized)
 			return
 		}
-		// CSRF: state-changing requests must originate from a loopback page.
-		if r.Method == http.MethodPost && !originLoopback(r) {
+		// CSRF: state-changing requests must originate from a loopback page —
+		// and, when the browser names the origin, from THIS page (same host
+		// and port), not some other local web app that learned nothing but
+		// could still try a blind POST.
+		if r.Method == http.MethodPost && (!originLoopback(r) || !originMatchesHost(r)) {
 			http.Error(w, "forbidden: bad origin", http.StatusForbidden)
 			return
 		}
@@ -264,6 +274,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: loopback only", http.StatusForbidden)
 		return
 	}
+	if !hostHeaderOK(r) {
+		http.Error(w, "forbidden: bad host header", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(indexHTML)
 }
@@ -271,7 +285,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) staticAsset(name, contentType string) http.HandlerFunc {
 	data, _ := assets.ReadFile("assets/" + name)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackRequest(r) {
+		if !isLoopbackRequest(r) || !hostHeaderOK(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -1680,6 +1694,23 @@ func originLoopback(r *http.Request) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// originMatchesHost tightens the loopback-origin rule to same-origin: when a
+// request carries an Origin, its host:port must be the Host the request was
+// sent to. (Requests with no Origin are covered by originLoopback's
+// Sec-Fetch-Site rule.) This stops a different local web app — another port on
+// 127.0.0.1 — from even attempting a state-changing request.
+func originMatchesHost(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSuffix(u.Host, "."), strings.TrimSuffix(r.Host, "."))
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
