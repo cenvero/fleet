@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
-  <title>Agentic SSH: Let AI Agents Run Your Servers Safely | Cenvero Fleet</title>
+  <title>Agentic SSH: Let AI Agents Run Your Servers | Cenvero Fleet</title>
   <meta name="description" content="Let Claude Code or Codex operate your servers over SSH: a self-describing CLI, JSON output, scoped tokens, approvals and a dead-man's switch. Self-hosted.">
   <link rel="canonical" href="https://fleet.cenvero.org/agentic.html">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
@@ -25,6 +25,7 @@
   <meta property="og:title" content="Agentic Fleet — the SSH control plane built for AI agents">
   <meta property="og:description" content="Let Claude Code or Codex discover and operate your servers over SSH: a self-describing CLI, JSON output and guard rails. Self-hosted, no cloud.">
   <meta property="og:image" content="https://fleet.cenvero.org/assets/og/og-agentic.png">
+  <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Agentic Fleet — the SSH control plane built for AI agents">
@@ -244,8 +245,8 @@ fleet journal web-01 <span class="f">--unit</span> nginx <span class="f">--since
       </div>
       <div class="grid grid-3">
         <article class="card"><div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-key-round"/></svg></div><h3>Scoped, fail-closed tokens</h3><p><code>fleet token create</code> limits an agent to named servers or a tag group, an allow/deny list of commands and specific secrets. Anything else is denied; a scoped token can never mint tokens or approve its own requests.</p></article>
-        <article class="card"><div class="card-icon blue"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-lock"/></svg></div><h3>Secrets, never inlined</h3><p>Store credentials with <code>fleet secret set</code> and inject them with <code>--secret VAR=@name</code>. Values reach the whole remote command through its environment and are redacted from output and the audit log.</p></article>
-        <article class="card"><div class="card-icon violet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-hand"/></svg></div><h3>Approvals</h3><p><code>--require-approval</code> stages a command with its options. A human reviews it with <code>fleet approve</code>, which then runs it and records the outcome.</p></article>
+        <article class="card"><div class="card-icon blue"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-lock"/></svg></div><h3>Secrets, never inlined</h3><p>Store credentials with <code>fleet secret set</code> and inject them with <code>--secret VAR=@name</code>. Values are redacted from output and the audit log; from the next release they reach the whole remote command through its environment.</p></article>
+        <article class="card"><div class="card-icon violet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-hand"/></svg></div><h3>Approvals</h3><p><code>--require-approval</code> stages a command with its options. A human reviews it with <code>fleet approve</code>, which — from the next release — shows the request, asks for confirmation, then runs it and records the outcome.</p></article>
         <article class="card"><div class="card-icon pink"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-undo-2"/></svg></div><h3>Dead-man's switch</h3><p><code>fleet guard</code> arms a detached, server-side timer that reverts a risky change unless it is confirmed — so an agent that locks itself out recovers on its own.</p></article>
         <article class="card"><div class="card-icon amber"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-list-checks"/></svg></div><h3>Dry runs, policy &amp; idempotency</h3><p><code>--dry-run</code> previews, <code>fleet cmd-policy</code> denies or demands confirmation for patterns, and <code>--idempotency-key</code> makes a retried command return the cached result.</p></article>
         <article class="card"><div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg></div><h3>A tamper-evident trail</h3><p>Every command, transfer, approval and token or secret change lands in a hash-chained audit log — with secret values shown only as <code>VAR=@name</code>.</p></article>

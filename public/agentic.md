@@ -120,11 +120,11 @@ Every rail is enforced by the controller before anything reaches a server — no
 
 ### Secrets, never inlined
 
-Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values reach the whole remote command through its environment and are redacted from output and the audit log.
+Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values are redacted from output and the audit log; from the next release they reach the whole remote command through its environment.
 
 ### Approvals
 
-`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which then runs it and records the outcome.
+`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which — from the next release — shows the request, asks for confirmation, then runs it and records the outcome.
 
 ### Dead-man's switch
 

@@ -129,15 +129,15 @@ The same engine drives a live terminal dashboard, a dual-pane terminal file mana
 
 ![The fleet dashboard terminal UI showing four servers with status, transport mode, CPU, memory, disk, load, agent version and tags, and a detail panel for db-01.](https://fleet.cenvero.org/assets/img/dashboard-servers.webp)
 
-**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse.
+**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse. (Next release)
 
 ![The dual-pane terminal file manager with a local project on the left, the web-01 server on the right and a preview of index.html.](https://fleet.cenvero.org/assets/img/file-manager.webp)
 
-**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop.
+**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop. (Next release)
 
 ![The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags.](https://fleet.cenvero.org/assets/img/web-fleet.webp)
 
-**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview.
+**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview. (Next release)
 
 ## Reach every server — even the ones behind NAT.
 
@@ -200,7 +200,7 @@ Stage risky commands for a human to review, deny or require confirmation for pat
 
 ### Tamper-evident audit log
 
-A hash-chained log of commands, transfers, approvals and key, token and secret changes — never the secret values.
+A hash-chained log of transfers and key changes — and, from the next release, every remote command, approval, and token or secret change. Never the secret values.
 
 ### Locked-down surfaces
 

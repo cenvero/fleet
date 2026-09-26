@@ -96,15 +96,15 @@ The same engine drives a live terminal dashboard, a dual-pane terminal file mana
 
 ![The fleet dashboard terminal UI showing four servers with status, transport mode, CPU, memory, disk, load, agent version and tags, and a detail panel for db-01.](https://fleet.cenvero.org/assets/img/dashboard-servers.webp)
 
-**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse.
+**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse. (Next release)
 
 ![The dual-pane terminal file manager with a local project on the left, the web-01 server on the right and a preview of index.html.](https://fleet.cenvero.org/assets/img/file-manager.webp)
 
-**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop.
+**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop. (Next release)
 
 ![The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags.](https://fleet.cenvero.org/assets/img/web-fleet.webp)
 
-**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview.
+**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview. (Next release)
 
 ### Transport: direct and reverse modes
 
@@ -138,7 +138,7 @@ Stage risky commands for a human to review, deny or require confirmation for pat
 
 #### Tamper-evident audit log
 
-A hash-chained log of commands, transfers, approvals and key, token and secret changes — never the secret values.
+A hash-chained log of transfers and key changes — and, from the next release, every remote command, approval, and token or secret change. Never the secret values.
 
 #### Locked-down surfaces
 
@@ -1971,11 +1971,11 @@ Every rail is enforced by the controller before anything reaches a server — no
 
 #### Secrets, never inlined
 
-Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values reach the whole remote command through its environment and are redacted from output and the audit log.
+Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values are redacted from output and the audit log; from the next release they reach the whole remote command through its environment.
 
 #### Approvals
 
-`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which then runs it and records the outcome.
+`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which — from the next release — shows the request, asks for confirmation, then runs it and records the outcome.
 
 #### Dead-man's switch
 

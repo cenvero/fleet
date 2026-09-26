@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Cenvero Fleet — Self-Hosted Server Fleet Management over SSH</title>
-  <meta name="description" content="Free, open-source, self-hosted fleet manager for Linux, macOS and Windows: shells, fan-out commands, file transfer, live sync, logs and alerts over SSH. No cloud.">
+  <meta name="description" content="Free, open-source, self-hosted fleet manager for Linux, macOS and Windows servers: shells, fan-out commands, file transfer, sync, logs and alerts over SSH.">
   <link rel="canonical" href="https://fleet.cenvero.org/">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta name="color-scheme" content="dark light">
@@ -25,6 +25,7 @@
   <meta property="og:title" content="Cenvero Fleet — Self-hosted server fleet management over SSH">
   <meta property="og:description" content="Shell, fan-out commands, file transfer, live sync, services, logs, metrics and alerts for every server — from one binary, with no cloud account. Built for humans and AI agents.">
   <meta property="og:image" content="https://fleet.cenvero.org/assets/og/og-home.png">
+  <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Cenvero Fleet — manage every server from one binary. No cloud required.">
@@ -334,19 +335,19 @@ web-02   direct   <span class="t-ok">online</span>  linux/amd64  <span class="t-
       <div role="tabpanel" id="sp-dash" aria-labelledby="st-dash">
         <figure class="shot">
           <div class="shot-frame"><img src="/assets/img/dashboard-servers.webp" width="1600" height="771" loading="lazy" decoding="async" alt="The fleet dashboard terminal UI showing four servers with status, transport mode, CPU, memory, disk, load, agent version and tags, and a detail panel for db-01."></div>
-          <figcaption><strong><code>fleet dashboard</code></strong> — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse.</figcaption>
+          <figcaption><strong><code>fleet dashboard</code></strong> — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse. <span class="tag tag-violet">Next release</span></figcaption>
         </figure>
       </div>
       <div role="tabpanel" id="sp-files" aria-labelledby="st-files" hidden>
         <figure class="shot">
           <div class="shot-frame"><img src="/assets/img/file-manager.webp" width="1600" height="771" loading="lazy" decoding="async" alt="The dual-pane terminal file manager with a local project on the left, the web-01 server on the right and a preview of index.html."></div>
-          <figcaption><strong><code>fleet files</code></strong> — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop.</figcaption>
+          <figcaption><strong><code>fleet files</code></strong> — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop. <span class="tag tag-violet">Next release</span></figcaption>
         </figure>
       </div>
       <div role="tabpanel" id="sp-web" aria-labelledby="st-web" hidden>
         <figure class="shot">
           <div class="shot-frame"><img src="/assets/img/web-fleet.webp" width="1600" height="867" loading="lazy" decoding="async" alt="The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags."></div>
-          <figcaption><strong><code>fleet file ui</code></strong> — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview.</figcaption>
+          <figcaption><strong><code>fleet file ui</code></strong> — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview. <span class="tag tag-violet">Next release</span></figcaption>
         </figure>
       </div>
     </div>
@@ -452,7 +453,7 @@ web-02   direct   <span class="t-ok">online</span>  linux/amd64  <span class="t-
         <article class="card"><div class="card-icon blue"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-badge-check"/></svg></div><h3>Signed, anti-rollback updates</h3><p>Every release is minisign-signed. The installer and updater verify it and refuse downgrades; agent rollouts can be canaried.</p></article>
         <article class="card"><div class="card-icon violet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-key-round"/></svg></div><h3>Scoped tokens &amp; secrets</h3><p>Fail-closed RBAC tokens per server, group and command; named secrets that reach commands through the environment and are redacted from output.</p></article>
         <article class="card"><div class="card-icon pink"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-hand"/></svg></div><h3>Approvals &amp; command policy</h3><p>Stage risky commands for a human to review, deny or require confirmation for patterns, and dry-run anything first.</p></article>
-        <article class="card"><div class="card-icon amber"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg></div><h3>Tamper-evident audit log</h3><p>A hash-chained log of commands, transfers, approvals and key, token and secret changes — never the secret values.</p></article>
+        <article class="card"><div class="card-icon amber"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg></div><h3>Tamper-evident audit log</h3><p>A hash-chained log of transfers and key changes — and, from the next release, every remote command, approval, and token or secret change. Never the secret values.</p></article>
         <article class="card"><div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-lock"/></svg></div><h3>Locked-down surfaces</h3><p>The web UI binds to loopback with a per-run token, CSRF checks and a strict CSP; agents can be confined to allow-listed directories.</p></article>
       </div>
     </div>
