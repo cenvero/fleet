@@ -4,10 +4,13 @@
 package logs
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,8 +34,122 @@ type ServiceStore struct {
 	maxAge       time.Duration
 }
 
+// logCursor records how far the remote log has been cached. Cursor files
+// written before FileID/Recent existed hold only last_remote_line; they still
+// load, and dedupe by line number alone until the next append records the rest.
 type logCursor struct {
 	LastRemoteLine int `json:"last_remote_line"`
+	// FileID is the agent's identity (device:inode) for the remote file the
+	// cached lines came from, when the agent reports one.
+	FileID string `json:"file_id,omitempty"`
+	// Recent fingerprints the last few remote lines seen, up to and including
+	// LastRemoteLine, so a later read can tell whether line N is still the
+	// same line N or the log was rotated/truncated and numbering restarted.
+	Recent []lineFingerprint `json:"recent,omitempty"`
+}
+
+// lineFingerprint identifies the text of one remote line.
+type lineFingerprint struct {
+	Number int    `json:"n"`
+	Len    int    `json:"len"`
+	Hash   string `json:"h"` // FNV-1a 64 of the text, hex
+	// Last marks the final line of the read it came from. It may have been an
+	// unterminated line still being written, so a later, longer line that
+	// starts with the same text is still the same line.
+	Last bool `json:"last,omitempty"`
+}
+
+// maxRecentFingerprints is how many trailing lines a cursor fingerprints.
+const maxRecentFingerprints = 8
+
+// AppendSource is what the caller knows about where appended lines came from.
+// The zero value (nothing known) is always valid.
+type AppendSource struct {
+	// FileID is the remote file's identity from the agent's log cursor
+	// (proto.LogCursor.FileID); a different one means a rotated or replaced log.
+	FileID string
+	// Reset reports that the agent restarted line numbering for these lines
+	// (proto.LogReadResult.Reset): the remote log was truncated or rotated.
+	Reset bool
+}
+
+func textHash(text string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(text))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func fingerprintOf(line proto.LogLine, last bool) lineFingerprint {
+	return lineFingerprint{Number: line.Number, Len: len(line.Text), Hash: textHash(line.Text), Last: last}
+}
+
+// matches reports whether text is (still) the line this fingerprints: the
+// same text, or for a batch's final line, a longer text that starts with it.
+func (fp lineFingerprint) matches(text string) bool {
+	if fp.Last && len(text) > fp.Len {
+		text = text[:fp.Len]
+	}
+	return len(text) == fp.Len && textHash(text) == fp.Hash
+}
+
+// continues reports whether lines (one read of the remote log, ascending line
+// numbers) continue the log the cursor describes, so that lines numbered up
+// to LastRemoteLine are already cached. false means the remote log was
+// rotated, truncated or replaced since, its numbering restarted, and every
+// line in the batch is new.
+func (c logCursor) continues(lines []proto.LogLine, src AppendSource) bool {
+	if src.Reset {
+		return false
+	}
+	if c.FileID != "" && src.FileID != "" && c.FileID != src.FileID {
+		return false
+	}
+	if lines[len(lines)-1].Number < c.LastRemoteLine {
+		return false // the file is now shorter than what was cached
+	}
+	// Compare the lines both sides have seen. When the batch does not reach
+	// back to them (it starts after LastRemoteLine), every line in it is
+	// newer than the cursor either way, so the answer does not matter.
+	byNumber := make(map[int]string, len(lines))
+	for _, line := range lines {
+		byNumber[line.Number] = line.Text
+	}
+	for _, fp := range c.Recent {
+		if text, ok := byNumber[fp.Number]; ok && !fp.matches(text) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c logCursor) equal(o logCursor) bool {
+	return c.LastRemoteLine == o.LastRemoteLine && c.FileID == o.FileID && slices.Equal(c.Recent, o.Recent)
+}
+
+// advance returns the cursor after lines (one read) were cached. continued
+// says whether they continued the previous cursor's log.
+func (c logCursor) advance(lines []proto.LogLine, src AppendSource, continued bool) logCursor {
+	next := logCursor{LastRemoteLine: lines[len(lines)-1].Number, FileID: src.FileID}
+	if next.FileID == "" && continued {
+		next.FileID = c.FileID
+	}
+	first := lines[0].Number
+	if continued {
+		// Keep older fingerprints this read did not cover.
+		for _, fp := range c.Recent {
+			if fp.Number < first {
+				next.Recent = append(next.Recent, fp)
+			}
+		}
+	}
+	start := max(len(lines)-maxRecentFingerprints, 0)
+	for i := start; i < len(lines); i++ {
+		next.Recent = append(next.Recent, fingerprintOf(lines[i], i == len(lines)-1))
+	}
+	if extra := len(next.Recent) - maxRecentFingerprints; extra > 0 {
+		next.Recent = next.Recent[extra:]
+	}
+	return next
 }
 
 func NewServiceStore(rootDir string, maxSizeBytes int64, maxFiles int, maxAge time.Duration) *ServiceStore {
@@ -53,7 +170,16 @@ func NewServiceStore(rootDir string, maxSizeBytes int64, maxFiles int, maxAge ti
 	}
 }
 
+// Append caches lines from one read of a remote service log (a tail window or
+// the lines after a follow cursor, in ascending line order), skipping the ones
+// an earlier read already cached.
 func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogLine) error {
+	return s.AppendFrom(serverName, serviceName, lines, AppendSource{})
+}
+
+// AppendFrom is Append with what the caller knows about the remote file, which
+// makes rotation detection exact rather than content-based.
+func (s *ServiceStore) AppendFrom(serverName, serviceName string, lines []proto.LogLine, src AppendSource) error {
 	if s == nil || s.rootDir == "" || len(lines) == 0 {
 		return nil
 	}
@@ -70,8 +196,12 @@ func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogL
 		return err
 	}
 
-	appendLines := append([]proto.LogLine(nil), lines...)
-	if last := lines[len(lines)-1].Number; last >= cursor.LastRemoteLine {
+	// Line numbers alone cannot tell "the same file, grown" from "rotated,
+	// and the new file already has more lines than we cached": check that the
+	// lines we cached are still there (and the file identity, when known).
+	continued := cursor.continues(lines, src)
+	appendLines := lines
+	if continued {
 		appendLines = make([]proto.LogLine, 0, len(lines))
 		for _, line := range lines {
 			if line.Number > cursor.LastRemoteLine {
@@ -79,8 +209,14 @@ func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogL
 			}
 		}
 	}
+	next := cursor.advance(lines, src, continued)
 	if len(appendLines) == 0 {
-		return nil
+		// Nothing new. Still record fresher fingerprints (a partial last line
+		// may have been completed) and the file id, when they changed.
+		if next.equal(cursor) {
+			return nil
+		}
+		return s.writeCursor(serverName, serviceName, next)
 	}
 
 	file, err := os.OpenFile(basePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- path is derived from the controller log root and validated server/service components
@@ -97,8 +233,7 @@ func (s *ServiceStore) Append(serverName, serviceName string, lines []proto.LogL
 		return fmt.Errorf("close aggregated log: %w", err)
 	}
 
-	cursor.LastRemoteLine = lines[len(lines)-1].Number
-	if err := s.writeCursor(serverName, serviceName, cursor); err != nil {
+	if err := s.writeCursor(serverName, serviceName, next); err != nil {
 		return err
 	}
 	return s.rotateAndPrune(basePath)

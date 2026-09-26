@@ -806,7 +806,7 @@ func (a *App) readServiceLogs(serverName, serviceName, search string, tailLines 
 		return proto.LogReadResult{}, err
 	}
 	if strings.TrimSpace(search) == "" {
-		if err := a.aggregatedLogs().Append(serverName, serviceName, result.Lines); err != nil {
+		if err := a.aggregatedLogs().AppendFrom(serverName, serviceName, result.Lines, logAppendSource(result)); err != nil {
 			return proto.LogReadResult{}, err
 		}
 	}
