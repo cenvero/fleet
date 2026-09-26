@@ -73,7 +73,14 @@ func newDoctorCommand(configDir *string) *cobra.Command {
 			}, doctorExecAdapter(app, server.Name))
 
 			if asJSON {
-				return writeJSON(cmd, report)
+				if err := writeJSON(cmd, report); err != nil {
+					return err
+				}
+				// Same exit status as the human report: scripts gate on it.
+				if report.Failed() {
+					return fmt.Errorf("doctor: one or more checks failed for %q", report.Server)
+				}
+				return nil
 			}
 			if err := writeDoctorReport(cmd, report); err != nil {
 				return err

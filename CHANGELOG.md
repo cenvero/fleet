@@ -127,6 +127,15 @@ Omit sections that have no entries for that release.
 - The file manager could move the selection to other files when re-sorting, only
   transferred the first of several selected folders, and could render file names and
   contents containing terminal escape sequences.
+- A mistyped subcommand (`fleet server lst`, `fleet approvals bogus`) printed the
+  group's help and exited 0; it is now an error with suggestions and exit 1.
+  Runtime errors no longer dump the command's usage block, and `fleet alerts`
+  prints `[]` instead of `null` when there are no alerts.
+- `fleet doctor --json` exited 0 when checks failed; it now exits 1 like the text
+  report.
+- The notification SSRF guard pointed at an "allow-internal" setting that could not
+  be set: `fleet notify add` now takes `--allow-internal`, re-adding a target
+  updates it, and `fleet notify list` shows it.
 
 ### Security
 

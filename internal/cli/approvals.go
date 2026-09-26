@@ -44,6 +44,7 @@ func newApprovalsCommand(configDir *string) *cobra.Command {
 			"  fleet approvals list                 # show all approvals\n" +
 			"  fleet approve <id>                   # approve a pending request and run it\n" +
 			"  fleet approvals reject <id>          # reject a pending request",
+		Args: noUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},

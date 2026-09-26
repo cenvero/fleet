@@ -44,6 +44,7 @@ func newNotifyCommand(configDir *string) *cobra.Command {
 
 func newNotifyAddCommand(configDir *string) *cobra.Command {
 	var on string
+	var allowInternal bool
 	cmd := &cobra.Command{
 		Use:   "add <slack|webhook> <url>",
 		Short: "Add a notification target",
@@ -59,9 +60,10 @@ func newNotifyAddCommand(configDir *string) *cobra.Command {
 			}
 			store := core.NewNotifyStore(*configDir)
 			target := core.NotifyTarget{
-				Kind:   core.NotifyKind(args[0]),
-				URL:    args[1],
-				Events: events,
+				Kind:          core.NotifyKind(args[0]),
+				URL:           args[1],
+				Events:        events,
+				AllowInternal: allowInternal,
 			}
 			if err := store.Add(target); err != nil {
 				return err
@@ -72,6 +74,7 @@ func newNotifyAddCommand(configDir *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&on, "on", "", "comma-separated events to subscribe to ("+strings.Join(core.NotifyEvents, ", ")+")")
+	cmd.Flags().BoolVar(&allowInternal, "allow-internal", false, "allow delivery to loopback/private/link-local addresses (e.g. a webhook on the controller's LAN); cloud metadata endpoints stay blocked")
 	return cmd
 }
 
@@ -91,11 +94,15 @@ func newNotifyListCommand(configDir *string) *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "#\tKIND\tURL\tEVENTS"); err != nil {
+			if _, err := fmt.Fprintln(w, "#\tKIND\tURL\tEVENTS\tINTERNAL"); err != nil {
 				return err
 			}
 			for i, t := range targets {
-				if _, err := fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", i, t.Kind, t.URL, strings.Join(t.Events, ",")); err != nil {
+				internal := "blocked"
+				if t.AllowInternal {
+					internal = "allowed"
+				}
+				if _, err := fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", i, t.Kind, t.URL, strings.Join(t.Events, ","), internal); err != nil {
 					return err
 				}
 			}

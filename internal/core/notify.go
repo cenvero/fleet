@@ -234,7 +234,10 @@ func (s *NotifyStore) Add(target NotifyTarget) error {
 		}
 		for i := range doc.Targets {
 			if doc.Targets[i].Kind == normalized.Kind && doc.Targets[i].URL == normalized.URL {
+				// Re-adding a target replaces its settings, so re-adding
+				// with or without --allow-internal takes effect.
 				doc.Targets[i].Events = normalized.Events
+				doc.Targets[i].AllowInternal = normalized.AllowInternal
 				return s.write(doc)
 			}
 		}
@@ -414,7 +417,7 @@ func ssrfBlockedErr(host string, ip net.IP, allowInternal bool) error {
 	if ip.Equal(cloudMetadataIP) {
 		return fmt.Errorf("refusing to deliver notification to %s (%s): the cloud metadata endpoint is always blocked", host, ip)
 	}
-	return fmt.Errorf("refusing to deliver notification to %s (%s): internal/loopback/private address blocked (set allow-internal on the target to permit this; the cloud metadata IP stays blocked either way)", host, ip)
+	return fmt.Errorf("refusing to deliver notification to %s (%s): internal/loopback/private address blocked (re-add the target with `fleet notify add ... --allow-internal` to permit this; the cloud metadata IP stays blocked either way)", host, ip)
 }
 
 // Send POSTs a single notification to one target. Slack targets receive

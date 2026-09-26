@@ -307,6 +307,11 @@ fleet notify list
 fleet notify test --event offline
 ```
 
+Targets on loopback, private or link-local addresses are refused unless added with
+`--allow-internal` (for a webhook receiver on the controller's own network); the cloud
+metadata address stays blocked either way. Re-adding a target replaces its events and
+this setting.
+
 ## Operating Safely and Unattended
 
 Fleet provides guardrails so a script or AI agent can make changes without a human on every

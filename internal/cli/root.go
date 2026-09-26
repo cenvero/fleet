@@ -24,6 +24,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/store"
@@ -88,6 +89,10 @@ func NewRootCommand() *cobra.Command {
 			return cmd.Help()
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Flags and arguments have been validated by now, so any error from
+			// here on is a runtime failure (a server that doesn't exist, a
+			// refused connection): report it without dumping the usage block.
+			cmd.SilenceUsage = true
 			configDir = core.ResolveConfigDir(configDir)
 			// Commands that are always allowed before init
 			switch cmd.Name() {
@@ -237,7 +242,57 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newApproveCommand(&configDir))
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
+	installUnknownSubcommandCheck(root)
 	return root
+}
+
+// installUnknownSubcommandCheck makes a mistyped subcommand of a command group
+// (`fleet server lst`, `fleet key lsit`) an error with suggestions and exit 1.
+// Cobra shows the group's help for it and exits 0 — the same as a successful
+// command — because a group without a Run of its own only ever returns help, so
+// a typo in a script or an AI agent's call silently "succeeded".
+func installUnknownSubcommandCheck(root *cobra.Command) {
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if c.HasSubCommands() && !c.Runnable() {
+			if extra := c.Flags().Args(); len(extra) > 0 {
+				writeUnknownSubcommand(c, extra[0])
+				exitProcess(1)
+				return
+			}
+		}
+		defaultHelp(c, args)
+	})
+}
+
+// writeUnknownSubcommand prints cobra's own unknown-command wording, with
+// suggestions, to stderr.
+func writeUnknownSubcommand(c *cobra.Command, name string) {
+	fmt.Fprintf(c.ErrOrStderr(), "Error: %s\n", unknownSubcommandMessage(c, name))
+}
+
+// unknownSubcommandMessage words an unknown subcommand the way cobra does for
+// the root command: the error, any close matches, and where to find usage.
+func unknownSubcommandMessage(c *cobra.Command, name string) string {
+	if c.SuggestionsMinimumDistance <= 0 {
+		c.SuggestionsMinimumDistance = 2
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", name, c.CommandPath())
+	if suggestions := c.SuggestionsFor(name); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return msg + fmt.Sprintf("\n\nRun '%s --help' for usage.", c.CommandPath())
+}
+
+// noUnknownSubcommand is the Args validator for a command group that also runs
+// on its own and takes no arguments (`fleet approvals`, `fleet alerts`): a stray
+// word is a mistyped subcommand, so it fails (exit 1) instead of being ignored.
+func noUnknownSubcommand(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	cmd.SilenceUsage = true
+	return errors.New(unknownSubcommandMessage(cmd, args[0]))
 }
 
 // resolveTokenID returns the presented RBAC token id, mirroring enforceToken:
@@ -1815,17 +1870,21 @@ func newAlertsCommand(configDir *string) *cobra.Command {
 	alertsCmd := &cobra.Command{
 		Use:   "alerts",
 		Short: "List alerts",
+		Args:  noUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
 			}
 			defer app.Close()
-			alerts, err := app.ListAlerts(server, severity)
+			list, err := app.ListAlerts(server, severity)
 			if err != nil {
 				return err
 			}
-			return writeJSON(cmd, alerts)
+			if list == nil {
+				list = []alerts.Alert{} // `[]`, not `null`, when there are none
+			}
+			return writeJSON(cmd, list)
 		},
 	}
 	alertsCmd.Flags().StringVar(&severity, "severity", "", "filter by severity")
