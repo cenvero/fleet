@@ -381,16 +381,19 @@ fleet cmd-policy show
 fleet exec web-01 "reboot" --confirm           # required for a confirm-flagged command
 fleet exec web-01 "./deploy.sh" --require-approval   # stage instead of running
 fleet approvals list
-fleet approve <id>                             # run it now; or: fleet approvals reject <id>
+fleet approve <id>                             # review, confirm and run it; or: fleet approvals reject <id>
 ```
 
 `--require-approval` stages the command together with its exec options (`--timeout`, `--retry`,
 `--backoff`, `--guard`, `--confirm`, `--on-fail`, `--idempotency-key`, and secrets as
 `VAR=@name` references — a literal `--secret` value is refused, so no secret value is written to
-`approvals.json`). `fleet approve <id>` then runs it once, through the normal `fleet exec` path,
-so cmd-policy, guard, redaction, audit and RBAC apply again at run time. The outcome is
-recorded on the approval (`executed` or `failed`, with the exit code) and shown by
-`fleet approvals list`. A scoped RBAC token cannot approve.
+`approvals.json`), and records who staged it; only a registered server can be staged.
+`fleet approvals list` shows every staged option. `fleet approve <id>` first prints the full
+request — server, command, every option, who staged it and when — and asks for confirmation
+(without a terminal, pass `--yes` after reviewing it). It then runs the command once, through the
+normal `fleet exec` path, so cmd-policy, guard, redaction, audit and RBAC apply again at run
+time. The outcome is recorded on the approval (`executed` or `failed`, with the exit code) and
+shown by `fleet approvals list`. A scoped RBAC token cannot approve.
 
 ## Playbooks
 

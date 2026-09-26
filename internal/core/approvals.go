@@ -45,12 +45,14 @@ type Approval struct {
 	Expires   time.Time `json:"expires"`
 
 	// Additive fields (older binaries ignore them). Exec holds the exec options
-	// the command was staged with; the rest record the decision and the run.
-	Exec       *ApprovalExec `json:"exec,omitempty"`
-	ApprovedAt *time.Time    `json:"approved_at,omitempty"`
-	ExecutedAt *time.Time    `json:"executed_at,omitempty"`
-	ExitCode   *int          `json:"exit_code,omitempty"`
-	Error      string        `json:"error,omitempty"`
+	// the command was staged with; the rest record who asked, the decision and
+	// the run.
+	RequestedBy string        `json:"requested_by,omitempty"`
+	Exec        *ApprovalExec `json:"exec,omitempty"`
+	ApprovedAt  *time.Time    `json:"approved_at,omitempty"`
+	ExecutedAt  *time.Time    `json:"executed_at,omitempty"`
+	ExitCode    *int          `json:"exit_code,omitempty"`
+	Error       string        `json:"error,omitempty"`
 }
 
 // ApprovalExec records the `fleet exec` options a command was staged with, so
@@ -99,6 +101,16 @@ func NewApprovalStore(configDir string) *ApprovalStore {
 	}
 	path := ApprovalsPath(configDir)
 	return &ApprovalStore{path: path, now: time.Now, entropy: rand.Reader}
+}
+
+// ValidateApprovalServer reports whether server is a plain server name that is
+// safe to stage and to pass on to `fleet exec` (letters, digits, '.', '_', '-';
+// never starting with '-').
+func ValidateApprovalServer(server string) error {
+	if err := validateSafeName(server); err != nil {
+		return fmt.Errorf("invalid server name for an approval: %w", err)
+	}
+	return nil
 }
 
 // ApprovalsPath returns the on-disk location of the approvals document.
@@ -203,14 +215,19 @@ func newApprovalID(entropy io.Reader) (string, error) {
 // after ttl, and returns its generated id. A non-positive ttl uses
 // DefaultApprovalTTL. Expired approvals are pruned to expired-status on the way.
 func (s *ApprovalStore) Stage(server, command string, ttl time.Duration) (string, error) {
-	return s.StageExec(server, command, ttl, nil)
+	return s.StageExec(server, command, ttl, nil, "")
 }
 
 // StageExec is Stage that also records the exec options (exec may be nil) the
-// command must run with once approved.
-func (s *ApprovalStore) StageExec(server, command string, ttl time.Duration, exec *ApprovalExec) (string, error) {
+// command must run with once approved, and who requested it.
+func (s *ApprovalStore) StageExec(server, command string, ttl time.Duration, exec *ApprovalExec, requestedBy string) (string, error) {
 	if strings.TrimSpace(server) == "" {
 		return "", fmt.Errorf("server name is required")
+	}
+	// The server is later handed to `fleet exec` as an argument; a value that
+	// is not a plain server name (e.g. "--all") must never be staged.
+	if err := ValidateApprovalServer(server); err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("command is required")
@@ -231,13 +248,14 @@ func (s *ApprovalStore) StageExec(server, command string, ttl time.Duration, exe
 		now := s.clock()
 		markExpired(approvals, now)
 		approval := Approval{
-			ID:        id,
-			Server:    server,
-			Command:   command,
-			Status:    ApprovalPending,
-			Requested: now.UTC(),
-			Expires:   now.UTC().Add(ttl),
-			Exec:      exec,
+			ID:          id,
+			Server:      server,
+			Command:     command,
+			Status:      ApprovalPending,
+			Requested:   now.UTC(),
+			Expires:     now.UTC().Add(ttl),
+			RequestedBy: strings.TrimSpace(requestedBy),
+			Exec:        exec,
 		}
 		approvals = append(approvals, approval)
 		if err := s.write(approvals); err != nil {

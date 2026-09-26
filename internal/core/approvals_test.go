@@ -107,12 +107,12 @@ func TestStageExecAndRecordResult(t *testing.T) {
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
 	s := newTestStore(t, &now)
 	opts := &ApprovalExec{Timeout: "30s", Confirm: true, Secrets: []string{"K=@key"}}
-	id, err := s.StageExec("web-01", "deploy", time.Hour, opts)
+	id, err := s.StageExec("web-01", "deploy", time.Hour, opts, "token:ci")
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Get(id)
-	if err != nil || got.Exec == nil || got.Exec.Timeout != "30s" || !got.Exec.Confirm || len(got.Exec.Secrets) != 1 {
+	if err != nil || got.Exec == nil || got.Exec.Timeout != "30s" || !got.Exec.Confirm || len(got.Exec.Secrets) != 1 || got.RequestedBy != "token:ci" {
 		t.Fatalf("staged = %+v, %v", got, err)
 	}
 
@@ -147,6 +147,23 @@ func TestStageExecAndRecordResult(t *testing.T) {
 		if tc.err != nil && got.Error != tc.err.Error() {
 			t.Fatalf("error = %q, want %q", got.Error, tc.err.Error())
 		}
+	}
+}
+
+// TestStageRejectsNonServerNames: the server is later passed to `fleet exec`,
+// so anything that is not a plain server name — above all a flag such as
+// "--all", which would turn an approved single-server command into a fleet-wide
+// fan-out — must never be staged.
+func TestStageRejectsNonServerNames(t *testing.T) {
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	s := newTestStore(t, &now)
+	for _, bad := range []string{"--all", "-x", "--group=role=web", "../etc", "a b", "web-01;rm"} {
+		if _, err := s.StageExec(bad, "uptime", time.Hour, nil, ""); err == nil {
+			t.Fatalf("staging server %q must be refused", bad)
+		}
+	}
+	if _, err := s.StageExec("web-01", "uptime", time.Hour, nil, ""); err != nil {
+		t.Fatalf("a plain server name must stage: %v", err)
 	}
 }
 

@@ -274,7 +274,7 @@ const contextForAgents = "## How to use this as an agent\n\n" +
 	"arms a detached server-side timer that auto-reverts unless you `fleet confirm <id>` in time; `fleet revert <id>` undoes it now. " +
 	"`fleet exec --guard` refuses commands that could lock the controller out of a server.\n" +
 	"- **Stage instead of running** when a human must sign off: `fleet exec ... --require-approval` queues the command with " +
-	"its exec options (`fleet approvals list`; an operator's `fleet approve <id>` then runs it and records executed/failed, " +
+	"its exec options (`fleet approvals list`; an operator reviews it with `fleet approve <id>`, which then runs it and records executed/failed, " +
 	"`approvals reject <id>` drops it; a scoped token cannot approve). `fleet cmd-policy` defines deny/confirm " +
 	"patterns; a confirm-flagged command needs `--confirm`. Use `--idempotency-key` so a retried `exec` returns the cached " +
 	"result instead of running twice.\n" +

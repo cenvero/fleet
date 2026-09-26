@@ -3072,7 +3072,12 @@ Examples:
 				// 4. require-approval — stage (with the exec options `fleet approve`
 				// must run it with) and refuse.
 				if requireApprove {
-					id, serr := approvals.StageExec(server, command, core.DefaultApprovalTTL, stagedExec)
+					// Only a real, registered server can be staged: the name is
+					// later passed to `fleet exec` by `fleet approve`.
+					if _, gerr := app.GetServer(server); gerr != nil {
+						return true, "", fmt.Errorf("stage approval: %w", gerr)
+					}
+					id, serr := approvals.StageExec(server, command, core.DefaultApprovalTTL, stagedExec, app.Operator())
 					if serr != nil {
 						return true, "", fmt.Errorf("stage approval: %w", serr)
 					}
