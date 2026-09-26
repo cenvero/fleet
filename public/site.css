@@ -610,6 +610,7 @@ td code { white-space: nowrap; }
 }
 .callout > .icon { color: var(--accent); margin-top: 3px; }
 .callout strong { color: var(--text); }
+.callout a { color: var(--accent-strong); }
 .callout.warn { border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 9%, transparent); }
 .callout.warn > .icon { color: var(--amber); }
 .callout.info { border-color: color-mix(in srgb, var(--blue) 40%, transparent); background: color-mix(in srgb, var(--blue) 8%, transparent); }
@@ -667,6 +668,9 @@ td code { white-space: nowrap; }
 .prose .code, .prose .table-wrap, .prose .callout { margin-top: 16px; margin-bottom: 16px; }
 .prose .table-wrap table { font-size: 0.9rem; }
 .prose .table-wrap td:first-child code { color: var(--accent); background: transparent; border: 0; padding: 0; }
+.prose .card h3, .prose .steps h3 { margin-top: 0; }
+.prose .card h3 { font-size: 1.08rem; }
+.steps:not(.grid) { grid-template-columns: minmax(0, 1fr); }
 .heading-anchor { margin-left: 8px; color: var(--text-3); text-decoration: none; opacity: 0; font-weight: 500; transition: opacity 150ms; }
 h2:hover > .heading-anchor, h3:hover > .heading-anchor, .heading-anchor:focus { opacity: 1; }
 
