@@ -333,11 +333,14 @@ func (m *model) renderHeader(r *drctx, W int) string {
 		alias = "fleet"
 	}
 	left = append(left, dseg{sHdr, " " + alias})
-	extras := []string{
-		strconv.Itoa(len(m.snapshot.Servers)) + " servers",
-		dashVersion(st.Version),
-		string(st.DatabaseBackend),
-		st.Channel,
+	var extras []string
+	if !m.snapshot.GeneratedAt.IsZero() {
+		extras = []string{
+			strconv.Itoa(len(m.snapshot.Servers)) + " servers",
+			dashVersion(st.Version),
+			string(st.DatabaseBackend),
+			st.Channel,
+		}
 	}
 	used := dsegsWidth(left)
 	for _, e := range extras {
@@ -397,6 +400,9 @@ func dashVersion(v string) string {
 var dashShortTabs = []string{"Home", "Srv", "Svc", "Logs", "Alrt", "Ops"}
 
 func (m *model) tabCount(tab dashboardTab) (string, dstyle) {
+	if m.snapshot.GeneratedAt.IsZero() {
+		return "", sTabCount // nothing loaded yet
+	}
 	switch tab {
 	case tabServers:
 		return strconv.Itoa(len(m.snapshot.Servers)), sTabCount
@@ -477,7 +483,7 @@ func (m *model) renderTabs(r *drctx, W int) string {
 		{sWarn, "◐"}, {sMuted, strconv.Itoa(f.degraded) + " "},
 		{sCrit, "○"}, {sMuted, strconv.Itoa(f.offline) + " "},
 	}
-	if hw := dsegsWidth(health); l.room() >= hw+2 {
+	if hw := dsegsWidth(health); l.room() >= hw+2 && !m.snapshot.GeneratedAt.IsZero() {
 		l.pad(sNone, l.room()-hw)
 		for _, s := range health {
 			l.put(s.s, s.t)
@@ -2146,11 +2152,14 @@ func (m *model) logViewerBox(r *drctx, body, at drect) []string {
 	}
 	b.meta = dashJoinMeta(dashFilterMeta(m.logSearch), dashRangeMeta(top, ih, len(texts))+unit, src)
 	if len(texts) == 0 {
-		msg := "No cached lines yet — `L` follows the live log."
-		if m.logSearch != "" {
+		msg, st := "No cached lines yet — `L` follows the live log.", sMuted
+		switch err := m.logTailErr(lp); {
+		case m.logSearch != "":
 			msg = "No lines match “" + m.logSearch + "”."
+		case err != nil:
+			msg, st = "Cannot read the cached log: "+dashFirstLine(err.Error()), sCrit
 		}
-		b.lines = dashEmptyBody(r, iw, ih, msg, sMuted)
+		b.lines = dashEmptyBody(r, iw, ih, msg, st)
 		return b.render()
 	}
 	numW := len(strconv.Itoa(dashMaxInt(nums)))

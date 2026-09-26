@@ -14,6 +14,7 @@ import (
 
 	fleetalerts "github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/pkg/proto"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
@@ -236,6 +237,7 @@ func RunDashboardWithOptions(opts DashboardOptions) error {
 
 	rt := newDashRuntime(loader, dark, exe, opts.Token, app.ConfigDir)
 	m := newDashboardModel(rt, opts.Interval)
+	m.lastStart = time.Now() // the initial load (Init) counts as the first refresh
 	// Cell-motion mouse mode: clicks, wheel and drags only — plain pointer
 	// movement does not generate an event (and a frame) per cell.
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
@@ -722,8 +724,8 @@ func (m *model) afterMove() tea.Cmd {
 		return nil
 	}
 	var cmds []tea.Cmd
-	if m.activeTab == tabServers || m.activeTab == tabOverview {
-		if s, _ := m.selectedServer(); s != nil && m.activeTab == tabServers {
+	if m.activeTab == tabServers {
+		if s, _ := m.selectedServer(); s != nil {
 			if e, ok := m.rt.hist[s.Name]; !ok || !e.stamp.Equal(s.Metrics.Timestamp) {
 				m.rt.histWant = s.Name
 				name := s.Name
@@ -843,7 +845,22 @@ func (m *model) logLines(lp *core.CachedLogPreview) ([]string, []int, bool) {
 			full = true
 		}
 	}
-	terms := dashTerms(m.logSearch)
+	return filterLogLines(src, m.logSearch, full)
+}
+
+// logTailErr is the error of the last on-demand read of lp, if any.
+func (m *model) logTailErr(lp *core.CachedLogPreview) error {
+	if m.rt == nil {
+		return nil
+	}
+	if e, ok := m.rt.logTail[lp.Server+"\x00"+lp.Service]; ok {
+		return e.err
+	}
+	return nil
+}
+
+func filterLogLines(src []proto.LogLine, search string, full bool) ([]string, []int, bool) {
+	terms := dashTerms(search)
 	texts := make([]string, 0, len(src))
 	nums := make([]int, 0, len(src))
 	for _, line := range src {
