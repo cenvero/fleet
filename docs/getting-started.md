@@ -111,10 +111,11 @@ Now you can try:
 
 Reverse mode is for the case where the agent can dial out but the controller is not directly reachable from the outside.
 
-Start the controller daemon:
+Start the controller daemon in the background (`./fleet stop` stops it; run `./fleet daemon`
+instead to keep it in the foreground):
 
 ```bash
-./fleet daemon
+./fleet start
 ```
 
 Register the server first:
