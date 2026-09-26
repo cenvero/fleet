@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,6 +104,43 @@ func (m legacyFileManager) OpenWrite(ctx context.Context, p proto.FileOpenWriteP
 func (m legacyFileManager) Finalize(ctx context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
 	p.ChunkDigest = ""
 	return m.FileManager.Finalize(ctx, p)
+}
+
+// renameRaceFileManager reproduces an older agent's finalize race once: the
+// temp file vanishes (renamed by a concurrent finalize) before this finalize
+// renames it.
+type renameRaceFileManager struct {
+	agent.FileManager
+	once sync.Once
+}
+
+func (m *renameRaceFileManager) Finalize(ctx context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
+	var raced bool
+	m.once.Do(func() { raced = true })
+	if raced {
+		// Let the real finalize tidy up, then report what the race produced.
+		_, _ = m.FileManager.Finalize(ctx, proto.FileFinalizePayload{TransferID: p.TransferID, Path: p.Path, TotalSize: -1, Abort: true})
+		return proto.FileFinalizeResult{}, &agent.RPCError{Code: "rename_failed", Message: "renameat: no such file or directory"}
+	}
+	return m.FileManager.Finalize(ctx, p)
+}
+
+func TestUploadRetriesOnceAfterRenameRace(t *testing.T) {
+	t.Parallel()
+	rig := quietRig(t)
+	rig.fileMgr.FileManager = &renameRaceFileManager{FileManager: agent.NewFileManager()}
+	data := randomBytes(t, 300<<10)
+	src := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(src, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "f.bin")
+	if _, err := rig.app.UploadFile("loopback", src, remote, FileTransferOptions{ChunkSize: 64 << 10}, nil); err != nil {
+		t.Fatalf("UploadFile after a lost rename race: %v", err)
+	}
+	if got, _ := os.ReadFile(remote); !bytes.Equal(got, data) {
+		t.Fatal("content differs")
+	}
 }
 
 func TestSmallUploadAndDownloadTakeOneRoundTrip(t *testing.T) {

@@ -287,6 +287,7 @@ const (
 	errCodeUnsupportedAction = "unsupported_action"
 	errCodeTargetIsDirectory = "target_is_directory"
 	errCodeTransferBusy      = "transfer_busy"
+	errCodeRenameFailed      = "rename_failed"
 )
 
 // transferBusyWait bounds how long an upload waits for a still-running
@@ -657,6 +658,14 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		if verr := ValidateTargetPath(style, target); verr != nil {
 			return proto.FileFinalizeResult{}, verr
 		}
+		result, err = up.run(target)
+	}
+	if remoteErrorCode(err) == errCodeRenameFailed {
+		// Older agents let a retried upload reopen the temp file of a
+		// finalize that was still running (its reply lost with a killed
+		// controller); that finalize then renamed the temp away underneath
+		// us. Starting over once is cheap next to reporting a spurious
+		// failure, and a persistent rename error simply recurs.
 		result, err = up.run(target)
 	}
 	if err != nil {
