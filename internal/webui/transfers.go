@@ -87,12 +87,6 @@ func newProgressHub() *progressHub {
 	return &progressHub{items: make(map[string]*liveTransfer), retention: hubRetention}
 }
 
-// start registers a new transfer under a fresh random id.
-func (h *progressHub) start() string {
-	id, _ := h.startMeta(transferMeta{})
-	return id
-}
-
 // startMeta registers a new transfer with display metadata.
 func (h *progressHub) startMeta(meta transferMeta) (string, error) {
 	id, err := randomToken()
