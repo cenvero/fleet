@@ -867,7 +867,7 @@ func newFilesCommand(configDir *string) *cobra.Command {
 			"pane has a source: the local filesystem (\"Local\") or a managed server, so you\n" +
 			"can browse and transfer local↔server AND server↔server.\n\n" +
 			"  fleet files          Local on the left, the first server on the right\n" +
-			"  fleet files a        server 'a' on the left, Local on the right\n" +
+			"  fleet files a        Local on the left, server 'a' on the right\n" +
 			"  fleet files a b      server 'a' on the left, server 'b' on the right\n\n" +
 			"Single-click selects, double-click / Enter / → opens a folder, ← goes up.\n" +
 			"Drag between panes to copy or move (Finder-style menu), right-click for a\n" +
