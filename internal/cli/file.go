@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -261,7 +262,7 @@ func newFileTailCommand(configDir *string) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			for _, line := range res.Lines {
-				fmt.Fprintln(out, line.Text)
+				fmt.Fprintln(out, safetext.Terminal(line.Text, false))
 			}
 			return nil
 		},

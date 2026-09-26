@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/crypto"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/pkg/proto"
 	"golang.org/x/crypto/ssh"
 )
@@ -203,6 +204,7 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 		if resp.RequestID != "" && resp.RequestID != env.RequestID {
 			return proto.Envelope{}, fmt.Errorf("rpc response request id %q does not match %q", resp.RequestID, env.RequestID)
 		}
+		neutraliseAgentError(resp.Error)
 		return resp, nil
 	}
 
@@ -287,8 +289,56 @@ func (s *Session) Hello(ctx context.Context, controllerID string) (proto.HelloPa
 	if err != nil {
 		return proto.HelloPayload{}, err
 	}
+	payload = neutraliseHello(payload)
 	s.SetCapabilities(payload.Capabilities)
 	return payload, nil
+}
+
+// Bounds on text an agent reports about itself and its errors. Nothing a
+// genuine agent sends comes close to them; they stop a hostile or compromised
+// one from planting megabytes in server records, alerts, notifications and
+// the audit log.
+const (
+	maxAgentErrorCode    = 128
+	maxAgentErrorMessage = 64 << 10
+	maxHelloField        = 1 << 10
+	maxHelloCapabilities = 256
+	maxHelloCapability   = 128
+)
+
+// neutraliseAgentError bounds an agent's error code and message and turns any
+// terminal control characters in them into visible escapes. Agent error text
+// reaches the operator's terminal on every failing command, and alerts,
+// notifications and the audit log besides; a hostile agent (or a local user
+// on the server whose file names and messages the agent repeats) must not be
+// able to drive the terminal through it.
+func neutraliseAgentError(e *proto.Error) {
+	if e == nil {
+		return
+	}
+	e.Code = safetext.Terminal(safetext.Bound(e.Code, maxAgentErrorCode), false)
+	e.Message = safetext.Terminal(safetext.Bound(e.Message, maxAgentErrorMessage), true)
+}
+
+// neutraliseHello applies the same treatment to an agent's self-description,
+// which is stored in the server record and shown by `server list`, inventory,
+// the dashboard and the web UI.
+func neutraliseHello(h proto.HelloPayload) proto.HelloPayload {
+	field := func(s string) string { return safetext.Terminal(safetext.Bound(s, maxHelloField), false) }
+	h.NodeName = field(h.NodeName)
+	h.ControllerID = field(h.ControllerID)
+	h.AgentVersion = field(h.AgentVersion)
+	h.OS = field(h.OS)
+	h.Arch = field(h.Arch)
+	h.Transport = field(h.Transport)
+	h.FileRoot = field(h.FileRoot)
+	if len(h.Capabilities) > maxHelloCapabilities {
+		h.Capabilities = h.Capabilities[:maxHelloCapabilities]
+	}
+	for i, c := range h.Capabilities {
+		h.Capabilities[i] = safetext.Terminal(safetext.Bound(c, maxHelloCapability), false)
+	}
+	return h
 }
 
 func newRequestID() (string, error) {

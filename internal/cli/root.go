@@ -27,6 +27,7 @@ import (
 	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/internal/crypto"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/internal/store"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/tui"
@@ -2842,6 +2843,9 @@ func writeServerTable(cmd *cobra.Command, servers []core.ServerRecord) error {
 			node = "-"
 		}
 		agentVersion := version.DisplaySemVer(server.Observed.AgentVersion)
+		// Node, OS/arch and version come from the agent's hello; a record saved
+		// before hello text was neutralised may still carry control characters.
+		node, osArch, agentVersion = safetext.Terminal(node, false), safetext.Terminal(osArch, false), safetext.Terminal(agentVersion, false)
 		if _, err := fmt.Fprintf(w, "%s\t%s\t%s:%d\t%s\t%s\t%s\t%s\n", server.Name, server.Mode, server.Address, server.Port, status, node, osArch, agentVersion); err != nil {
 			return err
 		}
@@ -2856,7 +2860,13 @@ func goRuntimeInfo() string {
 func writeLogOutput(cmd *cobra.Command, result proto.LogReadResult, exportPath string) error {
 	lines := make([]string, 0, len(result.Lines))
 	for _, line := range result.Lines {
-		lines = append(lines, fmt.Sprintf("%6d  %s", line.Number, line.Text))
+		text := line.Text
+		if exportPath == "" {
+			// Remote log text must not drive the operator's terminal; an
+			// --export file keeps the log's exact bytes.
+			text = safetext.Terminal(text, false)
+		}
+		lines = append(lines, fmt.Sprintf("%6d  %s", line.Number, text))
 	}
 	output := strings.Join(lines, "\n")
 	if output != "" {
@@ -2878,7 +2888,7 @@ func followServiceLogs(ctx context.Context, cmd *cobra.Command, app *core.App, s
 	return app.FollowServiceLogs(ctx, serverName, serviceName, search, tailLines, core.DefaultLogFollowInterval, func(line proto.LogLine) error {
 		formatted := fmt.Sprintf("%6d  %s\n", line.Number, line.Text)
 		if exportPath == "" {
-			_, err := fmt.Fprint(cmd.OutOrStdout(), formatted)
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "%6d  %s\n", line.Number, safetext.Terminal(line.Text, false))
 			return err
 		}
 		f, err := os.OpenFile(exportPath, os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- operator-selected log export path is the command contract
