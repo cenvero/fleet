@@ -68,6 +68,16 @@ type App struct {
 	// sessions reuses live SSH connections across control RPCs instead of
 	// handshaking per call. See sessionpool.go.
 	sessions *sessionPool
+
+	// alertPending counts poller observations of unchanged, still-firing
+	// alerts that have not been persisted yet (see observeAlert).
+	alertPendingMu sync.Mutex
+	alertPending   map[string]int
+
+	// notifications delivers webhook/Slack notifications asynchronously so a
+	// slow endpoint never stalls the caller (see notify_queue.go).
+	notificationsMu sync.Mutex
+	notifications   *notifyDispatcher
 }
 
 // SetActingOperator records who is acting for audit attribution. The CLI calls
@@ -172,6 +182,9 @@ func (a *App) Close() error {
 		return nil
 	}
 	var firstErr error
+	// Deliver notifications fired by this process (a CLI command or a stopping
+	// daemon) before exiting; bounded so a dead endpoint cannot hang us.
+	a.FlushNotifications(notifyFlushTimeout)
 	a.sessions.closeAllServers()
 	if a.StateDB != nil {
 		if err := a.StateDB.Close(); err != nil && firstErr == nil {

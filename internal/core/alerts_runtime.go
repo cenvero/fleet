@@ -14,10 +14,12 @@ import (
 	"github.com/cenvero/fleet/internal/logs"
 )
 
-// fireNotify delivers a notification to every subscribed target for event,
+// fireNotify queues a notification for every subscribed target for event,
 // best-effort: any failure (load or send) is swallowed so it can never break the
-// operation that triggered it. The store is loaded from the app's config dir at
-// the call site so it always reflects the latest configured targets.
+// operation that triggered it. Delivery happens on the App's background
+// dispatcher (notify_queue.go), so a slow or dead webhook (8s timeout per
+// target) no longer stalls the metrics poller; App.Close flushes the queue.
+// The store is loaded at delivery time so it reflects the latest targets.
 func (a *App) fireNotify(event, message string) {
 	if a == nil {
 		return
@@ -26,11 +28,52 @@ func (a *App) fireNotify(event, message string) {
 		// A panic in best-effort notification must never propagate.
 		_ = recover()
 	}()
-	_ = NewNotifyStore(a.ConfigDir).Fire(event, message)
+	a.notificationQueue().enqueue(notifyJob{event: event, message: message, at: time.Now().UTC()})
+}
+
+// alertTouchInterval is how often an alert that the metrics poller keeps
+// observing in exactly the same state is re-persisted (refreshing updated_at
+// and folding in the occurrences counted in memory meanwhile). Between touches
+// such a poll costs a read, not a rewrite + fsync of the alert file.
+const alertTouchInterval = 5 * time.Minute
+
+// observeAlert is raiseAlert for periodic observations (the metrics poller,
+// `fleet top`): when the alert already exists with the same severity, code,
+// server and message, no notification is due, and it was persisted less than
+// alertTouchInterval ago, the observation is only counted in memory instead of
+// rewriting the file. Anything else — a new, changed, escalated or
+// notification-due alert — goes through raiseAlert immediately, so
+// notification and cooldown semantics are unchanged.
+func (a *App) observeAlert(alert alerts.Alert) error {
+	existing, err := a.Alerts.Get(alert.ID)
+	if err == nil && existing.Severity == alert.Severity && existing.Code == alert.Code &&
+		existing.Server == alert.Server && existing.Message == alert.Message &&
+		!a.shouldNotifyAlert(existing, existing, false, false) &&
+		time.Since(existing.UpdatedAt) < alertTouchInterval {
+		a.alertPendingMu.Lock()
+		if a.alertPending == nil {
+			a.alertPending = map[string]int{}
+		}
+		a.alertPending[alert.ID]++
+		a.alertPendingMu.Unlock()
+		return nil
+	}
+	return a.raiseAlert(alert)
+}
+
+// takePendingAlertOccurrences returns and clears the observations counted in
+// memory for an alert since it was last persisted.
+func (a *App) takePendingAlertOccurrences(id string) int {
+	a.alertPendingMu.Lock()
+	defer a.alertPendingMu.Unlock()
+	n := a.alertPending[id]
+	delete(a.alertPending, id)
+	return n
 }
 
 func (a *App) raiseAlert(alert alerts.Alert) error {
 	existing, err := a.Alerts.Get(alert.ID)
+	pending := a.takePendingAlertOccurrences(alert.ID)
 	created := false
 	escalated := false
 	notify := false
@@ -40,7 +83,7 @@ func (a *App) raiseAlert(alert alerts.Alert) error {
 			alert.CreatedAt = existing.CreatedAt
 		}
 		alert.UpdatedAt = time.Now().UTC()
-		alert.Occurrences = existing.Occurrences + 1
+		alert.Occurrences = existing.Occurrences + 1 + pending
 		alert.NotifyCount = existing.NotifyCount
 		alert.LastNotifiedAt = existing.LastNotifiedAt
 		alert.SuppressedUntil = existing.SuppressedUntil
