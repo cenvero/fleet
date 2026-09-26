@@ -847,6 +847,45 @@ func TestTransferQueueStateMachine(t *testing.T) {
 	}
 }
 
+// TestQueueRunsOneJobPerServer: a job already uses the agent's whole
+// per-identity connection budget, so jobs touching the same server wait.
+func TestQueueRunsOneJobPerServer(t *testing.T) {
+	t.Parallel()
+	m := filesModel{}
+	add := func(src, dst string) *transferRow {
+		return m.enqueueTransfer(&transferJob{srcSource: src, dstSource: dst}, "x", "x", "", 0)
+	}
+	a1 := add("", "web-01")
+	a2 := add("", "web-01")
+	b1 := add("db-01", "")
+	c1 := add("", "")
+	c2 := add("", "")
+	got := m.startableTransfers()
+	if len(got) != maxActiveTransfers || got[0] != a1 || got[1] != b1 || got[2] != c1 {
+		t.Fatalf("startable = %v", got)
+	}
+	for _, r := range got {
+		r.queued = false // running
+	}
+	if next := m.startableTransfers(); len(next) != 0 {
+		t.Fatalf("no slot should be free: %v", next)
+	}
+	a1.done = true
+	next := m.startableTransfers()
+	if len(next) != 1 || next[0] != a2 {
+		t.Fatalf("after web-01 frees up: %v", next)
+	}
+	_ = c2
+	// A server-to-server job needs both servers free.
+	m2 := filesModel{}
+	r1 := m2.enqueueTransfer(&transferJob{srcSource: "a", dstSource: "b"}, "x", "x", "", 0)
+	r1.queued = false
+	m2.enqueueTransfer(&transferJob{srcSource: "b", dstSource: "c"}, "x", "x", "", 0)
+	if n := len(m2.startableTransfers()); n != 0 {
+		t.Fatalf("b is busy, got %d startable", n)
+	}
+}
+
 func TestTransferFailureShowsErrorAndRetries(t *testing.T) {
 	t.Parallel()
 	src, dst := t.TempDir(), t.TempDir()

@@ -877,6 +877,7 @@ func (m filesModel) onPaneLoaded(msg paneLoadedMsg) (tea.Model, tea.Cmd) {
 	pane.free = msg.free
 	if msg.err != nil {
 		pane.entries = nil
+		pane.focusName = ""
 		pane.selected = map[int]bool{}
 		pane.listedCwd = pane.cwd
 		pane.index, pane.scroll = 0, 0

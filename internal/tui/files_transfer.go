@@ -17,8 +17,9 @@ import (
 // Transfer queue
 //
 // Every copy/move becomes a row in a queue. At most maxActiveTransfers run at
-// once (each already fans out into parallel streams inside core), the rest
-// wait and can be cancelled before they start. Work happens on goroutines; the
+// once, and at most one per remote server (each already fans out into
+// parallel streams inside core); the rest wait and can be cancelled before
+// they start. Work happens on goroutines; the
 // UI only ever receives messages, so a 200 MB upload never blocks a keypress.
 // Progress comes from core's ProgressFunc callbacks and is coalesced to a few
 // UI updates per second per transfer.
@@ -114,13 +115,36 @@ func (m *filesModel) pumpTransfers() tea.Cmd {
 	if m.chans == nil {
 		m.chans = make(map[int]*transferChans)
 	}
+	var cmds []tea.Cmd
+	for _, t := range m.startableTransfers() {
+		cmds = append(cmds, m.startTransfer(t))
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// startableTransfers picks the queued rows that may start now: at most
+// maxActiveTransfers in total and at most one per remote server. A single
+// transfer already fans out into parallel streams (8 by default), which is
+// exactly the agent's per-identity connection limit, so running two jobs
+// against the same server only makes the agent drop connections mid-way.
+func (m filesModel) startableTransfers() []*transferRow {
 	running := 0
+	busy := map[string]bool{}
 	for _, t := range m.transfers {
-		if t.state() == xferRunning {
-			running++
+		if t.state() != xferRunning {
+			continue
+		}
+		running++
+		if t.job != nil {
+			for _, s := range t.job.servers() {
+				busy[s] = true
+			}
 		}
 	}
-	var cmds []tea.Cmd
+	var out []*transferRow
 	for _, t := range m.transfers {
 		if running >= maxActiveTransfers {
 			break
@@ -128,13 +152,34 @@ func (m *filesModel) pumpTransfers() tea.Cmd {
 		if t.state() != xferQueued || t.job == nil {
 			continue
 		}
-		cmds = append(cmds, m.startTransfer(t))
+		free := true
+		for _, s := range t.job.servers() {
+			if busy[s] {
+				free = false
+			}
+		}
+		if !free {
+			continue
+		}
+		for _, s := range t.job.servers() {
+			busy[s] = true
+		}
+		out = append(out, t)
 		running++
 	}
-	if len(cmds) == 0 {
-		return nil
+	return out
+}
+
+// servers lists the remote servers a job talks to.
+func (j *transferJob) servers() []string {
+	var out []string
+	if j.srcSource != "" {
+		out = append(out, j.srcSource)
 	}
-	return tea.Batch(cmds...)
+	if j.dstSource != "" && j.dstSource != j.srcSource {
+		out = append(out, j.dstSource)
+	}
+	return out
 }
 
 // startTransfer launches one queued row on a goroutine and returns the command

@@ -1594,6 +1594,9 @@ func (m filesModel) renderStatusLine(l fmLayout, p *fmPalette) string {
 	if st := m.selectionStats(m.focus); st.count > 0 {
 		add(fmt.Sprintf(" ✓ %d · %s ", st.count, st.sizeText()), p.statKey)
 	}
+	if pane.filter != "" {
+		add(fmt.Sprintf(" /%s · %d of %d ", fmFit(fmSanitize(pane.filter), 12), realCountFast(pane.entries), len(pane.allItems)), p.statWarn)
+	}
 	add(" "+pane.sortBy.label()+" "+sortArrow(pane.sortDesc)+" ", p.statDim)
 	if pane.visual {
 		add(" RANGE ", p.statWarn)

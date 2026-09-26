@@ -307,7 +307,7 @@ func previewLocalFile(d *previewData, full string, it fileItem) {
 
 func previewRemoteFile(d *previewData, app *core.App, server, full string, it fileItem) {
 	if it.size > previewRemoteMax && !looksTextual(it.name) {
-		d.note = "large remote file — contents not fetched for preview (" + humanSize(it.size) + ")"
+		d.note = "large remote file · not fetched for preview"
 		return
 	}
 	if app == nil {
