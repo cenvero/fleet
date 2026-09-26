@@ -6,7 +6,7 @@ package tui
 import (
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,9 +31,8 @@ func RunFiles(configDir string, servers ...string) error {
 	}
 	defer app.Close()
 
-	// bubblezone is the content-anchored way to track mouse zones in Bubble Tea:
-	// it records every zone.Mark during zone.Scan (in View) and answers InBounds
-	// queries on the next mouse event, surviving scroll/resize/border offsets.
+	// bubblezone tracks clickable regions inside popups (menus, dialogs). The
+	// base frame is hit-tested arithmetically from the layout instead.
 	zone.NewGlobal()
 
 	available, _ := app.ListServers()
@@ -61,7 +60,10 @@ func RunFiles(configDir string, servers ...string) error {
 		hoverIndex: -1,
 		showHidden: false,
 		frames:     &frameCache{},
+		lastPath:   map[string]string{},
+		bookmarks:  loadBookmarks(app.ConfigDir),
 	}
+	m.preview.cache = &previewCache{}
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion()).Run()
 	return err
 }
@@ -136,7 +138,7 @@ func newPaneSource(app *core.App, source string) paneState {
 		cwd = root
 	}
 	return paneState{
-		source: source, remote: remote, pathStyle: style, root: root, cwd: cwd,
+		source: source, remote: remote, pathStyle: style, root: root, cwd: cwd, home: cwd,
 		loading: true, selected: map[int]bool{},
 	}
 }
@@ -159,6 +161,7 @@ type fileItem struct {
 	mode      uint32
 	modTime   time.Time
 	symlink   bool
+	linkDir   bool // a symlink whose target is a directory (navigable)
 }
 
 type paneState struct {
@@ -166,7 +169,9 @@ type paneState struct {
 	remote    bool
 	pathStyle core.TargetPathStyle
 	root      string // highest browsable path (target-advertised file root)
+	home      string // initial folder for this source ("~" in go-to)
 	cwd       string
+	listedCwd string     // folder the current entries belong to
 	entries   []fileItem // the visible (filtered + sorted) listing
 	allItems  []fileItem // the full directory listing before filtering
 	index     int
@@ -175,11 +180,29 @@ type paneState struct {
 	err       error
 	selected  map[int]bool // multi-selection (excludes "..")
 	view      viewMode     // list (default) or grid/icons
+	free      int64        // free bytes on a local pane's filesystem (0 = unknown)
+
+	// focusName is the entry to put the cursor on when the next listing
+	// arrives (e.g. the folder we just came up out of).
+	focusName string
+
+	// range selection
+	anchor    int
+	anchorSet bool
+	rangeBase map[int]bool
+	visual    bool
 
 	// sort + filter
 	sortBy   sortKey
 	sortDesc bool
 	filter   string // case-insensitive name substring; "" = no filter
+
+	// allItems is sorted in place; these remember for which key/slice so a
+	// filter keystroke on a 50k-entry folder does not re-sort.
+	sortedFor  *fileItem
+	sortedLen  int
+	sortedBy   sortKey
+	sortedDesc bool
 
 	// rev changes whenever anything this pane renders from changes (listing,
 	// sort, filter, selection). The frame cache keys off it instead of hashing
@@ -198,24 +221,6 @@ func (p paneState) label() string {
 	}
 	return p.source
 }
-
-type transferRow struct {
-	id        int
-	label     string
-	bytesDone int64
-	total     int64
-	rate      float64
-	streams   int
-	done      bool
-	err       error
-}
-
-type transferChans struct {
-	progress chan core.ProgressUpdate
-	done     chan transferOutcome
-}
-
-type transferOutcome struct{ err error }
 
 // dragState tracks an in-progress mouse drag of one or more items.
 type dragState struct {
@@ -238,12 +243,16 @@ const (
 	overlaySourcePicker
 	overlayContextMenu
 	overlayCopyMove // Finder-style "Copy here · Move here · Cancel"
-	overlayConfirm  // generic confirmation (delete, dir transfer)
+	overlayConfirm  // generic confirmation (delete, transfer plan)
 	overlayPrompt   // text input (new folder / rename / new file)
 	overlayProperties
 	overlayEditor   // full-screen file viewer/editor with syntax highlighting
 	overlayFilter   // per-pane name filter input
 	overlayCompress // archive: pick a format + name, then compress the selection
+	overlayHelp     // keybinding reference
+	overlayGoto     // go-to-path input with completion
+	overlayJump     // fuzzy quick jump within the listing
+	overlayPlaces   // bookmarks + recent folders
 )
 
 // confirmKind distinguishes what a confirm overlay will do on Enter.
@@ -251,7 +260,7 @@ type confirmKind int
 
 const (
 	confirmDelete confirmKind = iota
-	confirmDirTransfer
+	confirmTransfer
 )
 
 // dirTransferKind selects which recursive op a confirmed dir transfer runs.
@@ -261,18 +270,6 @@ const (
 	dtCopy dirTransferKind = iota
 	dtMove
 )
-
-// pendingDirTransfer holds a directory copy/move awaiting confirmation, with a
-// live estimate of its size that fills in asynchronously.
-type pendingDirTransfer struct {
-	kind     dirTransferKind
-	fromSide int
-	item     fileItem
-	files    int
-	bytes    int64
-	scanned  bool
-	scanErr  error
-}
 
 // promptKind selects what a text-prompt overlay does on submit.
 type promptKind int
@@ -309,16 +306,20 @@ func (s sortKey) label() string {
 // Update and View.
 //
 // This exists because the program runs with tea.WithMouseAllMotion: the
-// terminal emits a motion event per cursor movement, Bubble Tea calls View
-// after every message, and a full frame costs ~1 ms and ~2.25 MB (71% of it in
-// zone.Scan walking the whole screen to strip zone markers). Moving the mouse
-// therefore generated tens of MB/s of garbage and kept the GC hot for frames
-// that were usually pixel-identical. Re-rendering only when something the frame
-// depends on actually changed makes idle mouse movement free.
+// terminal emits a motion event per cursor movement and Bubble Tea calls View
+// after every message. Re-rendering only when something the frame depends on
+// actually changed makes idle mouse movement free.
 type frameCache struct {
 	key   string
 	frame string
 	valid bool
+
+	// selection statistics memo (see selectionStats)
+	selSide  int
+	selRev   uint64
+	selN     int
+	sel      selStats
+	selValid bool
 }
 
 type filesModel struct {
@@ -334,12 +335,23 @@ type filesModel struct {
 	showHidden    bool
 	frames        *frameCache
 
+	// ver is bumped by Update for every message except pure mouse motion; it
+	// is part of the frame-cache key.
+	ver uint64
+
+	// status severity + expiry
+	statusLevel     fmLevel
+	statusLevelText string
+	statusSeen      string
+	statusSeq       int
+
 	// mouse / drag
 	drag       *dragState
 	mouseX     int
 	mouseY     int
 	hoverSide  int // pane index hovered, -1 = none
 	hoverIndex int // row index hovered, -1 = none
+	hoverTool  string
 
 	// overlay state
 	overlay overlayKind
@@ -349,13 +361,14 @@ type filesModel struct {
 	pickerIndex int
 	pickerItems []string
 
-	// context menu
+	// context menu (also used for the toolbar's "≡ More" menu)
 	menuItems []contextMenuItem
 	menuIndex int
 	menuX     int
 	menuY     int
 	menuSide  int
 	menuRow   int
+	menuTitle string
 
 	// copy/move menu
 	cmIndex  int
@@ -365,14 +378,11 @@ type filesModel struct {
 	cmTarget int // destination row index (-1 = pane cwd)
 
 	// confirm modal
-	confirm        confirmKind
-	confirmText    string
-	pendingDir     *pendingDirTransfer
-	pendingDirDest string
-	pendingDirTo   int
-	dirScanCmd     tea.Cmd
-	deleteSide     int
-	deleteItems    []fileItem
+	confirm     confirmKind
+	confirmText string
+	plan        *transferPlan
+	deleteSide  int
+	deleteItems []fileItem
 
 	// prompt modal
 	prompt      promptKind
@@ -390,12 +400,49 @@ type filesModel struct {
 
 	// properties modal
 	propsText string
+	propsKey  string
 
 	// editor overlay
 	editor editorState
 
 	// filter input
 	filterSide int
+
+	// help
+	helpScroll int
+
+	// go to path
+	gotoSide  int
+	gotoValue string
+	gotoErr   string
+	gotoSugg  []string
+	gotoIndex int
+
+	// quick jump
+	jumpSide    int
+	jumpQuery   string
+	jumpResults []int
+	jumpIndex   int
+
+	// places
+	placesItems []fmPlace
+	placesIndex int
+
+	// navigation memory
+	hist      [2]navHistory
+	lastPath  map[string]string
+	recent    []fmLoc
+	bookmarks []fmLoc
+	mirror    bool
+
+	// preview pane
+	preview previewState
+
+	// transfer queue panel
+	xferFocus  bool
+	xferIndex  int
+	refreshSeq int
+	batchFrom  int // first transfer id of the current burst of work
 }
 
 // ---- messages ----
@@ -403,9 +450,11 @@ type filesModel struct {
 type paneLoadedMsg struct {
 	side   int
 	source string
-	cwd    string
+	cwd    string // resolved folder
+	req    string // folder that was requested (stale-load detection)
 	items  []fileItem
 	err    error
+	free   int64
 }
 
 type progressTickMsg struct {
@@ -417,17 +466,22 @@ type transferDoneMsg struct {
 	id    int
 	label string
 	err   error
+	last  *core.ProgressUpdate
 }
 
-// dirScanMsg carries the asynchronous size estimate for a pending dir transfer.
+// dirScanMsg carries the asynchronous size estimate for a pending transfer.
 type dirScanMsg struct {
 	files int
 	bytes int64
 	err   error
+	plan  *transferPlan
 }
 
 // snapTickMsg ends the drop "snap" animation.
 type snapTickMsg struct{}
+
+// statusExpireMsg clears a transient status message.
+type statusExpireMsg struct{ seq int }
 
 // fileOpDoneMsg carries the result of an asynchronous file operation (compress,
 // extract, duplicate) so the pane can refresh and report status off the UI loop.
@@ -469,7 +523,7 @@ func loadLocalCmd(side int, cwd string, showHidden bool) tea.Cmd {
 	return func() tea.Msg {
 		entries, err := os.ReadDir(cwd)
 		if err != nil {
-			return paneLoadedMsg{side: side, source: "", cwd: cwd, err: err}
+			return paneLoadedMsg{side: side, source: "", cwd: cwd, req: cwd, err: err}
 		}
 		items := make([]fileItem, 0, len(entries))
 		for _, e := range entries {
@@ -484,17 +538,28 @@ func loadLocalCmd(side int, cwd string, showHidden bool) tea.Cmd {
 				fi.modTime = info.ModTime()
 				fi.symlink = info.Mode()&os.ModeSymlink != 0
 			}
+			if fi.symlink {
+				// Follow the link only to learn whether it can be entered; the
+				// entry itself stays a symlink for every file operation.
+				if st, err := os.Stat(joinPath(cwd, name, core.NativePathStyle())); err == nil && st.IsDir() {
+					fi.linkDir = true
+				}
+			}
 			items = append(items, fi)
 		}
-		return paneLoadedMsg{side: side, source: "", cwd: cwd, items: items}
+		free, _ := localDiskFree(cwd)
+		return paneLoadedMsg{side: side, source: "", cwd: cwd, req: cwd, items: items, free: free}
 	}
 }
 
 func loadRemoteCmd(side int, app *core.App, server, cwd string, showHidden bool) tea.Cmd {
 	return func() tea.Msg {
+		if app == nil {
+			return paneLoadedMsg{side: side, source: server, cwd: cwd, req: cwd, err: fmt.Errorf("no controller")}
+		}
 		result, err := app.ListRemoteDirHidden(server, cwd, showHidden)
 		if err != nil {
-			return paneLoadedMsg{side: side, source: server, cwd: cwd, err: err}
+			return paneLoadedMsg{side: side, source: server, cwd: cwd, req: cwd, err: err}
 		}
 		resolved := result.Path
 		if resolved == "" {
@@ -507,7 +572,7 @@ func loadRemoteCmd(side int, app *core.App, server, cwd string, showHidden bool)
 				mode: e.Mode, modTime: e.ModTime, symlink: e.IsSymlink,
 			})
 		}
-		return paneLoadedMsg{side: side, source: server, cwd: resolved, items: items}
+		return paneLoadedMsg{side: side, source: server, cwd: resolved, req: cwd, items: items}
 	}
 }
 
@@ -516,9 +581,27 @@ func loadRemoteCmd(side int, app *core.App, server, cwd string, showHidden bool)
 // case-insensitive name filter, then prepending ".." unless at the filesystem
 // root. It is called after a load and whenever the sort or filter changes so the
 // listing stays consistent without re-fetching from disk/network.
+//
+// The cursor and the multi-selection follow their entries by name, so
+// re-sorting never silently moves the selection onto different files.
 func (m *filesModel) reapplyPane(side int) {
 	pane := m.paneRef(side)
 	pane.touch()
+
+	// Remember what the cursor and selection point at before rebuilding.
+	focusName := ""
+	if pane.index >= 0 && pane.index < len(pane.entries) {
+		focusName = pane.entries[pane.index].name
+	}
+	var selNames map[string]bool
+	if len(pane.selected) > 0 {
+		selNames = make(map[string]bool, len(pane.selected))
+		for i := range pane.selected {
+			if i >= 0 && i < len(pane.entries) {
+				selNames[pane.entries[i].name] = true
+			}
+		}
+	}
 
 	// Ensure lowerName is populated for fast case-insensitive filter/sort
 	for i := range pane.allItems {
@@ -527,27 +610,62 @@ func (m *filesModel) reapplyPane(side int) {
 		}
 	}
 
-	filtered := make([]fileItem, 0, len(pane.allItems))
-	needle := strings.ToLower(strings.TrimSpace(pane.filter))
-	for _, it := range pane.allItems {
-		if needle != "" && !strings.Contains(it.lowerName, needle) {
-			continue
-		}
-		filtered = append(filtered, it)
+	// Sort allItems in place, but only when the key or the listing changed.
+	var first *fileItem
+	if len(pane.allItems) > 0 {
+		first = &pane.allItems[0]
 	}
-
-	sortItems(filtered, pane.sortBy, pane.sortDesc)
+	if first != pane.sortedFor || len(pane.allItems) != pane.sortedLen ||
+		pane.sortedBy != pane.sortBy || pane.sortedDesc != pane.sortDesc {
+		sortItems(pane.allItems, pane.sortBy, pane.sortDesc)
+		pane.sortedFor, pane.sortedLen = first, len(pane.allItems)
+		pane.sortedBy, pane.sortedDesc = pane.sortBy, pane.sortDesc
+	}
 
 	root := paneBrowseRoot(pane)
 	atRoot := pane.pathStyle.Clean(pane.cwd) == pane.pathStyle.Clean(root)
 	if pane.pathStyle.IsWindows() {
 		atRoot = strings.EqualFold(pane.pathStyle.Clean(pane.cwd), pane.pathStyle.Clean(root))
 	}
-	if atRoot {
-		pane.entries = filtered
-	} else {
-		pane.entries = append([]fileItem{{name: "..", lowerName: "..", isDir: true}}, filtered...)
+
+	needle := strings.ToLower(strings.TrimSpace(pane.filter))
+	n := len(pane.allItems) + 1
+	if needle != "" {
+		n = 1
 	}
+	entries := make([]fileItem, 0, n)
+	if !atRoot {
+		entries = append(entries, fileItem{name: "..", lowerName: "..", isDir: true})
+	}
+	if needle == "" {
+		entries = append(entries, pane.allItems...)
+	} else {
+		for i := range pane.allItems {
+			if strings.Contains(pane.allItems[i].lowerName, needle) {
+				entries = append(entries, pane.allItems[i])
+			}
+		}
+	}
+	pane.entries = entries
+
+	if len(selNames) > 0 {
+		sel := make(map[int]bool, len(selNames))
+		for i := range pane.entries {
+			if selNames[pane.entries[i].name] {
+				sel[i] = true
+			}
+		}
+		pane.selected = sel
+	}
+	if focusName != "" && (pane.index >= len(pane.entries) || pane.entries[pane.index].name != focusName) {
+		for i := range pane.entries {
+			if pane.entries[i].name == focusName {
+				pane.index = i
+				break
+			}
+		}
+	}
+	pane.anchorSet = pane.anchorSet && pane.visual
 
 	if pane.index >= len(pane.entries) {
 		pane.index = len(pane.entries) - 1
@@ -560,65 +678,107 @@ func (m *filesModel) reapplyPane(side int) {
 // sortItems orders items in place: directories always come first, then by the
 // chosen key. Name is the stable tiebreaker so the order is deterministic.
 func sortItems(items []fileItem, key sortKey, desc bool) {
-	less := func(a, b fileItem) bool {
+	lower := func(it *fileItem) string {
+		if it.lowerName != "" {
+			return it.lowerName
+		}
+		return strings.ToLower(it.name)
+	}
+	less := func(a, b *fileItem) int {
 		switch key {
 		case sortSize:
 			if a.size != b.size {
-				return a.size < b.size
+				if a.size < b.size {
+					return -1
+				}
+				return 1
 			}
 		case sortModified:
-			if !a.modTime.Equal(b.modTime) {
-				return a.modTime.Before(b.modTime)
+			if c := a.modTime.Compare(b.modTime); c != 0 {
+				return c
 			}
 		}
-		al := a.lowerName
-		if al == "" {
-			al = strings.ToLower(a.name)
-		}
-		bl := b.lowerName
-		if bl == "" {
-			bl = strings.ToLower(b.name)
-		}
-		return al < bl
+		return strings.Compare(lower(a), lower(b))
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].isDir != items[j].isDir {
-			return items[i].isDir // dirs first regardless of direction
+	slices.SortStableFunc(items, func(a, b fileItem) int {
+		if a.isDir != b.isDir {
+			if a.isDir {
+				return -1 // dirs first regardless of direction
+			}
+			return 1
 		}
 		if desc {
-			return less(items[j], items[i])
+			return less(&b, &a)
 		}
-		return less(items[i], items[j])
+		return less(&a, &b)
 	})
 }
 
+// Update wraps the message handlers with the cross-cutting bookkeeping every
+// state change needs: frame-cache versioning, status-message expiry and
+// preview syncing.
 func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	isMotion := false
+	if mm, ok := msg.(tea.MouseMsg); ok && mm.Action == tea.MouseActionMotion {
+		isMotion = true
+	}
+	model, cmd := m.update(msg)
+	fm, ok := model.(filesModel)
+	if !ok {
+		return model, cmd
+	}
+	if !isMotion {
+		fm.ver++
+	}
+	var extra []tea.Cmd
+	if fm.status != fm.statusSeen {
+		fm.statusSeen = fm.status
+		fm.statusSeq++
+		if fm.status != "" {
+			seq := fm.statusSeq
+			ttl := 6 * time.Second
+			switch fm.statusLevelOf() {
+			case levelError:
+				ttl = 20 * time.Second
+			case levelWarn:
+				ttl = 10 * time.Second
+			}
+			extra = append(extra, tea.Tick(ttl, func(time.Time) tea.Msg { return statusExpireMsg{seq: seq} }))
+		}
+	}
+	if !isMotion && fm.preview.on {
+		if c := fm.syncPreview(); c != nil {
+			extra = append(extra, c)
+		}
+	}
+	if len(extra) > 0 {
+		cmd = tea.Batch(append([]tea.Cmd{cmd}, extra...)...)
+	}
+	return fm, cmd
+}
+
+// setStatus records a status message with an explicit severity.
+func (m *filesModel) setStatus(level fmLevel, text string) {
+	m.status = text
+	m.statusLevel = level
+	m.statusLevelText = text
+}
+
+func (m filesModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.clampScroll(0)
 		m.clampScroll(1)
+		if m.overlay == overlayEditor && m.editor.mode == editorEdit {
+			w, h := m.editorAreaSize()
+			m.editor.area.SetWidth(w)
+			m.editor.area.SetHeight(h)
+		}
 		return m, nil
 
 	case paneLoadedMsg:
-		pane := m.paneRef(msg.side)
-		// Ignore a stale load for a source the pane has since switched away from.
-		if pane.source != msg.source {
-			return m, nil
-		}
-		pane.cwd = pane.pathStyle.Clean(msg.cwd)
-		pane.allItems = msg.items
-		pane.err = msg.err
-		pane.loading = false
-		pane.selected = map[int]bool{}
-		// A fresh listing replaces the filter (Esc-clear semantics on navigation).
-		pane.filter = ""
-		m.reapplyPane(msg.side)
-		if pane.index >= len(pane.entries) {
-			pane.index = 0
-		}
-		m.clampScroll(msg.side)
-		return m, nil
+		return m.onPaneLoaded(msg)
 
 	case progressTickMsg:
 		m.applyProgress(msg.id, msg.u)
@@ -630,13 +790,19 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transferDoneMsg:
 		return m.handleTransferDone(msg)
 
+	case refreshTickMsg:
+		if msg.seq != m.refreshSeq {
+			return m, nil
+		}
+		m.left.loading, m.right.loading = true, true
+		return m, m.refreshBoth()
+
 	case dirScanMsg:
-		if m.pendingDir != nil {
-			m.pendingDir.scanned = true
-			m.pendingDir.files = msg.files
-			m.pendingDir.bytes = msg.bytes
-			m.pendingDir.scanErr = msg.err
-			m.confirmText = m.dirConfirmText()
+		if m.plan != nil && (msg.plan == nil || msg.plan == m.plan) {
+			m.plan.scanned = true
+			m.plan.scanFiles = msg.files
+			m.plan.scanBytes = msg.bytes
+			m.plan.scanErr = msg.err
 		}
 		return m, nil
 
@@ -646,6 +812,19 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case statusExpireMsg:
+		if msg.seq == m.statusSeq && m.overlay == overlayNone {
+			m.status = ""
+			m.statusSeen = ""
+		}
+		return m, nil
+
+	case previewDebounceMsg:
+		return m.onPreviewDebounce(msg)
+
+	case previewLoadedMsg:
+		return m.onPreviewLoaded(msg)
+
 	case editorLoadedMsg:
 		return m.onEditorLoaded(msg)
 
@@ -654,6 +833,12 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fileOpDoneMsg:
 		return m.onFileOpDone(msg)
+
+	case batchOpDoneMsg:
+		return m.onBatchOpDone(msg)
+
+	case propsStatMsg:
+		return m.onPropsStat(msg)
 
 	case checksumDoneMsg:
 		return m.onChecksumDone(msg)
@@ -667,31 +852,62 @@ func (m filesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m filesModel) handleTransferDone(msg transferDoneMsg) (tea.Model, tea.Cmd) {
-	for _, t := range m.transfers {
-		if t.id == msg.id {
-			t.done = true
-			t.err = msg.err
-			if msg.err == nil {
-				t.bytesDone = t.total
+// onPaneLoaded installs a listing. A reload of the folder already on screen
+// keeps the cursor, selection and filter; a new folder starts fresh (with the
+// cursor on focusName when navigating up).
+func (m filesModel) onPaneLoaded(msg paneLoadedMsg) (tea.Model, tea.Cmd) {
+	pane := m.paneRef(msg.side)
+	// Ignore a stale load for a source the pane has since switched away from,
+	// or for a folder it has since navigated away from.
+	if pane.source != msg.source {
+		return m, nil
+	}
+	if msg.req != "" && pane.pathStyle.Clean(msg.req) != pane.pathStyle.Clean(pane.cwd) {
+		return m, nil
+	}
+	refresh := pane.listedCwd != "" && pane.listedCwd == pane.pathStyle.Clean(msg.cwd) && msg.err == nil && pane.err == nil
+	if msg.err == nil {
+		pane.cwd = pane.pathStyle.Clean(msg.cwd)
+	}
+	pane.allItems = msg.items
+	pane.sortedFor = nil
+	pane.err = msg.err
+	pane.loading = false
+	pane.free = msg.free
+	if msg.err != nil {
+		pane.entries = nil
+		pane.selected = map[int]bool{}
+		pane.listedCwd = pane.cwd
+		pane.index, pane.scroll = 0, 0
+		pane.touch()
+		return m, nil
+	}
+	if !refresh {
+		pane.selected = map[int]bool{}
+		// A fresh listing replaces the filter (Esc-clear semantics on navigation).
+		pane.filter = ""
+		pane.anchorSet, pane.visual = false, false
+		pane.index, pane.scroll = 0, 0
+	}
+	pane.listedCwd = pane.cwd
+	m.reapplyPane(msg.side)
+	if pane.focusName != "" {
+		for i, it := range pane.entries {
+			if it.name == pane.focusName {
+				pane.index = i
+				break
 			}
 		}
+		pane.focusName = ""
 	}
-	delete(m.chans, msg.id)
-	if msg.err == nil {
-		m.status = "completed: " + msg.label
-	} else {
-		m.status = "failed: " + msg.label + " — " + msg.err.Error()
+	if pane.index >= len(pane.entries) {
+		pane.index = 0
 	}
-	// Refresh both panes so new/removed files show up immediately.
-	return m, m.refreshBoth()
-}
-
-func (m filesModel) refreshBoth() tea.Cmd {
-	return tea.Batch(
-		m.loadCmd(0, m.left.source, m.left.cwd),
-		m.loadCmd(1, m.right.source, m.right.cwd),
-	)
+	m.clampScroll(msg.side)
+	if !refresh {
+		m.rememberVisit(msg.side)
+	}
+	return m, nil
 }
 
 // ---- keyboard ----
@@ -701,18 +917,64 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.overlay != overlayNone {
 		return m.handleOverlayKey(msg)
 	}
+	if m.xferFocus {
+		return m.handleTransferKey(msg)
+	}
 
-	switch msg.String() {
+	key := msg.String()
+	pane := m.paneRef(m.focus)
+	// Range-select mode turns plain movement into range extension.
+	if pane.visual {
+		switch key {
+		case "up", "k":
+			m.extendRange(m.focus, -m.vStep(m.focus))
+			return m, nil
+		case "down", "j":
+			m.extendRange(m.focus, m.vStep(m.focus))
+			return m, nil
+		case "pgup":
+			m.extendRange(m.focus, -m.pageStep(m.focus))
+			return m, nil
+		case "pgdown":
+			m.extendRange(m.focus, m.pageStep(m.focus))
+			return m, nil
+		case "home":
+			m.extendRange(m.focus, -1<<30)
+			return m, nil
+		case "end":
+			m.extendRange(m.focus, 1<<30)
+			return m, nil
+		case "esc", "V":
+			m.toggleVisual(m.focus)
+			return m, nil
+		}
+	}
+
+	switch key {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	case "tab":
+	case "tab", "shift+tab":
 		m.focus = 1 - m.focus
 		return m, nil
 	case "up", "k":
+		pane.anchorSet = false
 		m.movePane(m.focus, -m.vStep(m.focus))
 		return m, nil
 	case "down", "j":
+		pane.anchorSet = false
 		m.movePane(m.focus, m.vStep(m.focus))
+		return m, nil
+	case "shift+up", "K":
+		m.extendRange(m.focus, -m.vStep(m.focus))
+		return m, nil
+	case "shift+down", "J":
+		m.extendRange(m.focus, m.vStep(m.focus))
+		return m, nil
+	case "shift+home":
+		m.extendRange(m.focus, -1<<30)
+		return m, nil
+	case "shift+end":
+		m.extendRange(m.focus, 1<<30)
 		return m, nil
 	case "pgup":
 		m.movePane(m.focus, -m.pageStep(m.focus))
@@ -747,6 +1009,27 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		m.toggleSelect(m.focus)
 		return m, nil
+	case "ctrl+a":
+		m.selectAll(m.focus)
+		return m, nil
+	case "*":
+		m.invertSelection(m.focus)
+		return m, nil
+	case "V":
+		m.toggleVisual(m.focus)
+		return m, nil
+	case "esc":
+		if m.clearSelection(m.focus) {
+			m.setStatus(levelInfo, "selection cleared")
+			return m, nil
+		}
+		if pane.filter != "" {
+			pane.filter = ""
+			m.reapplyPane(m.focus)
+			m.clampScroll(m.focus)
+			m.setStatus(levelInfo, "filter cleared")
+		}
+		return m, nil
 	case "v":
 		m.cycleView(m.focus)
 		return m, nil
@@ -766,7 +1049,7 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openNewFolderPrompt(m.focus), nil
 	case "N":
 		return m.openNewFilePrompt(m.focus), nil
-	case "e":
+	case "e", "f4":
 		return m.openEditor(m.focus)
 	case "/":
 		return m.openFilter(m.focus), nil
@@ -774,11 +1057,11 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleSort(m.focus), nil
 	case "r":
 		return m.openRenamePrompt(m.focus), nil
-	case "d", "delete":
+	case "d", "delete", "f8":
 		return m.openDeleteConfirm(m.focus), nil
-	case "c":
+	case "c", "f5":
 		return m.copyToOtherPane(m.focus)
-	case "m":
+	case "m", "f6":
 		return m.moveToOtherPane(m.focus)
 	case "i":
 		return m.openProperties(m.focus)
@@ -795,6 +1078,48 @@ func (m filesModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.checksumFocused(m.focus)
 	case "D":
 		return m.duplicateFocused(m.focus)
+	case "?", "f1":
+		return m.openHelp(), nil
+	case "P", "f3":
+		return m.togglePreview()
+	case ":", "ctrl+g":
+		return m.openGoto(m.focus), nil
+	case "f", "ctrl+p":
+		return m.openJump(m.focus), nil
+	case "'":
+		return m.openPlaces(), nil
+	case "b":
+		return m.toggleBookmark(m.focus), nil
+	case "~":
+		return m.goHome(m.focus)
+	case "=":
+		m.mirror = !m.mirror
+		if m.mirror {
+			m.setStatus(levelInfo, "mirror navigation on — the other pane follows into same-named folders")
+		} else {
+			m.setStatus(levelInfo, "mirror navigation off")
+		}
+		return m, nil
+	case "alt+left", "H":
+		return m.historyBack(m.focus)
+	case "alt+right", "L":
+		return m.historyForward(m.focus)
+	case "t":
+		if len(m.transfers) == 0 {
+			m.setStatus(levelInfo, "no transfers yet — c/m copies or moves the selection to the other pane")
+			return m, nil
+		}
+		m.xferFocus = true
+		m.xferIndex = 0
+		return m, nil
+	case "C":
+		n := m.clearFinished()
+		m.setStatus(levelInfo, fmt.Sprintf("cleared %d finished transfer(s)", n))
+		return m, nil
+	case "R":
+		return m, m.retryFailed()
+	case "f9":
+		return m.openActionsMenu(m.focus, m.width/2-12, 3, m.toolbarLayout(m.layout().innerW).overflow, "Actions"), nil
 	}
 	return m, nil
 }
@@ -932,12 +1257,9 @@ func (m filesModel) enterParent(side int) (tea.Model, tea.Cmd) {
 	if parent == pane.cwd {
 		return m, nil
 	}
-	pane.cwd = parent
-	pane.index, pane.scroll = 0, 0
-	pane.loading = true
-	pane.selected = map[int]bool{}
-	pane.touch()
-	return m, m.loadCmd(side, pane.source, parent)
+	came := pane.pathStyle.Base(pane.cwd)
+	cmd := m.navigate(side, parent, came, true)
+	return m, tea.Batch(cmd, m.mirrorParent(side))
 }
 
 func (m filesModel) activate(side int) (tea.Model, tea.Cmd) {
@@ -949,14 +1271,10 @@ func (m filesModel) activate(side int) (tea.Model, tea.Cmd) {
 	if item.name == ".." {
 		return m.enterParent(side)
 	}
-	if item.isDir {
+	if item.isDir || item.linkDir {
 		next := joinPath(pane.cwd, item.name, pane.pathStyle)
-		pane.cwd = next
-		pane.index, pane.scroll = 0, 0
-		pane.loading = true
-		pane.selected = map[int]bool{}
-		pane.touch()
-		return m, m.loadCmd(side, pane.source, next)
+		cmd := m.navigate(side, next, "", true)
+		return m, tea.Batch(cmd, m.mirrorEnter(side, item.name))
 	}
 	// A file: show its properties (open == inspect; transfers are explicit).
 	return m.openProperties(side)
@@ -975,7 +1293,9 @@ func (m *filesModel) toggleSelect(side int) {
 	if pane.index < 0 || pane.index >= len(pane.entries) {
 		return
 	}
+	pane.anchorSet = false
 	if pane.entries[pane.index].name == ".." {
+		m.movePane(side, 1)
 		return
 	}
 	if pane.selected == nil {
@@ -999,7 +1319,7 @@ func (m filesModel) selectionItems(side int) []fileItem {
 		for i := range pane.selected {
 			idxs = append(idxs, i)
 		}
-		sort.Ints(idxs)
+		slices.Sort(idxs)
 		out := make([]fileItem, 0, len(idxs))
 		for _, i := range idxs {
 			if i >= 0 && i < len(pane.entries) && pane.entries[i].name != ".." {
@@ -1015,32 +1335,6 @@ func (m filesModel) selectionItems(side int) []fileItem {
 		return nil
 	}
 	return []fileItem{it}
-}
-
-// ---- transfer plumbing ----
-
-func pollTransferCmd(id int, c *transferChans) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case u := <-c.progress:
-			return progressTickMsg{id: id, u: u}
-		case out := <-c.done:
-			return transferDoneMsg{id: id, err: out.err}
-		}
-	}
-}
-
-func (m *filesModel) applyProgress(id int, u core.ProgressUpdate) {
-	for _, t := range m.transfers {
-		if t.id == id {
-			t.bytesDone = u.BytesDone
-			if u.TotalBytes > 0 {
-				t.total = u.TotalBytes
-			}
-			t.rate = u.RatePerSec
-			t.streams = u.ActiveStreams
-		}
-	}
 }
 
 // ---- helpers for panes ----
@@ -1072,13 +1366,7 @@ func (m filesModel) other(side int) int { return 1 - side }
 // visibleRows is the number of text lines available in a pane body. In list view
 // this equals the number of file rows; in grid view it is divided among cell-rows.
 func (m filesModel) visibleRows() int {
-	// header(1) + toolbar(1) + blank(1) + pane chrome (border2 + breadcrumb +
-	// rule = 4) + status(1) + transfers dock(varies ~6) + footer(1) + padding(2).
-	h := m.height - 16
-	if h < 4 {
-		h = 4
-	}
-	return h
+	return m.layout().rows
 }
 
 // ---- grid geometry ----
@@ -1091,20 +1379,11 @@ const (
 	gridCellH = 2
 )
 
-// paneInnerWidth is the content width inside a pane's rounded border, matching
-// renderPane's cw. Used so navigation can compute the grid column count exactly
-// as the renderer does.
+// paneInnerWidth is the content width inside a pane's border, matching the
+// renderer. Both panes are always the same width (or only one is shown).
 func (m filesModel) paneInnerWidth() int {
-	innerW := m.width - 4
-	if innerW < 48 {
-		innerW = 48
-	}
-	sepW := 3
-	paneWidth := (innerW - sepW) / 2
-	if paneWidth < 28 {
-		paneWidth = 28
-	}
-	return paneWidth - 2 // inside the rounded border
+	l := m.layout()
+	return l.contentW(m.focus)
 }
 
 // gridCols is the number of columns that fit in a pane of content width cw.
@@ -1144,14 +1423,10 @@ func onOff(b bool) string {
 	return "hidden"
 }
 
-// ---- zone ids ----
+// ---- zone ids (popups only) ----
 
-func rowZoneID(side, i int) string { return fmt.Sprintf("fm-row-%d-%d", side, i) }
-func paneZoneID(side int) string   { return fmt.Sprintf("fm-pane-%d", side) }
-func headerZoneID(side int) string { return fmt.Sprintf("fm-head-%d", side) }
-
-const fmActPrefix = "fm-act-"
 const fmMenuPrefix = "fm-menu-"
 const fmPickPrefix = "fm-pick-"
 const fmCMPrefix = "fm-cm-"
 const fmCompressPrefix = "fm-compress-"
+const fmPlacePrefix = "fm-place-"

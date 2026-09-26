@@ -5,9 +5,12 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/charmbracelet/lipgloss"
@@ -19,70 +22,49 @@ import (
 // ============================================================================
 
 var (
-	fmAccent   = lipgloss.Color("#00d4aa")
-	fmAccent2  = lipgloss.Color("#36f0c0")
-	fmInk      = lipgloss.Color("#04231d")
-	fmText     = lipgloss.Color("#e7ecef")
-	fmMutedC   = lipgloss.Color("#8fa7b3")
-	fmDimC     = lipgloss.Color("#5f7480")
-	fmBorderC  = lipgloss.Color("#1c2b36")
-	fmZebraC   = lipgloss.Color("#0c141d")
-	fmDirC     = lipgloss.Color("#7ad7ff")
-	fmDangerC  = lipgloss.Color("#ff6b6b")
-	fmWarnC    = lipgloss.Color("#ffce6b")
-	fmHeaderBg = lipgloss.Color("#0e1620")
-	fmPanelBg  = lipgloss.Color("#0d131b")
-	fmDropC    = lipgloss.Color("#36f0c0")
+	fmAccent   = fmColor("#00d4aa")
+	fmAccent2  = fmColor("#36f0c0")
+	fmInk      = fmColor("#04231d")
+	fmText     = fmColor("#e7ecef")
+	fmMutedC   = fmColor("#8fa7b3")
+	fmDimC     = fmColor("#5f7480")
+	fmBorderC  = fmColor("#1c2b36")
+	fmZebraC   = fmColor("#0c141d")
+	fmDirC     = fmColor("#7ad7ff")
+	fmDangerC  = fmColor("#ff6b6b")
+	fmWarnC    = fmColor("#ffce6b")
+	fmHeaderBg = fmColor("#0e1620")
+	fmPanelBg  = fmColor("#0d131b")
+	fmDropC    = fmColor("#36f0c0")
 
 	// Category colors for file-type icons (palette-consistent: teal/blue accents,
 	// soft warm tones). Used by iconFor for both list and grid views.
-	fmCodeC    = lipgloss.Color("#7ee787") // code: soft green
-	fmDocC     = lipgloss.Color("#a8c7e0") // docs/text: soft blue
-	fmDataC    = lipgloss.Color("#c8a8ff") // structured data: lavender
-	fmImageC   = lipgloss.Color("#f0a8d0") // images: pink
-	fmArchiveC = lipgloss.Color("#e0b87a") // archives: amber/tan
-	fmMediaC   = lipgloss.Color("#8fd0c8") // audio/video: muted teal
-	fmExecC    = lipgloss.Color("#ff9d6b") // executables/binaries: warm orange
-	fmConfigC  = lipgloss.Color("#9fb0bd") // config/dotfiles: cool grey
-	fmDocsRedC = lipgloss.Color("#ff8c8c") // pdf/rich docs: soft red
+	fmCodeC    = fmColor("#7ee787") // code: soft green
+	fmDocC     = fmColor("#a8c7e0") // docs/text: soft blue
+	fmDataC    = fmColor("#c8a8ff") // structured data: lavender
+	fmImageC   = fmColor("#f0a8d0") // images: pink
+	fmArchiveC = fmColor("#e0b87a") // archives: amber/tan
+	fmMediaC   = fmColor("#8fd0c8") // audio/video: muted teal
+	fmExecC    = fmColor("#ff9d6b") // executables/binaries: warm orange
+	fmConfigC  = fmColor("#9fb0bd") // config/dotfiles: cool grey
+	fmDocsRedC = fmColor("#ff8c8c") // pdf/rich docs: soft red
 
-	// Cached icon styles — iconFor is called per-row per-frame, so reuse
-	// prebuilt styles instead of allocating a new lipgloss.Style each time.
-	iconDirStyle     = lipgloss.NewStyle().Foreground(fmDirC).Bold(true)
-	iconUpStyle      = lipgloss.NewStyle().Foreground(fmMutedC).Bold(true)
-	iconSymlinkStyle = lipgloss.NewStyle().Foreground(fmDimC)
-	iconCodeStyle    = lipgloss.NewStyle().Foreground(fmCodeC).Bold(true)
-	iconDocStyle     = lipgloss.NewStyle().Foreground(fmDocC)
-	iconDataStyle    = lipgloss.NewStyle().Foreground(fmDataC)
-	iconImageStyle   = lipgloss.NewStyle().Foreground(fmImageC)
-	iconArchiveStyle = lipgloss.NewStyle().Foreground(fmArchiveC)
-	iconMediaStyle   = lipgloss.NewStyle().Foreground(fmMediaC)
-	iconExecStyle    = lipgloss.NewStyle().Foreground(fmExecC).Bold(true)
-	iconConfigStyle  = lipgloss.NewStyle().Foreground(fmConfigC)
-	iconDocsRedStyle = lipgloss.NewStyle().Foreground(fmDocsRedC)
-	iconDefaultStyle = lipgloss.NewStyle().Foreground(fmMutedC)
-
-	fmHeaderBar = lipgloss.NewStyle().Background(fmHeaderBg)
-	fmBrand     = lipgloss.NewStyle().Foreground(fmAccent).Bold(true)
 	fmTag       = lipgloss.NewStyle().Foreground(fmDimC)
 	fmServerTag = lipgloss.NewStyle().Foreground(fmMutedC)
 
-	fmRule  = lipgloss.NewStyle().Foreground(fmBorderC)
-	fmCount = lipgloss.NewStyle().Foreground(fmDimC)
+	fmRule = lipgloss.NewStyle().Foreground(fmBorderC)
 
-	fmSelRow   = lipgloss.NewStyle().Background(fmAccent).Foreground(fmInk).Bold(true)
-	fmHoverRow = lipgloss.NewStyle().Background(lipgloss.Color("#15212c")).Foreground(fmText)
-	fmDropRow  = lipgloss.NewStyle().Background(lipgloss.Color("#0f3b32")).Foreground(fmAccent2).Bold(true)
-	fmMarkRow  = lipgloss.NewStyle().Background(lipgloss.Color("#10303a")).Foreground(fmAccent2)
-	fmDirRow   = lipgloss.NewStyle().Foreground(fmDirC).Bold(true)
-	fmFileRow  = lipgloss.NewStyle().Foreground(fmText)
-	fmSizeCol  = lipgloss.NewStyle().Foreground(fmDimC)
+	fmSelRow = lipgloss.NewStyle().Background(fmAccent).Foreground(fmInk).Bold(true)
 
 	fmKeyChip   = lipgloss.NewStyle().Background(fmBorderC).Foreground(fmAccent2).Bold(true).Padding(0, 1)
 	fmHintLabel = lipgloss.NewStyle().Foreground(fmMutedC)
 	fmStatusSty = lipgloss.NewStyle().Foreground(fmMutedC)
 	fmDoneSty   = lipgloss.NewStyle().Foreground(fmAccent).Bold(true)
 	fmErrSty    = lipgloss.NewStyle().Foreground(fmDangerC).Bold(true)
+	fmWarnSty   = lipgloss.NewStyle().Foreground(fmWarnC).Bold(true)
+	fmTextSty   = lipgloss.NewStyle().Foreground(fmText)
+	fmTitleSty  = lipgloss.NewStyle().Foreground(fmAccent).Bold(true)
+	fmDimSty    = lipgloss.NewStyle().Foreground(fmDimC)
 
 	fmCrumbSty = lipgloss.NewStyle().Foreground(fmDimC)
 	fmCrumbCur = lipgloss.NewStyle().Foreground(fmAccent2).Bold(true)
@@ -100,8 +82,26 @@ var (
 			Background(fmPanelBg).
 			Padding(0, 1)
 
-	fmToolBtn = lipgloss.NewStyle().Foreground(fmMutedC).Padding(0, 1)
+	fmInputSty = lipgloss.NewStyle().
+			Background(fmColor("#101822")).
+			Foreground(fmText).
+			Padding(0, 1)
 )
+
+// Glyphs for pane sources. Both are single-cell in every common terminal
+// (the old 🖥 emoji is two cells in some and one in others, which tore the
+// pane border).
+const (
+	fmLocalGlyph  = "⌂"
+	fmRemoteGlyph = "☁"
+)
+
+func sourceGlyph(remote bool) string {
+	if remote {
+		return fmRemoteGlyph
+	}
+	return fmLocalGlyph
+}
 
 // ============================================================================
 // Top-level View
@@ -109,7 +109,9 @@ var (
 
 // frameKey is a compact digest of everything the base frame renders from. It is
 // deliberately cheap: pane content is represented by paneState.rev (bumped on
-// every listing/sort/filter/selection change) rather than by walking entries.
+// every listing/sort/filter/selection change) rather than by walking entries,
+// and m.ver is bumped by Update for every message except pure mouse motion, so
+// any state change that goes through Update re-renders.
 //
 // It is only meaningful when no overlay or drag is active — those carry a lot of
 // transient state (menu geometry, editor buffer, ghost position, mouse
@@ -124,7 +126,9 @@ func (m filesModel) frameKey() string {
 			b.WriteByte('|')
 		}
 	}
-	put(m.width, m.height, m.focus, boolInt(m.showHidden), m.hoverSide, m.hoverIndex)
+	put(int(m.ver), m.width, m.height, m.focus, boolInt(m.showHidden), m.hoverSide, m.hoverIndex)
+	b.WriteString(m.hoverTool)
+	b.WriteByte('|')
 	b.WriteString(m.status)
 	b.WriteByte('|')
 	for _, p := range []paneState{m.left, m.right} {
@@ -188,105 +192,353 @@ func (m filesModel) View() string {
 }
 
 func (m filesModel) renderFrame() string {
-	innerW := m.width - 4 // page padding (1,2)
-	if innerW < 48 {
-		innerW = 48
+	if m.overlay == overlayEditor {
+		return zone.Scan(m.renderEditor())
+	}
+	l := m.layout()
+	p := fmPal()
+	if l.tooSmall {
+		return m.renderTooSmall(l, p)
 	}
 
-	header := m.renderHeader(innerW)
-	toolbar := m.renderToolbar(innerW)
+	lines := make([]string, 0, l.h)
+	lines = append(lines, m.renderHeaderLine(l, p))
+	lines = append(lines, m.renderToolbarLine(l, p))
 
-	sepW := 3
-	paneWidth := (innerW - sepW) / 2
-	if paneWidth < 28 {
-		paneWidth = 28
+	var boxes [3][]string
+	for side := range 2 {
+		if l.paneShown[side] {
+			boxes[side] = m.renderPaneBox(side, l, p)
+		}
 	}
-	rows := m.visibleRows()
-
-	left := m.renderPane(0, paneWidth, rows)
-	right := m.renderPane(1, paneWidth, rows)
-	sep := sepColumn(lipgloss.Height(left))
-	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, sep, right)
-
-	status := m.status
-	if status == "" {
-		status = "ready"
+	if l.previewShown {
+		boxes[2] = m.renderPreviewBox(l, p)
 	}
-	statusLine := fmStatusSty.Render("  " + truncate(status, innerW-4))
-	transfers := m.renderTransfers(innerW)
-	footer := m.renderFooter()
-
-	parts := []string{header, toolbar, "", panes, statusLine}
-	if transfers != "" {
-		parts = append(parts, transfers)
+	type col struct {
+		x, w  int
+		lines []string
 	}
-	parts = append(parts, footer)
-	body := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	cols := make([]col, 0, 3)
+	for side := range 2 {
+		if boxes[side] != nil {
+			cols = append(cols, col{x: l.paneX[side], w: l.paneW[side], lines: boxes[side]})
+		}
+	}
+	if boxes[2] != nil {
+		cols = append(cols, col{x: l.previewX, w: l.previewW, lines: boxes[2]})
+	}
+	// Order columns left to right (the preview can sit on the left when it
+	// replaces the left pane).
+	for i := 1; i < len(cols); i++ {
+		for j := i; j > 0 && cols[j].x < cols[j-1].x; j-- {
+			cols[j], cols[j-1] = cols[j-1], cols[j]
+		}
+	}
+	for row := range l.boxH {
+		var b strings.Builder
+		x := 0
+		for _, c := range cols {
+			if c.x > x {
+				b.WriteString(p.pad(c.x - x))
+				x = c.x
+			}
+			if row < len(c.lines) {
+				b.WriteString(c.lines[row])
+			}
+			x += c.w
+		}
+		if x < l.w {
+			b.WriteString(p.pad(l.w - x))
+		}
+		lines = append(lines, b.String())
+	}
 
-	rendered := pageStyle.Render(body)
+	lines = append(lines, m.renderTransferPanel(l, p)...)
+	lines = append(lines, m.renderStatusLine(l, p))
+	if l.footer {
+		lines = append(lines, m.renderFooterLine(l, p))
+	}
+	for len(lines) < l.h {
+		lines = append(lines, p.pad(l.w))
+	}
+	if len(lines) > l.h && l.h > 0 {
+		lines = lines[:l.h]
+	}
+	rendered := strings.Join(lines, "\n")
 
 	// Compose overlays on top of the base frame, then drag ghost on top of all.
-	rendered = m.composeOverlay(rendered)
-	rendered = m.composeGhost(rendered)
+	if m.overlay != overlayNone {
+		rendered = m.composeOverlay(rendered)
+		rendered = m.composeGhost(rendered)
+		// Only overlays carry bubblezone markers; the base frame is hit-tested
+		// arithmetically (see fmLayout), so zone.Scan — which walks the whole
+		// frame — is paid only while a popup is open.
+		return zone.Scan(rendered)
+	}
+	return m.composeGhost(rendered)
+}
 
-	// zone.Scan records every marked zone and strips the markers. Run once per
-	// frame at the root.
-	return zone.Scan(rendered)
+func (m filesModel) renderTooSmall(l fmLayout, p *fmPalette) string {
+	msg := fmt.Sprintf("Terminal too small (%d×%d)", l.w, l.h)
+	hint := "resize to at least 30×10 · q quit"
+	lines := make([]string, 0, l.h)
+	for i := range l.h {
+		switch i {
+		case l.h/2 - 1:
+			lines = append(lines, p.accentB.s(fmPadRight(" "+msg, l.w)))
+		case l.h / 2:
+			lines = append(lines, p.muted.s(fmPadRight(" "+hint, l.w)))
+		default:
+			lines = append(lines, p.pad(l.w))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ============================================================================
 // Header (brand + sources)
 // ============================================================================
 
-func (m filesModel) renderHeader(innerW int) string {
-	brand := fmBrand.Render("◆ Cenvero Fleet") + fmTag.Render("  ·  files")
-	right := fmServerTag.Render(m.left.label() + "  ⇄  " + m.right.label())
-	gap := innerW - lipgloss.Width(brand) - lipgloss.Width(right) - 2
-	if gap < 1 {
-		gap = 1
+func (m filesModel) renderHeaderLine(l fmLayout, p *fmPalette) string {
+	w := l.innerW
+	brand := " ◆ Cenvero Fleet"
+	tag := "  ·  files"
+	srcs := fmt.Sprintf("%s %s  ⇄  %s %s ",
+		sourceGlyph(m.left.remote), fmSanitize(m.left.label()),
+		sourceGlyph(m.right.remote), fmSanitize(m.right.label()))
+	if w < 70 {
+		tag = ""
 	}
-	line := " " + brand + strings.Repeat(" ", gap) + right + " "
-	return fmHeaderBar.Width(innerW).Render(line)
+	used := fmWidth(brand) + fmWidth(tag)
+	if used+fmWidth(srcs) > w {
+		srcs = fmFit(srcs, w-used)
+	}
+	gap := w - used - fmWidth(srcs)
+	if gap < 0 {
+		gap = 0
+	}
+	line := p.barBrand.s(brand) + p.barDim.s(tag) + p.barBase.s(strings.Repeat(" ", gap)) + p.barMuted.s(srcs)
+	return p.pad(l.padX) + line + p.pad(l.w-l.padX-w)
 }
 
 // ============================================================================
-// Toolbar (thin action strip; every button has a key)
+// Toolbar (responsive action strip; every button has a key)
 // ============================================================================
 
 type toolButton struct {
 	action string
 	key    string
 	label  string
+	short  string
+	prio   int
 }
 
-func (m filesModel) renderToolbar(innerW int) string {
-	btns := []toolButton{
-		{"source", "s", "Source"},
-		{"edit", "e", "Edit"},
-		{"newfolder", "n", "Folder"},
-		{"newfile", "N", "File"},
-		{"rename", "r", "Rename"},
-		{"delete", "d", "Delete"},
-		{"copy", "c", "Copy →"},
-		{"move", "m", "Move →"},
-		{"compress", "z", "Zip"},
-		{"chmod", "p", "Perms"},
-		{"props", "i", "Info"},
-		{"filter", "/", "Filter"},
-		{"sort", "o", sortLabel(m.paneRefConst(m.focus))},
-		{"view", "v", viewLabel(m.paneRefConst(m.focus).view)},
-		{"hidden", ".", hiddenLabel(m.showHidden)},
-		{"refresh", "g", "Refresh"},
-		{"quit", "q", "Quit"},
+type toolSpan struct {
+	x0, x1 int
+	action string
+}
+
+type toolbarFit struct {
+	shown    []toolButton
+	right    []toolButton
+	overflow []toolButton
+	short    bool
+	keysOnly bool
+	spans    []toolSpan
+	width    int
+}
+
+// toolbarButtons lists the action strip in display order. prio decides what
+// collapses into the "≡ More" menu first when the terminal is narrow (lower
+// goes first).
+func (m filesModel) toolbarButtons() []toolButton {
+	focus := m.paneRefConst(m.focus)
+	previewLabel := "Preview"
+	if m.preview.on {
+		previewLabel = "Preview ✓"
 	}
-	parts := make([]string, 0, len(btns))
-	for _, b := range btns {
-		txt := fmt.Sprintf("%s %s", b.key, b.label)
-		styled := fmToolBtn.Render(txt)
-		parts = append(parts, zone.Mark(fmActPrefix+b.action, styled))
+	return []toolButton{
+		{"source", "s", "Source", "Src", 8},
+		{"edit", "e", "Edit", "Edit", 7},
+		{"newfolder", "n", "Folder", "Dir", 6},
+		{"newfile", "N", "File", "File", 3},
+		{"rename", "r", "Rename", "Ren", 6},
+		{"delete", "d", "Delete", "Del", 8},
+		{"copy", "c", "Copy →", "Copy", 10},
+		{"move", "m", "Move →", "Move", 10},
+		{"compress", "z", "Zip", "Zip", 2},
+		{"chmod", "p", "Perms", "Perm", 1},
+		{"props", "i", "Info", "Info", 4},
+		{"filter", "/", "Filter", "Filt", 5},
+		{"sort", "o", sortLabel(focus), sortShort(focus), 5},
+		{"view", "v", viewLabel(focus.view), viewShort(focus.view), 7},
+		{"preview", "P", previewLabel, "Prev", 5},
+		{"hidden", ".", hiddenLabel(m.showHidden), "Hid", 2},
+		{"refresh", "g", "Refresh", "Ref", 1},
 	}
-	bar := strings.Join(parts, fmRule.Render("│"))
-	return lipgloss.NewStyle().Background(fmHeaderBg).Width(innerW).Render(" " + bar)
+}
+
+func toolBtnText(b toolButton, short, keysOnly bool) string {
+	switch {
+	case keysOnly:
+		return " " + b.key + " "
+	case short:
+		return " " + b.key + " " + b.short + " "
+	default:
+		return " " + b.key + " " + b.label + " "
+	}
+}
+
+// toolbarLayout picks the richest toolbar that fits in width w: first by
+// moving low-priority buttons into an overflow menu, then by shortening
+// labels, then by showing keys only. It never wraps.
+func (m filesModel) toolbarLayout(w int) toolbarFit {
+	all := m.toolbarButtons()
+	help := toolButton{"help", "?", "Help", "Help", 99}
+	quit := toolButton{"quit", "q", "Quit", "Quit", 99}
+	more := toolButton{"more", "≡", "More", "More", 99}
+
+	measure := func(shown []toolButton, right []toolButton, short, keysOnly bool) int {
+		w := 1 // leading space
+		for i, b := range shown {
+			if i > 0 {
+				w++ // separator
+			}
+			w += fmWidth(toolBtnText(b, short, keysOnly))
+		}
+		w++ // gap before the right group
+		for i, b := range right {
+			if i > 0 {
+				w++
+			}
+			w += fmWidth(toolBtnText(b, short, keysOnly))
+		}
+		return w
+	}
+	// Removal order: lowest priority first; among equals, the right-most first.
+	order := make([]int, len(all))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		if all[order[a]].prio != all[order[b]].prio {
+			return all[order[a]].prio < all[order[b]].prio
+		}
+		return order[a] > order[b]
+	})
+	build := func(removed map[int]bool, short, keysOnly bool) toolbarFit {
+		var shown, overflow []toolButton
+		for i, b := range all {
+			if removed[i] {
+				overflow = append(overflow, b)
+			} else {
+				shown = append(shown, b)
+			}
+		}
+		right := []toolButton{help, quit}
+		if len(overflow) > 0 {
+			right = []toolButton{more, help, quit}
+		}
+		width := measure(shown, right, short, keysOnly)
+		return toolbarFit{shown: shown, right: right, overflow: overflow, short: short, keysOnly: keysOnly, width: width}
+	}
+	// For each label style, drop buttons one at a time (never below keepPrio)
+	// until the strip fits.
+	fitWith := func(short, keysOnly bool, keepPrio int) (toolbarFit, bool) {
+		removed := map[int]bool{}
+		f := build(removed, short, keysOnly)
+		for _, i := range order {
+			if f.width <= w {
+				return f, true
+			}
+			if all[i].prio >= keepPrio {
+				break
+			}
+			removed[i] = true
+			f = build(removed, short, keysOnly)
+		}
+		return f, f.width <= w
+	}
+	fit, ok := fitWith(false, false, 7)
+	if !ok {
+		fit, ok = fitWith(true, false, 9)
+	}
+	if !ok {
+		fit, ok = fitWith(false, true, 100)
+	}
+	_ = ok
+	// Lay out spans (x relative to the start of the toolbar content).
+	x := 1
+	for i, b := range fit.shown {
+		if i > 0 {
+			x++
+		}
+		t := fmWidth(toolBtnText(b, fit.short, fit.keysOnly))
+		fit.spans = append(fit.spans, toolSpan{x0: x, x1: x + t, action: b.action})
+		x += t
+	}
+	rightW := 0
+	for i, b := range fit.right {
+		if i > 0 {
+			rightW++
+		}
+		rightW += fmWidth(toolBtnText(b, fit.short, fit.keysOnly))
+	}
+	rx := w - rightW
+	if rx < x+1 {
+		rx = x + 1
+	}
+	for i, b := range fit.right {
+		if i > 0 {
+			rx++
+		}
+		t := fmWidth(toolBtnText(b, fit.short, fit.keysOnly))
+		fit.spans = append(fit.spans, toolSpan{x0: rx, x1: rx + t, action: b.action})
+		rx += t
+	}
+	return fit
+}
+
+func (m filesModel) renderToolbarLine(l fmLayout, p *fmPalette) string {
+	w := l.innerW
+	fit := m.toolbarLayout(w)
+	var b strings.Builder
+	x := 0
+	btn := func(t toolButton, sp toolSpan) {
+		if sp.x0 > x {
+			if x > 1 && sp.x0-x == 1 {
+				b.WriteString(p.toolSep.s("│"))
+			} else {
+				b.WriteString(p.toolBase.s(strings.Repeat(" ", sp.x0-x)))
+			}
+		}
+		text := toolBtnText(t, fit.short, fit.keysOnly)
+		if m.hoverTool == t.action {
+			b.WriteString(p.toolHot.s(text))
+		} else {
+			// " k Label ": key bright, label muted.
+			key := t.key
+			rest := strings.TrimPrefix(text, " "+key)
+			b.WriteString(p.toolBase.s(" "))
+			b.WriteString(p.toolKey.s(key))
+			b.WriteString(p.toolLabel.s(rest))
+		}
+		x = sp.x1
+	}
+	all := append(append([]toolButton{}, fit.shown...), fit.right...)
+	for i, t := range all {
+		if i < len(fit.spans) {
+			btn(t, fit.spans[i])
+		}
+	}
+	if x < w {
+		b.WriteString(p.toolBase.s(strings.Repeat(" ", w-x)))
+	}
+	line := b.String()
+	if fit.width > w {
+		line = truncateANSI(line, w)
+	}
+	return p.pad(l.padX) + line + p.pad(l.w-l.padX-w)
 }
 
 func hiddenLabel(on bool) string {
@@ -302,6 +554,10 @@ func sortLabel(p paneState) string {
 	return "Sort: " + p.sortBy.label() + " " + sortArrow(p.sortDesc)
 }
 
+func sortShort(p paneState) string {
+	return p.sortBy.label() + sortArrow(p.sortDesc)
+}
+
 // viewLabel names the toolbar/menu button for the focused pane's current layout
 // (showing what `v` will offer next, Finder-style).
 func viewLabel(v viewMode) string {
@@ -311,76 +567,697 @@ func viewLabel(v viewMode) string {
 	return "View: List"
 }
 
-// ============================================================================
-// Pane rendering (breadcrumb header + big rows)
-// ============================================================================
-
-func (m filesModel) renderPane(side, paneWidth, rows int) string {
-	pane := m.paneRefConst(side)
-	cw := paneWidth - 2 // content width inside the rounded border
-	focused := side == m.focus
-
-	// Whether this pane is the active drop target during a drag.
-	isDropTarget := m.drag != nil && m.drag.active && m.hoverSide == side && side != m.drag.fromSide
-
-	header := zone.Mark(headerZoneID(side), m.renderPaneHeader(side, cw, focused))
-
-	var b strings.Builder
-	b.WriteString(header + "\n")
-	b.WriteString(fmRule.Render(strings.Repeat("─", cw)) + "\n")
-
-	switch {
-	case pane.loading:
-		b.WriteString(fmStatusSty.Render("loading…"))
-	case pane.err != nil:
-		b.WriteString(fmErrSty.Render("error: " + truncate(pane.err.Error(), cw-7)))
-	case len(pane.entries) == 0:
-		b.WriteString(fmStatusSty.Render("(empty)"))
-	case pane.view == viewGrid:
-		b.WriteString(m.renderGridBody(side, cw, rows, isDropTarget))
-	default:
-		b.WriteString(m.renderListBody(side, cw, rows, isDropTarget))
+func viewShort(v viewMode) string {
+	if v == viewGrid {
+		return "Icons"
 	}
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(fmBorderC).
-		Width(cw).
-		Height(rows + 2) // header + rule + rows
-	switch {
-	case isDropTarget:
-		box = box.BorderForeground(fmDropC)
-	case focused:
-		box = box.BorderForeground(fmAccent)
-	}
-	return zone.Mark(paneZoneID(side), box.Render(b.String()))
+	return "List"
 }
 
-// renderListBody draws the classic one-item-per-row list, padded to a stable
-// height. Every row is zone.Mark'ed by its item index so hit-testing, hover, and
-// drag-drop resolve clicks back to the right entry.
+// ============================================================================
+// Pane box
+// ============================================================================
+
+// rowColumns is the list-view column plan for a content width.
+type rowColumns struct {
+	nameW, sizeW, modeW, timeW int
+}
+
+func listColumns(cw int) rowColumns {
+	c := rowColumns{}
+	switch {
+	case cw >= 96:
+		c.sizeW, c.modeW, c.timeW = 8, 10, 12
+	case cw >= 46:
+		c.sizeW, c.timeW = 8, 12
+	case cw >= 30:
+		c.sizeW = 8
+	}
+	// lead " m i " (5) + trailing " " (1) + one separator per column.
+	used := 6
+	for _, w := range []int{c.sizeW, c.modeW, c.timeW} {
+		if w > 0 {
+			used += 1 + w
+		}
+	}
+	c.nameW = cw - used
+	if c.nameW < 1 {
+		c.nameW = 1
+	}
+	return c
+}
+
+// renderPaneBox draws one pane as exactly l.boxH lines, each l.paneW wide.
+func (m filesModel) renderPaneBox(side int, l fmLayout, p *fmPalette) []string {
+	pane := m.paneRefConst(side)
+	w := l.paneW[side]
+	cw := l.contentW(side)
+	focused := side == m.focus
+	isDropTarget := m.drag != nil && m.drag.active && m.hoverSide == side && side != m.drag.fromSide
+
+	border := p.paneRule
+	title := p.muted
+	switch {
+	case isDropTarget:
+		border, title = p.accent2, p.accent2
+	case focused:
+		border, title = p.accent, p.accentB
+	}
+
+	out := make([]string, 0, l.boxH)
+
+	// Top border: ╭─ ⌂ Local ──────────── badges ─╮
+	name := fmSanitize(pane.label())
+	titleText := " " + sourceGlyph(pane.remote) + " " + name + " "
+	if focused && p.noColor {
+		titleText = " ▸" + titleText
+	}
+	var badges []string
+	var badgePaints []fmPaint
+	if pane.loading && pane.listedCwd == pane.cwd && pane.listedCwd != "" {
+		badges, badgePaints = append(badges, " ↻ "), append(badgePaints, p.muted)
+	}
+	if m.mirror {
+		badges, badgePaints = append(badges, " ⇆ mirror "), append(badgePaints, p.accent2)
+	}
+	if pane.view == viewGrid {
+		badges, badgePaints = append(badges, " icons "), append(badgePaints, p.dim)
+	}
+	badgeW := 0
+	for _, b := range badges {
+		badgeW += fmWidth(b)
+	}
+	maxTitle := w - 4 - badgeW
+	if maxTitle < 4 {
+		maxTitle = 4
+		badges, badgePaints, badgeW = nil, nil, 0
+	}
+	titleText = fmFit(titleText, maxTitle)
+	fill := w - 3 - fmWidth(titleText) - badgeW - 1
+	if fill < 0 {
+		fill = 0
+	}
+	var top strings.Builder
+	top.WriteString(border.s("╭─"))
+	top.WriteString(title.s(titleText))
+	top.WriteString(border.s(strings.Repeat("─", fill)))
+	for i, b := range badges {
+		top.WriteString(badgePaints[i].s(b))
+	}
+	top.WriteString(border.s("─╮"))
+	out = append(out, top.String())
+
+	side2 := border.s("│")
+	// Breadcrumb line.
+	out = append(out, side2+m.renderCrumbLine(side, cw, p)+side2)
+	// Column header.
+	out = append(out, side2+m.renderColumnHeader(side, cw, p)+side2)
+
+	// Body.
+	body := m.renderPaneBody(side, cw, l.rows, isDropTarget, p)
+	sb := scrollbar(len(pane.entries), l.rows, pane.scroll, pane.view == viewGrid, m.gridColsFor(cw))
+	for i := range l.rows {
+		line := ""
+		if i < len(body) {
+			line = body[i]
+		}
+		right := side2
+		if sb != nil && sb[i] {
+			if focused {
+				right = p.accent.s("┃")
+			} else {
+				right = p.muted.s("┃")
+			}
+		}
+		out = append(out, side2+line+right)
+	}
+
+	// Bottom border: ╰─ 12 items · 3 selected (1.2 MB) ──── 37/50000 ─╯
+	info := " " + m.paneSummary(side) + " "
+	pos := ""
+	if n := realCountFast(pane.entries); n > 0 && !pane.loading {
+		pos = " " + groupThousands(int64(positionOf(pane))) + "/" + groupThousands(int64(n)) + " "
+	}
+	info = fmFit(info, w-4-fmWidth(pos))
+	fill = w - 3 - fmWidth(info) - fmWidth(pos) - 1
+	if fill < 0 {
+		fill = 0
+	}
+	var bot strings.Builder
+	bot.WriteString(border.s("╰─"))
+	if len(pane.selected) > 0 {
+		bot.WriteString(p.accent2.s(info))
+	} else {
+		bot.WriteString(p.dim.s(info))
+	}
+	bot.WriteString(border.s(strings.Repeat("─", fill)))
+	bot.WriteString(p.dim.s(pos))
+	bot.WriteString(border.s("─╯"))
+	out = append(out, bot.String())
+	return out
+}
+
+func (m filesModel) gridColsFor(cw int) int { return gridCols(cw) }
+
+// positionOf is the 1-based cursor position among real entries.
+func positionOf(p paneState) int {
+	pos := p.index + 1
+	if len(p.entries) > 0 && p.entries[0].name == ".." {
+		pos--
+	}
+	if pos < 1 {
+		pos = 1
+	}
+	return pos
+}
+
+// realCountFast counts entries excluding "..", which only ever sits first.
+func realCountFast(items []fileItem) int {
+	n := len(items)
+	if n > 0 && items[0].name == ".." {
+		n--
+	}
+	return n
+}
+
+// paneSummary is the per-pane footer: item count, and the selection's size.
+func (m filesModel) paneSummary(side int) string {
+	pane := m.paneRefConst(side)
+	if pane.loading && pane.listedCwd != pane.cwd {
+		return "loading…"
+	}
+	if pane.err != nil {
+		return "unavailable"
+	}
+	n := realCountFast(pane.entries)
+	s := plural(n, "item", "items")
+	if pane.filter != "" {
+		s = fmt.Sprintf("%d of %d shown", n, len(pane.allItems))
+	}
+	if len(pane.selected) > 0 {
+		st := m.selectionStats(side)
+		s = fmt.Sprintf("%d selected · %s", st.count, st.sizeText())
+	}
+	return s
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%s %s", groupThousands(int64(n)), many)
+}
+
+// groupThousands renders 50000 as "50,000".
+func groupThousands(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	if len(s) <= 3 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+	}
+	for i := pre; i < len(s); i += 3 {
+		if b.Len() > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+// scrollbar returns, for each body line, whether it is part of the thumb. nil
+// means everything fits and no scrollbar is drawn.
+func scrollbar(total, rows, scroll int, grid bool, cols int) []bool {
+	if grid {
+		if cols < 1 {
+			cols = 1
+		}
+		total = (total + cols - 1) / cols * gridCellH
+		scroll = scroll / cols * gridCellH
+	}
+	if total <= rows || rows <= 0 {
+		return nil
+	}
+	thumb := rows * rows / total
+	if thumb < 1 {
+		thumb = 1
+	}
+	maxScroll := total - rows
+	pos := 0
+	if maxScroll > 0 {
+		pos = scroll * (rows - thumb) / maxScroll
+	}
+	if pos+thumb > rows {
+		pos = rows - thumb
+	}
+	out := make([]bool, rows)
+	for i := pos; i < pos+thumb; i++ {
+		out[i] = true
+	}
+	return out
+}
+
+// ---- breadcrumb line ----
+
+type crumbSpan struct {
+	x0, x1 int
+	path   string
+}
+
+// crumbLayout renders the clickable breadcrumb for a pane within cw columns
+// (including a leading space) and returns the rendered text and its spans.
+func (m filesModel) crumbLayout(side, cw int, p *fmPalette) (string, []crumbSpan) {
+	pane := m.paneRefConst(side)
+	segs := breadcrumbSegmentsWithin(pane.cwd, pane.root, pane.pathStyle)
+	paths := make([]string, len(segs))
+	for i, s := range segs {
+		if i == 0 {
+			paths[i] = s
+		} else {
+			paths[i] = pane.pathStyle.Join(paths[i-1], s)
+		}
+	}
+	names := make([]string, len(segs))
+	for i, s := range segs {
+		names[i] = fmSanitize(s)
+	}
+	const sep = " › "
+	avail := cw - 1
+	// Drop leading segments (keeping the root) until the rest fits.
+	start := 1
+	width := func(from int) int {
+		w := fmWidth(names[0])
+		if from > 1 {
+			w += fmWidth(sep) + 1 // "…"
+		}
+		for i := from; i < len(names); i++ {
+			w += fmWidth(sep) + fmWidth(names[i])
+		}
+		return w
+	}
+	for start < len(names)-1 && width(start) > avail {
+		start++
+	}
+	var b strings.Builder
+	var spans []crumbSpan
+	x := 1
+	b.WriteString(p.base.s(" "))
+	add := func(text string, pt fmPaint, path string) {
+		tw := fmWidth(text)
+		if x+tw > cw {
+			text = fmFit(text, cw-x)
+			tw = fmWidth(text)
+		}
+		if tw <= 0 {
+			return
+		}
+		b.WriteString(pt.s(text))
+		if path != "" {
+			spans = append(spans, crumbSpan{x0: x, x1: x + tw, path: path})
+		}
+		x += tw
+	}
+	last := len(names) - 1
+	segPaint := func(i int) fmPaint {
+		if i == last {
+			return p.accent2
+		}
+		return p.dim
+	}
+	add(names[0], segPaint(0), paths[0])
+	if start > 1 {
+		add(sep, p.rule, "")
+		add("…", p.dim, paths[start-1])
+	}
+	for i := start; i < len(names); i++ {
+		add(sep, p.rule, "")
+		add(names[i], segPaint(i), paths[i])
+	}
+	// Right-aligned filter badge.
+	badge := ""
+	if pane.filter != "" {
+		badge = " /" + fmFit(fmSanitize(pane.filter), 16) + " "
+	}
+	if bw := fmWidth(badge); bw > 0 && x+bw+1 <= cw {
+		b.WriteString(p.pad(cw - x - bw))
+		b.WriteString(p.warn.s(badge))
+		x = cw
+	}
+	if x < cw {
+		b.WriteString(p.pad(cw - x))
+	}
+	return b.String(), spans
+}
+
+func (m filesModel) renderCrumbLine(side, cw int, p *fmPalette) string {
+	s, _ := m.crumbLayout(side, cw, p)
+	return s
+}
+
+// crumbHit returns the index of the crumb span under content column cx, or -1.
+func (m filesModel) crumbHit(side, cw, cx int) int {
+	_, spans := m.crumbLayout(side, cw, fmPal())
+	for i, sp := range spans {
+		if cx >= sp.x0 && cx < sp.x1 {
+			return i
+		}
+	}
+	return -1
+}
+
+// crumbPath returns the directory the i-th crumb span navigates to.
+func (m filesModel) crumbPath(side, cw, i int) string {
+	_, spans := m.crumbLayout(side, cw, fmPal())
+	if i < 0 || i >= len(spans) {
+		return ""
+	}
+	return spans[i].path
+}
+
+// ---- column header ----
+
+func (m filesModel) renderColumnHeader(side, cw int, p *fmPalette) string {
+	pane := m.paneRefConst(side)
+	arrow := sortArrow(pane.sortDesc)
+	label := func(text string, key sortKey) (string, fmPaint) {
+		if pane.sortBy == key {
+			return text + " " + arrow, p.accent2
+		}
+		return text, p.dim
+	}
+	if pane.view == viewGrid {
+		t, pt := label("Name", sortName)
+		s, sp := label("Size", sortSize)
+		d, dp := label("Modified", sortModified)
+		txt := "   " + t
+		line := p.base.s("   ") + pt.s(t)
+		rest := "  " + s + "  " + d
+		if fmWidth(txt)+fmWidth(rest) <= cw {
+			line += p.dim.s("  ") + sp.s(s) + p.dim.s("  ") + dp.s(d)
+			txt += rest
+		}
+		return line + p.pad(cw-fmWidth(txt))
+	}
+	c := listColumns(cw)
+	var b strings.Builder
+	x := 0
+	write := func(text string, pt fmPaint) {
+		b.WriteString(pt.s(text))
+		x += fmWidth(text)
+	}
+	write("     ", p.base)
+	t, pt := label("Name", sortName)
+	write(fmPadRight(t, c.nameW), pt)
+	if c.sizeW > 0 {
+		s, sp := label("Size", sortSize)
+		write(" ", p.base)
+		write(fmPadLeft(s, c.sizeW), sp)
+	}
+	if c.modeW > 0 {
+		write(" ", p.base)
+		write(fmPadRight("Mode", c.modeW), p.dim)
+	}
+	if c.timeW > 0 {
+		d, dp := label("Modified", sortModified)
+		write(" ", p.base)
+		write(fmPadRight(d, c.timeW), dp)
+	}
+	if x < cw {
+		write(strings.Repeat(" ", cw-x), p.base)
+	}
+	return b.String()
+}
+
+// columnHit maps a click on the column header to a sort key name.
+func (m filesModel) columnHit(side, cw, cx int) string {
+	pane := m.paneRefConst(side)
+	if pane.view == viewGrid {
+		return ""
+	}
+	c := listColumns(cw)
+	x := 5
+	if cx >= x && cx < x+c.nameW {
+		return "name"
+	}
+	x += c.nameW
+	if c.sizeW > 0 {
+		if cx >= x && cx < x+1+c.sizeW {
+			return "size"
+		}
+		x += 1 + c.sizeW
+	}
+	if c.modeW > 0 {
+		x += 1 + c.modeW
+	}
+	if c.timeW > 0 && cx >= x && cx < x+1+c.timeW {
+		return "modified"
+	}
+	return ""
+}
+
+// ---- body ----
+
+func (m filesModel) renderPaneBody(side, cw, rows int, isDropTarget bool, p *fmPalette) []string {
+	pane := m.paneRefConst(side)
+	switch {
+	case pane.loading && pane.listedCwd != pane.cwd:
+		return centeredBlock(cw, rows, p, []fmStyledLine{{"Loading…", p.muted}})
+	case pane.err != nil && !(pane.loading && pane.listedCwd == pane.cwd):
+		return m.renderPaneError(side, cw, rows, p)
+	case len(pane.entries) == 0 || (len(pane.entries) == 1 && pane.entries[0].name == ".." && pane.filter != ""):
+		if pane.filter != "" {
+			return centeredBlock(cw, rows, p, []fmStyledLine{
+				{"No items match “" + fmFit(fmSanitize(pane.filter), cw-20) + "”", p.warn},
+				{"", p.base},
+				{"esc clear filter · / edit filter", p.dim},
+			})
+		}
+		if len(pane.entries) == 0 {
+			return centeredBlock(cw, rows, p, []fmStyledLine{
+				{"This folder is empty", p.muted},
+				{"", p.base},
+				{"n new folder · N new file · drop files here", p.dim},
+			})
+		}
+	}
+	if pane.view == viewGrid {
+		return m.renderGridLines(side, cw, rows, isDropTarget, p)
+	}
+	return m.renderListLines(side, cw, rows, isDropTarget)
+}
+
+type fmStyledLine struct {
+	text string
+	pt   fmPaint
+}
+
+// centeredBlock renders a few lines vertically/horizontally centred in the
+// pane body.
+func centeredBlock(cw, rows int, p *fmPalette, lines []fmStyledLine) []string {
+	out := make([]string, 0, rows)
+	top := (rows - len(lines)) / 3
+	if top < 0 {
+		top = 0
+	}
+	for i := 0; i < top && len(out) < rows; i++ {
+		out = append(out, p.pad(cw))
+	}
+	for _, ln := range lines {
+		if len(out) >= rows {
+			break
+		}
+		t := fmFit(ln.text, cw-2)
+		tw := fmWidth(t)
+		left := (cw - tw) / 2
+		out = append(out, p.pad(left)+ln.pt.s(t)+p.pad(cw-left-tw))
+	}
+	for len(out) < rows {
+		out = append(out, p.pad(cw))
+	}
+	return out
+}
+
+// renderListBody is kept for callers/tests that want the joined body text.
 func (m filesModel) renderListBody(side, cw, rows int, isDropTarget bool) string {
+	return strings.Join(m.renderListLines(side, cw, rows, isDropTarget), "\n")
+}
+
+// renderListLines draws only the visible window of the listing (windowing):
+// a 50,000-entry directory costs the same per frame as a 50-entry one.
+func (m filesModel) renderListLines(side, cw, rows int, isDropTarget bool) []string {
 	pane := m.paneRefConst(side)
 	end := pane.scroll + rows
 	if end > len(pane.entries) {
 		end = len(pane.entries)
 	}
+	start := pane.scroll
+	if start < 0 {
+		start = 0
+	}
 	lines := make([]string, 0, rows)
-	for i := pane.scroll; i < end; i++ {
-		lines = append(lines, zone.Mark(rowZoneID(side, i), m.renderRow(side, i, cw, isDropTarget)))
+	for i := start; i < end; i++ {
+		lines = append(lines, m.renderRow(side, i, cw, isDropTarget))
 	}
-	// Pad the body so the box height is stable while scrolling.
+	p := fmPal()
 	for len(lines) < rows {
-		lines = append(lines, strings.Repeat(" ", cw))
+		lines = append(lines, p.pad(cw))
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
-// renderGridBody draws a Finder-style icon grid: cells laid out in gridCols
-// columns, each cell gridCellH lines tall (big icon over a centered name). Each
-// cell is zone.Mark'ed with the SAME rowZoneID as its list row, so hitRow,
-// hover, selection, and drag-drop work identically in both views.
+// renderRow draws one full-width file row, exactly cw columns wide.
+func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
+	pane := m.paneRefConst(side)
+	item := pane.entries[i]
+	p := fmPal()
+	focused := side == m.focus
+	cursor := i == pane.index
+	selected := cursor && focused
+	marked := pane.selected[i]
+	hovered := side == m.hoverSide && i == m.hoverIndex
+	dropHover := dropTargetPane && i == m.hoverIndex && item.isDir
+
+	glyph, kind := iconKindFor(item)
+	name := fmSanitize(item.name)
+	if (item.isDir || item.linkDir) && item.name != ".." {
+		name += "/"
+	}
+	mark := " "
+	if marked {
+		mark = "✓"
+	}
+	c := listColumns(cw)
+
+	sizeStr, modeStr, timeStr := "", "", ""
+	if c.sizeW > 0 && item.name != ".." {
+		if !item.isDir {
+			sizeStr = humanSize(item.size)
+		}
+	}
+	if c.modeW > 0 && item.name != ".." && item.mode != 0 {
+		modeStr = os.FileMode(item.mode).String()
+	}
+	if c.timeW > 0 && !item.modTime.IsZero() {
+		timeStr = fmtTime(item.modTime)
+	}
+
+	var rowPaint fmPaint
+	full := true
+	switch {
+	case selected:
+		rowPaint = p.sel
+	case dropHover:
+		rowPaint = p.drop
+	case marked:
+		rowPaint = p.mark
+	case cursor && !focused:
+		rowPaint = p.cursor
+	case hovered && p.hover != (fmPaint{}):
+		rowPaint = p.hover
+	default:
+		full = false
+	}
+
+	var b strings.Builder
+	b.Grow(cw + 96)
+	if full {
+		var t strings.Builder
+		t.WriteString(" ")
+		t.WriteString(mark)
+		t.WriteString(" ")
+		t.WriteString(glyph)
+		t.WriteString(" ")
+		t.WriteString(fmPadRight(fmFitName(name, c.nameW), c.nameW))
+		if c.sizeW > 0 {
+			t.WriteString(" ")
+			t.WriteString(fmPadLeft(sizeStr, c.sizeW))
+		}
+		if c.modeW > 0 {
+			t.WriteString(" ")
+			t.WriteString(fmPadRight(modeStr, c.modeW))
+		}
+		if c.timeW > 0 {
+			t.WriteString(" ")
+			t.WriteString(fmPadRight(timeStr, c.timeW))
+		}
+		t.WriteString(" ")
+		b.WriteString(rowPaint.s(t.String()))
+		return b.String()
+	}
+
+	zebra := i%2 == 1
+	baseP, nameP, metaP, iconP := p.base, p.base, p.dim, p.icons[kind]
+	if item.isDir || item.linkDir {
+		nameP = p.dir
+	}
+	if zebra {
+		baseP, metaP, iconP = p.zBase, p.zDim, p.iconsZ[kind]
+		nameP = p.zBase
+		if item.isDir || item.linkDir {
+			nameP = p.zDir
+		}
+	}
+	b.WriteString(baseP.s(" "))
+	if marked {
+		b.WriteString(baseP.s(mark))
+	} else {
+		b.WriteString(baseP.s(" "))
+	}
+	b.WriteString(baseP.s(" "))
+	b.WriteString(iconP.s(glyph))
+	b.WriteString(baseP.s(" "))
+	b.WriteString(nameP.s(fmPadRight(fmFitName(name, c.nameW), c.nameW)))
+	var meta strings.Builder
+	if c.sizeW > 0 {
+		meta.WriteString(" ")
+		meta.WriteString(fmPadLeft(sizeStr, c.sizeW))
+	}
+	if c.modeW > 0 {
+		meta.WriteString(" ")
+		meta.WriteString(fmPadRight(modeStr, c.modeW))
+	}
+	if c.timeW > 0 {
+		meta.WriteString(" ")
+		meta.WriteString(fmPadRight(timeStr, c.timeW))
+	}
+	meta.WriteString(" ")
+	b.WriteString(metaP.s(meta.String()))
+	return b.String()
+}
+
+// fmtTime formats a modification time like ls: time of day for recent
+// entries, the year for older ones. Always 12 columns.
+func fmtTime(t time.Time) string {
+	now := time.Now()
+	if t.Year() == now.Year() || (now.Sub(t) < 180*24*time.Hour && now.Sub(t) > -24*time.Hour) {
+		return t.Format("Jan 02 15:04")
+	}
+	return t.Format("Jan 02  2006")
+}
+
+// ---- grid ----
+
+// renderGridBody draws a Finder-style icon grid (joined), kept for callers.
 func (m filesModel) renderGridBody(side, cw, rows int, isDropTarget bool) string {
+	return strings.Join(m.renderGridLines(side, cw, rows, isDropTarget, fmPal()), "\n")
+}
+
+// renderGridLines draws cells laid out in gridCols columns, each cell
+// gridCellH lines tall (big icon over a centered name).
+func (m filesModel) renderGridLines(side, cw, rows int, isDropTarget bool, p *fmPalette) []string {
 	pane := m.paneRefConst(side)
 	cols := gridCols(cw)
 	cellW := cw / cols // distribute slack evenly across the row
@@ -391,102 +1268,90 @@ func (m filesModel) renderGridBody(side, cw, rows int, isDropTarget bool) string
 	if visRows < 1 {
 		visRows = 1
 	}
-
 	start := pane.scroll
 	end := start + cols*visRows
 	if end > len(pane.entries) {
 		end = len(pane.entries)
 	}
-
 	var lines []string
 	for i := start; i < end; i += cols {
-		cells := make([]string, 0, cols)
+		top := strings.Builder{}
+		bot := strings.Builder{}
+		used := 0
 		for c := range cols {
 			idx := i + c
 			if idx >= end {
-				cells = append(cells, blankCell(cellW))
-				continue
+				break
 			}
-			cell := m.renderGridCell(side, idx, cellW, isDropTarget)
-			cells = append(cells, zone.Mark(rowZoneID(side, idx), cell))
+			a, b := m.renderGridCellLines(side, idx, cellW, isDropTarget, p)
+			top.WriteString(a)
+			bot.WriteString(b)
+			used += cellW
 		}
-		// Each cell is gridCellH lines; join them side-by-side per cell-row.
-		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
+		if used < cw {
+			top.WriteString(p.pad(cw - used))
+			bot.WriteString(p.pad(cw - used))
+		}
+		lines = append(lines, top.String(), bot.String())
 	}
-	body := strings.Join(lines, "\n")
-
-	// Pad the body to a stable height (rows text lines).
-	cur := 0
-	if body != "" {
-		cur = lipgloss.Height(body)
+	for len(lines) < rows {
+		lines = append(lines, p.pad(cw))
 	}
-	for cur < rows {
-		body += "\n" + strings.Repeat(" ", cw)
-		cur++
+	if len(lines) > rows {
+		lines = lines[:rows]
 	}
-	return body
+	return lines
 }
 
-// blankCell is an empty grid cell (gridCellH lines of spaces) used to pad short
-// final rows so the grid keeps a rectangular shape.
-func blankCell(cellW int) string {
-	line := strings.Repeat(" ", cellW)
-	parts := make([]string, gridCellH)
-	for i := range parts {
-		parts[i] = line
-	}
-	return strings.Join(parts, "\n")
-}
-
-// renderGridCell draws a single icon+name cell of width cellW and height
-// gridCellH. Styling precedence matches renderRow: selected > drop-hover >
-// marked > hover > default, color-coded by kind.
+// renderGridCell draws a single icon+name cell (two lines joined by "\n").
 func (m filesModel) renderGridCell(side, i, cellW int, dropTargetPane bool) string {
+	a, b := m.renderGridCellLines(side, i, cellW, dropTargetPane, fmPal())
+	return a + "\n" + b
+}
+
+func (m filesModel) renderGridCellLines(side, i, cellW int, dropTargetPane bool, p *fmPalette) (string, string) {
 	pane := m.paneRefConst(side)
 	item := pane.entries[i]
 	focused := side == m.focus
-	selected := i == pane.index && focused
+	cursor := i == pane.index
+	selected := cursor && focused
 	marked := pane.selected[i]
 	hovered := side == m.hoverSide && i == m.hoverIndex
 	dropHover := dropTargetPane && i == m.hoverIndex && item.isDir
 
-	icon, iconStyle := iconFor(item)
-	name := item.name
-	if item.isDir && item.name != ".." {
+	glyph, kind := iconKindFor(item)
+	name := fmSanitize(item.name)
+	if (item.isDir || item.linkDir) && item.name != ".." {
 		name += "/"
 	}
 	if marked {
 		name = "✓ " + name
 	}
-
-	nameLine := centerCell(truncate(name, cellW), cellW)
-	iconLine := centerCell(icon, cellW)
+	nameLine := centerCell(fmFitName(name, cellW-1), cellW)
+	iconLine := centerCell(glyph, cellW)
 
 	switch {
 	case selected:
-		return fmSelRow.Width(cellW).Render(iconLine) + "\n" + fmSelRow.Width(cellW).Render(nameLine)
+		return p.sel.s(iconLine), p.sel.s(nameLine)
 	case dropHover:
-		return fmDropRow.Width(cellW).Render(iconLine) + "\n" + fmDropRow.Width(cellW).Render(nameLine)
+		return p.drop.s(iconLine), p.drop.s(nameLine)
 	case marked:
-		return fmMarkRow.Width(cellW).Render(iconLine) + "\n" + fmMarkRow.Width(cellW).Render(nameLine)
-	case hovered:
-		return fmHoverRow.Width(cellW).Render(iconLine) + "\n" + fmHoverRow.Width(cellW).Render(nameLine)
-	default:
-		// Grid icons get the category color (already bold for many kinds);
-		// force bold for a touch larger feel while staying single-width.
-		iconStyled := iconStyle.Bold(true).Width(cellW).Render(iconLine)
-		nameFg := fmText
-		if item.isDir {
-			nameFg = fmDirC
-		}
-		nameStyled := lipgloss.NewStyle().Foreground(nameFg).Width(cellW).Render(nameLine)
-		return iconStyled + "\n" + nameStyled
+		return p.mark.s(iconLine), p.mark.s(nameLine)
+	case cursor && !focused:
+		return p.cursor.s(iconLine), p.cursor.s(nameLine)
+	case hovered && p.hover != (fmPaint{}):
+		return p.hover.s(iconLine), p.hover.s(nameLine)
 	}
+	nameP := p.base
+	if item.isDir || item.linkDir {
+		nameP = p.dir
+	}
+	return p.icons[kind].s(iconLine), nameP.s(nameLine)
 }
 
 // centerCell centers s within width w (display columns), padding with spaces.
 func centerCell(s string, w int) string {
-	sw := lipgloss.Width(s)
+	sw := fmWidth(s)
 	if sw >= w {
 		return s
 	}
@@ -495,367 +1360,364 @@ func centerCell(s string, w int) string {
 	return strings.Repeat(" ", left) + s + strings.Repeat(" ", right)
 }
 
-func (m filesModel) renderPaneHeader(side, cw int, focused bool) string {
-	pane := m.paneRefConst(side)
+// ---- error state ----
 
-	srcStyle := lipgloss.NewStyle().Foreground(fmMutedC).Bold(true)
-	icon := "🖥"
-	if pane.remote {
-		icon = "☁"
-	}
-	if focused {
-		srcStyle = srcStyle.Foreground(fmAccent)
-	}
-	src := srcStyle.Render(icon + " " + pane.label())
-
-	count := ""
-	if !pane.loading {
-		count = fmCount.Render(fmt.Sprintf("(%d)", countReal(pane.entries)))
-	}
-	sel := ""
-	if n := len(pane.selected); n > 0 {
-		sel = lipgloss.NewStyle().Foreground(fmAccent2).Render(fmt.Sprintf(" • %d sel", n))
-	}
-	if pane.filter != "" {
-		sel += lipgloss.NewStyle().Foreground(fmWarnC).Render(" • /" + truncate(pane.filter, 12))
-	}
-
-	crumbW := cw - lipgloss.Width(src) - lipgloss.Width(count) - lipgloss.Width(sel) - 2
-	if crumbW < 6 {
-		crumbW = 6
-	}
-	crumb := renderBreadcrumbWithin(pane.cwd, pane.root, pane.pathStyle, crumbW)
-
-	line := src + "  " + crumb
-	// right-align the count + selection
-	used := lipgloss.Width(line) + lipgloss.Width(count) + lipgloss.Width(sel)
-	pad := cw - used
-	if pad < 1 {
-		pad = 1
-	}
-	return line + strings.Repeat(" ", pad) + count + sel
+// fmErrorInfo is a classified, human-oriented description of a listing error.
+type fmErrorInfo struct {
+	title string
+	hint  []string
 }
 
-// renderBreadcrumbWithin renders only paths at or below root. It falls back to
-// filesystem-root breadcrumbs for legacy pane states with no boundary.
-func renderBreadcrumbWithin(cwd, root string, style core.TargetPathStyle, width int) string {
-	segs := breadcrumbSegmentsWithin(cwd, root, style)
-	return renderBreadcrumbSegments(segs, width)
-}
-
-func breadcrumbSegmentsWithin(cwd, root string, style core.TargetPathStyle) []string {
-	if root == "" {
-		return breadcrumbSegments(cwd, style)
-	}
-	root = style.Clean(root)
-	rel, err := style.Relative(root, style.Clean(cwd))
-	if err != nil || rel == "." {
-		return []string{root}
-	}
-	return append([]string{root}, strings.Split(rel, "/")...)
-}
-
-// renderBreadcrumb renders a path as accented segments separated by ›, trimming
-// leading segments to fit the width.
-func renderBreadcrumb(cwd string, style core.TargetPathStyle, width int) string {
-	return renderBreadcrumbSegments(breadcrumbSegments(cwd, style), width)
-}
-
-func renderBreadcrumbSegments(segs []string, width int) string {
-	if len(segs) == 0 {
-		return ""
-	}
-	// Build from the right until we run out of width.
-	sepGlyph := fmCrumbSep.Render(" › ")
-	var rendered []string
-	for i, s := range segs {
-		style := fmCrumbSty
-		if i == len(segs)-1 {
-			style = fmCrumbCur
+// classifyPaneError turns a raw listing error into a title and recovery
+// hints. Remote errors arrive as text ("invalid_path: path is outside the
+// agent's allowed file roots"), so matching is on message content.
+func classifyPaneError(err error, pane paneState) fmErrorInfo {
+	msg := strings.ToLower(err.Error())
+	who := fmSanitize(pane.label())
+	has := func(subs ...string) bool {
+		for _, s := range subs {
+			if strings.Contains(msg, s) {
+				return true
+			}
 		}
-		rendered = append(rendered, style.Render(s))
+		return false
 	}
-	full := strings.Join(rendered, sepGlyph)
-	if lipgloss.Width(full) <= width {
-		return full
-	}
-	// Trim from the left, keeping the tail segments visible.
-	for start := 1; start < len(rendered); start++ {
-		candidate := fmCrumbSty.Render("…") + sepGlyph + strings.Join(rendered[start:], sepGlyph)
-		if lipgloss.Width(candidate) <= width {
-			return candidate
-		}
-	}
-	// Fall back to a plain truncated tail.
-	return fmCrumbCur.Render(truncate(segs[len(segs)-1], width))
-}
-
-// breadcrumbSegments splits an absolute target path without consulting the
-// controller filesystem. The first segment is the target root (/, C:\, or a
-// UNC share root), followed by each directory component.
-func breadcrumbSegments(cwd string, style core.TargetPathStyle) []string {
-	current := style.Clean(cwd)
-	if current == "." || style.IsRoot(current) {
-		return []string{current}
-	}
-
-	var tail []string
-	for !style.IsRoot(current) {
-		parent := style.Dir(current)
-		base := style.Base(current)
-		if parent == current || base == "." || base == "" {
-			return append([]string{current}, tail...)
-		}
-		tail = append([]string{base}, tail...)
-		current = parent
-	}
-	return append([]string{current}, tail...)
-}
-
-// renderRow draws one big, full-width file row.
-func (m filesModel) renderRow(side, i, cw int, dropTargetPane bool) string {
-	pane := m.paneRefConst(side)
-	item := pane.entries[i]
-	focused := side == m.focus
-	selected := i == pane.index && focused
-	marked := pane.selected[i]
-	hovered := side == m.hoverSide && i == m.hoverIndex
-	dropHover := dropTargetPane && i == m.hoverIndex && item.isDir
-
-	icon, iconStyle := iconFor(item)
-	name := item.name
-	if item.isDir && item.name != ".." {
-		name += "/"
-	}
-
-	// Column layout: " <mark> <icon>  <name....>  <size>  <time> ".
-	mark := " "
-	if marked {
-		mark = "✓"
-	}
-	sizeStr := ""
-	if !item.isDir {
-		sizeStr = humanSize(item.size)
-	}
-	timeStr := ""
-	if !item.modTime.IsZero() {
-		timeStr = item.modTime.Format("Jan 02 15:04")
-	}
-	sizeW := 9
-	timeW := 12
-	// Fixed chrome around the name column, in display columns:
-	//   " "(1) + mark(1) + " "(1) + icon(1) + "  "(2) + size + " "(1) + "  "(2)
-	//   + time + " "(1) trailing = name + size + time + 10.
-	// nameW is whatever is left after that chrome so the whole row is exactly cw
-	// wide — one terminal line, no soft-wrap inside the pane box.
-	const rowChrome = 10
-	nameW := cw - sizeW - timeW - rowChrome
-	if nameW < 6 {
-		nameW = 6
-		timeW = 0
-		timeStr = ""
-	}
-
-	// Style precedence: selected > drop-hover > marked > hover > zebra. The
-	// strongly-highlighted states paint a full-row background, so the icon stays
-	// plain there to keep the background contiguous; the default (zebra) state
-	// colors the icon by its file-type category for at-a-glance recognition.
 	switch {
-	case selected:
-		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
-			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
-		return fmSelRow.Width(cw).Render(plain)
-	case dropHover:
-		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
-			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
-		return fmDropRow.Width(cw).Render(plain)
-	case marked:
-		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
-			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
-		return fmMarkRow.Width(cw).Render(plain)
-	case hovered:
-		plain := fmt.Sprintf(" %s %s  %-*s %*s  %-*s ",
-			mark, icon, nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr)
-		style := fmHoverRow
-		if item.isDir {
-			style = style.Foreground(fmDirC)
+	case has("outside the agent's allowed file roots", "outside the selected file root", "is not permitted"):
+		root := fmSanitize(pane.root)
+		info := fmErrorInfo{title: "Outside the allowed file roots"}
+		info.hint = append(info.hint, who+" only allows file access inside its --file-root.")
+		if root != "" && root != "/" {
+			info.hint = append(info.hint, "Allowed root: "+root)
 		}
-		return style.Width(cw).Render(plain)
-	default:
-		base := fmFileRow
-		if item.isDir {
-			base = fmDirRow
+		info.hint = append(info.hint, "~ go to allowed root · ⌫ up · : go to path")
+		return info
+	case has("permission denied", "access is denied", "operation not permitted", "eacces"):
+		return fmErrorInfo{title: "Permission denied", hint: []string{
+			"You can't read this folder as the " + agentOrUser(pane) + ".",
+			"⌫ go up · g retry · s switch source",
+		}}
+	case has("no such file", "not found", "does not exist", "cannot find"):
+		return fmErrorInfo{title: "Folder not found", hint: []string{
+			"It may have been moved or deleted.",
+			"⌫ go up · ~ home · g retry",
+		}}
+	case has("not a directory"):
+		return fmErrorInfo{title: "Not a folder", hint: []string{"⌫ go up · g retry"}}
+	case pane.remote && has("connection refused", "no route to host", "i/o timeout", "timed out", "timeout",
+		"connection reset", "broken pipe", "eof", "unreachable", "not connected", "dial", "handshake",
+		"no reverse session", "not online", "offline", "closed network connection"):
+		return fmErrorInfo{title: who + " is unreachable", hint: []string{
+			"The agent did not answer. Check it with: fleet server reconnect " + who,
+			"g retry · s switch source · Tab other pane",
+		}}
+	}
+	return fmErrorInfo{title: "Couldn't list this folder", hint: []string{"g retry · ⌫ go up · s switch source"}}
+}
+
+func agentOrUser(p paneState) string {
+	if p.remote {
+		return "agent's user"
+	}
+	return "current user"
+}
+
+func (m filesModel) renderPaneError(side, cw, rows int, p *fmPalette) []string {
+	pane := m.paneRefConst(side)
+	info := classifyPaneError(pane.err, pane)
+	lines := []fmStyledLine{{"⚠  " + info.title, p.danger}, {"", p.base}}
+	raw := fmSanitize(pane.err.Error())
+	wrapped := fmWrap(raw, cw-4)
+	if len(wrapped) > 3 {
+		wrapped = append(wrapped[:2], fmFit(wrapped[2], cw-5)+"…")
+	}
+	for _, w := range wrapped {
+		lines = append(lines, fmStyledLine{w, p.dim})
+	}
+	lines = append(lines, fmStyledLine{"", p.base})
+	for _, h := range info.hint {
+		for _, w := range fmWrap(h, cw-4) {
+			lines = append(lines, fmStyledLine{w, p.muted})
 		}
-		zebra := i%2 == 1
-		if zebra {
-			base = base.Background(fmZebraC)
-			iconStyle = iconStyle.Background(fmZebraC)
-		}
-		// Compose the row as three width-stable segments joined horizontally so
-		// the icon can carry its own category color without disturbing column
-		// alignment: lead+mark (3 cols), the styled icon (1 col), then the rest.
-		// The rest segment is pinned to the remaining width (cw-4) so the joined
-		// line is always exactly cw columns — never cw+1, which would soft-wrap
-		// inside the pane box and split each item across two lines.
-		lead := base.Render(fmt.Sprintf(" %s ", mark))
-		iconCell := iconStyle.Render(icon)
-		restW := cw - 4
-		if restW < 0 {
-			restW = 0
-		}
-		rest := base.Width(restW).Render(fmt.Sprintf("  %-*s %*s  %-*s ",
-			nameW, truncate(name, nameW), sizeW, sizeStr, timeW, timeStr))
-		return lipgloss.JoinHorizontal(lipgloss.Top, lead, iconCell, rest)
+	}
+	return centeredBlock(cw, rows, p, lines)
+}
+
+// ============================================================================
+// Icons
+// ============================================================================
+
+type fmIconKind int
+
+const (
+	iconKindDefault fmIconKind = iota
+	iconKindUp
+	iconKindDir
+	iconKindSymlink
+	iconKindCode
+	iconKindDoc
+	iconKindData
+	iconKindImage
+	iconKindArchive
+	iconKindDocsRed
+	iconKindMedia
+	iconKindExec
+	iconKindConfig
+)
+
+func fmIconStyles() map[fmIconKind]lipgloss.Style {
+	return map[fmIconKind]lipgloss.Style{
+		iconKindDefault: lipgloss.NewStyle().Foreground(fmMutedC),
+		iconKindUp:      lipgloss.NewStyle().Foreground(fmMutedC).Bold(true),
+		iconKindDir:     lipgloss.NewStyle().Foreground(fmDirC).Bold(true),
+		iconKindSymlink: lipgloss.NewStyle().Foreground(fmDimC),
+		iconKindCode:    lipgloss.NewStyle().Foreground(fmCodeC).Bold(true),
+		iconKindDoc:     lipgloss.NewStyle().Foreground(fmDocC),
+		iconKindData:    lipgloss.NewStyle().Foreground(fmDataC),
+		iconKindImage:   lipgloss.NewStyle().Foreground(fmImageC),
+		iconKindArchive: lipgloss.NewStyle().Foreground(fmArchiveC),
+		iconKindDocsRed: lipgloss.NewStyle().Foreground(fmDocsRedC),
+		iconKindMedia:   lipgloss.NewStyle().Foreground(fmMediaC),
+		iconKindExec:    lipgloss.NewStyle().Foreground(fmExecC).Bold(true),
+		iconKindConfig:  lipgloss.NewStyle().Foreground(fmConfigC),
 	}
 }
 
 // iconFor is the single source of truth for a file item's icon: it returns a
 // crisp, single-terminal-cell-wide glyph and a palette-consistent lipgloss style
-// (color, weight) describing its file-type category. Both the list view
-// (renderRow) and the grid/icon view (renderGridCell) call this so the two stay
-// perfectly in sync. Every glyph is deliberately a single display column wide so
-// column alignment and the icon grid never tear.
+// (color, weight) describing its file-type category. Both the list view and the
+// grid/icon view use it (via iconKindFor) so the two stay in sync.
 func iconFor(item fileItem) (glyph string, style lipgloss.Style) {
+	g, k := iconKindFor(item)
+	return g, fmIconStyles()[k]
+}
+
+func iconKindFor(item fileItem) (string, fmIconKind) {
 	switch {
 	case item.name == "..":
-		return "⬑", iconUpStyle
+		return "⬑", iconKindUp
 	case item.isDir:
-		return "▣", iconDirStyle
+		return "▣", iconKindDir
 	case item.symlink:
-		return "↳", iconSymlinkStyle
+		if item.linkDir {
+			return "↳", iconKindDir
+		}
+		return "↳", iconKindSymlink
 	}
 
 	ext := strings.ToLower(filepath.Ext(item.name))
 	name := strings.ToLower(item.name)
 
 	if strings.HasPrefix(item.name, ".") && (ext == "" || ext == name) {
-		return "✦", iconConfigStyle
+		return "✦", iconKindConfig
 	}
 
 	switch ext {
 	case ".go", ".rs", ".c", ".h", ".hpp", ".cpp", ".cc", ".py", ".js", ".jsx",
 		".ts", ".tsx", ".java", ".rb", ".sh", ".bash", ".zsh", ".php", ".lua",
 		".swift", ".kt", ".scala", ".pl", ".sql", ".html", ".css", ".scss", ".vue":
-		return "λ", iconCodeStyle
+		return "λ", iconKindCode
 	case ".md", ".markdown", ".txt", ".rst", ".log", ".csv", ".tsv", ".rtf", ".tex":
-		return "≡", iconDocStyle
+		return "≡", iconKindDoc
 	case ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml",
 		".env", ".properties", ".lock":
-		return "◈", iconDataStyle
+		return "◈", iconKindData
 	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
 		".tiff", ".heic":
-		return "❖", iconImageStyle
+		return "❖", iconKindImage
 	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".zst",
 		".lz", ".lzma", ".deb", ".rpm":
-		return "▤", iconArchiveStyle
+		return "▤", iconKindArchive
 	case ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".odt", ".epub":
-		return "▥", iconDocsRedStyle
+		return "▥", iconKindDocsRed
 	case ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac",
 		".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv":
-		return "♪", iconMediaStyle
+		return "♪", iconKindMedia
 	case ".exe", ".bin", ".so", ".dylib", ".dll", ".o", ".a", ".app", ".out":
-		return "⚙", iconExecStyle
+		return "⚙", iconKindExec
+	}
+	switch name {
+	case "dockerfile", "makefile", "containerfile", "justfile", "vagrantfile":
+		return "λ", iconKindCode
 	}
 
 	if item.mode&0o111 != 0 {
-		return "⚙", iconExecStyle
+		return "⚙", iconKindExec
 	}
 
-	return "•", iconDefaultStyle
+	return "•", iconKindDefault
 }
 
 // ============================================================================
-// Transfers dock
+// Status bar & footer
 // ============================================================================
 
-func (m filesModel) renderTransfers(innerW int) string {
-	if len(m.transfers) == 0 {
-		return ""
+// fmLevel is the severity of a status message.
+type fmLevel int
+
+const (
+	levelInfo fmLevel = iota
+	levelOK
+	levelWarn
+	levelError
+)
+
+// statusLevelOf returns the severity for the current status text: the level
+// recorded by setStatus when it applies to this exact text, otherwise a
+// best-effort classification of the wording.
+func (m filesModel) statusLevelOf() fmLevel {
+	if m.statusLevelText == m.status && m.status != "" {
+		return m.statusLevel
+	}
+	return classifyStatus(m.status)
+}
+
+func classifyStatus(s string) fmLevel {
+	low := strings.ToLower(s)
+	has := func(subs ...string) bool {
+		for _, x := range subs {
+			if strings.Contains(low, x) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("failed", "error", "invalid", "refused", "denied", "unreachable", "collision", "cannot represent", "cannot inspect"):
+		return levelError
+	case has("cancelled", "select ", "cannot ", "not a recognised", "nothing to", "no ", "already"):
+		return levelWarn
+	case has("completed", "created", "deleted", "renamed", "saved", "copied", "moved", "extracted",
+		"compressed", "duplicated", "set ", "sha-256 ", "bookmarked", "started", "queued"):
+		return levelOK
+	}
+	return levelInfo
+}
+
+func (m filesModel) renderStatusLine(l fmLayout, p *fmPalette) string {
+	w := l.innerW
+	// Right-hand chips.
+	var chips []string
+	var chipPaints []fmPaint
+	add := func(s string, pt fmPaint) {
+		chips = append(chips, s)
+		chipPaints = append(chipPaints, pt)
+	}
+	pane := m.paneRefConst(m.focus)
+	if st := m.selectionStats(m.focus); st.count > 0 {
+		add(fmt.Sprintf(" ✓ %d · %s ", st.count, st.sizeText()), p.statKey)
+	}
+	add(" "+pane.sortBy.label()+" "+sortArrow(pane.sortDesc)+" ", p.statDim)
+	if pane.visual {
+		add(" RANGE ", p.statWarn)
+	}
+	if free, ok := m.freeSpace(m.focus); ok {
+		add(" "+humanSize(free)+" free ", p.statDim)
+	}
+	if !l.footer {
+		add(" ? help ", p.statKey)
+	}
+	chipW := 0
+	for _, c := range chips {
+		chipW += fmWidth(c)
+	}
+	// Drop chips from the left while the message area would get too narrow.
+	for len(chips) > 1 && w-chipW < 24 {
+		chipW -= fmWidth(chips[0])
+		chips, chipPaints = chips[1:], chipPaints[1:]
+	}
+
+	// Left: the transient message, or a mini status of the focused item.
+	msgW := w - chipW
+	var left string
+	if m.status != "" {
+		lvl := m.statusLevelOf()
+		icon, pt := "•", p.statInfo
+		switch lvl {
+		case levelOK:
+			icon, pt = "✓", p.statOk
+		case levelWarn:
+			icon, pt = "!", p.statWarn
+		case levelError:
+			icon, pt = "✗", p.statErr
+		}
+		txt := " " + icon + " " + fmSanitize(m.status)
+		txt = fmPadRight(txt, msgW)
+		left = pt.s(txt)
+	} else {
+		left = m.miniStatus(msgW, p)
 	}
 	var b strings.Builder
-	active := 0
-	for _, t := range m.transfers {
-		if !t.done {
-			active++
-		}
+	b.WriteString(left)
+	for i, c := range chips {
+		b.WriteString(chipPaints[i].s(c))
 	}
-	title := fmt.Sprintf(" Transfers  (%d active)", active)
-	b.WriteString(lipgloss.NewStyle().Foreground(fmText).Bold(true).Render(title))
-	b.WriteString("\n")
-	start := 0
-	if len(m.transfers) > 4 {
-		start = len(m.transfers) - 4
-	}
-	barW := 24
-	for _, t := range m.transfers[start:] {
-		pct := 0
-		if t.total > 0 {
-			pct = int(t.bytesDone * 100 / t.total)
-		}
-		if t.done && t.err == nil {
-			pct = 100
-		}
-		var meta string
-		switch {
-		case t.err != nil:
-			meta = fmErrSty.Render("failed: " + truncate(t.err.Error(), 30))
-		case t.done:
-			meta = fmDoneSty.Render("done · " + humanSize(t.total))
-		default:
-			meta = fmSizeCol.Render(fmt.Sprintf("%s/s · %d streams · %s left",
-				humanSize(int64(t.rate)), t.streams, formatETA(t)))
-		}
-		label := lipgloss.NewStyle().Foreground(fmText).Render(fmt.Sprintf(" %-18s", truncate(t.label, 18)))
-		fmt.Fprintf(&b, "%s %s  %s\n", label, smoothBar(pct, barW), meta)
-	}
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(fmBorderC).
-		Width(innerW - 2).
-		Render(strings.TrimRight(b.String(), "\n"))
+	return p.pad(l.padX) + b.String() + p.pad(l.w-l.padX-w)
 }
 
-// smoothBar renders a sub-cell-precise progress bar using eighth blocks.
-func smoothBar(pct, width int) string {
-	if pct < 0 {
-		pct = 0
+// miniStatus describes the focused entry when no message is showing: its full
+// (untruncated) name, size, mode and time, like Midnight Commander's mini
+// status line.
+func (m filesModel) miniStatus(w int, p *fmPalette) string {
+	pane := m.paneRefConst(m.focus)
+	it := m.focusedItem(m.focus)
+	if pane.loading && pane.listedCwd != pane.cwd {
+		return p.statMuted.s(fmPadRight(" loading "+fmSanitize(pane.cwd)+"…", w))
 	}
-	if pct > 100 {
-		pct = 100
+	if it.name == "" || it.name == ".." {
+		return p.statMuted.s(fmPadRight(" "+fmSanitize(pane.label())+"  "+fmSanitize(pane.cwd), w))
 	}
-	eighths := pct * width * 8 / 100
-	full := eighths / 8
-	rem := eighths % 8
-	bar := strings.Repeat("█", full)
-	used := full
-	if rem > 0 && full < width {
-		bar += string([]rune("▏▎▍▌▋▊▉")[rem-1])
-		used++
+	var details []string
+	switch {
+	case it.isDir:
+		details = append(details, "folder")
+	case it.symlink:
+		details = append(details, "symlink")
+	default:
+		details = append(details, humanSize(it.size))
 	}
-	empty := width - used
-	if empty < 0 {
-		empty = 0
+	if it.mode != 0 {
+		details = append(details, os.FileMode(it.mode).String())
 	}
-	filled := lipgloss.NewStyle().Foreground(fmAccent).Render(bar)
-	rest := lipgloss.NewStyle().Foreground(fmBorderC).Render(strings.Repeat("░", empty))
-	return filled + rest + lipgloss.NewStyle().Foreground(fmMutedC).Render(fmt.Sprintf(" %3d%%", pct))
+	if !it.modTime.IsZero() {
+		details = append(details, it.modTime.Format("2006-01-02 15:04"))
+	}
+	meta := "  " + strings.Join(details, "  ")
+	nameW := w - 1 - fmWidth(meta)
+	if nameW < 8 {
+		meta = ""
+		nameW = w - 1
+	}
+	name := fmFitName(fmSanitize(it.name), nameW)
+	return p.statBase.s(" "+name) + p.statDim.s(fmPadRight(meta, w-1-fmWidth(name)))
 }
 
-// ============================================================================
-// Footer hints
-// ============================================================================
-
-func (m filesModel) renderFooter() string {
+func (m filesModel) renderFooterLine(l fmLayout, p *fmPalette) string {
+	w := l.innerW
 	hints := [][2]string{
-		{"↑↓", "move"}, {"↵/→", "open"}, {"e", "edit"}, {"space", "select"},
-		{"c/m", "copy/move"}, {"D", "dup"}, {"z/x", "zip/unzip"}, {"p", "chmod"},
-		{"#", "sha256"}, {"d", "del"}, {"/", "filter"}, {"drag", "transfer"}, {"q", "quit"},
+		{"?", "help"}, {"↵", "open"}, {"space", "select"}, {"c/m", "copy/move"},
+		{"e", "edit"}, {"P", "preview"}, {"f", "jump"}, {":", "go to"}, {"t", "transfers"},
+		{"d", "del"}, {"/", "filter"}, {"drag", "transfer"}, {"q", "quit"},
 	}
-	parts := make([]string, 0, len(hints))
+	var b strings.Builder
+	x := 0
+	b.WriteString(p.base.s(" "))
+	x++
 	for _, h := range hints {
-		parts = append(parts, fmKeyChip.Render(h[0])+" "+fmHintLabel.Render(h[1]))
+		chip := " " + h[0] + " "
+		label := " " + h[1] + "  "
+		cw := fmWidth(chip) + fmWidth(label)
+		if x+cw > w {
+			break
+		}
+		b.WriteString(p.keyChip.s(chip))
+		b.WriteString(p.hintLabel.s(label))
+		x += cw
 	}
-	return " " + strings.Join(parts, "  ")
+	if x < w {
+		b.WriteString(p.pad(w - x))
+	}
+	return p.pad(l.padX) + b.String() + p.pad(l.w-l.padX-w)
 }
 
 // ============================================================================
@@ -882,8 +1744,36 @@ func (m filesModel) composeOverlay(base string) string {
 		return overlayCenter(base, m.width, m.height, m.renderFilter())
 	case overlayCompress:
 		return overlayCenter(base, m.width, m.height, m.renderCompress())
+	case overlayHelp:
+		return overlayCenter(base, m.width, m.height, m.renderHelp())
+	case overlayGoto:
+		return overlayCenter(base, m.width, m.height, m.renderGoto())
+	case overlayJump:
+		return overlayCenter(base, m.width, m.height, m.renderJump())
+	case overlayPlaces:
+		return overlayCenter(base, m.width, m.height, m.renderPlaces())
 	}
 	return base
+}
+
+// dialogWidth is the usable text width inside a centered overlay box.
+func (m filesModel) dialogWidth(want int) int {
+	max := m.width - 8 // border (2) + padding (4) + margin
+	if max < 20 {
+		max = 20
+	}
+	if want > max {
+		return max
+	}
+	return want
+}
+
+func renderInput(value string, w int) string {
+	field := fmSanitize(value) + "▏"
+	if fmWidth(field) > w-2 {
+		field = "…" + fmSuffixWithin(field, w-3)
+	}
+	return fmInputSty.Width(w).Render(field)
 }
 
 // renderCompress draws the archive overlay: a one-line summary of what's being
@@ -893,15 +1783,15 @@ func (m filesModel) composeOverlay(base string) string {
 func (m filesModel) renderCompress() string {
 	formats := core.ArchiveFormats()
 	format := formats[m.compressFormat]
+	dw := m.dialogWidth(44)
 
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).
-		Render("Compress " + m.paneRefConst(m.compressSide).label()))
+	b.WriteString(fmTitleSty.Render("Compress " + fmSanitize(m.paneRefConst(m.compressSide).label())))
 	b.WriteString("\n\n")
 
 	what := fmt.Sprintf("%d item(s)", len(m.compressNames))
 	if len(m.compressNames) == 1 {
-		what = "'" + m.compressNames[0] + "'"
+		what = "'" + fmFitName(fmSanitize(m.compressNames[0]), dw-12) + "'"
 	}
 	b.WriteString(fmStatusSty.Render("Archiving " + what))
 	b.WriteString("\n\n")
@@ -917,18 +1807,7 @@ func (m filesModel) renderCompress() string {
 	// Editable name field.
 	b.WriteString(fmHintLabel.Render("Name"))
 	b.WriteString("\n")
-	field := m.compressName + "▏"
-	inputW := 40
-	if lipgloss.Width(field) > inputW {
-		inputW = lipgloss.Width(field)
-	}
-	input := lipgloss.NewStyle().
-		Background(lipgloss.Color("#101822")).
-		Foreground(fmText).
-		Width(inputW).
-		Padding(0, 1).
-		Render(field)
-	b.WriteString(input)
+	b.WriteString(renderInput(m.compressName, dw))
 	b.WriteString("\n\n")
 
 	okBtn := zone.Mark(fmCompressPrefix+"ok",
@@ -944,22 +1823,11 @@ func (m filesModel) renderCompress() string {
 func (m filesModel) renderFilter() string {
 	side := m.filterSide
 	pane := m.paneRefConst(side)
+	dw := m.dialogWidth(44)
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).
-		Render("Filter " + pane.label() + " by name"))
+	b.WriteString(fmTitleSty.Render("Filter " + fmSanitize(pane.label()) + " by name"))
 	b.WriteString("\n\n")
-	field := pane.filter + "▏"
-	inputW := 40
-	if lipgloss.Width(field) > inputW {
-		inputW = lipgloss.Width(field)
-	}
-	input := lipgloss.NewStyle().
-		Background(lipgloss.Color("#101822")).
-		Foreground(fmText).
-		Width(inputW).
-		Padding(0, 1).
-		Render(field)
-	b.WriteString(input)
+	b.WriteString(renderInput(pane.filter, dw))
 	b.WriteString("\n")
 	b.WriteString(fmStatusSty.Render(fmt.Sprintf("  %d match(es)", countReal(pane.entries))))
 	b.WriteString("\n\n")
@@ -969,13 +1837,13 @@ func (m filesModel) renderFilter() string {
 
 func (m filesModel) renderSourcePicker() string {
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).Render("Open source in " + sideName(m.pickerSide) + " pane"))
+	b.WriteString(fmTitleSty.Render("Open source in " + sideName(m.pickerSide) + " pane"))
 	b.WriteString("\n\n")
 	for i, it := range m.pickerItems {
-		icon := "🖥"
+		icon := fmLocalGlyph
 		dot := ""
 		if it != "Local" {
-			icon = "☁"
+			icon = fmRemoteGlyph
 			// A small reachability indicator for servers.
 			reachable := false
 			for _, s := range m.servers {
@@ -990,12 +1858,16 @@ func (m filesModel) renderSourcePicker() string {
 				dot = lipgloss.NewStyle().Foreground(fmDimC).Render(" ○")
 			}
 		}
-		line := fmt.Sprintf(" %s  %-14s%s ", icon, it, dot)
+		last := ""
+		if p, ok := m.lastPath[pickerSource(it)]; ok {
+			last = "  " + fmFitPathLeft(fmSanitize(p), 28)
+		}
+		line := fmt.Sprintf(" %s  %s%s ", icon, fmPadRight(fmSanitize(it), 14), dot)
 		var styled string
 		if i == m.pickerIndex {
-			styled = fmSelRow.Render(line)
+			styled = fmSelRow.Render(line) + fmDimSty.Render(last)
 		} else {
-			styled = lipgloss.NewStyle().Foreground(fmText).Render(line)
+			styled = fmTextSty.Render(line) + fmDimSty.Render(last)
 		}
 		b.WriteString(zone.Mark(fmt.Sprintf("%s%d", fmPickPrefix, i), styled))
 		b.WriteString("\n")
@@ -1005,19 +1877,38 @@ func (m filesModel) renderSourcePicker() string {
 	return fmOverlayBox.Render(b.String())
 }
 
+func pickerSource(label string) string {
+	if label == "Local" {
+		return ""
+	}
+	return label
+}
+
 func (m filesModel) renderContextMenu() string {
 	var b strings.Builder
+	if m.menuTitle != "" {
+		b.WriteString(fmDimSty.Render(" " + m.menuTitle))
+		b.WriteString("\n")
+	}
+	labelW := 0
+	for _, it := range m.menuItems {
+		if w := fmWidth(it.label); w > labelW {
+			labelW = w
+		}
+	}
 	for i, it := range m.menuItems {
-		key := lipgloss.NewStyle().Foreground(fmAccent2).Render(fmt.Sprintf("%-2s", it.key))
-		label := it.label
+		label := fmPadRight(it.label, labelW)
 		var line string
 		switch {
+		case it.separator:
+			line = fmRule.Render(strings.Repeat("─", labelW+6))
 		case !it.enabled:
-			line = lipgloss.NewStyle().Foreground(fmDimC).Render(fmt.Sprintf(" %s  %s ", key, label))
+			line = lipgloss.NewStyle().Foreground(fmDimC).Render(fmt.Sprintf(" %-2s  %s ", it.key, label))
 		case i == m.menuIndex:
-			line = fmSelRow.Render(fmt.Sprintf(" %s  %s ", it.key, label))
+			line = fmSelRow.Render(fmt.Sprintf(" %-2s  %s ", it.key, label))
 		default:
-			line = fmt.Sprintf(" %s  %s ", key, lipgloss.NewStyle().Foreground(fmText).Render(label))
+			key := lipgloss.NewStyle().Foreground(fmAccent2).Render(fmt.Sprintf("%-2s", it.key))
+			line = fmt.Sprintf(" %s  %s ", key, fmTextSty.Render(label))
 		}
 		b.WriteString(zone.Mark(fmt.Sprintf("%s%d", fmMenuPrefix, i), line))
 		if i < len(m.menuItems)-1 {
@@ -1033,9 +1924,9 @@ func (m filesModel) renderCopyMoveMenu() string {
 	cancelBtn := " Cancel "
 	if m.cmIndex == 0 {
 		copyBtn = fmSelRow.Render(copyBtn)
-		moveBtn = lipgloss.NewStyle().Foreground(fmText).Render(moveBtn)
+		moveBtn = fmTextSty.Render(moveBtn)
 	} else {
-		copyBtn = lipgloss.NewStyle().Foreground(fmText).Render(copyBtn)
+		copyBtn = fmTextSty.Render(copyBtn)
 		moveBtn = fmSelRow.Render(moveBtn)
 	}
 	cancelBtn = lipgloss.NewStyle().Foreground(fmDimC).Render(cancelBtn)
@@ -1049,19 +1940,34 @@ func (m filesModel) renderCopyMoveMenu() string {
 }
 
 func (m filesModel) renderConfirm() string {
+	if m.confirm == confirmTransfer && m.plan != nil {
+		return m.renderTransferConfirm()
+	}
 	title := "Confirm"
-	titleStyle := lipgloss.NewStyle().Foreground(fmWarnC).Bold(true)
+	titleStyle := fmWarnSty
 	if m.confirm == confirmDelete {
 		title = "Delete"
-		titleStyle = lipgloss.NewStyle().Foreground(fmDangerC).Bold(true)
+		titleStyle = fmErrSty
 	}
+	dw := m.dialogWidth(64)
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("⚠  " + title))
 	b.WriteString("\n\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(fmText).Render(m.confirmText))
-	b.WriteString("\n\n")
-	b.WriteString(fmDoneSty.Render("Enter") + fmStatusSty.Render(" confirm   ") +
-		fmErrSty.Render("Esc") + fmStatusSty.Render(" cancel"))
+	if m.confirm == confirmDelete && len(m.deleteItems) > 0 {
+		b.WriteString(m.renderDeleteBody(dw))
+	} else {
+		for _, ln := range fmWrap(fmSanitize(m.confirmText), dw) {
+			b.WriteString(fmTextSty.Render(ln))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+	verb := " confirm   "
+	if m.confirm == confirmDelete {
+		verb = " delete   "
+	}
+	b.WriteString(fmDoneSty.Render("Enter/y") + fmStatusSty.Render(verb) +
+		fmErrSty.Render("Esc/n") + fmStatusSty.Render(" cancel"))
 	box := fmOverlayBox
 	if m.confirm == confirmDelete {
 		box = box.BorderForeground(fmDangerC)
@@ -1071,33 +1977,114 @@ func (m filesModel) renderConfirm() string {
 	return box.Render(b.String())
 }
 
-func (m filesModel) renderPrompt() string {
-	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).Render(m.promptLabel))
-	b.WriteString("\n\n")
-	field := m.promptValue + "▏"
-	inputW := 40
-	if lipgloss.Width(field) > inputW {
-		inputW = lipgloss.Width(field)
+// renderDeleteBody lists exactly what will be deleted: counts, known sizes,
+// the location and the first few names.
+func (m filesModel) renderDeleteBody(dw int) string {
+	pane := m.paneRefConst(m.deleteSide)
+	files, dirs := 0, 0
+	var bytes int64
+	for _, it := range m.deleteItems {
+		if it.isDir {
+			dirs++
+		} else {
+			files++
+			bytes += it.size
+		}
 	}
-	input := lipgloss.NewStyle().
-		Background(lipgloss.Color("#101822")).
-		Foreground(fmText).
-		Width(inputW).
-		Padding(0, 1).
-		Render(field)
-	b.WriteString(input)
+	var parts []string
+	if files > 0 {
+		parts = append(parts, fmt.Sprintf("%s (%s)", plural(files, "file", "files"), humanSize(bytes)))
+	}
+	if dirs > 0 {
+		parts = append(parts, plural(dirs, "folder", "folders")+" and everything inside")
+	}
+	var b strings.Builder
+	head := fmt.Sprintf("Permanently delete %s from %s?", strings.Join(parts, " + "), fmSanitize(pane.label()))
+	for _, ln := range fmWrap(head, dw) {
+		b.WriteString(fmTextSty.Render(ln))
+		b.WriteString("\n")
+	}
+	b.WriteString(fmDimSty.Render(fmFitPathLeft(fmSanitize(pane.cwd), dw)))
 	b.WriteString("\n\n")
-	b.WriteString(fmStatusSty.Render("↵ confirm · esc cancel"))
+	b.WriteString(itemList(m.deleteItems, dw, 6))
+	b.WriteString("\n")
+	b.WriteString(fmErrSty.Render("This cannot be undone."))
+	b.WriteString("\n")
+	return b.String()
+}
+
+// itemList renders up to max items as "• name   size" lines plus "+N more".
+func itemList(items []fileItem, dw, max int) string {
+	var b strings.Builder
+	for i, it := range items {
+		if i >= max {
+			b.WriteString(fmDimSty.Render(fmt.Sprintf("  … and %d more", len(items)-max)))
+			b.WriteString("\n")
+			break
+		}
+		name := fmSanitize(it.name)
+		meta := humanSize(it.size)
+		if it.isDir {
+			name += "/"
+			meta = "folder"
+		}
+		nameW := dw - 4 - 10
+		if nameW < 8 {
+			nameW = 8
+		}
+		b.WriteString(fmTextSty.Render("  • " + fmPadRight(fmFitName(name, nameW), nameW)))
+		b.WriteString(fmDimSty.Render(fmPadLeft(meta, 10)))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (m filesModel) renderPrompt() string {
+	dw := m.dialogWidth(48)
+	var b strings.Builder
+	for i, ln := range fmWrap(fmSanitize(m.promptLabel), dw) {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(fmTitleSty.Render(ln))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(renderInput(m.promptValue, dw))
+	b.WriteString("\n\n")
+	b.WriteString(fmStatusSty.Render("↵ confirm · esc cancel · ctrl+u clear"))
 	return fmOverlayBox.Render(b.String())
 }
 
 func (m filesModel) renderProperties() string {
+	dw := m.dialogWidth(76)
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Foreground(fmAccent).Bold(true).Render("Properties"))
+	b.WriteString(fmTitleSty.Render("Properties"))
 	b.WriteString("\n\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(fmText).Render(m.propsText))
-	b.WriteString("\n\n")
+	for _, raw := range strings.Split(m.propsText, "\n") {
+		// "Label:   value" — wrap long values under the value column.
+		label, value := raw, ""
+		if i := strings.Index(raw, ":"); i > 0 && i < 12 {
+			label, value = raw[:i+1], strings.TrimLeft(raw[i+1:], " ")
+		}
+		labelW := 10
+		if value == "" {
+			for _, ln := range fmWrap(fmSanitize(raw), dw) {
+				b.WriteString(fmTextSty.Render(ln))
+				b.WriteString("\n")
+			}
+			continue
+		}
+		for i, ln := range fmWrap(fmSanitize(value), dw-labelW) {
+			if i == 0 {
+				b.WriteString(fmDimSty.Render(fmPadRight(label, labelW)))
+			} else {
+				b.WriteString(strings.Repeat(" ", labelW))
+			}
+			b.WriteString(fmTextSty.Render(ln))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
 	b.WriteString(fmStatusSty.Render("esc / ↵ close"))
 	return fmOverlayBox.Render(b.String())
 }
@@ -1115,10 +2102,6 @@ func (m filesModel) renderEditor() string {
 	bw, bh := m.editorAreaSize()
 
 	// Header: file name + source + mode + dirty marker.
-	srcIcon := "🖥"
-	if ed.source != "" {
-		srcIcon = "☁"
-	}
 	srcLabel := "Local"
 	if ed.source != "" {
 		srcLabel = ed.source
@@ -1131,8 +2114,9 @@ func (m filesModel) renderEditor() string {
 	if ed.dirty {
 		dirty = lipgloss.NewStyle().Foreground(fmWarnC).Bold(true).Render(" ●")
 	}
-	title := lipgloss.NewStyle().Foreground(fmAccent).Bold(true).Render("✎ "+ed.name) + dirty
-	src := fmServerTag.Render("  " + srcIcon + " " + srcLabel)
+	src := fmServerTag.Render("  " + sourceGlyph(ed.source != "") + " " + fmSanitize(srcLabel))
+	nameW := bw - lipgloss.Width(src) - lipgloss.Width(modeTag) - 6
+	title := fmTitleSty.Render("✎ "+fmFitName(fmSanitize(ed.name), nameW)) + dirty
 	headLeft := title + src
 	gap := bw - lipgloss.Width(headLeft) - lipgloss.Width(modeTag)
 	if gap < 1 {
@@ -1158,7 +2142,7 @@ func (m filesModel) renderEditor() string {
 		parts = append(parts, fmKeyChip.Render(h.k)+" "+fmHintLabel.Render(h.v))
 	}
 	footLeft := strings.Join(parts, "  ")
-	statusTxt := ed.status
+	statusTxt := fmSanitize(ed.status)
 	statusSty := fmStatusSty
 	switch {
 	case strings.HasPrefix(statusTxt, "save failed"), strings.HasPrefix(statusTxt, "open failed"):
@@ -1166,7 +2150,7 @@ func (m filesModel) renderEditor() string {
 	case strings.HasPrefix(statusTxt, "saved"):
 		statusSty = fmDoneSty
 	}
-	footRight := statusSty.Render(statusTxt)
+	footRight := statusSty.Render(fmFit(statusTxt, bw/2))
 	fgap := bw - lipgloss.Width(footLeft) - lipgloss.Width(footRight)
 	if fgap < 1 {
 		fgap = 1
@@ -1185,10 +2169,13 @@ func (m filesModel) renderEditor() string {
 }
 
 // renderEditorViewer renders the highlighted read-only content windowed to the
-// visible body height, with a thin scrollbar-style position indicator.
+// visible body height, with line numbers.
 func (m filesModel) renderEditorViewer(bw, bh int) string {
 	ed := m.editor
-	lines := highlightLines(ed.name, ed.area.Value())
+	lines := ed.viewLines
+	if lines == nil {
+		lines = highlightLines(ed.name, ed.area.Value())
+	}
 	total := len(lines)
 
 	top := ed.viewScrl
@@ -1203,7 +2190,7 @@ func (m filesModel) renderEditorViewer(bw, bh int) string {
 		end = total
 	}
 
-	gutterW := len(fmt.Sprintf("%d", total))
+	gutterW := len(strconv.Itoa(total))
 	if gutterW < 2 {
 		gutterW = 2
 	}
@@ -1235,15 +2222,15 @@ func (m filesModel) composeGhost(base string) string {
 		return base
 	}
 	d := m.drag
-	icon, _ := iconFor(d.primary)
-	name := truncate(d.primary.name, 18)
+	icon, _ := iconKindFor(d.primary)
+	name := fmFitName(fmSanitize(d.primary.name), 18)
 	label := fmt.Sprintf(" %s %s ", icon, name)
 	if len(d.items) > 1 {
 		label += lipgloss.NewStyle().Background(fmAccent).Foreground(fmInk).Bold(true).
 			Render(fmt.Sprintf(" +%d ", len(d.items)-1))
 	}
 	ghost := lipgloss.NewStyle().
-		Background(lipgloss.Color("#10303a")).
+		Background(fmColor("#10303a")).
 		Foreground(fmAccent2).
 		Bold(true).
 		Border(lipgloss.RoundedBorder()).
@@ -1289,6 +2276,15 @@ func overlayAt(base string, x, y int, box string) string {
 	if x < 0 {
 		x = 0
 	}
+	// Keep the box on-screen horizontally when the base is wide enough.
+	if len(baseLines) > 0 {
+		if bw := lipgloss.Width(baseLines[0]); bw > 0 && x+boxW > bw {
+			x = bw - boxW
+			if x < 0 {
+				x = 0
+			}
+		}
+	}
 	// Clamp so the box stays on-screen vertically.
 	if y+len(boxLines) > len(baseLines) {
 		y = len(baseLines) - len(boxLines)
@@ -1323,7 +2319,7 @@ func overlayLine(base, overlay string, x, overlayW int) string {
 	if rightStart < baseW {
 		right = dropANSI(base, rightStart)
 	}
-	return left + overlay + right
+	return left + "\x1b[0m" + overlay + "\x1b[0m" + right
 }
 
 // ============================================================================
@@ -1331,7 +2327,7 @@ func overlayLine(base, overlay string, x, overlayW int) string {
 // ============================================================================
 
 // truncateANSI returns the prefix of s that occupies the first n display columns,
-// preserving styling, using lipgloss's truncation.
+// preserving styling.
 func truncateANSI(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -1351,13 +2347,14 @@ func dropANSI(s string, n int) string {
 	if n >= total {
 		return ""
 	}
-	// Take the full string, drop the first n visible cols by truncating the head
-	// then removing it. lipgloss has no native left-trim, so walk rune cells.
 	return trimVisibleLeft(s, n)
 }
 
-// truncateVisible walks the string honoring ANSI escapes, returning the prefix
-// covering n visible columns.
+// isCSIFinal reports whether b terminates a CSI escape sequence.
+func isCSIFinal(r rune) bool { return r >= 0x40 && r <= 0x7e && r != '[' }
+
+// truncateVisible walks the string honoring ANSI escapes (and wide runes),
+// returning the prefix covering n visible columns.
 func truncateVisible(s string, n int) string {
 	var out strings.Builder
 	visible := 0
@@ -1370,16 +2367,17 @@ func truncateVisible(s string, n int) string {
 		}
 		if inEsc {
 			out.WriteRune(r)
-			if r == 'm' {
+			if isCSIFinal(r) {
 				inEsc = false
 			}
 			continue
 		}
-		if visible >= n {
+		rw := fmRuneWidth(r)
+		if visible+rw > n {
 			break
 		}
 		out.WriteRune(r)
-		visible++
+		visible += rw
 	}
 	return out.String()
 }
@@ -1393,22 +2391,22 @@ func trimVisibleLeft(s string, n int) string {
 	for _, r := range s {
 		if r == '\x1b' {
 			inEsc = true
-			if visible >= n {
-				out.WriteRune(r)
-			}
+			out.WriteRune(r)
 			continue
 		}
 		if inEsc {
-			if visible >= n {
-				out.WriteRune(r)
-			}
-			if r == 'm' {
+			out.WriteRune(r)
+			if isCSIFinal(r) {
 				inEsc = false
 			}
 			continue
 		}
 		if visible < n {
-			visible++
+			visible += fmRuneWidth(r)
+			if visible > n {
+				// A wide rune straddled the cut: keep alignment with a space.
+				out.WriteByte(' ')
+			}
 			continue
 		}
 		out.WriteRune(r)
@@ -1419,15 +2417,6 @@ func trimVisibleLeft(s string, n int) string {
 // ============================================================================
 // Misc render helpers
 // ============================================================================
-
-func sepColumn(height int) string {
-	line := fmRule.Render(" ┃ ")
-	lines := make([]string, height)
-	for i := range lines {
-		lines[i] = line
-	}
-	return strings.Join(lines, "\n")
-}
 
 func countReal(items []fileItem) int {
 	n := 0
@@ -1455,7 +2444,10 @@ func formatDuration(secs float64) string {
 	if s < 60 {
 		return fmt.Sprintf("%ds", s)
 	}
-	return fmt.Sprintf("%dm%02ds", s/60, s%60)
+	if s < 3600 {
+		return fmt.Sprintf("%dm%02ds", s/60, s%60)
+	}
+	return fmt.Sprintf("%dh%02dm", s/3600, (s%3600)/60)
 }
 
 func humanSize(n int64) string {
@@ -1469,4 +2461,80 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f%c", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// renderBreadcrumbWithin renders only paths at or below root. It falls back to
+// filesystem-root breadcrumbs for legacy pane states with no boundary.
+func renderBreadcrumbWithin(cwd, root string, style core.TargetPathStyle, width int) string {
+	segs := breadcrumbSegmentsWithin(cwd, root, style)
+	return renderBreadcrumbSegments(segs, width)
+}
+
+func breadcrumbSegmentsWithin(cwd, root string, style core.TargetPathStyle) []string {
+	if root == "" {
+		return breadcrumbSegments(cwd, style)
+	}
+	root = style.Clean(root)
+	rel, err := style.Relative(root, style.Clean(cwd))
+	if err != nil || rel == "." {
+		return []string{root}
+	}
+	return append([]string{root}, strings.Split(rel, "/")...)
+}
+
+// renderBreadcrumb renders a path as accented segments separated by ›, trimming
+// leading segments to fit the width.
+func renderBreadcrumb(cwd string, style core.TargetPathStyle, width int) string {
+	return renderBreadcrumbSegments(breadcrumbSegments(cwd, style), width)
+}
+
+func renderBreadcrumbSegments(segs []string, width int) string {
+	if len(segs) == 0 {
+		return ""
+	}
+	// Build from the right until we run out of width.
+	sepGlyph := fmCrumbSep.Render(" › ")
+	var rendered []string
+	for i, s := range segs {
+		style := fmCrumbSty
+		if i == len(segs)-1 {
+			style = fmCrumbCur
+		}
+		rendered = append(rendered, style.Render(fmSanitize(s)))
+	}
+	full := strings.Join(rendered, sepGlyph)
+	if lipgloss.Width(full) <= width {
+		return full
+	}
+	// Trim from the left, keeping the tail segments visible.
+	for start := 1; start < len(rendered); start++ {
+		candidate := fmCrumbSty.Render("…") + sepGlyph + strings.Join(rendered[start:], sepGlyph)
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+	}
+	// Fall back to a plain truncated tail.
+	return fmCrumbCur.Render(fmFit(fmSanitize(segs[len(segs)-1]), width))
+}
+
+// breadcrumbSegments splits an absolute target path without consulting the
+// controller filesystem. The first segment is the target root (/, C:\, or a
+// UNC share root), followed by each directory component.
+func breadcrumbSegments(cwd string, style core.TargetPathStyle) []string {
+	current := style.Clean(cwd)
+	if current == "." || style.IsRoot(current) {
+		return []string{current}
+	}
+
+	var tail []string
+	for !style.IsRoot(current) {
+		parent := style.Dir(current)
+		base := style.Base(current)
+		if parent == current || base == "." || base == "" {
+			return append([]string{current}, tail...)
+		}
+		tail = append([]string{base}, tail...)
+		current = parent
+	}
+	return append([]string{current}, tail...)
 }

@@ -24,19 +24,35 @@ const snapDuration = 140 * time.Millisecond
 func (m filesModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	m.mouseX, m.mouseY = msg.X, msg.Y
 
-	// Wheel scrolls whichever pane is under the cursor.
+	// Wheel scrolls whichever pane (or overlay) is under the cursor.
 	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		if m.overlay == overlayNone {
-			if side, _, ok := m.hitRow(msg); ok {
-				m.movePane(side, -1)
-			}
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		delta := 1
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -1
 		}
-		return m, nil
-	case tea.MouseButtonWheelDown:
-		if m.overlay == overlayNone {
+		switch m.overlay {
+		case overlayNone:
 			if side, _, ok := m.hitRow(msg); ok {
-				m.movePane(side, 1)
+				m.movePane(side, delta*m.vStep(side))
+			} else if h := m.hitTest(msg.X, msg.Y); h.kind == fmHitTransfer && len(m.transfers) > 0 {
+				m.xferIndex += delta
+				if m.xferIndex < 0 {
+					m.xferIndex = 0
+				}
+				if m.xferIndex >= len(m.transfers) {
+					m.xferIndex = len(m.transfers) - 1
+				}
+			}
+		case overlayHelp:
+			m.helpScroll += delta * 3
+			if m.helpScroll < 0 {
+				m.helpScroll = 0
+			}
+		case overlayEditor:
+			if m.editor.mode == editorView {
+				m.editor.viewScrl += delta * 3
+				m.clampEditorScroll()
 			}
 		}
 		return m, nil
@@ -59,11 +75,20 @@ func (m filesModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m filesModel) handleMouseMotion(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Update hover target.
-	if side, idx, ok := m.hitRow(msg); ok && idx >= 0 {
-		m.hoverSide, m.hoverIndex = side, idx
+	m.mouseX, m.mouseY = msg.X, msg.Y
+	h := m.hitTest(msg.X, msg.Y)
+	// Update hover target (O(1): the layout maps y straight to a row).
+	if h.kind == fmHitRow && h.index >= 0 {
+		m.hoverSide, m.hoverIndex = h.side, h.index
+	} else if m.drag != nil && m.drag.active && h.side >= 0 {
+		m.hoverSide, m.hoverIndex = h.side, -1
 	} else {
 		m.hoverSide, m.hoverIndex = -1, -1
+	}
+	if h.kind == fmHitToolbar {
+		m.hoverTool = h.action
+	} else {
+		m.hoverTool = ""
 	}
 	// Promote a press into an active drag once the mouse is held and moves.
 	if m.drag != nil && msg.Button == tea.MouseButtonLeft {
@@ -73,6 +98,8 @@ func (m filesModel) handleMouseMotion(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m filesModel) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	h := m.hitTest(msg.X, msg.Y)
+
 	// Right-click opens the context menu on the row/pane under the cursor.
 	if msg.Button == tea.MouseButtonRight {
 		side, idx, ok := m.hitRow(msg)
@@ -80,6 +107,7 @@ func (m filesModel) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.focus = side
+		m.xferFocus = false
 		if idx >= 0 && idx < len(m.paneRefConst(side).entries) {
 			m.paneRef(side).index = idx
 		}
@@ -90,17 +118,49 @@ func (m filesModel) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Toolbar buttons.
-	if act, ok := hitToolbar(msg); ok {
-		return m.applyAction(act)
-	}
-
-	// Header click opens the source picker for that pane.
-	for side := range 2 {
-		if zone.Get(headerZoneID(side)).InBounds(msg) {
-			m.focus = side
-			return m.openSourcePicker(side), nil
+	switch h.kind {
+	case fmHitToolbar:
+		if h.action == "more" {
+			fit := m.toolbarLayout(m.layout().innerW)
+			return m.openActionsMenu(m.focus, msg.X-10, msg.Y+1, fit.overflow, "More actions"), nil
 		}
+		return m.applyAction(h.action)
+	case fmHitTitle:
+		// Pane title click opens the source picker for that pane.
+		m.focus = h.side
+		m.xferFocus = false
+		return m.openSourcePicker(h.side), nil
+	case fmHitCrumb:
+		m.focus = h.side
+		m.xferFocus = false
+		l := m.layout()
+		if path := m.crumbPath(h.side, l.contentW(h.side), h.index); path != "" {
+			pane := m.paneRefConst(h.side)
+			if path != pane.cwd {
+				focus := ""
+				if rel, err := pane.pathStyle.Relative(path, pane.cwd); err == nil && rel != "." {
+					focus = strings.SplitN(rel, "/", 2)[0]
+				}
+				return m, m.navigate(h.side, path, focus, true)
+			}
+		}
+		return m, nil
+	case fmHitColumn:
+		m.focus = h.side
+		m.xferFocus = false
+		if h.action != "" {
+			return m.setSortByColumn(h.side, h.action), nil
+		}
+		return m, nil
+	case fmHitTransfer:
+		if len(m.transfers) == 0 {
+			return m, nil
+		}
+		m.xferFocus = true
+		if h.index >= 0 {
+			m.xferIndex = h.index
+		}
+		return m, nil
 	}
 
 	side, idx, ok := m.hitRow(msg)
@@ -108,9 +168,34 @@ func (m filesModel) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.focus = side
+	m.xferFocus = false
 	if idx >= 0 {
 		pane := m.paneRef(side)
+		// Modifier clicks select without starting a drag.
+		switch {
+		case msg.Ctrl || msg.Alt:
+			pane.index = idx
+			if pane.entries[idx].name != ".." {
+				if pane.selected == nil {
+					pane.selected = map[int]bool{}
+				}
+				if pane.selected[idx] {
+					delete(pane.selected, idx)
+				} else {
+					pane.selected[idx] = true
+				}
+				pane.touch()
+			}
+			m.drag = nil
+			return m, nil
+		case msg.Shift:
+			delta := idx - pane.index
+			m.extendRange(side, delta)
+			m.drag = nil
+			return m, nil
+		}
 		pane.index = idx
+		pane.anchorSet = false
 		// Begin a potential drag from this row (or the multi-selection).
 		items := m.selectionItems(side)
 		if len(items) == 0 || pane.entries[idx].name == ".." {
@@ -127,7 +212,7 @@ func (m filesModel) handleMousePress(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m filesModel) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Button != tea.MouseButtonLeft {
+	if msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonNone {
 		return m, nil
 	}
 	drag := m.drag
@@ -143,6 +228,7 @@ func (m filesModel) handleMouseRelease(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// Detect a double-click: two clicks on the same row open it.
 		if inPane && relSide == drag.fromSide && m.isDoubleClick(relSide, relIdx) {
 			m.paneRef(relSide).index = relIdx
+			lastClickIdx = -1
 			return m.activate(relSide)
 		}
 		if inPane && relIdx >= 0 {
@@ -208,68 +294,6 @@ func (m filesModel) recordClick(side, idx int) {
 
 func sameItem(a, b fileItem) bool { return a.name == b.name && a.isDir == b.isDir }
 
-// hitRow resolves a mouse event to (side, rowIndex, inSomePane). rowIndex is -1
-// when inside a pane but not over a row.
-func (m filesModel) hitRow(msg tea.MouseMsg) (int, int, bool) {
-	for side := range 2 {
-		if !zone.Get(paneZoneID(side)).InBounds(msg) {
-			continue
-		}
-		// Only the rows currently on screen were zone.Mark'ed by the renderer, so
-		// scanning the whole listing is pure waste: every probe costs a
-		// fmt.Sprintf for the zone id plus a round trip to bubblezone's manager
-		// goroutine. On a big directory that turned each mouse-motion event into
-		// thousands of allocations. Restrict the scan to the rendered window.
-		lo, hi := m.visibleRange(side)
-		for i := lo; i < hi; i++ {
-			if zone.Get(rowZoneID(side, i)).InBounds(msg) {
-				return side, i, true
-			}
-		}
-		return side, -1, true
-	}
-	return -1, -1, false
-}
-
-// visibleRange returns the [lo, hi) entry indices the renderer currently draws
-// for a pane, matching renderListBody/renderGridBody's own windowing.
-func (m filesModel) visibleRange(side int) (int, int) {
-	pane := m.paneRefConst(side)
-	count := len(pane.entries)
-	lo := pane.scroll
-	if lo < 0 {
-		lo = 0
-	}
-	if lo > count {
-		lo = count
-	}
-	span := m.visibleRows()
-	if pane.view == viewGrid {
-		cols, visRows := m.gridDims()
-		span = cols * visRows
-	}
-	hi := lo + span
-	if hi > count {
-		hi = count
-	}
-	return lo, hi
-}
-
-func hitToolbar(msg tea.MouseMsg) (string, bool) {
-	for _, name := range toolbarActions {
-		if zone.Get(fmActPrefix + name).InBounds(msg) {
-			return name, true
-		}
-	}
-	return "", false
-}
-
-// toolbarActions are the clickable toolbar buttons (also keyboard shortcuts).
-var toolbarActions = []string{
-	"source", "edit", "newfolder", "newfile", "rename", "delete", "copy", "move",
-	"compress", "chmod", "props", "filter", "sort", "view", "hidden", "refresh", "quit",
-}
-
 func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
 	switch name {
 	case "source":
@@ -294,13 +318,21 @@ func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
 		return m.moveToOtherPane(m.focus)
 	case "compress":
 		return m.openCompress(m.focus), nil
+	case "extract":
+		return m.extractFocused(m.focus)
 	case "chmod":
 		return m.openChmodPrompt(m.focus), nil
 	case "props":
 		return m.openProperties(m.focus)
+	case "checksum":
+		return m.checksumFocused(m.focus)
+	case "duplicate":
+		return m.duplicateFocused(m.focus)
 	case "view":
 		m.cycleView(m.focus)
 		return m, nil
+	case "preview":
+		return m.togglePreview()
 	case "hidden":
 		m.showHidden = !m.showHidden
 		m.left.loading, m.right.loading = true, true
@@ -309,6 +341,21 @@ func (m filesModel) applyAction(name string) (tea.Model, tea.Cmd) {
 	case "refresh":
 		m.left.loading, m.right.loading = true, true
 		return m, m.refreshBoth()
+	case "help":
+		return m.openHelp(), nil
+	case "goto":
+		return m.openGoto(m.focus), nil
+	case "jump":
+		return m.openJump(m.focus), nil
+	case "places":
+		return m.openPlaces(), nil
+	case "bookmark":
+		return m.toggleBookmark(m.focus), nil
+	case "transfers":
+		if len(m.transfers) > 0 {
+			m.xferFocus = true
+		}
+		return m, nil
 	case "quit":
 		return m, tea.Quit
 	}
@@ -351,7 +398,8 @@ func (m filesModel) chooseSource(idx int) (tea.Model, tea.Cmd) {
 	}
 	side := m.pickerSide
 	pane := m.paneRef(side)
-	*pane = newPaneSource(m.app, source)
+	m.pushHistory(side, fmLoc{Source: pane.source, Path: pane.cwd})
+	*pane = m.newPane(source, *pane)
 	m.overlay = overlayNone
 	m.focus = side
 	m.status = "switched " + sideName(side) + " pane to " + choice
@@ -363,10 +411,11 @@ func (m filesModel) chooseSource(idx int) (tea.Model, tea.Cmd) {
 // ============================================================================
 
 type contextMenuItem struct {
-	key     string
-	label   string
-	action  string
-	enabled bool
+	key       string
+	label     string
+	action    string
+	enabled   bool
+	separator bool
 }
 
 func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
@@ -393,19 +442,48 @@ func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
 		{key: "/", label: "Filter…", action: "filter", enabled: true},
 		{key: "o", label: "Sort: " + m.paneRefConst(side).sortBy.label(), action: "sort", enabled: true},
 		{key: "v", label: viewLabel(m.paneRefConst(side).view), action: "view", enabled: true},
+		{key: "b", label: "Bookmark this folder", action: "bookmark", enabled: true},
 		{key: "g", label: "Refresh", action: "refresh", enabled: true},
 	}
 	m.overlay = overlayContextMenu
 	m.menuItems = items
 	m.menuIndex = 0
+	m.menuTitle = ""
 	m.menuX, m.menuY = x, y
 	m.menuSide, m.menuRow = side, idx
+	return m
+}
+
+// openActionsMenu shows toolbar buttons that did not fit (the "≡ More" menu),
+// plus the navigation actions that have no button.
+func (m filesModel) openActionsMenu(side, x, y int, overflow []toolButton, title string) filesModel {
+	var items []contextMenuItem
+	for _, b := range overflow {
+		items = append(items, contextMenuItem{key: b.key, label: b.label, action: b.action, enabled: true})
+	}
+	items = append(items,
+		contextMenuItem{key: ":", label: "Go to path…", action: "goto", enabled: true},
+		contextMenuItem{key: "f", label: "Jump to item…", action: "jump", enabled: true},
+		contextMenuItem{key: "'", label: "Places…", action: "places", enabled: true},
+		contextMenuItem{key: "t", label: "Transfers", action: "transfers", enabled: len(m.transfers) > 0},
+		contextMenuItem{key: "?", label: "Help", action: "help", enabled: true},
+	)
+	m.overlay = overlayContextMenu
+	m.menuItems = items
+	m.menuIndex = 0
+	m.menuTitle = title
+	if x < 0 {
+		x = 0
+	}
+	m.menuX, m.menuY = x, y
+	m.menuSide, m.menuRow = side, -1
 	return m
 }
 
 func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
 	side := m.menuSide
 	m.overlay = overlayNone
+	m.menuTitle = ""
 	switch action {
 	case "open":
 		return m.activate(side)
@@ -444,8 +522,11 @@ func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "refresh":
 		return m, m.reload(side)
+	case "bookmark":
+		return m.toggleBookmark(side), nil
 	}
-	return m, nil
+	m.focus = side
+	return m.applyAction(action)
 }
 
 // ============================================================================
@@ -485,6 +566,8 @@ func (m filesModel) openRenamePrompt(side int) filesModel {
 	return m
 }
 
+// submitPrompt validates the typed name and runs the operation off the UI
+// thread (remote mkdir/rename/upload are network round trips).
 func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 	side := m.promptSide
 	name := strings.TrimSpace(m.promptValue)
@@ -500,66 +583,95 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	app := m.app
+	source, remote := pane.source, pane.remote
 	switch m.prompt {
 	case promptNewFolder:
-		target := joinPath(pane.cwd, name, pane.pathStyle)
-		if pane.remote {
-			if err := m.app.RemoteMkdir(pane.source, target); err != nil {
-				m.status = "mkdir failed: " + err.Error()
-				return m, nil
-			}
-		} else {
-			if err := os.Mkdir(target, 0o750); err != nil {
-				m.status = "mkdir failed: " + err.Error()
-				return m, nil
-			}
+		if m.nameExists(side, name) {
+			m.setStatus(levelWarn, name+" already exists here")
+			return m, nil
 		}
-		m.status = "created folder " + name
-		return m, m.reload(side)
+		target := joinPath(pane.cwd, name, pane.pathStyle)
+		m.status = "creating folder " + name + "…"
+		pane := m.paneRef(side)
+		pane.focusName = name
+		return m, func() tea.Msg {
+			var err error
+			if remote {
+				err = app.RemoteMkdir(source, target)
+			} else {
+				err = os.Mkdir(target, 0o750)
+			}
+			return fileOpDoneMsg{side: side, verb: "created folder", what: name, err: err}
+		}
 	case promptNewFile:
-		target := joinPath(pane.cwd, name, pane.pathStyle)
-		if pane.remote {
-			// Stage an empty controller temp and upload it to the exact path.
-			tmp, err := os.CreateTemp("", "fleet-new-*")
-			if err != nil {
-				m.status = "create failed: " + err.Error()
-				return m, nil
-			}
-			tmpName := tmp.Name()
-			_ = tmp.Close()
-			defer os.Remove(tmpName)
-			if _, err := m.app.UploadFile(pane.source, tmpName, target, core.FileTransferOptions{}, nil); err != nil {
-				m.status = "create failed: " + err.Error()
-				return m, nil
-			}
-		} else {
-			if err := os.WriteFile(target, nil, 0o600); err != nil {
-				m.status = "create failed: " + err.Error()
-				return m, nil
-			}
+		if m.nameExists(side, name) {
+			m.setStatus(levelWarn, name+" already exists here")
+			return m, nil
 		}
-		m.status = "created file " + name
-		return m, m.reload(side)
+		target := joinPath(pane.cwd, name, pane.pathStyle)
+		m.status = "creating file " + name + "…"
+		m.paneRef(side).focusName = name
+		return m, func() tea.Msg {
+			return fileOpDoneMsg{side: side, verb: "created file", what: name, err: createEmptyFile(app, source, remote, target)}
+		}
 	case promptRename:
+		if name == m.promptItem.name {
+			return m, nil
+		}
+		if m.nameExists(side, name) {
+			m.setStatus(levelWarn, name+" already exists here — pick another name")
+			return m, nil
+		}
 		from := joinPath(pane.cwd, m.promptItem.name, pane.pathStyle)
 		to := joinPath(pane.cwd, name, pane.pathStyle)
-		if pane.remote {
-			if err := m.app.RemoteRename(pane.source, from, to); err != nil {
-				m.status = "rename failed: " + err.Error()
-				return m, nil
+		m.status = "renaming to " + name + "…"
+		m.paneRef(side).focusName = name
+		return m, func() tea.Msg {
+			var err error
+			if remote {
+				err = app.RemoteRename(source, from, to)
+			} else {
+				err = os.Rename(from, to)
 			}
-		} else {
-			if err := os.Rename(from, to); err != nil {
-				m.status = "rename failed: " + err.Error()
-				return m, nil
-			}
+			return fileOpDoneMsg{side: side, verb: "renamed to", what: name, err: err}
 		}
-		m.status = "renamed to " + name
-		return m, m.reload(side)
 	case promptChmod:
 		return m.runChmod(side, m.promptItem.name, name)
 	}
 	return m, nil
+}
+
+// nameExists reports whether the pane's current listing already has name
+// (case-insensitively on Windows targets).
+func (m filesModel) nameExists(side int, name string) bool {
+	pane := m.paneRefConst(side)
+	for _, it := range pane.allItems {
+		if it.name == name || (pane.pathStyle.IsWindows() && strings.EqualFold(it.name, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func createEmptyFile(app *core.App, source string, remote bool, target string) error {
+	if !remote {
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- operator-chosen path in the pane's folder
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	}
+	// Stage an empty controller temp and upload it to the exact path.
+	tmp, err := os.CreateTemp("", "fleet-new-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpName)
+	_, err = app.UploadFile(source, tmpName, target, core.FileTransferOptions{}, nil)
+	return err
 }
 
 // ============================================================================
@@ -586,35 +698,88 @@ func (m filesModel) openDeleteConfirm(side int) filesModel {
 	return m
 }
 
+// opFailure is one item that failed in a multi-item operation.
+type opFailure struct {
+	name string
+	err  error
+}
+
+// batchOpDoneMsg reports a multi-item operation (delete, same-pane move) with
+// per-item failures.
+type batchOpDoneMsg struct {
+	sides    []int
+	verb     string // "deleted", "moved"
+	suffix   string // e.g. " into logs/"
+	total    int
+	failures []opFailure
+}
+
 func (m filesModel) runDelete() (tea.Model, tea.Cmd) {
 	side := m.deleteSide
 	pane := m.paneRefConst(side)
 	m.overlay = overlayNone
-	var firstErr error
-	for _, it := range m.deleteItems {
-		target := joinPath(pane.cwd, it.name, pane.pathStyle)
-		var err error
-		if pane.remote {
-			err = m.app.RemoteDelete(pane.source, target, it.isDir)
-		} else {
-			err = os.RemoveAll(target)
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		m.status = "delete failed: " + firstErr.Error()
-	} else {
-		m.status = fmt.Sprintf("deleted %d item(s)", len(m.deleteItems))
-	}
+	items := append([]fileItem(nil), m.deleteItems...)
 	m.deleteItems = nil
-	return m, m.reload(side)
+	app := m.app
+	source, remote, cwd, style := pane.source, pane.remote, pane.cwd, pane.pathStyle
+	m.status = fmt.Sprintf("deleting %d item(s)…", len(items))
+	m.clearSelection(side)
+	return m, func() tea.Msg {
+		var fails []opFailure
+		for _, it := range items {
+			target := joinPath(cwd, it.name, style)
+			var err error
+			if remote {
+				err = app.RemoteDelete(source, target, it.isDir)
+			} else {
+				err = os.RemoveAll(target)
+			}
+			if err != nil {
+				fails = append(fails, opFailure{name: it.name, err: err})
+			}
+		}
+		return batchOpDoneMsg{sides: []int{side}, verb: "deleted", total: len(items), failures: fails}
+	}
+}
+
+func (m filesModel) onBatchOpDone(msg batchOpDoneMsg) (tea.Model, tea.Cmd) {
+	ok := msg.total - len(msg.failures)
+	switch {
+	case len(msg.failures) == 0:
+		m.setStatus(levelOK, fmt.Sprintf("%s %d item(s)%s", msg.verb, msg.total, msg.suffix))
+	case ok == 0 && len(msg.failures) == 1:
+		f := msg.failures[0]
+		m.setStatus(levelError, fmt.Sprintf("%s failed: %s — %v", strings.TrimSuffix(msg.verb, "d"), f.name, f.err))
+	default:
+		var parts []string
+		for i, f := range msg.failures {
+			if i == 3 {
+				parts = append(parts, fmt.Sprintf("+%d more", len(msg.failures)-3))
+				break
+			}
+			parts = append(parts, fmt.Sprintf("%s (%v)", f.name, f.err))
+		}
+		m.setStatus(levelError, fmt.Sprintf("%s %d of %d; %d failed: %s", msg.verb, ok, msg.total,
+			len(msg.failures), strings.Join(parts, ", ")))
+	}
+	cmds := make([]tea.Cmd, 0, len(msg.sides))
+	for _, s := range msg.sides {
+		cmds = append(cmds, m.reload(s))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // ============================================================================
 // Properties overlay
 // ============================================================================
+
+// propsStatMsg refreshes a remote item's properties with an authoritative stat.
+type propsStatMsg struct {
+	key  string
+	size int64
+	mode uint32
+	err  error
+}
 
 func (m filesModel) openProperties(side int) (tea.Model, tea.Cmd) {
 	pane := m.paneRefConst(side)
@@ -630,6 +795,9 @@ func (m filesModel) openProperties(side int) (tea.Model, tea.Cmd) {
 	}
 	if it.symlink {
 		kind = "Symlink"
+		if it.linkDir {
+			kind = "Symlink → directory"
+		}
 	}
 	lines := []string{
 		"Name:     " + it.name,
@@ -642,14 +810,46 @@ func (m filesModel) openProperties(side int) (tea.Model, tea.Cmd) {
 	if !it.modTime.IsZero() {
 		lines = append(lines, "Modified: "+it.modTime.Format("2006-01-02 15:04:05"))
 	}
-	// For remote files prefer a fresh stat so size/mode are authoritative.
-	if pane.remote && !it.isDir {
-		if st, err := m.app.StatRemoteFile(pane.source, full); err == nil {
-			lines[4] = "Size:     " + humanSize(st.Entry.Size)
-			lines[5] = "Mode:     " + os.FileMode(st.Entry.Mode).String()
+	if !pane.remote {
+		if fi, err := os.Lstat(full); err == nil {
+			if owner := fileOwner(fi); owner != "" {
+				lines = append(lines, "Owner:    "+owner)
+			}
+		}
+		if it.symlink {
+			if target, err := os.Readlink(full); err == nil {
+				lines = append(lines, "Target:   "+target)
+			}
 		}
 	}
 	m.overlay = overlayProperties
+	m.propsText = strings.Join(lines, "\n")
+	m.propsKey = pane.source + "\x00" + full
+	// For remote files prefer a fresh stat so size/mode are authoritative —
+	// fetched asynchronously so the dialog opens instantly.
+	if pane.remote && !it.isDir && m.app != nil {
+		app, source, key := m.app, pane.source, m.propsKey
+		return m, func() tea.Msg {
+			st, err := app.StatRemoteFile(source, full)
+			return propsStatMsg{key: key, size: st.Entry.Size, mode: st.Entry.Mode, err: err}
+		}
+	}
+	return m, nil
+}
+
+func (m filesModel) onPropsStat(msg propsStatMsg) (tea.Model, tea.Cmd) {
+	if m.overlay != overlayProperties || msg.key != m.propsKey || msg.err != nil {
+		return m, nil
+	}
+	lines := strings.Split(m.propsText, "\n")
+	for i, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "Size:"):
+			lines[i] = "Size:     " + humanSize(msg.size)
+		case strings.HasPrefix(ln, "Mode:"):
+			lines[i] = "Mode:     " + os.FileMode(msg.mode).String()
+		}
+	}
 	m.propsText = strings.Join(lines, "\n")
 	return m, nil
 }
@@ -723,7 +923,7 @@ func (m *filesModel) applyFilterLive(side int) {
 }
 
 // ============================================================================
-// Sort picker overlay
+// Sort
 // ============================================================================
 
 // cycleSort advances the focused pane's sort key (Name → Size → Modified →
@@ -747,6 +947,29 @@ func (m filesModel) cycleSort(side int) filesModel {
 	return m
 }
 
+// setSortByColumn sorts by a clicked column; clicking the active column again
+// flips the direction.
+func (m filesModel) setSortByColumn(side int, col string) filesModel {
+	pane := m.paneRef(side)
+	key := sortName
+	switch col {
+	case "size":
+		key = sortSize
+	case "modified":
+		key = sortModified
+	}
+	if pane.sortBy == key {
+		pane.sortDesc = !pane.sortDesc
+	} else {
+		pane.sortBy = key
+		pane.sortDesc = key != sortName // newest / largest first feels natural
+	}
+	m.reapplyPane(side)
+	m.clampScroll(side)
+	m.status = fmt.Sprintf("%s pane: sort by %s %s", pane.label(), pane.sortBy.label(), sortArrow(pane.sortDesc))
+	return m
+}
+
 func sortArrow(desc bool) string {
 	if desc {
 		return "↓"
@@ -764,7 +987,7 @@ func (m filesModel) copyToOtherPane(side int) (tea.Model, tea.Cmd) {
 		m.status = "select item(s) to copy"
 		return m, nil
 	}
-	return m.startBatch(side, m.other(side), items, dtCopy, -1)
+	return m.planTransfer(side, m.other(side), items, dtCopy, -1, false)
 }
 
 func (m filesModel) moveToOtherPane(side int) (tea.Model, tea.Cmd) {
@@ -773,7 +996,7 @@ func (m filesModel) moveToOtherPane(side int) (tea.Model, tea.Cmd) {
 		m.status = "select item(s) to move"
 		return m, nil
 	}
-	return m.startBatch(side, m.other(side), items, dtMove, -1)
+	return m.planTransfer(side, m.other(side), items, dtMove, -1, false)
 }
 
 // explicitTransfer is the `u` (upload) shortcut: push the selection to the other
@@ -811,7 +1034,7 @@ func (m filesModel) chooseCopyMove(copy bool) (tea.Model, tea.Cmd) {
 		active: true, snapping: true, snapUntil: time.Now().Add(snapDuration),
 		snapX: m.cmX, snapY: m.cmY,
 	}
-	model, cmd := m.startBatch(drag.fromSide, m.other(drag.fromSide), drag.items, kind, m.cmTarget)
+	model, cmd := m.planTransfer(drag.fromSide, m.other(drag.fromSide), drag.items, kind, m.cmTarget, true)
 	return model, tea.Batch(cmd, snapCmd())
 }
 
@@ -826,390 +1049,33 @@ func snapCmd() tea.Cmd {
 func (m filesModel) sameDirMove(drag *dragState, dstDir fileItem) (tea.Model, tea.Cmd) {
 	pane := m.paneRefConst(drag.fromSide)
 	dstBase := joinPath(pane.cwd, dstDir.name, pane.pathStyle)
-	var firstErr error
-	for _, it := range drag.items {
-		if sameItem(it, dstDir) {
-			continue
-		}
-		from := joinPath(pane.cwd, it.name, pane.pathStyle)
-		to := joinPath(dstBase, it.name, pane.pathStyle)
-		var err error
-		if pane.remote {
-			err = m.app.RemoteRename(pane.source, from, to)
-		} else {
-			err = os.Rename(from, to)
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		m.status = "move failed: " + firstErr.Error()
-	} else {
-		m.status = fmt.Sprintf("moved %d item(s) into %s/", len(drag.items), dstDir.name)
-	}
-	return m, m.reload(drag.fromSide)
-}
-
-// ============================================================================
-// Batch + routing: the heart of the transfer engine
-// ============================================================================
-
-// startBatch routes a set of items from one pane to another. Directory items
-// pop a size-confirmation modal (one at a time); file items transfer immediately
-// in parallel. targetIdx selects a destination folder row in the dest pane, or
-// -1 for the dest pane's cwd.
-func (m filesModel) startBatch(fromSide, toSide int, items []fileItem, kind dirTransferKind, targetIdx int) (tea.Model, tea.Cmd) {
-	if fromSide == toSide || len(items) == 0 {
-		return m, nil
-	}
-	dstPane := m.paneRefConst(toSide)
-	destDir := m.destDir(toSide, targetIdx)
-	if err := core.ValidateTargetPath(dstPane.pathStyle, destDir); err != nil {
-		m.status = "invalid destination: " + err.Error()
-		return m, nil
-	}
-	seen := make(map[string]string, len(items))
-	caseInsensitive := dstPane.pathStyle.IsWindows()
-	if !dstPane.remote {
-		var err error
-		caseInsensitive, err = core.LocalPathCaseInsensitive(destDir)
-		if err != nil {
-			m.status = "cannot inspect destination: " + err.Error()
-			return m, nil
-		}
-	}
-	for _, item := range items {
-		if err := core.ValidateTargetPathComponent(dstPane.pathStyle, item.name); err != nil {
-			m.status = "destination cannot represent " + item.name + ": " + err.Error()
-			return m, nil
-		}
-		key := item.name
-		if caseInsensitive {
-			key = strings.ToLower(key)
-		}
-		if previous, ok := seen[key]; ok && previous != item.name {
-			m.status = fmt.Sprintf("destination name collision: %s and %s", previous, item.name)
-			return m, nil
-		}
-		seen[key] = item.name
-	}
-
-	var cmds []tea.Cmd
-	var dirItem *fileItem
-	for i := range items {
-		it := items[i]
-		if it.isDir {
-			// Confirm the FIRST directory; queue remaining handling after.
-			dirItem = &items[i]
-			break
-		}
-		cmds = append(cmds, m.transferOne(fromSide, toSide, it, destDir, kind))
-	}
-
-	if dirItem != nil {
-		// Open the dir confirm modal; remember dest for the confirmed run. With a
-		// mixed selection we confirm one directory at a time; any file items above
-		// have already started transferring in parallel.
-		mm := m.openDirConfirm(fromSide, toSide, *dirItem, destDir, kind)
-		cmds = append(cmds, mm.dirScanCmd)
-		return mm, tea.Batch(cmds...)
-	}
-
-	if len(cmds) == 0 {
-		return m, nil
-	}
-	m.status = fmt.Sprintf("started %d transfer(s)", len(cmds))
-	return m, tea.Batch(cmds...)
-}
-
-// destDir computes the absolute destination directory in the dest pane.
-func (m filesModel) destDir(toSide, targetIdx int) string {
-	pane := m.paneRefConst(toSide)
-	if targetIdx >= 0 && targetIdx < len(pane.entries) {
-		dst := pane.entries[targetIdx]
-		if dst.isDir && dst.name != ".." {
-			return joinPath(pane.cwd, dst.name, pane.pathStyle)
-		}
-	}
-	return pane.cwd
-}
-
-// transferOne builds the tea.Cmd that performs a single file copy/move from the
-// source pane to a destination directory, routed by the two panes' source types.
-func (m *filesModel) transferOne(fromSide, toSide int, it fileItem, destDir string, kind dirTransferKind) tea.Cmd {
-	src := m.paneRefConst(fromSide)
-	dst := m.paneRefConst(toSide)
-	srcPath := joinPath(src.cwd, it.name, src.pathStyle)
-
-	// Vet remote-derived names before composing a LOCAL destination path.
-	var dstPath string
-	if !dst.remote {
-		safe, err := core.SafeLocalJoin(destDir, it.name)
-		if err != nil {
-			m.status = "refused unsafe name: " + it.name
-			return nil
-		}
-		dstPath = safe
-	} else {
-		dstPath = joinPath(destDir, it.name, dst.pathStyle)
-	}
-
-	id := m.nextID
-	m.nextID++
-	c := &transferChans{
-		progress: make(chan core.ProgressUpdate, 1),
-		done:     make(chan transferOutcome, 1),
-	}
-	m.chans[id] = c
-	progress := func(u core.ProgressUpdate) {
-		select {
-		case c.progress <- u:
-		default:
-		}
-	}
-
 	app := m.app
-	label := fmt.Sprintf("%s %s", transferGlyph(src.remote, dst.remote, kind), it.name)
-	m.transfers = append(m.transfers, &transferRow{id: id, label: label, total: it.size})
-
-	go func() {
-		err := runFileOp(app, src.source, srcPath, dst.source, dstPath, kind, progress)
-		c.done <- transferOutcome{err: err}
-	}()
-	return pollTransferCmd(id, c)
-}
-
-// runFileOp dispatches a single-file operation by source/dest type and kind.
-//
-//	local  -> remote : Upload  (+ delete source for move)
-//	remote -> local  : Download(+ delete source for move)
-//	remote -> remote : Copy / Move(rename or relay)
-//	local  -> local  : os copy (via relay-less rename/copy) — handled below
-func runFileOp(app *core.App, srcServer, srcPath, dstServer, dstPath string, kind dirTransferKind, progress core.ProgressFunc) error {
-	opts := core.FileTransferOptions{}
-	switch {
-	case srcServer == "" && dstServer != "":
-		// local -> remote
-		if _, err := app.UploadFile(dstServer, srcPath, dstPath, opts, progress); err != nil {
-			return err
-		}
-		if kind == dtMove {
-			return os.Remove(srcPath)
-		}
-		return nil
-	case srcServer != "" && dstServer == "":
-		// remote -> local
-		if _, err := app.DownloadFile(srcServer, srcPath, dstPath, opts, progress); err != nil {
-			return err
-		}
-		if kind == dtMove {
-			return app.RemoteDelete(srcServer, srcPath, false)
-		}
-		return nil
-	case srcServer != "" && dstServer != "":
-		// remote -> remote
-		if kind == dtMove {
-			return app.MoveFile(srcServer, srcPath, dstServer, dstPath, opts, progress)
-		}
-		_, err := app.CopyFile(srcServer, srcPath, dstServer, dstPath, opts, progress)
-		return err
-	default:
-		// local -> local
-		return localFileCopyMove(srcPath, dstPath, kind, progress)
-	}
-}
-
-// localFileCopyMove copies (or moves) a single local file. Move tries rename
-// first (cheap, cross-pane on the same FS) then falls back to copy+remove.
-func localFileCopyMove(srcPath, dstPath string, kind dirTransferKind, progress core.ProgressFunc) error {
-	if kind == dtMove {
-		if err := os.Rename(srcPath, dstPath); err == nil {
-			if progress != nil {
-				if fi, e := os.Stat(dstPath); e == nil {
-					progress(core.ProgressUpdate{BytesDone: fi.Size(), TotalBytes: fi.Size(), Done: true})
-				}
+	source, remote, cwd, style := pane.source, pane.remote, pane.cwd, pane.pathStyle
+	side := drag.fromSide
+	items := append([]fileItem(nil), drag.items...)
+	m.status = fmt.Sprintf("moving %d item(s) into %s/…", len(items), dstDir.name)
+	return m, func() tea.Msg {
+		var fails []opFailure
+		n := 0
+		for _, it := range items {
+			if sameItem(it, dstDir) {
+				continue
 			}
-			return nil
-		}
-	}
-	info, err := os.Lstat(srcPath)
-	if err != nil {
-		return err
-	}
-	if err := core.CopyLocalFileAtomic(srcPath, dstPath, info.Mode()); err != nil {
-		return err
-	}
-	if progress != nil {
-		progress(core.ProgressUpdate{BytesDone: info.Size(), TotalBytes: info.Size(), Done: true})
-	}
-	if kind == dtMove {
-		return os.Remove(srcPath)
-	}
-	return nil
-}
-
-// ============================================================================
-// Directory transfer confirmation
-// ============================================================================
-
-func (m filesModel) openDirConfirm(fromSide, toSide int, it fileItem, destDir string, kind dirTransferKind) filesModel {
-	m.overlay = overlayConfirm
-	m.confirm = confirmDirTransfer
-	src := m.paneRefConst(fromSide)
-	m.pendingDir = &pendingDirTransfer{kind: kind, fromSide: fromSide, item: it}
-	// Stash destination + sides for the confirmed run.
-	m.pendingDirDest = destDir
-	m.pendingDirTo = toSide
-	m.confirmText = m.dirConfirmText()
-	// Kick off the async estimate.
-	srcPath := joinPath(src.cwd, it.name, src.pathStyle)
-	return m.withDirScan(src.source, srcPath)
-}
-
-func (m filesModel) dirConfirmText() string {
-	if m.pendingDir == nil {
-		return ""
-	}
-	pd := m.pendingDir
-	verb := "Copy"
-	if pd.kind == dtMove {
-		verb = "Move"
-	}
-	dest := m.paneRefConst(m.pendingDirTo).label()
-	size := "(scanning…)"
-	if pd.scanErr != nil {
-		size = "(scan failed)"
-	} else if pd.scanned {
-		size = fmt.Sprintf("%d items, ~%s", pd.files, humanSize(pd.bytes))
-	}
-	return fmt.Sprintf("%s directory '%s' (%s) to %s?", verb, pd.item.name, size, dest)
-}
-
-func (m filesModel) withDirScan(source, path string) filesModel {
-	m.dirScanCmd = m.dirScanCmdFor(source, path)
-	return m
-}
-
-func (m filesModel) dirScanCmdFor(source, scanPath string) tea.Cmd {
-	app := m.app
-	return func() tea.Msg {
-		if source == "" {
-			f, b, err := core.EstimateLocalTree(scanPath)
-			return dirScanMsg{files: f, bytes: b, err: err}
-		}
-		f, b, err := app.EstimateRemoteTree(source, scanPath)
-		return dirScanMsg{files: f, bytes: b, err: err}
-	}
-}
-
-func (m filesModel) runDirTransfer() (tea.Model, tea.Cmd) {
-	pd := m.pendingDir
-	m.overlay = overlayNone
-	if pd == nil {
-		return m, nil
-	}
-	fromSide := pd.fromSide
-	toSide := m.pendingDirTo
-	destDir := m.pendingDirDest
-	src := m.paneRefConst(fromSide)
-	dst := m.paneRefConst(toSide)
-	srcPath := joinPath(src.cwd, pd.item.name, src.pathStyle)
-
-	var dstPath string
-	if !dst.remote {
-		safe, err := core.SafeLocalJoin(destDir, pd.item.name)
-		if err != nil {
-			m.status = "refused unsafe name: " + pd.item.name
-			m.pendingDir = nil
-			return m, nil
-		}
-		dstPath = safe
-	} else {
-		dstPath = joinPath(destDir, pd.item.name, dst.pathStyle)
-	}
-
-	id := m.nextID
-	m.nextID++
-	c := &transferChans{
-		progress: make(chan core.ProgressUpdate, 1),
-		done:     make(chan transferOutcome, 1),
-	}
-	m.chans[id] = c
-	progress := func(u core.ProgressUpdate) {
-		select {
-		case c.progress <- u:
-		default:
-		}
-	}
-	app := m.app
-	srcSource, dstSource := src.source, dst.source
-	kind := pd.kind
-	label := fmt.Sprintf("%s %s/", transferGlyph(src.remote, dst.remote, kind), pd.item.name)
-	m.transfers = append(m.transfers, &transferRow{id: id, label: label, total: pd.bytes})
-	m.status = "started directory " + label
-
-	go func() {
-		err := runDirOp(app, srcSource, srcPath, dstSource, dstPath, kind, progress)
-		c.done <- transferOutcome{err: err}
-	}()
-	m.pendingDir = nil
-	return m, pollTransferCmd(id, c)
-}
-
-// runDirOp dispatches a recursive directory operation by source/dest type.
-func runDirOp(app *core.App, srcServer, srcPath, dstServer, dstPath string, kind dirTransferKind, progress core.ProgressFunc) error {
-	opts := core.FileTransferOptions{}
-	switch {
-	case srcServer == "" && dstServer != "":
-		if _, err := app.UploadDir(dstServer, srcPath, dstPath, opts, progress); err != nil {
-			return err
-		}
-		if kind == dtMove {
-			return os.RemoveAll(srcPath)
-		}
-		return nil
-	case srcServer != "" && dstServer == "":
-		if _, err := app.DownloadDir(srcServer, srcPath, dstPath, opts, progress); err != nil {
-			return err
-		}
-		if kind == dtMove {
-			return app.RemoteDelete(srcServer, srcPath, true)
-		}
-		return nil
-	case srcServer != "" && dstServer != "":
-		if kind == dtMove {
-			_, err := app.MoveDir(srcServer, srcPath, dstServer, dstPath, opts, progress)
-			return err
-		}
-		_, err := app.CopyDir(srcServer, srcPath, dstServer, dstPath, opts, progress)
-		return err
-	default:
-		return localDirCopyMove(srcPath, dstPath, kind, progress)
-	}
-}
-
-// localDirCopyMove recursively copies (or moves) a local directory tree.
-func localDirCopyMove(srcPath, dstPath string, kind dirTransferKind, progress core.ProgressFunc) error {
-	if kind == dtMove {
-		if err := os.Rename(srcPath, dstPath); err == nil {
-			if progress != nil {
-				progress(core.ProgressUpdate{Done: true})
+			n++
+			from := joinPath(cwd, it.name, style)
+			to := joinPath(dstBase, it.name, style)
+			var err error
+			if remote {
+				err = app.RemoteRename(source, from, to)
+			} else {
+				err = os.Rename(from, to)
 			}
-			return nil
+			if err != nil {
+				fails = append(fails, opFailure{name: it.name, err: err})
+			}
 		}
+		return batchOpDoneMsg{sides: []int{side}, verb: "moved", suffix: " into " + dstDir.name + "/", total: n, failures: fails}
 	}
-	err := core.CopyLocalTreeAtomic(srcPath, dstPath)
-	if err != nil {
-		return err
-	}
-	if progress != nil {
-		progress(core.ProgressUpdate{Done: true})
-	}
-	if kind == dtMove {
-		return os.RemoveAll(srcPath)
-	}
-	return nil
 }
 
 // ============================================================================
@@ -1283,18 +1149,18 @@ func (m filesModel) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlayConfirm:
+		if m.confirm == confirmTransfer {
+			return m.handlePlanKey(msg)
+		}
 		switch key {
 		case "esc", "q", "n":
 			m.overlay = overlayNone
-			m.pendingDir = nil
+			m.plan = nil
 			m.deleteItems = nil
 			m.status = "cancelled"
 			return m, nil
 		case "enter", "y":
-			if m.confirm == confirmDelete {
-				return m.runDelete()
-			}
-			return m.runDirTransfer()
+			return m.runDelete()
 		}
 		return m, nil
 
@@ -1341,6 +1207,18 @@ func (m filesModel) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case overlayCompress:
 		return m.handleCompressKey(msg)
+
+	case overlayHelp:
+		return m.handleHelpKey(msg)
+
+	case overlayGoto:
+		return m.handleGotoKey(msg)
+
+	case overlayJump:
+		return m.handleJumpKey(msg)
+
+	case overlayPlaces:
+		return m.handlePlacesKey(msg)
 	}
 	return m, nil
 }
@@ -1385,10 +1263,7 @@ func (m filesModel) handleCompressKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m filesModel) handleOverlayMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress && msg.Action != tea.MouseActionRelease {
-		return m, nil
-	}
-	if msg.Action == tea.MouseActionRelease {
+	if msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
 	if msg.Button != tea.MouseButtonLeft {
@@ -1448,11 +1323,24 @@ func (m filesModel) handleOverlayMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
-	case overlayConfirm, overlayProperties, overlayPrompt:
-		// Click outside dismisses (confirm/props); prompt keeps focus.
-		if m.overlay != overlayPrompt {
-			m.overlay = overlayNone
+	case overlayPlaces:
+		for i := range m.placesItems {
+			if zone.Get(fmt.Sprintf("%s%d", fmPlacePrefix, i)).InBounds(msg) {
+				return m.choosePlace(i)
+			}
 		}
+		m.overlay = overlayNone
+		return m, nil
+	case overlayConfirm:
+		if m.confirm == confirmTransfer {
+			return m.handlePlanMouse(msg)
+		}
+		m.overlay = overlayNone
+		m.deleteItems = nil
+		m.status = "cancelled"
+		return m, nil
+	case overlayProperties, overlayHelp:
+		m.overlay = overlayNone
 		return m, nil
 	}
 	return m, nil

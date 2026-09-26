@@ -17,18 +17,18 @@ import (
 // Literal, Comment, …) — not by every fine-grained token type — for a clean,
 // readable result with the teal/blue accent family already in use.
 var (
-	hlKeyword = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff9d6b")).Bold(true) // warm orange
+	hlKeyword = lipgloss.NewStyle().Foreground(fmColor("#ff9d6b")).Bold(true) // warm orange
 	hlName    = lipgloss.NewStyle().Foreground(fmText)
-	hlNameFn  = lipgloss.NewStyle().Foreground(fmAccent2)                 // teal accent
-	hlNameCls = lipgloss.NewStyle().Foreground(lipgloss.Color("#7ad7ff")) // blue (types)
-	hlNameBlt = lipgloss.NewStyle().Foreground(lipgloss.Color("#c8a8ff")) // lavender (builtins)
-	hlString  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7ee787")) // green
-	hlNumber  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f0a8d0")) // pink
-	hlComment = lipgloss.NewStyle().Foreground(fmDimC).Italic(true)       // dim, italic
-	hlOperat  = lipgloss.NewStyle().Foreground(lipgloss.Color("#8fd0c8")) // muted teal
-	hlPunct   = lipgloss.NewStyle().Foreground(fmMutedC)                  // muted
-	hlPreproc = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffce6b")) // amber
-	hlError   = lipgloss.NewStyle().Foreground(fmDangerC)                 // red
+	hlNameFn  = lipgloss.NewStyle().Foreground(fmAccent2)           // teal accent
+	hlNameCls = lipgloss.NewStyle().Foreground(fmColor("#7ad7ff"))  // blue (types)
+	hlNameBlt = lipgloss.NewStyle().Foreground(fmColor("#c8a8ff"))  // lavender (builtins)
+	hlString  = lipgloss.NewStyle().Foreground(fmColor("#7ee787"))  // green
+	hlNumber  = lipgloss.NewStyle().Foreground(fmColor("#f0a8d0"))  // pink
+	hlComment = lipgloss.NewStyle().Foreground(fmDimC).Italic(true) // dim, italic
+	hlOperat  = lipgloss.NewStyle().Foreground(fmColor("#8fd0c8"))  // muted teal
+	hlPunct   = lipgloss.NewStyle().Foreground(fmMutedC)            // muted
+	hlPreproc = lipgloss.NewStyle().Foreground(fmColor("#ffce6b"))  // amber
+	hlError   = lipgloss.NewStyle().Foreground(fmDangerC)           // red
 	hlText    = lipgloss.NewStyle().Foreground(fmText)
 )
 

@@ -45,6 +45,11 @@ type editorState struct {
 	saving   bool
 	status   string // inline message inside the editor footer (errors, hints)
 	viewScrl int    // scroll offset (top line) for the read-only highlighted view
+
+	// viewLines caches the highlighted lines of viewSrc so scrolling the viewer
+	// does not re-tokenise the whole file on every frame.
+	viewLines []string
+	viewSrc   string
 }
 
 // editorLoadedMsg carries the result of loading a file into the editor.
@@ -54,6 +59,7 @@ type editorLoadedMsg struct {
 	path    string
 	name    string
 	content string
+	lines   []string // highlighted content, computed off the UI thread
 	err     error
 }
 
@@ -93,7 +99,11 @@ func (m filesModel) editorLoadCmd(side int, source, full, name string) tea.Cmd {
 	app := m.app
 	return func() tea.Msg {
 		data, err := loadFileForEdit(app, source, full)
-		return editorLoadedMsg{side: side, source: source, path: full, name: name, content: data, err: err}
+		var lines []string
+		if err == nil {
+			lines = highlightLines(name, data)
+		}
+		return editorLoadedMsg{side: side, source: source, path: full, name: name, content: data, lines: lines, err: err}
 	}
 }
 
@@ -189,6 +199,11 @@ func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 
 	m.editor.area = ta
 	m.editor.content = msg.content
+	m.editor.viewLines = msg.lines
+	m.editor.viewSrc = msg.content
+	if m.editor.viewLines == nil {
+		m.editor.viewLines = highlightLines(msg.name, msg.content)
+	}
 	m.editor.dirty = false
 	m.editor.mode = editorView
 	m.editor.viewScrl = 0
@@ -203,7 +218,7 @@ func styleEditorTextarea(ta *textarea.Model) {
 	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(fmText)
 	ta.FocusedStyle.LineNumber = lipgloss.NewStyle().Foreground(fmDimC)
 	ta.FocusedStyle.CursorLineNumber = lipgloss.NewStyle().Foreground(fmAccent2)
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("#0f1a24"))
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(fmColor("#0f1a24"))
 	ta.BlurredStyle.Text = lipgloss.NewStyle().Foreground(fmMutedC)
 	ta.BlurredStyle.LineNumber = lipgloss.NewStyle().Foreground(fmDimC)
 	ta.Cursor.Style = lipgloss.NewStyle().Foreground(fmAccent2)
@@ -240,6 +255,10 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// from discarding edits silently.
 			ed.area.Blur()
 			ed.mode = editorView
+			if v := ed.area.Value(); v != ed.viewSrc {
+				ed.viewLines = highlightLines(ed.name, v)
+				ed.viewSrc = v
+			}
 			ed.status = "unsaved changes — Ctrl+S to save, Esc again to discard"
 			return m, nil
 		}
@@ -280,7 +299,10 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // clampEditorScroll keeps the read-only viewer scroll within the content.
 func (m *filesModel) clampEditorScroll() {
 	ed := &m.editor
-	total := strings.Count(ed.area.Value(), "\n") + 1
+	total := len(ed.viewLines)
+	if total == 0 {
+		total = strings.Count(ed.area.Value(), "\n") + 1
+	}
 	maxTop := total - m.editorBodyHeight()
 	if maxTop < 0 {
 		maxTop = 0
@@ -307,6 +329,10 @@ func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
 	}
 	ed.mode = editorView
 	ed.area.Blur()
+	if v := ed.area.Value(); v != ed.viewSrc {
+		ed.viewLines = highlightLines(ed.name, v)
+		ed.viewSrc = v
+	}
 	m.clampEditorScroll()
 	return m, nil
 }
