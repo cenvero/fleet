@@ -28,16 +28,27 @@ Typical layout:
 ├── templates/
 ├── logs/
 │   ├── _aggregated/
-│   └── _audit.log
+│   ├── _audit.log
+│   └── _audit.log.lock    ← cross-process lock so concurrent fleet processes never fork the audit hash chain
 ├── alerts/
 ├── data/
 │   ├── state.db
 │   ├── metrics.db
 │   ├── events.db
+│   ├── update-available.json ← cached update check (a failed check is also recorded, so an offline controller retries at most every 10 minutes)
 │   └── control.token      ← per-session secret for local reverse-hub control socket
+├── approvals.json         ← staged `exec --require-approval` commands and their outcomes
+├── tui/
+│   └── files-bookmarks.json ← file manager bookmarks
 ├── backups/
 └── tmp/
 ```
+
+The databases open on first use, so commands that never touch them (such as `server list` or
+`exec`) do not pay for opening them. Each database records its schema version in a small
+`fleet_schema_versions` table; when it is current, the schema migration step is skipped. SQLite
+databases run in WAL mode with `synchronous=NORMAL`. The `metric_snapshots` history (used for the
+dashboard's sparklines) keeps 30 days; the daemon prunes older rows hourly.
 
 ## Config File
 

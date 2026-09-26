@@ -26,6 +26,16 @@ fleet server add web-01 192.0.2.10 --mode direct --port 2222
 - the agent runs an SSH server on the fleet port (default 2222)
 - host keys are TOFU-pinned in the controller `known_hosts` on first connect; subsequent connects match silently
 - live RPCs for services, logs, metrics, firewall, and ports run over that session
+- a controller process keeps one pooled SSH connection per server and multiplexes RPC channels
+  (including file-transfer streams) over it; pooled connections are probed with SSH keepalives
+  every 15 seconds and retired after 3 missed replies, so a peer that vanished without closing the
+  connection is noticed within about a minute instead of hanging the next call
+- when a `fleet daemon` is running, one-shot CLI commands hand their direct-mode calls to it over
+  the token-authenticated loopback control socket, reusing the daemon's warm connection (one round
+  trip instead of a fresh handshake, roughly 550 ms → 90 ms at 50 ms latency). Every RBAC,
+  cmd-policy, redaction and audit decision still happens in the CLI first; the daemon refuses and
+  the CLI dials itself if the daemon's view of the server (address, port, user, key, known_hosts)
+  differs, or if the daemon is older. Set `FLEET_NO_DAEMON_RELAY=1` to always dial directly.
 
 ## Reverse Mode
 
@@ -52,8 +62,17 @@ fleet-agent reverse --controller controller.example.net:9443 --server-name edge-
 - the controller runs an SSH listener (default port 9443)
 - the agent authenticates with its own key; the controller pins that key in `keys/agents/<name>.pub`
 - the agent pins the controller host key in its own `known_hosts`
-- the agent reconnects automatically on disconnect with built-in backoff
-- queued metrics are replayed to the controller on reconnect
+- the agent reconnects automatically on disconnect with built-in backoff (±20% jitter, so a fleet
+  does not reconnect in lockstep); after a session that was healthy, such as a controller restart,
+  it reconnects within about a second instead of waiting out an old backoff
+- both sides send SSH keepalives, so a dead tunnel is detected within about a minute
+- while disconnected the agent queues a metrics snapshot every `--offline-metrics-interval`; the
+  queue is capped (10,000 snapshots / 4 MiB, thinning the oldest half when full) and is replayed
+  in pages after the session registers, each page saved in one transaction and acknowledged
+  separately, so a long outage replays reliably and a lost acknowledgement never duplicates history
+- other `fleet` processes (the CLI, the web UI) reach reverse agents through the daemon's loopback
+  control socket; the daemon queues bursts of connections instead of dropping them, and file
+  chunks cross it as binary frames when both ends support it
 
 ## Per-Server Override
 

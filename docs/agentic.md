@@ -69,7 +69,7 @@ documented in [Operations → Operating Safely and Unattended](operations.md#ope
 - **Guard risky changes** — `fleet guard <server> <cmd> --revert-after … --revert-cmd …` auto-reverts
   unless the agent (or you) runs `fleet confirm <id>` in time; `fleet exec --guard` refuses
   lock-yourself-out commands.
-- **Stage for sign-off** — `fleet exec ... --require-approval` queues a command for `fleet approve <id>`;
+- **Stage for sign-off** — `fleet exec ... --require-approval` queues a command; an operator's `fleet approve <id>` runs it (a scoped token cannot approve);
   `fleet cmd-policy` deny/confirm-gates dangerous patterns.
 
 ## Safety

@@ -15,14 +15,14 @@ Cenvero Fleet is built around a simple promise: one operator-controlled controll
 
 Today the repository includes:
 
-- A controller binary with a Cobra CLI and a Bubble Tea terminal dashboard
+- A controller binary with a Cobra CLI and a live Bubble Tea operations dashboard
 - A remote agent binary with direct and reverse SSH transport support
 - Direct-mode and reverse-mode session handling with TOFU host-key pinning
 - Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
 - Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet file ui`)
-- Structured remote execution (`fleet exec --json`) with timeouts, retries, dry-run, tag-group fan-out, and automatic output redaction
-- Unattended-operation guardrails: scoped RBAC tokens (`fleet token` / `--token`), named secrets (`fleet secret`), a dead-man's-switch (`fleet guard`/`confirm`/`revert`), command policy (`fleet cmd-policy`), and an approval queue (`fleet approvals`/`approve`)
+- Structured remote execution (`fleet exec --json`) with timeouts, retries, dry-run, concurrent tag-group fan-out (`--parallel`), and automatic output redaction
+- Unattended-operation guardrails: scoped RBAC tokens (`fleet token` / `--token`), named secrets (`fleet secret`), a dead-man's-switch (`fleet guard`/`confirm`/`revert`), command policy (`fleet cmd-policy`), and an approval queue (`fleet approvals`/`approve`, which runs the approved command)
 - Transactional, idempotent playbooks (`fleet run`) with check/apply/rollback, plus tag-based grouping (`fleet tag`) and scheduled jobs (`fleet cron`)
 - Fleet observability: `fleet health`, `fleet top`, `fleet svc`, `fleet journal`, `fleet drift`, `fleet inventory --json`, and event notifications (`fleet notify`)
 - Background jobs (`fleet job`/`jobs`), port tunneling (`fleet tunnel`), and health-gated rolling agent updates (`fleet agent update --canary`)
@@ -45,7 +45,7 @@ Today the repository includes:
 Implemented now:
 
 - `fleet init` creates the config layout, keys, databases, and audit paths
-- `fleet dashboard` provides a multi-panel TUI with mouse and keyboard navigation
+- `fleet dashboard` is a live operations console: auto-refresh, a sortable/filterable server table, per-server metric history sparklines, alert actions, and one-key ssh/file-manager/log hand-offs, with mouse and keyboard navigation
 - **Secure file manager (new in v2):** `fleet file` (CLI), `fleet files <server>` (dual-pane drag-and-drop TUI), and `fleet file ui` (localhost web file manager) — chunked, parallel, checksummed, resumable transfers
 - **Live directory sync (new in v2):** `fleet sync` keeps a folder and a server directory mirrored — pick which side is the writer (`--from`); the replica is kept an exact copy (overwrite differing, delete extras) or `--no-delete` to keep extras — until you stop the command
 - **Agentic control (new in v2):** `fleet context` and `fleet skill` let Claude Code / Codex learn and operate the whole fleet
@@ -264,7 +264,7 @@ File manager and transfers (**new in v2**):
 - `fleet file diff <serverA:path> <serverB:path>` (or `--group EXPR <path>`) — unified diff across servers
 - `fleet file compress|extract|chmod|checksum|duplicate <server> ...` — archive, permission, and copy ops on the host
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
-- `fleet files [server...]` (also `fleet filemanager` / `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, List/Icons views, and Finder-style drag-to-copy/move (local↔server **and** server↔server)
+- `fleet files [server...]` (also `fleet filemanager` / `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, List/Icons views, Finder-style drag-to-copy/move (local↔server **and** server↔server), a transfer queue with speed/ETA/retry, a preview pane, go-to/jump/bookmarks, and a `?` key reference
 - `fleet file ui` (also `fleet filemanager ui`) — premium **dual-pane** localhost browser file manager (Local + server panes, same operations, drag-to-copy/move, desktop-drop upload, live progress)
 - `fleet file copy <srcServer:path> <dstServer:path> [-r]` / `fleet file move …` — copy or move a file or directory **directly between two servers** (relayed through the controller)
 - `fleet sync <server> <local-dir> <remote-dir> [--from local|remote] [--no-delete]` — live mirror: one side is the writer (source of truth, `--from`), the other a replica; the writer is copied once, then changes overwrite the replica and (by default) its extra files are deleted, until you stop the command
