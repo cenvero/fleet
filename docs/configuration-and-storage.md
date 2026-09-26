@@ -36,7 +36,7 @@ Typical layout:
 │   ├── metrics.db
 │   ├── events.db
 │   ├── update-available.json ← cached update check (a failed check is also recorded, so an offline controller retries at most every 10 minutes)
-│   └── control.token      ← per-session secret for local reverse-hub control socket
+│   └── control.token      ← per-run secret for the daemon's mutually authenticated control socket (removed when the daemon stops)
 ├── approvals.json         ← staged `exec --require-approval` commands and their outcomes
 ├── approvals-extra.json   ← copy of the exec options/outcomes, so older fleet binaries rewriting approvals.json cannot drop them
 ├── tui/

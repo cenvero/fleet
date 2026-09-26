@@ -162,9 +162,20 @@ Omit sections that have no entries for that release.
 - The notification SSRF guard pointed at an "allow-internal" setting that could not
   be set: `fleet notify add` now takes `--allow-internal`, re-adding a target
   updates it, and `fleet notify list` shows it.
+- `fleet ssh` to a reverse-mode server dialed the placeholder address and looped on
+  "Reconnecting"; it is now refused with a pointer to `fleet exec`. A failed first
+  connection no longer retries, and `fleet ssh` exits with the remote shell's status.
+- A reverse agent that could not connect (wrong fingerprint, rejected enrollment,
+  controller down) retried silently forever; it now logs the reason, rate-limited.
+- Stopping the daemon could leave server-record and audit writes running after
+  shutdown.
 
 ### Security
 
+- The daemon's local control socket is mutually authenticated: callers no longer send
+  the control token (or, with the direct-mode relay, commands and file data) to
+  whatever listens on the control address before the daemon has proved it holds the
+  token. The daemon removes `data/control.token` when it stops and handles `SIGTERM`.
 - Remote text (file names, log lines, alert messages) is stripped of terminal escape
   sequences in the dashboard and file manager.
 - A scoped RBAC token is explicitly denied `fleet approve`, a staged server name can
