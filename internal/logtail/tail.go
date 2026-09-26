@@ -252,6 +252,17 @@ type keptLine struct {
 // matches (the extra one only decides Truncated). The newlines of the skipped
 // prefix are then counted to number the lines.
 func Tail(r io.ReaderAt, size int64, n int, m *Matcher) (TailResult, error) {
+	return tail(r, size, n, m, -1)
+}
+
+// TailKnown is Tail for content whose line count is already known (the
+// TotalLines of an earlier Tail, or CountLines, over the same unchanged
+// bytes): it skips counting the prefix, so it reads only the tail.
+func TailKnown(r io.ReaderAt, size int64, n int, m *Matcher, totalLines int) (TailResult, error) {
+	return tail(r, size, n, m, max(totalLines, 0))
+}
+
+func tail(r io.ReaderAt, size int64, n int, m *Matcher, knownLines int) (TailResult, error) {
 	var res TailResult
 	if size <= 0 {
 		return res, nil
@@ -330,14 +341,20 @@ func Tail(r io.ReaderAt, size int64, n int, m *Matcher) (TailResult, error) {
 		boundary = pos + int64(regionOff)
 	}
 
-	prefix := 0
-	if boundary > 0 {
-		var err error
-		if prefix, err = countNewlines(r, buf, 0, boundary); err != nil {
+	res.TotalLines = linesAfter
+	switch {
+	case boundary == 0:
+	case knownLines > linesAfter:
+		// A non-empty prefix holds at least one line, so a smaller known
+		// count cannot describe this content and is ignored.
+		res.TotalLines = knownLines
+	default:
+		prefix, err := countNewlines(r, buf, 0, boundary)
+		if err != nil {
 			return TailResult{}, err
 		}
+		res.TotalLines += prefix
 	}
-	res.TotalLines = prefix + linesAfter
 	res.End = Position{Offset: endOffset, Lines: res.TotalLines}
 	if endOffset < size {
 		res.End.Lines-- // the last line is unterminated

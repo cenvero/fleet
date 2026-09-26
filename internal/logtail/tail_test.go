@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode"
@@ -119,6 +120,12 @@ func compareTail(t *testing.T, data []byte, n int, search string) {
 	end := int64(bytes.LastIndexByte(data, '\n') + 1)
 	if got.End.Offset != end || got.End.Lines != bytes.Count(data, []byte{'\n'}) {
 		t.Fatalf("End = %+v, want offset %d lines %d", got.End, end, bytes.Count(data, []byte{'\n'}))
+	}
+	// With the line count supplied, the prefix is not counted but every
+	// result is the same.
+	known, err := TailKnown(bytes.NewReader(data), int64(len(data)), n, NewMatcher(search), want.total)
+	if err != nil || !reflect.DeepEqual(known, got) {
+		t.Fatalf("TailKnown = %+v, %v; want %+v", known, err, got)
 	}
 }
 
