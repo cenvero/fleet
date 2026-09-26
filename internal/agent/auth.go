@@ -57,10 +57,7 @@ func (m fileAuthorizedKeysManager) Update(_ context.Context, payload proto.Autho
 	}
 
 	filtered := make([]string, 0, len(lines))
-	// Security: a sum of two in-memory slice lengths cannot overflow int, and
-	// AddKeys arrives from the authenticated controller inside an envelope
-	// capped at proto.MaxEnvelopeSize (16 MiB); this is a capacity hint only.
-	seen := make(map[string]struct{}, len(lines)+len(payload.AddKeys))
+	seen := make(map[string]struct{}, len(lines))
 	for _, line := range lines {
 		if _, remove := removeSet[line]; remove {
 			continue

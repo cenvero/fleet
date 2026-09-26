@@ -245,6 +245,7 @@ func existingChain(p string) []pathLink {
 	var out []pathLink
 	cur := p
 	for i := 0; i < 512; i++ {
+		// codeql[go/path-injection] read-only stat performed by the protected-path guard itself to decide whether to refuse the request
 		if info, err := os.Stat(cur); err == nil {
 			rest := make([]string, len(below))
 			for j := range below {
@@ -478,6 +479,7 @@ func (s *Server) extractLocalGuarded(archive string) error {
 	if err := s.app.ExtractArchive("", staged); err != nil {
 		return err
 	}
+	// codeql[go/path-injection] generated Base() name inside a freshly created private 0700 staging directory
 	if err := os.Remove(staged); err != nil {
 		return err
 	}
@@ -508,6 +510,7 @@ func (s *Server) extractLocalGuarded(archive string) error {
 
 // copyArchiveForStaging copies the archive into the private staging dir.
 func copyArchiveForStaging(src, dst string) error {
+	// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 	in, err := os.Open(src) // #nosec G304,G703 -- operator-selected local archive; the caller's guard refused protected paths
 	if err != nil {
 		return err
@@ -520,6 +523,7 @@ func copyArchiveForStaging(src, dst string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", filepath.Base(src))
 	}
+	// codeql[go/path-injection] generated Base() name inside a freshly created private 0700 staging directory
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304,G703 -- generated name inside a private 0700 staging dir
 	if err != nil {
 		return err

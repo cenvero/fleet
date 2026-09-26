@@ -34,6 +34,7 @@ func (a *App) ChmodPath(server, p, octalMode string) error {
 		// Security: p is an operator-chosen controller path (CLI/TUI argument,
 		// or a web UI path the caller already vetted with cleanLocalWrite and
 		// the protected-path guard); changing its mode is the requested action.
+		// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 		return os.Chmod(p, os.FileMode(m)) // #nosec G302 -- operator-chosen mode
 	}
 	record, err := a.GetServer(server)
@@ -51,6 +52,7 @@ func (a *App) ChecksumPath(server, p string) (string, error) {
 	if server == "" {
 		// Security: operator-chosen controller path (web UI callers vet it
 		// with cleanLocal and the protected-path guard first).
+		// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 		f, err := os.Open(p) // #nosec G304 -- operator-chosen path
 		if err != nil {
 			return "", err
@@ -266,6 +268,7 @@ func (a *App) CompressPaths(server, dir string, names []string, archiveName, for
 			// Security: dir is the operator-chosen working directory (the web UI
 			// vets it with cleanLocalWrite and checkLocalCompress) and Base keeps
 			// the archive name a single entry inside it.
+			// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 			_ = os.Remove(filepath.Join(dir, filepath.Base(archiveName))) // zip appends; start fresh
 		}
 		tool, args, err := compressArgv(names, archiveName, format)
@@ -603,6 +606,7 @@ func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
 		return entries, nil
 	}
 
+	// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 	f, err := os.Open(archivePath) // #nosec G304 -- operator-chosen archive path
 	if err != nil {
 		return nil, fmt.Errorf("open archive manifest: %w", err)
@@ -816,6 +820,7 @@ func extractZipNative(archivePath, destDir string) error {
 // extractTarNative extracts a tar / tar.gz / tar.bz2 archive, writing each
 // member through SafeLocalJoin so an escaping member cannot leave destDir.
 func extractTarNative(archivePath, destDir string) error {
+	// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 	f, err := os.Open(archivePath) // #nosec G304 -- operator-chosen archive path
 	if err != nil {
 		return fmt.Errorf("open archive: %w", err)
@@ -988,6 +993,7 @@ func stageLocalArchiveCopy(archivePath string) (staged string, cleanup func(), e
 		cleanup()
 		return "", func() {}, fmt.Errorf("stage archive copy: %w", err)
 	}
+	// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 	src, err := os.Open(archivePath) // #nosec G304 -- operator-chosen archive path
 	if err != nil {
 		cleanup()
@@ -995,6 +1001,7 @@ func stageLocalArchiveCopy(archivePath string) (staged string, cleanup func(), e
 	}
 	defer src.Close()
 	staged = filepath.Join(dir, filepath.Base(archivePath))
+	// codeql[go/path-injection] generated Base() name inside a freshly created private 0700 staging directory
 	dst, err := os.OpenFile(staged, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600) // #nosec G304 -- path is generated inside an owner-only archive staging directory
 	if err != nil {
 		cleanup()

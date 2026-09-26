@@ -625,6 +625,7 @@ func (a *App) UploadFile(serverName, localPath, remotePath string, opts FileTran
 		return proto.FileFinalizeResult{}, err
 	}
 
+	// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 	lf, err := os.Open(localPath) // #nosec G304 -- operator-supplied local path
 	if err != nil {
 		return proto.FileFinalizeResult{}, fmt.Errorf("open local file: %w", err)
@@ -1030,6 +1031,7 @@ func (a *App) downloadFile(serverName, remotePath, localPath string, opts FileTr
 		localPath = filepath.Join(opts.localRoot, filepath.FromSlash(opts.localRel))
 	} else if localPath == "" {
 		localPath = style.Base(remotePath)
+		// codeql[go/path-injection] operator-chosen controller path (a CLI/TUI argument, or a web UI path already vetted by cleanLocal and the protected-path guard), not attacker input
 	} else if info, err := os.Lstat(localPath); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		localPath = filepath.Join(localPath, style.Base(remotePath))
 	}

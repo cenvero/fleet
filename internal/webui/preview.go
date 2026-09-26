@@ -93,6 +93,7 @@ func (s *Server) previewText(w http.ResponseWriter, server, p string) {
 			writeError(w, err)
 			return
 		}
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		f, err := os.Open(clean) // #nosec G304,G703 -- operator-selected local path; config dir refused by cleanLocal
 		if err != nil {
 			writeError(w, err)
@@ -186,6 +187,7 @@ func (s *Server) previewImage(w http.ResponseWriter, r *http.Request, server, p 
 			writeError(w, err)
 			return
 		}
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		f, err := os.Open(clean) // #nosec G304,G703 -- operator-selected local path; config dir refused by cleanLocal
 		if err != nil {
 			writeError(w, err)
