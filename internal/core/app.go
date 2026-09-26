@@ -549,6 +549,35 @@ func (a *App) teardownAgentWithPassword(server ServerRecord, password string) er
 	return a.TeardownAgent(server)
 }
 
+// ProbeAgent returns the hello of the agent that is live right now: over a
+// fresh (unpooled) connection in direct mode — which also refreshes the
+// recorded observation — or from the daemon's current session in reverse mode.
+// Unlike the recorded Observed.AgentVersion, which an agent update records as
+// soon as it is applied, this reflects the version actually running. It
+// writes no audit entry, so it is cheap to poll.
+func (a *App) ProbeAgent(ctx context.Context, name string) (proto.HelloPayload, error) {
+	server, err := a.GetServer(name)
+	if err != nil {
+		return proto.HelloPayload{}, err
+	}
+	if server.Mode == transport.ModeReverse {
+		info, err := a.reverseStatus(name)
+		if err != nil {
+			return proto.HelloPayload{}, err
+		}
+		if !info.Connected {
+			return proto.HelloPayload{}, fmt.Errorf("reverse agent %s is not connected", name)
+		}
+		return info.Hello, nil
+	}
+	session, hello, err := a.openDirectSessionContext(ctx, server, false)
+	if err != nil {
+		return proto.HelloPayload{}, err
+	}
+	_ = session.Close()
+	return hello, nil
+}
+
 func (a *App) ReconnectServer(name string, acceptNewHostKey bool) error {
 	server, err := a.GetServer(name)
 	if err != nil {
