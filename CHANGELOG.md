@@ -49,6 +49,11 @@ Omit sections that have no entries for that release.
   confirmation with collision handling, a preview pane, go-to path with completion,
   fuzzy jump, back/forward history, bookmarks and recent folders, range selection,
   and a full `?` key reference; the toolbar adapts to any width.
+- Redesigned web file manager (`fleet file ui`): light/dark themes, a phone layout,
+  full keyboard control with a command palette, context menus, confirm dialogs with
+  undo, a transfers panel with cancel/retry, text and image previews, streaming
+  downloads, virtualized lists for very large folders, and a read-only **Fleet
+  overview** of every server's status, resources, tags and alerts.
 - `fleet exec --parallel N` bounds how many servers `--all`/`--group` run on at once
   (default 16).
 - `fleet top --group EXPR`; swap is read from the agent's metrics snapshot.
@@ -126,6 +131,9 @@ Omit sections that have no entries for that release.
 - Remote text (file names, log lines, alert messages) is stripped of terminal escape
   sequences in the dashboard and file manager.
 - A scoped RBAC token is explicitly denied `fleet approve`.
+- The web UI requires same-origin `POST`s for every mutation, sends additional
+  isolation headers, refuses the controller's config directory in its Local source,
+  and never renders previewed SVG/HTML.
 
 ## [v2.4.3] — 2026-09-11 (stable)
 

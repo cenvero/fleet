@@ -241,3 +241,33 @@ upload, download, **List/Icons view**, filter/search, sortable columns, and a
 hidden toggle. **Drag between any panes** for a Copy/Move popup (directories
 confirm), **drag files from your desktop** to upload, and watch live progress in
 the transfers dock. The same secure transfer engine runs underneath.
+
+- **Light and dark themes** follow the system setting, with a toggle that is
+  remembered. On a phone the UI shows one pane at a time with a pane switcher and a
+  bottom action bar; it also works well on tablets.
+- **Keyboard first**: arrows, `Enter` to open, `Backspace`/`Alt+↑` to go up, `Space`
+  and `Shift` to select, `Ctrl/Cmd+A`, `Delete`, `F2` to rename, `Ctrl/Cmd+C`/`V` to
+  copy between panes, a command palette on `Ctrl/Cmd+K`, and `?` for every shortcut.
+  Right-click (or long-press) opens a context menu.
+- **Confirm dialogs** state exactly what will be copied, replaced or deleted, and
+  toasts offer **Undo** where the operation can be undone. Breadcrumbs have an
+  overflow menu and an editable path; each pane keeps back/forward history, and the
+  layout and last folders are remembered.
+- **Transfers panel** with speed, ETA, cancel and retry, and overall progress in the
+  header.
+- **Previews** of text (up to 256 KiB, shown as text, never rendered as HTML) and
+  common raster images; SVG and HTML files are never rendered inline.
+- **Streaming downloads** start sending bytes to the browser immediately and are
+  verified as they go; if verification fails the download is aborted, so the browser
+  shows a failed download rather than a corrupt file.
+- **Very large folders** (tens of thousands of entries) scroll smoothly.
+- **Fleet overview** (the *Fleet* tab): a read-only table of every server with its
+  status, mode, OS, CPU/memory/disk, last seen, tags and open alerts, with filters and
+  auto-refresh; *Browse* opens that server in a file pane. When the UI is started with
+  `--token`, the overview is authorized like `fleet server list`, `fleet alerts` and
+  `fleet tag`.
+
+Security: in addition to the loopback bind, per-process token and strict CSP, every
+mutating request must be a same-origin `POST` (another localhost port is refused),
+extra isolation headers are sent, and the *Local* source refuses paths inside the
+controller's config directory (keys, tokens, databases), including through symlinks.
