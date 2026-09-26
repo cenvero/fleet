@@ -33,7 +33,18 @@ func (m filesModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		switch m.overlay {
 		case overlayNone:
-			if side, _, ok := m.hitRow(msg); ok {
+			l := m.layout()
+			inPreview := l.previewShown && msg.X >= l.previewX && msg.X < l.previewX+l.previewW &&
+				msg.Y >= l.panesY && msg.Y < l.panesY+l.boxH
+			if inPreview {
+				m.preview.scroll += delta * 3
+				if m.preview.scroll < 0 {
+					m.preview.scroll = 0
+				}
+				if d := m.preview.data; d != nil && m.preview.scroll > len(d.lines) {
+					m.preview.scroll = len(d.lines)
+				}
+			} else if side, _, ok := m.hitRow(msg); ok {
 				m.movePane(side, delta*m.vStep(side))
 			} else if h := m.hitTest(msg.X, msg.Y); h.kind == fmHitTransfer && len(m.transfers) > 0 {
 				m.xferIndex += delta

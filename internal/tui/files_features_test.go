@@ -719,6 +719,25 @@ func TestPreviewToggleDebouncesAndCaches(t *testing.T) {
 	}
 }
 
+func TestPreviewWheelScrolls(t *testing.T) {
+	t.Parallel()
+	m := sampleFilesModel(160, 45)
+	m.preview.on = true
+	m.preview.data = &previewData{name: "x", lines: make([]string, 100)}
+	l := m.layout()
+	if !l.previewShown {
+		t.Fatal("preview column expected at 160 cols")
+	}
+	mm, _ := m.handleMouse(tea.MouseMsg{X: l.previewX + 3, Y: l.bodyY + 3, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	m = mm.(filesModel)
+	if m.preview.scroll != 3 {
+		t.Fatalf("preview scroll = %d", m.preview.scroll)
+	}
+	if m.left.index != 2 {
+		t.Fatal("wheel over the preview must not move the pane cursor")
+	}
+}
+
 // ---- transfers ----
 
 // runCmd executes a command (and nested batches) with a timeout, returning
