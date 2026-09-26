@@ -384,6 +384,10 @@ func (m *model) update(msg tea.Msg) (tea.Cmd, bool) {
 	case dashLogMsg:
 		return nil, m.applyLogTail(msg)
 	case dashActionMsg:
+		if !m.now.IsZero() {
+			// Ticks stop while an interactive child owns the terminal.
+			m.now = time.Now()
+		}
 		return m.applyAction(msg), true
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionMotion || msg.Action == tea.MouseActionRelease {
@@ -1079,7 +1083,9 @@ func (m *model) pageSize() int {
 func (m *model) setFlash(text string, isErr bool) {
 	m.flash = text
 	m.flashErr = isErr
-	m.flashAt = m.clock()
+	// Wall clock, like the ticks that expire it: m.now can be seconds stale
+	// after an interactive child held the terminal.
+	m.flashAt = time.Now()
 }
 
 func (m *model) handleFilterKey(msg tea.KeyMsg) (tea.Cmd, bool) {

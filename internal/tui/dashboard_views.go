@@ -1297,21 +1297,10 @@ func dashMax64(vs ...float64) float64 {
 }
 
 // openAlertOrder returns indices of open alerts, most severe then newest first.
+// openAlertOrder returns indices of open alerts, most severe then newest
+// first (computed once per load).
 func (m *model) openAlertOrder() []int {
-	var idx []int
-	for i := range m.base.alerts {
-		if core.AlertState(m.base.alerts[i], m.base.now) == "open" {
-			idx = append(idx, i)
-		}
-	}
-	sort.SliceStable(idx, func(a, c int) bool {
-		x, y := &m.base.alerts[idx[a]], &m.base.alerts[idx[c]]
-		if rx, ry := dashSevRank(x.Severity), dashSevRank(y.Severity); rx != ry {
-			return rx > ry
-		}
-		return dashAlertTime(*x).After(dashAlertTime(*y))
-	})
-	return idx
+	return m.base.openOrder
 }
 
 func dashSevStyle(s fleetalerts.Severity) dstyle {

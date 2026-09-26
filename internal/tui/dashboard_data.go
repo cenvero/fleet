@@ -217,6 +217,8 @@ type dashBase struct {
 	stats    core.AlertStats
 	fleet    dashFleetAgg
 	now      time.Time
+	// openOrder indexes the open alerts, most severe then newest first.
+	openOrder []int
 }
 
 // dashViews holds the filtered/sorted orders for each list tab. Immutable.
@@ -262,6 +264,18 @@ func dashBuildBase(snap *core.DashboardSnapshot, allAlerts []fleetalerts.Alert, 
 		perServer[a.Server] = agg
 	}
 	b.fleet.alertingServers = len(perServer)
+	for i := range allAlerts {
+		if core.AlertState(allAlerts[i], now) == "open" {
+			b.openOrder = append(b.openOrder, i)
+		}
+	}
+	sort.SliceStable(b.openOrder, func(a, c int) bool {
+		x, y := &allAlerts[b.openOrder[a]], &allAlerts[b.openOrder[c]]
+		if rx, ry := dashSevRank(x.Severity), dashSevRank(y.Severity); rx != ry {
+			return rx > ry
+		}
+		return dashAlertTime(*x).After(dashAlertTime(*y))
+	})
 
 	// Newest agent version in the fleet.
 	newest := ""
