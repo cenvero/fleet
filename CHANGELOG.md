@@ -124,6 +124,8 @@ Omit sections that have no entries for that release.
 - The agent's ControllerID was always empty in hello payloads.
 - A hung agent could stall the metrics poller indefinitely.
 - Following a log that was truncated reprinted its whole tail on every poll.
+- The controller's cached service log (`--cached`, dashboard) dropped the first lines
+  of a rotated or truncated remote log once the new file had grown past the old one.
 - The file manager could move the selection to other files when re-sorting, only
   transferred the first of several selected folders, and could render file names and
   contents containing terminal escape sequences.

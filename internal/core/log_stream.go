@@ -53,7 +53,7 @@ func (a *App) FollowServiceLogs(ctx context.Context, serverName, serviceName, se
 	cache := strings.TrimSpace(search) == ""
 	follower := logFollower{emit: emit}
 	var cursor *proto.LogCursor
-	pages, openFailures, polled := 0, 0, false
+	pages, openFailures, polled, resetPending := 0, 0, false, false
 	for {
 		result, code, err := a.readServiceLogPage(serverName, serviceName, search, tailLines, cursor)
 		if err != nil {
@@ -74,7 +74,7 @@ func (a *App) FollowServiceLogs(ctx context.Context, serverName, serviceName, se
 			// Agent without cursor support (or it could not issue one): the
 			// original tail-and-dedupe path, caching the whole tail as before.
 			if cache {
-				if err := a.aggregatedLogs().Append(serverName, serviceName, result.Lines); err != nil {
+				if err := a.aggregatedLogs().AppendFrom(serverName, serviceName, result.Lines, logAppendSource(result)); err != nil {
 					return err
 				}
 			}
@@ -83,11 +83,17 @@ func (a *App) FollowServiceLogs(ctx context.Context, serverName, serviceName, se
 				return err
 			}
 		} else {
+			// A reset whose lines are all held back (an unterminated first
+			// line) still has to reach the cache with the lines that follow.
+			resetPending = resetPending || result.Reset
 			emitted, err := follower.applyCursor(result)
 			if cache && len(emitted) > 0 {
-				if cerr := a.aggregatedLogs().Append(serverName, serviceName, emitted); cerr != nil && err == nil {
+				src := logAppendSource(result)
+				src.Reset = resetPending
+				if cerr := a.aggregatedLogs().AppendFrom(serverName, serviceName, emitted, src); cerr != nil && err == nil {
 					err = cerr
 				}
+				resetPending = false
 			}
 			if err != nil {
 				return err
@@ -110,6 +116,16 @@ func (a *App) FollowServiceLogs(ctx context.Context, serverName, serviceName, se
 		case <-time.After(interval):
 		}
 	}
+}
+
+// logAppendSource passes what the agent reported about the remote file to the
+// aggregated log cache, so it can tell a rotated log from a grown one.
+func logAppendSource(result proto.LogReadResult) logs.AppendSource {
+	src := logs.AppendSource{Reset: result.Reset}
+	if result.Cursor != nil {
+		src.FileID = result.Cursor.FileID
+	}
+	return src
 }
 
 // readServiceLogPage is one log.read for a follow poll: no audit entry, no

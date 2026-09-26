@@ -63,9 +63,29 @@ type followHarness struct {
 
 	mu    sync.Mutex
 	lines []string
+
+	cached []string // aggregated cache contents, filled by stop()
 }
 
 func startFollow(t *testing.T, reader agent.LogReader, logPath, search string, tailLines int) *followHarness {
+	t.Helper()
+	h := newLogHarness(t, reader, logPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	go func() {
+		h.done <- h.app.FollowServiceLogs(ctx, "loopback", "app.service", search, tailLines, 5*time.Millisecond, func(line proto.LogLine) error {
+			h.mu.Lock()
+			h.lines = append(h.lines, fmt.Sprintf("%d:%s", line.Number, line.Text))
+			h.mu.Unlock()
+			return nil
+		})
+	}()
+	return h
+}
+
+// newLogHarness sets up an App whose tracked service "loopback/app.service"
+// logs to logPath on an in-process agent (reader nil = the real reader).
+func newLogHarness(t *testing.T, reader agent.LogReader, logPath string) *followHarness {
 	t.Helper()
 	configDir := filepath.Join(t.TempDir(), "fleet")
 	if _, err := Initialize(InitOptions{
@@ -100,16 +120,6 @@ func startFollow(t *testing.T, reader agent.LogReader, logPath, search string, t
 	}); err != nil {
 		t.Fatalf("AddServer() error = %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
-	go func() {
-		h.done <- app.FollowServiceLogs(ctx, "loopback", "app.service", search, tailLines, 5*time.Millisecond, func(line proto.LogLine) error {
-			h.mu.Lock()
-			h.lines = append(h.lines, fmt.Sprintf("%d:%s", line.Number, line.Text))
-			h.mu.Unlock()
-			return nil
-		})
-	}()
 	return h
 }
 
@@ -146,10 +156,32 @@ func (h *followHarness) stop() []string {
 	}
 	h.app.DisconnectPooledSessions()
 	drainAgentServeErrs(h.t, h.errCh)
+	cached, err := h.app.aggregatedLogs().Read("loopback", "app.service", "", 10_000_000)
+	if err != nil {
+		h.t.Fatalf("reading the aggregated cache: %v", err)
+	}
+	h.cached = h.cached[:0]
+	for _, line := range cached.Lines {
+		h.cached = append(h.cached, line.Text)
+	}
 	h.app.Close()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.lines...)
+}
+
+// expectCachedAsPrinted checks that the controller's aggregated cache holds
+// exactly the printed lines (texts), in order: nothing dropped or repeated.
+func (h *followHarness) expectCachedAsPrinted(printed []string) {
+	h.t.Helper()
+	want := make([]string, len(printed))
+	for i, p := range printed {
+		_, want[i], _ = strings.Cut(p, ":")
+	}
+	if strings.Join(h.cached, "\n") != strings.Join(want, "\n") {
+		h.t.Fatalf("aggregated cache holds %d lines, printed %d\n cache tail %v\nprinted tail %v",
+			len(h.cached), len(want), h.cached[max(0, len(h.cached)-5):], want[max(0, len(want)-5):])
+	}
 }
 
 func writeTestLog(t *testing.T, path string, from, to int, prefix string) {
@@ -238,6 +270,9 @@ func TestFollowServiceLogsWithCursorLosesNothing(t *testing.T) {
 	if got := h.stop(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("followed lines differ (%d vs %d)\n got tail %v\nwant tail %v", len(got), len(want), got[max(0, len(got)-5):], want[max(0, len(want)-5):])
 	}
+	// The rotation above replaced a file cached up to line 44 with one that
+	// already had 50 lines: all 50 must be cached too (B10).
+	h.expectCachedAsPrinted(want)
 }
 
 func TestFollowServiceLogsWithCursorAndSearch(t *testing.T) {
@@ -277,6 +312,7 @@ func TestFollowServiceLogsLegacyAgent(t *testing.T) {
 	if got := h.stop(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
+	h.expectCachedAsPrinted(want)
 }
 
 // scriptedLogReader answers log.read from a fixed script, then repeats the
@@ -327,6 +363,7 @@ func TestFollowServiceLogsRidesOutMissingFile(t *testing.T) {
 	if got := h.stop(); strings.Join(got, "|") != "1:a|2:b|1:x" {
 		t.Fatalf("got %v", got)
 	}
+	h.expectCachedAsPrinted([]string{"1:a", "2:b", "1:x"})
 
 	reader = &scriptedLogReader{steps: []func() (proto.LogReadResult, error){logResult(1, false, "1:a"), logMissing}}
 	h = startFollow(t, reader, "/x", "", 10)
