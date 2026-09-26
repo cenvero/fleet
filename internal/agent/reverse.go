@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -45,6 +46,9 @@ type ReverseOptions struct {
 	OfflineMetricsInterval time.Duration
 	MetricsQueuePath       string
 	NetworkDialContext     func(context.Context, string, string) (net.Conn, error)
+	// Log receives a line for each failed connection attempt (rate-limited)
+	// and for the recovery after one. Nil means os.Stderr.
+	Log io.Writer
 }
 
 func DefaultControllerKnownHostsPath() string {
@@ -122,9 +126,14 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 	defer stopOffline()
 
 	retry := newReconnectBackoff(opts.MinRetryDelay, opts.MaxRetryDelay)
+	logOut := opts.Log
+	if logOut == nil {
+		logOut = os.Stderr
+	}
+	attempts := newReconnectLog(logOut, opts.ControllerAddress)
 
 	for {
-		authenticated, err := runReverseSession(ctx, opts, server, &connected)
+		authenticated, err := runReverseSession(ctx, opts, server, &connected, attempts.connected)
 		if authenticated {
 			// The controller accepted this agent identity. Never present the one-use
 			// credential on later reconnects, and remove the bootstrap file so it is
@@ -148,13 +157,109 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 			return nil
 		}
 
-		if err := waitForReconnect(ctx, retry.next(authenticated, err)); err != nil {
+		delay := retry.next(authenticated, err)
+		attempts.ended(authenticated, err, delay)
+		if err := waitForReconnect(ctx, delay); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
 	}
+}
+
+// reconnectLogRepeat is how long an identical failure stays quiet after it
+// was last logged, so a long outage costs a line every few minutes rather
+// than one per attempt.
+const reconnectLogRepeat = 5 * time.Minute
+
+// reconnectLog tells the operator why a reverse agent is not connected: each
+// failed attempt with its reason and the next retry delay, identical repeats
+// rate-limited, and the recovery once a session is up again. It is used only
+// by the RunReverse loop's goroutine.
+type reconnectLog struct {
+	out        io.Writer
+	controller string
+	now        func() time.Time
+	every      time.Duration
+	seen       map[string]*reconnectLogEntry // by failure kind (see logKey)
+	failures   int                           // failed attempts since the last session
+}
+
+type reconnectLogEntry struct {
+	loggedAt   time.Time
+	suppressed int
+}
+
+func newReconnectLog(out io.Writer, controller string) *reconnectLog {
+	return &reconnectLog{out: out, controller: controller, now: time.Now, every: reconnectLogRepeat,
+		seen: make(map[string]*reconnectLogEntry)}
+}
+
+// ended records how an attempt finished. A session that authenticated and
+// then ended without an error is a normal disconnect and is not reported.
+func (l *reconnectLog) ended(authenticated bool, err error, delay time.Duration) {
+	if err == nil {
+		return
+	}
+	l.failures++
+	var reason string
+	switch {
+	case authenticated:
+		reason = fmt.Sprintf("reverse session failed: %v", err)
+	case strings.Contains(err.Error(), "unable to authenticate"):
+		reason = fmt.Sprintf("controller rejected this agent (check --server-name; an agent that is not enrolled needs a fresh enrollment token): %v", err)
+	default:
+		reason = fmt.Sprintf("connection attempt failed: %v", err)
+	}
+	key := logKey(reason)
+	now := l.now()
+	entry := l.seen[key]
+	if entry != nil && now.Sub(entry.loggedAt) < l.every {
+		entry.suppressed++
+		return
+	}
+	line := fmt.Sprintf("fleet-agent: %s; retrying in %s", reason, delay.Round(10*time.Millisecond))
+	if entry != nil && entry.suppressed > 0 {
+		line += fmt.Sprintf(" (repeated %d more times since last logged)", entry.suppressed)
+	}
+	fmt.Fprintln(l.out, line)
+	if entry == nil {
+		if len(l.seen) >= 32 {
+			clear(l.seen) // many distinct failures: forget old ones rather than grow
+		}
+		entry = &reconnectLogEntry{}
+		l.seen[key] = entry
+	}
+	entry.loggedAt, entry.suppressed = now, 0
+}
+
+// connected records that a session is up; after failures it says so.
+func (l *reconnectLog) connected() {
+	if l.failures > 0 {
+		fmt.Fprintf(l.out, "fleet-agent: connected to controller %s after %d failed attempts\n", l.controller, l.failures)
+	}
+	l.failures = 0
+	clear(l.seen)
+}
+
+// logKey groups failures that differ only in numbers, such as the local
+// port of each attempt in a timeout message, so they are rate-limited as one.
+func logKey(reason string) string {
+	var b strings.Builder
+	digits := false
+	for _, r := range reason {
+		if r >= '0' && r <= '9' {
+			if !digits {
+				b.WriteByte('#')
+			}
+			digits = true
+			continue
+		}
+		digits = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // reconnectBackoff decides how long the reverse agent waits before its next
@@ -203,7 +308,7 @@ var reconnectJitter = func(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64()))
 }
 
-func runReverseSession(ctx context.Context, opts ReverseOptions, server Server, connected *atomic.Bool) (bool, error) {
+func runReverseSession(ctx context.Context, opts ReverseOptions, server Server, connected *atomic.Bool, onConnected func()) (bool, error) {
 	signer, err := fleetcrypto.EnsureEd25519Signer(server.HostKeyPath)
 	if err != nil {
 		return false, err
@@ -291,6 +396,9 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server, 
 		connected.Store(true)
 		defer connected.Store(false)
 	}
+	if onConnected != nil {
+		onConnected()
+	}
 	done := make(chan error, 1)
 	go func() {
 		server.serveRPC(channel)
@@ -327,10 +435,21 @@ func verifiedControllerHostKeyCallback(path, expectedFingerprint string, forceRe
 			return tofu(hostname, remote, key)
 		}
 		var keyErr *knownhosts.KeyError
-		if !errors.As(err, &keyErr) || len(keyErr.Want) != 0 {
-			// Existing-key mismatch is handled by the normal strict/explicit-repin
-			// callback so its established diagnostics and behavior are preserved.
+		if !errors.As(err, &keyErr) {
 			return tofu(hostname, remote, key)
+		}
+		if len(keyErr.Want) != 0 {
+			// Existing-key mismatch is handled by the normal strict/explicit-repin
+			// callback so its established behavior is preserved; a rejection
+			// names both keys so the operator can tell what changed.
+			if err := tofu(hostname, remote, key); err != nil {
+				pinned := make([]string, 0, len(keyErr.Want))
+				for _, want := range keyErr.Want {
+					pinned = append(pinned, ssh.FingerprintSHA256(want.Key))
+				}
+				return fmt.Errorf("%w: expected %s, presented %s", err, strings.Join(pinned, " or "), ssh.FingerprintSHA256(key))
+			}
+			return nil
 		}
 		if expectedFingerprint == "" {
 			return fmt.Errorf("controller %s is not pinned; --controller-fingerprint is required for first enrollment", hostname)
