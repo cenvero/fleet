@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cenvero/fleet/pkg/proto"
@@ -820,7 +821,11 @@ func (a *App) controlDial(ctx context.Context, kind string) (net.Conn, func(), e
 		if ctx.Err() != nil {
 			return nil, nil, &controlNotSentError{err: ctx.Err()}
 		}
-		return nil, nil, &controlNotSentError{err: &controlDialError{err: fmt.Errorf("connect to local reverse control at %s: %w", address, err)}}
+		dialErr := fmt.Errorf("connect to local reverse control at %s: %w", address, err)
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			dialErr = fmt.Errorf("%w (the fleet daemon is not running; start it with `fleet start`, or run `fleet daemon`)", dialErr)
+		}
+		return nil, nil, &controlNotSentError{err: &controlDialError{err: dialErr}}
 	}
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	requested, hasDeadline := ctx.Deadline()
@@ -1028,6 +1033,11 @@ func (a *App) controlTokenPath() string {
 func readControlTokenFile(path string) (string, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path is the controller's own data/control.token
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The daemon writes this file when it starts and removes it when it
+			// stops, so a missing file means no daemon is running.
+			return "", fmt.Errorf("the fleet daemon is not running (reverse-mode servers are reached through it); start it with `fleet start`, or run `fleet daemon`: %w", err)
+		}
 		return "", fmt.Errorf("read control token (is `fleet daemon` running?): %w", err)
 	}
 	// Trim surrounding whitespace: the token is compared byte-for-byte with a
