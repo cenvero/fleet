@@ -143,7 +143,10 @@ func (c Connector) DialContext(ctx context.Context, target ServerTarget) (*Sessi
 		return nil, fmt.Errorf("clear ssh handshake deadline for %s: %w", address, err)
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
-	channel, requests, err := client.OpenChannel(RPCChannelType, nil)
+	// The handshake deadline was cleared above, so bound the first channel open
+	// separately: a peer that authenticates and then never confirms the channel
+	// must not pin this dial indefinitely.
+	channel, requests, err := OpenChannelTimeout(ctx, client, RPCChannelType, nil, DefaultChannelOpenTimeout)
 	if err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("open %s channel: %w", RPCChannelType, err)

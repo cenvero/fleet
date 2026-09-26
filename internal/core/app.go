@@ -1127,7 +1127,7 @@ func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto
 // dialing only when nothing reusable is cached.
 
 func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
-	if l, ok := a.sessions.acquire(server.Name); ok {
+	if l, ok := a.sessions.acquireContext(ctx, server.Name); ok {
 		resp, err := l.session().Call(ctx, env)
 		if err == nil || transport.SessionUsableAfterError(err) {
 			l.release()
@@ -1158,10 +1158,20 @@ func (a *App) dialPooledContext(ctx context.Context, server ServerRecord) (*leas
 	defer dialMu.Unlock()
 
 	// Re-check: whoever held the lock before us has just published a connection.
-	if l, ok := a.sessions.acquire(server.Name); ok {
+	if l, ok := a.sessions.acquireContext(ctx, server.Name); ok {
 		return l, nil
 	}
-	session, _, err := a.openDirectSessionContext(ctx, server, false)
+	// Connection setup (TCP, SSH handshake, channel open, hello) is bounded even
+	// for a caller without a deadline: the dial lock is held across it, so a
+	// peer that accepts TCP and then goes silent would otherwise stall every
+	// caller queued behind it for this server.
+	dialCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, pooledDialHelloTimeoutCap)
+		defer cancel()
+	}
+	session, _, err := a.openDirectSessionContext(dialCtx, server, false)
 	if err != nil {
 		return nil, err
 	}

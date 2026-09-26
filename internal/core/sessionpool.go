@@ -4,6 +4,7 @@
 package core
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -23,6 +24,17 @@ const sessionIdleTTL = 2 * time.Minute
 // limit. The agent independently caps channels per connection.
 const maxPooledChannelsPerServer = 8
 
+// Pooled connections are probed with SSH keepalives so a connection whose peer
+// vanished without a FIN is retired within about a minute instead of hanging
+// the next caller, and channel opens on them are bounded. Variables rather than
+// constants so tests can shorten them.
+var (
+	pooledKeepaliveInterval   = transport.DefaultKeepaliveInterval
+	pooledKeepaliveMaxMissed  = transport.DefaultKeepaliveMaxMissed
+	pooledChannelOpenTimeout  = transport.DefaultChannelOpenTimeout
+	pooledDialHelloTimeoutCap = 45 * time.Second
+)
+
 // sessionPool keeps one live SSH connection per server and multiplexes RPC
 // channels over it.
 //
@@ -39,6 +51,12 @@ const maxPooledChannelsPerServer = 8
 // openDirectSession, so host-key pinning, the curated cipher/KEX/MAC sets, and
 // public-key auth all apply exactly as before. Pooling changes when we connect,
 // never how we verify.
+//
+// Locking: mu guards the maps and every pooledServer's fields, and is only ever
+// held for bookkeeping — never across network I/O. Opening an extra channel
+// waits for a round trip to the agent, so it happens after the entry has been
+// looked up and mu released; otherwise one slow or half-dead server would stall
+// every acquire and release for every other server behind it.
 type sessionPool struct {
 	mu      sync.Mutex
 	entries map[string]*pooledServer
@@ -50,6 +68,11 @@ type pooledServer struct {
 	root     *transport.Session   // owns the underlying ssh.Client
 	idle     []*transport.Session // channels ready for reuse (root is one of them)
 	lastUsed time.Time
+	// dead is set when the keepalive gave up on the connection; the entry is
+	// retired on the spot, and this stops any lookup racing that retirement
+	// from handing the connection out again.
+	dead          bool
+	stopKeepalive func()
 }
 
 func newSessionPool() *sessionPool {
@@ -92,6 +115,11 @@ type lease struct {
 	name    string
 	sess    *transport.Session
 	fromNew bool // channel was opened outside the pool's cached set
+	// entry is the pooled connection this channel rides on. A lease only ever
+	// goes back to that entry: if the server's connection was retired and
+	// redialled while the call was in flight, the channel belongs to a dead
+	// connection and must not be handed to the replacement's next caller.
+	entry *pooledServer
 }
 
 func (l *lease) session() *transport.Session { return l.sess }
@@ -110,7 +138,7 @@ func (l *lease) release() {
 	l.pool.mu.Lock()
 	defer l.pool.mu.Unlock()
 	entry, ok := l.pool.entries[l.name]
-	if !ok || l.pool.closed {
+	if !ok || l.pool.closed || (l.entry != nil && entry != l.entry) || entry.dead {
 		_ = l.sess.Close()
 		return
 	}
@@ -133,25 +161,39 @@ func (l *lease) discard() {
 		_ = l.sess.Close()
 		return
 	}
-	l.pool.mu.Lock()
-	entry, ok := l.pool.entries[l.name]
-	if ok {
-		delete(l.pool.entries, l.name)
-	}
-	l.pool.mu.Unlock()
 	_ = l.sess.Close()
-	if ok {
-		entry.closeAll()
+	entry := l.entry
+	if entry == nil {
+		l.pool.mu.Lock()
+		entry = l.pool.entries[l.name]
+		l.pool.mu.Unlock()
 	}
+	// Only the entry this channel came from is retired; a replacement installed
+	// since is a different, healthy connection.
+	l.pool.retire(l.name, entry)
 }
 
-func (p *pooledServer) closeAll() {
-	for _, s := range p.idle {
+// detachLocked marks the entry dead and takes its idle channels, so nothing can
+// hand them out again. sp.mu must be held.
+func (p *pooledServer) detachLocked() []*transport.Session {
+	p.dead = true
+	idle := p.idle
+	p.idle = nil
+	return idle
+}
+
+// shutdown closes a detached entry: its keepalive, its idle channels and the
+// connection itself. It must be called without the pool lock (closing waits on
+// the network) and is safe to repeat.
+func (p *pooledServer) shutdown(idle []*transport.Session) {
+	if p.stopKeepalive != nil {
+		p.stopKeepalive()
+	}
+	for _, s := range idle {
 		if s != p.root {
 			_ = s.Close()
 		}
 	}
-	p.idle = nil
 	if p.root != nil {
 		// Closing the root closes its ssh.Client, which tears down any channel
 		// still outstanding on this connection.
@@ -159,44 +201,92 @@ func (p *pooledServer) closeAll() {
 	}
 }
 
+// retire removes entry from the pool if it is still the current connection for
+// serverName, and closes it either way.
+func (sp *sessionPool) retire(serverName string, entry *pooledServer) {
+	if sp == nil || entry == nil {
+		return
+	}
+	sp.mu.Lock()
+	if current, ok := sp.entries[serverName]; ok && current == entry {
+		delete(sp.entries, serverName)
+	}
+	idle := entry.detachLocked()
+	sp.mu.Unlock()
+	entry.shutdown(idle)
+}
+
+// removeAllLocked detaches every entry and empties the map. sp.mu must be held.
+func (sp *sessionPool) removeAllLocked() map[*pooledServer][]*transport.Session {
+	out := make(map[*pooledServer][]*transport.Session, len(sp.entries))
+	for name, entry := range sp.entries {
+		out[entry] = entry.detachLocked()
+		delete(sp.entries, name)
+	}
+	return out
+}
+
 // acquire borrows a channel for serverName, or reports that the caller must dial
 // and hand the result to adopt. It returns (nil, false) when nothing usable is
 // cached.
 func (sp *sessionPool) acquire(serverName string) (*lease, bool) {
+	return sp.acquireContext(context.Background(), serverName)
+}
+
+// acquireContext is acquire bounded by ctx: opening an extra channel waits for
+// the agent to confirm it, and the caller's cancellation or deadline applies to
+// that wait as well as the pool's own channel-open timeout.
+func (sp *sessionPool) acquireContext(ctx context.Context, serverName string) (*lease, bool) {
 	if sp == nil {
 		return nil, false
 	}
 	sp.mu.Lock()
-	defer sp.mu.Unlock()
 	if sp.closed {
+		sp.mu.Unlock()
 		return nil, false
 	}
 	entry, ok := sp.entries[serverName]
 	if !ok {
+		sp.mu.Unlock()
 		return nil, false
 	}
 	// A connection that has been quiet for a while may have been dropped by the
 	// far side or an intermediary without a FIN we ever noticed. Retire it.
-	if time.Since(entry.lastUsed) > sessionIdleTTL {
+	if entry.dead || time.Since(entry.lastUsed) > sessionIdleTTL {
 		delete(sp.entries, serverName)
-		go entry.closeAll()
+		idle := entry.detachLocked()
+		sp.mu.Unlock()
+		go entry.shutdown(idle)
 		return nil, false
 	}
 	if n := len(entry.idle); n > 0 {
 		sess := entry.idle[n-1]
 		entry.idle = entry.idle[:n-1]
-		return &lease{pool: sp, name: serverName, sess: sess}, true
+		sp.mu.Unlock()
+		return &lease{pool: sp, name: serverName, sess: sess, entry: entry}, true
 	}
+	root := entry.root
+	sp.mu.Unlock()
+	if root == nil {
+		return nil, false
+	}
+
 	// All cached channels are busy. Multiplex another one onto the existing
-	// connection — far cheaper than a second full handshake.
-	if entry.root != nil {
-		child, err := entry.root.OpenChannelSession()
-		if err == nil {
-			return &lease{pool: sp, name: serverName, sess: child, fromNew: true}, true
-		}
-		// The connection can no longer open channels; treat it as dead.
-		delete(sp.entries, serverName)
-		go entry.closeAll()
+	// connection — far cheaper than a second full handshake. This waits for the
+	// agent's confirmation, so it runs without the pool lock.
+	child, err := root.OpenChannelSessionContext(ctx, pooledChannelOpenTimeout)
+	if err == nil {
+		return &lease{pool: sp, name: serverName, sess: child, fromNew: true, entry: entry}, true
+	}
+	switch {
+	case ctx.Err() != nil:
+		// The caller gave up; that says nothing about the connection.
+	case transport.ChannelOpenRejected(err):
+		// The agent answered and refused (it is at its channel cap). The
+		// connection is alive and stays pooled; this caller dials its own.
+	default:
+		// The connection could not open a channel in time, or is closed.
+		sp.retire(serverName, entry)
 	}
 	return nil, false
 }
@@ -220,15 +310,22 @@ func (sp *sessionPool) adopt(serverName string, sess *transport.Session) *lease 
 	if sp.closed {
 		return &lease{pool: nil, name: serverName, sess: sess}
 	}
-	if existing, ok := sp.entries[serverName]; ok && existing.root != nil {
+	if existing, ok := sp.entries[serverName]; ok && existing.root != nil && !existing.dead {
 		// Someone else already established the pooled connection. Hand this one
 		// back to the caller as a one-shot; release() will close it because the
 		// entry it belongs to is not this one.
 		existing.lastUsed = time.Now()
 		return &lease{pool: nil, name: serverName, sess: sess}
 	}
-	sp.entries[serverName] = &pooledServer{root: sess, lastUsed: time.Now()}
-	return &lease{pool: sp, name: serverName, sess: sess}
+	entry := &pooledServer{root: sess, lastUsed: time.Now()}
+	// Probe the connection while it is pooled. When the probe gives up it has
+	// already closed the connection; retiring the entry right away means the
+	// next caller redials instead of tripping over the corpse.
+	entry.stopKeepalive = sess.StartKeepalive(pooledKeepaliveInterval, pooledKeepaliveMaxMissed, func() {
+		sp.retire(serverName, entry)
+	})
+	sp.entries[serverName] = entry
+	return &lease{pool: sp, name: serverName, sess: sess, entry: entry}
 }
 
 // evict drops any pooled connection for a server. Call after anything that
@@ -240,13 +337,26 @@ func (sp *sessionPool) evict(serverName string) {
 	}
 	sp.mu.Lock()
 	entry, ok := sp.entries[serverName]
+	var idle []*transport.Session
 	if ok {
 		delete(sp.entries, serverName)
+		idle = entry.detachLocked()
 	}
 	sp.mu.Unlock()
 	if ok {
-		entry.closeAll()
+		entry.shutdown(idle)
 	}
+}
+
+// has reports whether a live pooled connection exists for serverName.
+func (sp *sessionPool) has(serverName string) bool {
+	if sp == nil {
+		return false
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	entry, ok := sp.entries[serverName]
+	return ok && !entry.dead && time.Since(entry.lastUsed) <= sessionIdleTTL
 }
 
 // disconnectAll closes every pooled connection but leaves the pool usable, so a
@@ -257,11 +367,10 @@ func (sp *sessionPool) disconnectAll() {
 		return
 	}
 	sp.mu.Lock()
-	entries := sp.entries
-	sp.entries = make(map[string]*pooledServer)
+	detached := sp.removeAllLocked()
 	sp.mu.Unlock()
-	for _, entry := range entries {
-		entry.closeAll()
+	for entry, idle := range detached {
+		entry.shutdown(idle)
 	}
 }
 
