@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -86,5 +87,14 @@ func TestFileDefaultsRejectNegativeParallel(t *testing.T) {
 	configDir := newServerCommandTestConfig(t)
 	if _, err := runFleetIn(t, configDir, "file", "defaults", "set", "--parallel", "-3"); err == nil || !strings.Contains(err.Error(), "--parallel") {
 		t.Fatalf("err = %v, want --parallel validation error", err)
+	}
+}
+
+// With the daemon stopped a reverse-mode server is unreachable, not an agent
+// error.
+func TestClassifyDaemonNotRunningAsUnreachable(t *testing.T) {
+	err := errors.New("the fleet daemon is not running (reverse-mode servers are reached through it); start it with `fleet start`, or run `fleet daemon`: open control.token: no such file or directory")
+	if got := classifyAgentError(err); got != "unreachable" {
+		t.Fatalf("classifyAgentError = %q, want unreachable", got)
 	}
 }

@@ -2879,7 +2879,8 @@ func classifyAgentError(err error) string {
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "dial"), strings.Contains(s, "refused"), strings.Contains(s, "no route"),
-		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"):
+		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"),
+		strings.Contains(s, "daemon is not running"):
 		return "unreachable"
 	case strings.Contains(s, "auth"), strings.Contains(s, "unauthorized"), strings.Contains(s, "permission"),
 		strings.Contains(s, "host key"), strings.Contains(s, "handshake"):
