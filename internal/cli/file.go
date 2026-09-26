@@ -6,6 +6,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -94,8 +95,8 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 			"the file lands in the server's default remote directory under its base name.\n" +
 			"The transfer is chunked, run over --parallel concurrent channels, SHA-256\n" +
 			"verified, and resumable: re-running the same command after an interruption\n" +
-			"skips the chunks already on the server. On a terminal it shows a live progress\n" +
-			"bar; otherwise it prints periodic JSON.\n\n" +
+			"skips the chunks already on the server. Progress goes to stderr: a live bar on\n" +
+			"a terminal, otherwise one JSON object per line about once a second.\n\n" +
 			"With -r/--recursive, <local> is a directory and <remote> (required) is the\n" +
 			"destination directory; the whole tree is uploaded, preserving structure.",
 		Args: cobra.RangeArgs(2, 3),
@@ -151,7 +152,8 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 		Long: "Download <remote> from <server> into <local> (defaults to the remote base name\n" +
 			"in the current directory; a local directory is allowed and the base name is\n" +
 			"appended). Same engine as upload: chunked, parallel, SHA-256 verified, and\n" +
-			"resumable from a partial local file.\n\n" +
+			"resumable from a partial local file. Progress goes to stderr: a live bar on a\n" +
+			"terminal, otherwise one JSON object per line about once a second.\n\n" +
 			"The source may be given as two arguments (<server> <remote>) or combined as\n" +
 			"<server:remote>, so both of these are equivalent:\n" +
 			"  fleet file download web-01 /root/x.log ./\n" +
@@ -654,7 +656,8 @@ func newFileCopyCommand(configDir *string) *cobra.Command {
 		Long: "Copy a file or, with -r, a whole directory tree from one managed server to\n" +
 			"another. Within one server the agent copies the file itself; across servers the\n" +
 			"bytes stream through the controller chunk by chunk (no temp copy), so it works\n" +
-			"for every server mode and reuses the resumable, checksummed engine.\n\n" +
+			"for every server mode and reuses the resumable, checksummed engine. Progress\n" +
+			"for a single file goes to stderr (a live bar on a terminal, JSON lines otherwise).\n\n" +
 			"Examples:\n" +
 			"  fleet file copy web-01:/etc/hosts db-01:/tmp/hosts\n" +
 			"  fleet file copy web-01:/srv/app db-01:/srv/app -r",
@@ -712,7 +715,8 @@ func newFileServerMoveCommand(configDir *string) *cobra.Command {
 		Long: "Move a file or, with -r, a whole directory tree between managed servers.\n" +
 			"Within one server it's an efficient rename; across servers it copies (streamed\n" +
 			"through the controller) then deletes the source. ('fleet file mv' renames within\n" +
-			"a single server.)\n\n" +
+			"a single server.) Progress for a single file goes to stderr (a live bar on a\n" +
+			"terminal, JSON lines otherwise).\n\n" +
 			"Examples:\n" +
 			"  fleet file move web-01:/tmp/a db-01:/tmp/a\n" +
 			"  fleet file move web-01:/srv/app db-01:/srv/app -r",
@@ -1054,19 +1058,38 @@ func parseSize(s string) (int64, error) {
 // newProgressReporter returns a core.ProgressFunc that renders a live one-line
 // bar on a TTY (throttled), or periodic percentage lines otherwise, plus a
 // finish func that closes the line.
+// newProgressReporter reports transfer progress on stderr, never stdout, which
+// carries the command's result for scripts. On a terminal it redraws a live
+// bar; otherwise it writes one JSON object per line at most once a second
+// (plus the final update), as the upload help documents.
 func newProgressReporter(cmd *cobra.Command, verb string) (core.ProgressFunc, func()) {
-	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	out := cmd.ErrOrStderr()
+	return newProgressWriter(out, verb, writerIsTerminal(out))
+}
+
+// progressLine is one non-terminal progress record: the transfer's
+// ProgressUpdate fields plus the operation and a whole percentage.
+type progressLine struct {
+	Op      string `json:"op"`
+	Percent int    `json:"percent"`
+	core.ProgressUpdate
+}
+
+func newProgressWriter(out io.Writer, verb string, isTTY bool) (core.ProgressFunc, func()) {
 	var (
 		mu       sync.Mutex
 		last     time.Time
 		anything bool
 	)
-	out := cmd.OutOrStdout()
+	interval := time.Second
+	if isTTY {
+		interval = 100 * time.Millisecond
+	}
 	report := func(u core.ProgressUpdate) {
 		mu.Lock()
 		defer mu.Unlock()
 		now := time.Now()
-		if !u.Done && now.Sub(last) < 100*time.Millisecond {
+		if !u.Done && now.Sub(last) < interval {
 			return
 		}
 		last = now
@@ -1079,9 +1102,10 @@ func newProgressReporter(cmd *cobra.Command, verb string) (core.ProgressFunc, fu
 			fmt.Fprintf(out, "\r%s %s  %s  %d streams  %s/%s   ",
 				verb, renderBar(pct, 24), humanizeRate(u.RatePerSec), u.ActiveStreams,
 				humanizeBytes(u.BytesDone), humanizeBytes(u.TotalBytes))
-		} else {
-			fmt.Fprintf(out, "%s %d%% (%s/%s) %s\n", verb, pct,
-				humanizeBytes(u.BytesDone), humanizeBytes(u.TotalBytes), humanizeRate(u.RatePerSec))
+			return
+		}
+		if data, err := json.Marshal(progressLine{Op: verb, Percent: pct, ProgressUpdate: u}); err == nil {
+			fmt.Fprintf(out, "%s\n", data)
 		}
 	}
 	finish := func() {
@@ -1092,6 +1116,12 @@ func newProgressReporter(cmd *cobra.Command, verb string) (core.ProgressFunc, fu
 		}
 	}
 	return report, finish
+}
+
+// writerIsTerminal reports whether w is a terminal (an *os.File on a tty).
+func writerIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd())) // #nosec G115 -- a file descriptor fits in int
 }
 
 func renderBar(pct, width int) string {
