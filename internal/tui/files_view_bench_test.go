@@ -65,3 +65,61 @@ func BenchmarkMouseMotionFrame(b *testing.B) {
 		_ = m.View()
 	}
 }
+
+// BenchmarkViewCold50k is a full frame build for a 50k-entry directory. Only
+// the visible window should be rendered, so this must stay close to the 1k
+// case.
+func BenchmarkViewCold50k(b *testing.B) {
+	zone.NewGlobal()
+	m := benchModel(50000)
+	b.ReportAllocs()
+	for b.Loop() {
+		m.frames.valid = false
+		_ = m.View()
+	}
+}
+
+// BenchmarkScroll50k is holding ↓ in a 50k-entry directory: every step moves
+// the cursor and renders a new frame.
+func BenchmarkScroll50k(b *testing.B) {
+	zone.NewGlobal()
+	m := benchModel(50000)
+	_ = m.View()
+	b.ReportAllocs()
+	for b.Loop() {
+		mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = mm.(filesModel)
+		if m.left.index >= len(m.left.entries)-1 {
+			m.left.index, m.left.scroll = 0, 0
+		}
+		_ = m.View()
+	}
+}
+
+// BenchmarkMouseMotionAcrossRows50k sweeps the pointer over different rows of
+// a 50k-entry pane, so every event changes the hover target and re-renders.
+func BenchmarkMouseMotionAcrossRows50k(b *testing.B) {
+	zone.NewGlobal()
+	m := benchModel(50000)
+	_ = m.View()
+	b.ReportAllocs()
+	y := 0
+	for b.Loop() {
+		mm, _ := m.Update(tea.MouseMsg{
+			X: 20, Y: 8 + y%20, Action: tea.MouseActionMotion, Button: tea.MouseButtonNone,
+		})
+		m = mm.(filesModel)
+		_ = m.View()
+		y++
+	}
+}
+
+// BenchmarkReapply50k measures re-sorting/filtering a 50k listing (sort key
+// change, filter keystroke).
+func BenchmarkReapply50k(b *testing.B) {
+	m := benchModel(50000)
+	b.ReportAllocs()
+	for b.Loop() {
+		m.reapplyPane(0)
+	}
+}
