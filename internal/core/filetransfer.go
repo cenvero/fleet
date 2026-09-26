@@ -203,7 +203,11 @@ func (a *App) RemoteDelete(serverName, remotePath string, recursive bool) error 
 	if err := rejectDotComponents(TargetPathStyleForServer(server), remotePath); err != nil {
 		return err
 	}
-	return a.simpleFileOp(serverName, proto.ActionFileDelete, proto.FileDeletePayload{Path: remotePath, Recursive: recursive}, "file.delete", remotePath)
+	target := remotePath
+	if recursive {
+		target += " recursive=true"
+	}
+	return a.simpleFileOp(serverName, proto.ActionFileDelete, proto.FileDeletePayload{Path: remotePath, Recursive: recursive}, "file.delete", target)
 }
 
 // RemoteRename renames/moves a path on a managed server.
@@ -239,11 +243,19 @@ func (a *App) simpleFileOp(serverName, action string, payload any, auditAction, 
 		return err
 	}
 	resp, err := a.callRPC(server, proto.Envelope{Action: action, Payload: payload})
-	if err != nil {
-		return err
+	if err == nil && resp.Error != nil {
+		err = remoteErr(resp.Error)
 	}
-	if resp.Error != nil {
-		return remoteErr(resp.Error)
+	if err != nil {
+		// Attempts that fail (refused by the agent's file root, missing path,
+		// unreachable) are audited too, not only successes.
+		_ = a.AuditLog.Append(logs.AuditEntry{
+			Action:   auditAction + ".failed",
+			Target:   serverName,
+			Operator: a.operator(),
+			Details:  target + " error=" + err.Error(),
+		})
+		return err
 	}
 	_ = a.AuditLog.Append(logs.AuditEntry{
 		Action:   auditAction,

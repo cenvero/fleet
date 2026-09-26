@@ -71,6 +71,7 @@ func newSecretSetCommand(configDir *string) *cobra.Command {
 				if err := store.Generate(name, generate); err != nil {
 					return err
 				}
+				auditLocal(*configDir, "secret.set", name, fmt.Sprintf("generated length=%d", generate))
 				// Print only the length — never the generated value.
 				fmt.Fprintf(cmd.OutOrStdout(), "stored secret %s (%d chars)\n", name, generate)
 				return nil
@@ -93,6 +94,8 @@ func newSecretSetCommand(configDir *string) *cobra.Command {
 			if err := store.Set(name, value); err != nil {
 				return err
 			}
+			// Name only: the value never reaches the audit log.
+			auditLocal(*configDir, "secret.set", name, "")
 			// Confirm without echoing the value.
 			fmt.Fprintf(cmd.OutOrStdout(), "stored secret %s\n", name)
 			return nil
@@ -144,6 +147,7 @@ func newSecretRotateCommand(configDir *string) *cobra.Command {
 			if err := store.Rotate(name, length); err != nil {
 				return err
 			}
+			auditLocal(*configDir, "secret.rotate", name, fmt.Sprintf("length=%d", length))
 			// Print only the length — never the new value.
 			fmt.Fprintf(cmd.OutOrStdout(), "rotated secret %s (%d chars)\n", name, length)
 			return nil
@@ -165,6 +169,7 @@ func newSecretRemoveCommand(configDir *string) *cobra.Command {
 			if err := store.Remove(name); err != nil {
 				return err
 			}
+			auditLocal(*configDir, "secret.remove", name, "")
 			fmt.Fprintf(cmd.OutOrStdout(), "removed secret %s\n", name)
 			return nil
 		},

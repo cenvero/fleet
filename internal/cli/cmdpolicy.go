@@ -81,12 +81,14 @@ func runCmdPolicySet(cmd *cobra.Command, configDir, kind, value string) error {
 		if err := store.SetDenyPatterns(patterns); err != nil {
 			return err
 		}
+		auditLocal(configDir, "cmd-policy.set", "controller", fmt.Sprintf("kind=deny patterns=%q", patterns))
 		fmt.Fprintf(out, "deny patterns set (%d)\n", len(patterns))
 		return nil
 	case "confirm":
 		if err := store.SetConfirmPatterns(patterns); err != nil {
 			return err
 		}
+		auditLocal(configDir, "cmd-policy.set", "controller", fmt.Sprintf("kind=confirm patterns=%q", patterns))
 		fmt.Fprintf(out, "confirm patterns set (%d)\n", len(patterns))
 		return nil
 	default:

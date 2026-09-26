@@ -3095,6 +3095,7 @@ Examples:
 					if serr != nil {
 						return true, "", fmt.Errorf("stage approval: %w", serr)
 					}
+					_ = app.Audit("approval.stage", server, fmt.Sprintf("id=%s command=%q", id, redact(secretDisplayPrefix()+command)))
 					fmt.Fprintf(w.note, "staged approval %s for %s — run: fleet approve %s\n", id, server, id)
 					return true, id, nil
 				}
@@ -3151,6 +3152,9 @@ Examples:
 				// run, then redact, then handle on-fail.
 				r, timedOut, dur, agentErr := run(server, command)
 				j := toJSON(server, r, timedOut, agentErr, dur)
+				// Audit what ran: the displayed command (secret references, never
+				// values), redacted, with its exit code / timeout / error.
+				_ = app.Audit("exec.run", server, execAuditDetails(redact(secretDisplayPrefix()+command), j))
 				if idempotencyKey != "" {
 					if data, merr := json.Marshal(j); merr == nil {
 						_ = idemStore.Put(idemKey(server, command), string(data), time.Hour)
@@ -3176,6 +3180,7 @@ Examples:
 					}
 					or, oTimedOut, oDur, oAgentErr := run(server, onFail)
 					oj := toJSON(server, or, oTimedOut, oAgentErr, oDur)
+					_ = app.Audit("exec.run", server, execAuditDetails(redact(secretDisplayPrefix()+onFail), oj)+" on_fail=true")
 					if human {
 						printExecHuman(w.out, w.err, j, printHeader)
 						fmt.Fprintf(w.out, "--- on-fail: %s ---\n", onFail)
