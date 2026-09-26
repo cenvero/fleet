@@ -140,7 +140,70 @@ func (s *ApprovalStore) read() ([]Approval, error) {
 	if err := json.Unmarshal(data, &approvals); err != nil {
 		return nil, fmt.Errorf("decode approvals: %w", err)
 	}
+	s.mergeExtras(approvals)
 	return approvals, nil
+}
+
+// approvalExtras is the part of an Approval that fleet versions before the
+// approval-run feature do not know. Those binaries rewrite approvals.json from
+// their own struct (e.g. `approvals reject`) and silently drop unknown fields,
+// which would make a later `fleet approve` run the command without its staged
+// --timeout/--on-fail/secrets. The extras are therefore also kept in a sidecar
+// (approvals-extra.json, which older binaries never touch) keyed by approval
+// id, and merged back into any approval that lost them.
+type approvalExtras struct {
+	RequestedBy string        `json:"requested_by,omitempty"`
+	Exec        *ApprovalExec `json:"exec,omitempty"`
+	ApprovedAt  *time.Time    `json:"approved_at,omitempty"`
+	ExecutedAt  *time.Time    `json:"executed_at,omitempty"`
+	ExitCode    *int          `json:"exit_code,omitempty"`
+	Error       string        `json:"error,omitempty"`
+}
+
+func (e approvalExtras) empty() bool {
+	return e.RequestedBy == "" && e.Exec == nil && e.ApprovedAt == nil && e.ExecutedAt == nil && e.ExitCode == nil && e.Error == ""
+}
+
+func (s *ApprovalStore) extrasPath() string {
+	return strings.TrimSuffix(s.path, ".json") + "-extra.json"
+}
+
+// mergeExtras restores extras an older binary dropped. A missing or unreadable
+// sidecar only means there is nothing to restore.
+func (s *ApprovalStore) mergeExtras(approvals []Approval) {
+	data, err := os.ReadFile(s.extrasPath())
+	if err != nil || len(data) == 0 {
+		return
+	}
+	var extras map[string]approvalExtras
+	if json.Unmarshal(data, &extras) != nil {
+		return
+	}
+	for i := range approvals {
+		e, ok := extras[approvals[i].ID]
+		if !ok {
+			continue
+		}
+		a := &approvals[i]
+		if a.RequestedBy == "" {
+			a.RequestedBy = e.RequestedBy
+		}
+		if a.Exec == nil {
+			a.Exec = e.Exec
+		}
+		if a.ApprovedAt == nil {
+			a.ApprovedAt = e.ApprovedAt
+		}
+		if a.ExecutedAt == nil {
+			a.ExecutedAt = e.ExecutedAt
+		}
+		if a.ExitCode == nil {
+			a.ExitCode = e.ExitCode
+		}
+		if a.Error == "" {
+			a.Error = e.Error
+		}
+	}
 }
 
 func (s *ApprovalStore) write(approvals []Approval) error {
@@ -150,13 +213,35 @@ func (s *ApprovalStore) write(approvals []Approval) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
+	extras := make(map[string]approvalExtras)
+	for _, a := range approvals {
+		e := approvalExtras{RequestedBy: a.RequestedBy, Exec: a.Exec, ApprovedAt: a.ApprovedAt,
+			ExecutedAt: a.ExecutedAt, ExitCode: a.ExitCode, Error: a.Error}
+		if !e.empty() {
+			extras[a.ID] = e
+		}
+	}
+	extraData, err := json.MarshalIndent(extras, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode approvals: %w", err)
+	}
+	// The sidecar first: the main file never references extras that were not
+	// persisted.
+	if err := writeFileAtomic(s.extrasPath(), ".approvals-extra-*.json", extraData); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(approvals, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode approvals: %w", err)
 	}
-	// Atomic write: temp file in the same dir -> chmod 0600 -> rename.
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".approvals-*.json")
+	return writeFileAtomic(s.path, ".approvals-*.json", data)
+}
+
+// writeFileAtomic replaces path with data: temp file in the same dir -> chmod
+// 0600 -> fsync -> rename.
+func writeFileAtomic(path, pattern string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return fmt.Errorf("write approvals: %w", err)
 	}
@@ -180,7 +265,7 @@ func (s *ApprovalStore) write(approvals []Approval) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("write approvals: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write approvals: %w", err)
 	}
 	return nil

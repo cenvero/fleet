@@ -4,6 +4,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -453,5 +454,70 @@ func TestApprovalStoreLockFailureFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(ApprovalsPath(dir)); !os.IsNotExist(err) {
 		t.Fatalf("approval document exists after failed lock acquisition: %v", err)
+	}
+}
+
+// TestApprovalExtrasSurviveLegacyRewrite: a fleet binary from before the
+// approval-run feature rewrites approvals.json from its own struct (e.g. to
+// reject another approval) and drops the fields it does not know. The staged
+// exec options and outcome must survive that, so a later `fleet approve` runs
+// the command with its --timeout/--on-fail/secrets (QA B4).
+func TestApprovalExtrasSurviveLegacyRewrite(t *testing.T) {
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	s := newTestStore(t, &now)
+	opts := &ApprovalExec{Timeout: "2s", OnFail: "echo undo", Secrets: []string{"K=@k"}}
+	id, err := s.StageExec("web-01", "deploy", time.Hour, opts, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, _ := s.Stage("web-02", "uptime", time.Hour)
+	if _, err := s.Approve(done); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordResult(done, 3, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// What an older binary does: decode into the old struct, change something,
+	// write the old struct back.
+	type legacyApproval struct {
+		ID        string    `json:"id"`
+		Server    string    `json:"server"`
+		Command   string    `json:"command"`
+		Status    string    `json:"status"`
+		Requested time.Time `json:"requested"`
+		Expires   time.Time `json:"expires"`
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy []legacyApproval
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	stripped, _ := json.MarshalIndent(legacy, "", "  ")
+	if err := os.WriteFile(s.path, stripped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exec == nil || got.Exec.Timeout != "2s" || got.Exec.OnFail != "echo undo" || len(got.Exec.Secrets) != 1 || got.RequestedBy != "alice" {
+		t.Fatalf("staged options lost after a legacy rewrite: %+v", got)
+	}
+	res, err := s.Get(done)
+	if err != nil || res.ExitCode == nil || *res.ExitCode != 3 || res.ExecutedAt == nil {
+		t.Fatalf("recorded outcome lost after a legacy rewrite: %+v, %v", res, err)
+	}
+
+	// Rejected/removed approvals are pruned from the sidecar on the next write.
+	if _, err := s.Reject(id); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(id); got.Status != ApprovalRejected || got.Exec == nil {
+		t.Fatalf("after reject = %+v", got)
 	}
 }

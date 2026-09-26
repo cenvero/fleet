@@ -38,6 +38,7 @@ Typical layout:
 │   ├── update-available.json ← cached update check (a failed check is also recorded, so an offline controller retries at most every 10 minutes)
 │   └── control.token      ← per-session secret for local reverse-hub control socket
 ├── approvals.json         ← staged `exec --require-approval` commands and their outcomes
+├── approvals-extra.json   ← copy of the exec options/outcomes, so older fleet binaries rewriting approvals.json cannot drop them
 ├── tui/
 │   └── files-bookmarks.json ← file manager bookmarks
 ├── backups/
