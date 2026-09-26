@@ -242,3 +242,45 @@ func TestApproveRefusesLegacyFlagLikeServer(t *testing.T) {
 		t.Fatalf("legacy approval = %+v, %v; must stay pending (never approved or run)", got, gerr)
 	}
 }
+
+// TestDryRunNeverStagesApproval: `exec --dry-run --require-approval` previews
+// the command; it must not stage a real approval (QA B6).
+func TestDryRunNeverStagesApproval(t *testing.T) {
+	dir, fake := setupExecFanout(t, map[string]fakeExecBehavior{"srv-01": {}}, nil)
+	res := runExecFleet(t, dir, "exec", "srv-01", "--dry-run", "--require-approval", "--", "reboot")
+	if res.err != nil {
+		t.Fatalf("dry-run: %v (stderr=%q)", res.err, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "would run") {
+		t.Fatalf("dry-run must preview the command, stdout=%q", res.stdout)
+	}
+	if list, _ := core.NewApprovalStore(dir).List(); len(list) != 0 {
+		t.Fatalf("a dry run staged approvals: %+v", list)
+	}
+	if fake.calls.Load() != 0 {
+		t.Fatalf("agent saw %d call(s)", fake.calls.Load())
+	}
+}
+
+// TestApprovedJSONOutcome: with --json, exec exits 0 on a timeout or an agent
+// error, so approve must read the outcome from the JSON result (QA B5).
+func TestApprovedJSONOutcome(t *testing.T) {
+	for name, tc := range map[string]struct {
+		out      string
+		code     int
+		wantCode int
+		wantErr  bool
+	}{
+		"success":     {`{"server":"a","exit_code":0}`, 0, 0, false},
+		"remote exit": {`{"server":"a","exit_code":3}`, 3, 3, false},
+		"timed out":   {`{"server":"a","exit_code":-1,"timed_out":true}`, 0, -1, true},
+		"agent error": {`{"server":"a","exit_code":0,"agent_error":"unreachable: dial tcp"}`, 0, -1, true},
+		"blocked":     {`{"server":"a","status":"blocked","error":"cmd-policy deny"}`, 1, -1, true},
+		"not json":    {"garbage", 2, 2, false},
+	} {
+		code, err := approvedJSONOutcome([]byte(tc.out), tc.code)
+		if code != tc.wantCode || (err != nil) != tc.wantErr {
+			t.Fatalf("%s: got (%d, %v), want (%d, err=%v)", name, code, err, tc.wantCode, tc.wantErr)
+		}
+	}
+}

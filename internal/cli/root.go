@@ -3070,8 +3070,9 @@ Examples:
 					}
 				}
 				// 4. require-approval — stage (with the exec options `fleet approve`
-				// must run it with) and refuse.
-				if requireApprove {
+				// must run it with) and refuse. A --dry-run never stages anything:
+				// it falls through to the dry-run preview below.
+				if requireApprove && !dryRun {
 					// Only a real, registered server can be staged: the name is
 					// later passed to `fleet exec` by `fleet approve`.
 					if _, gerr := app.GetServer(server); gerr != nil {

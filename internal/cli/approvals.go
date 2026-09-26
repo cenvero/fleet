@@ -5,6 +5,8 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -153,7 +155,7 @@ func newApproveCommand(configDir *string) *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "approval %s: %s (exit %d)\n", recorded.ID, recorded.Status, exitCode)
 			}
 			if runErr != nil {
-				return fmt.Errorf("approved command could not run on %s: %w", approval.Server, runErr)
+				return fmt.Errorf("approved command failed on %s: %w", approval.Server, runErr)
 			}
 			if exitCode != 0 {
 				return fmt.Errorf("approved command failed on %s (exit %d)", approval.Server, exitCode)
@@ -198,16 +200,48 @@ func runApprovedCommand(cmd *cobra.Command, configDir, tokenFlag string, approva
 	child := exec.CommandContext(cmd.Context(), exe, approvedExecArgs(configDir, approval, asJSON)...) // #nosec G204 -- re-invokes this same fleet binary with a fixed argv shape
 	child.Env = approvedExecEnv(os.Environ(), tokenFlag)
 	child.Stdin = nil
+	// In --json mode `fleet exec` exits 0 for a timeout or an agent/transport
+	// error (the failure is in the JSON), so the outcome is read from the JSON
+	// result itself; the output still streams to the approver unchanged.
+	var jsonOut bytes.Buffer
 	child.Stdout = cmd.OutOrStdout()
+	if asJSON {
+		child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &jsonOut)
+	}
 	child.Stderr = cmd.ErrOrStderr()
+	code := 0
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode(), nil
+		if !errors.As(err, &exitErr) {
+			return -1, err
 		}
-		return -1, err
+		code = exitErr.ExitCode()
 	}
-	return 0, nil
+	if asJSON {
+		return approvedJSONOutcome(jsonOut.Bytes(), code)
+	}
+	return code, nil
+}
+
+// approvedJSONOutcome derives the recorded outcome from a single-server
+// `fleet exec --json` result: a timeout, an agent/transport error or a policy
+// block is a failure even though the child exited 0.
+func approvedJSONOutcome(out []byte, childCode int) (int, error) {
+	var j execJSON
+	if err := json.Unmarshal(bytes.TrimSpace(out), &j); err != nil {
+		return childCode, nil // no single JSON result to read: keep the exit status
+	}
+	switch {
+	case j.TimedOut:
+		return -1, errors.New("timed out")
+	case j.AgentError != "":
+		return -1, errors.New(j.AgentError)
+	case j.Status == execStatusBlocked:
+		return -1, fmt.Errorf("blocked: %s", j.Error)
+	case j.ExitCode != 0:
+		return j.ExitCode, nil
+	}
+	return childCode, nil
 }
 
 // approvedExecEnv is env with FLEET_TOKEN set to tokenFlag when one was given
