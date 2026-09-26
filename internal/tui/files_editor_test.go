@@ -35,7 +35,7 @@ func TestEditorLoadSaveLocal(t *testing.T) {
 	}
 
 	updated := original + "// edited\n"
-	if err := saveFileFromEdit(nil, "", p, []byte(updated)); err != nil {
+	if err := saveFileFromEdit(nil, "", p, []byte(updated), []byte(original)); err != nil {
 		t.Fatalf("saveFileFromEdit: %v", err)
 	}
 	roundtrip, err := os.ReadFile(p)

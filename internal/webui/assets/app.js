@@ -4370,6 +4370,8 @@ const editor = {
   p: null,
   item: null,
   original: "",
+  base: "", // sha256 of the file as opened/last saved (conflict check)
+  crlf: false,
   lang: "text",
   dirty: false,
   lastFocus: null,
@@ -4405,7 +4407,12 @@ async function openEditor(p, item) {
     return;
   }
   if (!editor.open || editor.item !== item) return; // closed while loading
-  editor.original = data.content || "";
+  // A textarea turns every line break into "\n"; remember a CRLF file so the
+  // save can put its line endings back instead of rewriting the whole file.
+  const raw = data.content || "";
+  editor.crlf = raw.includes("\r\n") && !/(^|[^\r])\n/.test(raw);
+  editor.base = data.sha256 || "";
+  editor.original = raw.replace(/\r\n/g, "\n");
   ta.value = editor.original;
   ta.disabled = false;
   $("#ed-meta").textContent = humanSize(data.size || editor.original.length) + " · " + locationLabel(p.server, p.path);
@@ -4473,17 +4480,22 @@ async function saveEditor() {
   const item = editor.item;
   const ta = $("#ed-input");
   const content = ta.value;
+  const body = editor.crlf ? content.replace(/\r?\n/g, "\r\n") : content;
   const full = fullPath(p, item);
   const saveBtn = $("#ed-save");
   saveBtn.disabled = true;
   saveBtn.textContent = "Saving…";
   try {
-    const res = await fetch(api("/api/write", { server: p.server, path: full }), {
+    const params = { server: p.server, path: full };
+    if (editor.base) params.base = editor.base;
+    const res = await fetch(api("/api/write", params), {
       method: "POST",
       headers: { "X-Fleet-Token": TOKEN, "Content-Type": "text/plain" },
-      body: content,
+      body,
     });
     if (!res.ok) throw await errorFrom(res);
+    const saved = await res.json().catch(() => ({}));
+    editor.base = saved.sha256 || "";
   } catch (e) {
     toast("Save failed: " + friendlyError(e, p.server), "error");
     saveBtn.disabled = false;

@@ -4,8 +4,6 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +11,6 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +38,7 @@ func newFileCommand(configDir *string) *cobra.Command {
 	fileCmd.AddCommand(newFileStatCommand(configDir))
 	fileCmd.AddCommand(newFileCatCommand(configDir))
 	fileCmd.AddCommand(newFileTailCommand(configDir))
+	fileCmd.AddCommand(newFileViewCommand(configDir))
 	fileCmd.AddCommand(newFileEditCommand(configDir))
 	fileCmd.AddCommand(newFileDiffCommand(configDir))
 	fileCmd.AddCommand(newFileUploadCommand(configDir))
@@ -273,82 +271,6 @@ func newFileTailCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
-func newFileEditCommand(configDir *string) *cobra.Command {
-	var parallel int
-	var chunkSize string
-	cmd := &cobra.Command{
-		Use:   "edit <server:path>",
-		Short: "Edit a remote file in $EDITOR, then upload it back atomically",
-		Long: "Download <path> from <server> into a local temp file, open it in your editor\n" +
-			"($EDITOR, falling back to vi then nano), and on save upload it back over the\n" +
-			"same chunked, checksummed, resumable engine — the remote file is replaced\n" +
-			"atomically (temp file -> fsync -> rename). If you quit the editor without\n" +
-			"changing anything, the upload is skipped.\n\n" +
-			"  fleet file edit web-01:/etc/nginx/nginx.conf",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			server, remotePath, err := parseServerPath(args[0])
-			if err != nil {
-				return err
-			}
-			app, err := openApp(*configDir)
-			if err != nil {
-				return err
-			}
-			defer app.Close()
-			record, err := app.GetServer(server)
-			if err != nil {
-				return err
-			}
-			style := core.TargetPathStyleForServer(record)
-			opts, err := transferOptsFromFlags(parallel, chunkSize)
-			if err != nil {
-				return err
-			}
-
-			tmpDir, err := os.MkdirTemp("", "fleet-edit-")
-			if err != nil {
-				return err
-			}
-			defer func() { _ = os.RemoveAll(tmpDir) }()
-			tmpPath := filepath.Join(tmpDir, style.Base(remotePath))
-
-			if _, err := app.DownloadFile(server, remotePath, tmpPath, opts, nil); err != nil {
-				return fmt.Errorf("download for edit: %w", err)
-			}
-			before, err := fileSHA256(tmpPath)
-			if err != nil {
-				return err
-			}
-
-			if err := openInEditor(cmd, *configDir, tmpPath); err != nil {
-				return err
-			}
-
-			after, err := fileSHA256(tmpPath)
-			if err != nil {
-				return err
-			}
-			if after == before {
-				fmt.Fprintln(cmd.OutOrStdout(), "no changes — upload skipped")
-				return nil
-			}
-
-			progress, finish := newProgressReporter(cmd, "upload")
-			result, err := app.UploadFile(server, tmpPath, remotePath, opts, progress)
-			finish()
-			if err != nil {
-				return fmt.Errorf("upload after edit: %w", err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "saved %s:%s (%s, sha256=%s)\n", server, result.Path, humanizeBytes(result.Size), shortHash(result.SHA256))
-			return nil
-		},
-	}
-	cmd.Flags().IntVar(&parallel, "parallel", 0, "number of parallel streams (0 = use server/global default)")
-	cmd.Flags().StringVar(&chunkSize, "chunk-size", "", "chunk size, e.g. 4M, 8M (0 = use default)")
-	return cmd
-}
-
 // editorShellMetachars are characters whose presence in $EDITOR means the string
 // is more than a "program [args]" invocation — it is a shell snippet (e.g.
 // EDITOR='sh -c payload #', or chaining/redirection/expansion). We split $EDITOR
@@ -403,21 +325,6 @@ func openInEditor(cmd *cobra.Command, configDir, path string) error {
 		return fmt.Errorf("editor exited with error: %w", err)
 	}
 	return nil
-}
-
-// fileSHA256 returns the hex SHA-256 of a local file, used to detect whether an
-// edit actually changed the file before re-uploading.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path) // #nosec G304 -- controller-created temp file
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func firstNonEmpty(values ...string) string {

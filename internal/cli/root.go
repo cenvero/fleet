@@ -2088,16 +2088,26 @@ func newConfigCommand(configDir *string) *cobra.Command {
 	})
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "set <key> <value>",
-		Short: "Change a runtime setting after init (job-log-retention, session-grace)",
+		Short: "Change a runtime setting after init (job-log-retention, session-grace, edit-*)",
 		Long: "Change a configurable runtime setting at any time. Supported keys:\n\n" +
 			"  job-log-retention   how long detached job logs are kept before they're\n" +
 			"                      auto-deleted on the controller + servers (e.g. 7d, 30d,\n" +
 			"                      12h; 0/off/never disables pruning)\n" +
 			"  session-grace       how long a session stays alive after an unexpected\n" +
-			"                      disconnect so you can reconnect (e.g. 10m, 5m, 1h)\n\n" +
+			"                      disconnect so you can reconnect (e.g. 10m, 5m, 1h)\n" +
+			"  edit-backups        how many previous versions of each file edited with\n" +
+			"                      `fleet file edit` are kept for --undo (0-100, default 10;\n" +
+			"                      0 turns the history off)\n" +
+			"  edit-max-size       largest file `fleet file view/edit` will load (e.g. 1M,\n" +
+			"                      512K; at most and by default 8M)\n" +
+			"  edit-require-hash   on: every non-interactive edit of an existing file must\n" +
+			"                      pass --expect-sha256, so it can only change the exact\n" +
+			"                      version that was viewed (good for AI agents); off: optional\n\n" +
 			"Examples:\n" +
 			"  fleet config set job-log-retention 30d\n" +
-			"  fleet config set session-grace 15m",
+			"  fleet config set session-grace 15m\n" +
+			"  fleet config set edit-backups 20\n" +
+			"  fleet config set edit-require-hash on",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value := strings.ToLower(strings.TrimSpace(args[0])), strings.TrimSpace(args[1])
@@ -2116,8 +2126,26 @@ func newConfigCommand(configDir *string) *cobra.Command {
 					return fmt.Errorf("invalid session-grace %q: %w", value, err)
 				}
 				cfg.Runtime.SessionReconnectGrace = value
+			case "edit-backups", "edit_backups":
+				n, err := strconv.Atoi(value)
+				if err != nil {
+					return fmt.Errorf("invalid edit-backups %q: give a number from 0 to 100", value)
+				}
+				cfg.Runtime.FileEdit.Backups = &n
+			case "edit-max-size", "edit_max_size":
+				n, err := parseSize(value)
+				if err != nil || n <= 0 {
+					return fmt.Errorf("invalid edit-max-size %q: give a size such as 512K or 2M (at most 8M)", value)
+				}
+				cfg.Runtime.FileEdit.MaxBytes = n
+			case "edit-require-hash", "edit_require_hash":
+				on, err := parseOnOff(value)
+				if err != nil {
+					return fmt.Errorf("invalid edit-require-hash %q: use on or off", value)
+				}
+				cfg.Runtime.FileEdit.RequireHash = on
 			default:
-				return fmt.Errorf("unknown key %q (supported: job-log-retention, session-grace)", args[0])
+				return fmt.Errorf("unknown key %q (supported: job-log-retention, session-grace, edit-backups, edit-max-size, edit-require-hash)", args[0])
 			}
 			if err := cfg.Validate(); err != nil {
 				return err

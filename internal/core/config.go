@@ -322,6 +322,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("runtime metrics poll interval: %w", err)
 		}
 	}
+	if err := c.Runtime.FileEdit.Validate(); err != nil {
+		return fmt.Errorf("runtime file edit: %w", err)
+	}
 	if v := strings.TrimSpace(c.Runtime.JobLogRetention); v != "" {
 		switch strings.ToLower(v) {
 		case "0", "off", "never", "disabled": // explicit "no pruning" — valid

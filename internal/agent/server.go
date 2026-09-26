@@ -898,6 +898,12 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			handleFileRPC(encode, request, s.fileManager().Copy)
 		case proto.ActionFileTree:
 			handleFileRPC(encode, request, s.fileManager().Tree)
+		case proto.ActionFileEdit:
+			if editor, ok := s.fileManager().(fileEditor); ok {
+				handleFileRPC(encode, request, editor.Edit)
+			} else {
+				_ = encode(errorEnvelope(request, &RPCError{Code: "unsupported_action", Message: "this agent's file manager does not support file.edit"}))
+			}
 		default:
 			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,

@@ -12,6 +12,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -1052,7 +1053,14 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fmt.Errorf("file appears to be binary and cannot be edited as text"))
 		return
 	}
-	writeJSON(w, map[string]any{"content": string(data), "size": len(data)})
+	// sha256 is the version the editor opened; the save sends it back so a
+	// server file changed in the meantime is reported, not overwritten.
+	writeJSON(w, map[string]any{"content": string(data), "size": len(data), "sha256": sha256Hex(data)})
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // errEditTooLarge is the sentinel capWriter uses to abort an oversized remote
@@ -1077,12 +1085,21 @@ func (c *capWriter) Write(p []byte) (int, error) {
 
 // handleWrite saves edited text back to a file. The request body is the new
 // content (capped at maxEditBytes). Local writes hit the controller's disk at
-// 0o600; server writes spool to a controller temp then upload to the agent.
+// 0o600. Server writes use the agent's safe in-place edit, which keeps the
+// file's owner, group, mode and extended attributes, replaces it atomically,
+// and — given the sha256 the editor opened (?base=) — refuses with 409 if the
+// file changed on the server since. Agents too old for that get the
+// checksummed atomic upload.
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p := r.URL.Query().Get("path")
+	base := strings.ToLower(r.URL.Query().Get("base"))
 	if p == "" {
 		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if base != "" && !isHexSHA256(base) {
+		http.Error(w, "base must be a hex sha256", http.StatusBadRequest)
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxEditBytes))
@@ -1110,10 +1127,24 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "ok"})
+		writeJSON(w, map[string]string{"status": "ok", "sha256": sha256Hex(body)})
 		return
 	}
-	// Spool to a controller temp file, then upload to the target path on the agent.
+	res, err := s.app.EditRemoteFile(server, core.EditRequest{Path: p, Replace: true, Content: body, BaseSHA256: base})
+	switch {
+	case err == nil:
+		writeJSON(w, map[string]string{"status": "ok", "sha256": res.NewSHA256})
+		return
+	case core.EditErrorCode(err) == "edit_conflict":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "the file changed on the server since you opened it, so it was not overwritten; copy your changes, then reopen the file"})
+		return
+	case !errors.Is(err, core.ErrEditUnsupported):
+		writeError(w, err)
+		return
+	}
+	// An older agent: spool to a controller temp file, then upload.
 	tmp, err := os.CreateTemp("", "fleet-webui-edit-*")
 	if err != nil {
 		writeError(w, err)
@@ -1134,7 +1165,15 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok", "sha256": sha256Hex(body)})
+}
+
+func isHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // handleTouch creates a new empty file. Local: O_EXCL so it won't clobber an

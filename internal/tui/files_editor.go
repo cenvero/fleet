@@ -5,6 +5,9 @@ package tui
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -63,9 +66,11 @@ type editorLoadedMsg struct {
 	err     error
 }
 
-// editorSavedMsg carries the result of an asynchronous save.
+// editorSavedMsg carries the result of an asynchronous save and the content
+// that was saved (the base the next save is checked against).
 type editorSavedMsg struct {
-	err error
+	err     error
+	content string
 }
 
 // openEditor begins loading the focused file into the editor overlay. It refuses
@@ -361,18 +366,32 @@ func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
 	app := m.app
 	source := ed.source
 	path := ed.path
+	base := ed.content
 	return m, func() tea.Msg {
-		err := saveFileFromEdit(app, source, path, []byte(content))
-		return editorSavedMsg{err: err}
+		err := saveFileFromEdit(app, source, path, []byte(content), []byte(base))
+		return editorSavedMsg{err: err, content: content}
 	}
 }
 
 // saveFileFromEdit persists edited content. Local writes go straight to the file
-// (0o600); remote writes stage the content in a controller temp file and upload
-// it to the exact remote path, then remove the temp.
-func saveFileFromEdit(app *core.App, source, full string, content []byte) error {
+// (0o600). Remote writes use the agent's safe in-place edit: the file keeps its
+// owner, group, mode and extended attributes, is replaced atomically, and is
+// only replaced if it still has the content the editor opened (base) — a
+// change made on the server meanwhile is reported instead of overwritten.
+// Agents too old for that get the checksummed atomic upload instead.
+func saveFileFromEdit(app *core.App, source, full string, content, base []byte) error {
 	if source == "" {
 		return os.WriteFile(full, content, 0o600)
+	}
+	_, err := app.EditRemoteFile(source, core.EditRequest{Path: full, Replace: true, Content: content, BaseSHA256: sha256Hex(base)})
+	if err == nil {
+		return nil
+	}
+	if core.EditErrorCode(err) == "edit_conflict" {
+		return fmt.Errorf("the file changed on %s since you opened it; your text is still here — copy what you need, then reopen the file", source)
+	}
+	if !errors.Is(err, core.ErrEditUnsupported) {
+		return err
 	}
 	tmp, err := os.CreateTemp("", "fleet-edit-*")
 	if err != nil {
@@ -393,6 +412,11 @@ func saveFileFromEdit(app *core.App, source, full string, content []byte) error 
 	return nil
 }
 
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // onEditorSaved updates editor state after a save completes and refreshes the
 // owning pane so the new size/mtime show immediately.
 func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
@@ -410,8 +434,10 @@ func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
 		m.status = "save failed: " + msg.err.Error()
 		return m, nil
 	}
-	ed.content = ed.area.Value()
-	ed.dirty = false
+	// What was saved is the new base; text typed while the save ran is
+	// still unsaved.
+	ed.content = msg.content
+	ed.dirty = ed.area.Value() != msg.content
 	ed.status = "saved ✓"
 	m.status = "saved " + ed.name
 	return m, m.reload(ed.side)
