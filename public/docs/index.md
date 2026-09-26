@@ -110,7 +110,7 @@ PowerShell:
 irm https://fleet.cenvero.org/install.ps1 | iex
 ```
 
-Run from an elevated PowerShell prompt (PowerShell 5.1 or later). It fetches a checksum-pinned `minisign` verifier if you have none, installs `fleet.exe` and adds it to `PATH`.
+Run in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned `minisign` verifier if you have none, installs `fleet.exe` to `%USERPROFILE%\.local\bin` and adds it to your user `PATH`.
 
 The install script needs `curl` and `tar`, and offers to install `jq` and `minisign` if they are missing — signature verification cannot be skipped.
 

@@ -70,7 +70,7 @@ PowerShell:
 irm https://fleet.cenvero.org/install.ps1 | iex
 ```
 
-Run from an elevated PowerShell prompt. Installs to `%ProgramFiles%\fleet` and adds it to `PATH`.
+Run in PowerShell 5.1 or later — no administrator rights needed. Installs `fleet.exe` to `%USERPROFILE%\.local\bin` and adds it to your user `PATH`.
 
 - **0** cloud accounts or hosted services
 - **2** transport modes — direct & reverse

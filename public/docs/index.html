@@ -86,7 +86,7 @@
             "@type": "HowToStep",
             "position": 1,
             "name": "Install the controller",
-            "text": "On macOS run: brew tap cenvero/fleet && brew install cenvero-fleet. On Linux or macOS you can also run: curl -fsSL https://fleet.cenvero.org/install | sh. On Windows, from an elevated PowerShell prompt, run: irm https://fleet.cenvero.org/install.ps1 | iex. Every installer verifies the release signature before installing.",
+            "text": "On macOS run: brew tap cenvero/fleet && brew install cenvero-fleet. On Linux or macOS you can also run: curl -fsSL https://fleet.cenvero.org/install | sh. On Windows, in PowerShell 5.1 or later (no administrator rights needed), run: irm https://fleet.cenvero.org/install.ps1 | iex. Every installer verifies the release signature before installing.",
             "url": "https://fleet.cenvero.org/docs/#install"
           },
           {
@@ -376,7 +376,7 @@ fleet dashboard</pre></div>
             <div class="tabpanel" role="tabpanel" id="docs-panel-windows" aria-labelledby="docs-tab-windows" hidden>
               <div class="cmd-label">PowerShell</div>
               <div class="cmd ps"><code>irm https://fleet.cenvero.org/install.ps1 | iex</code><button class="copy-btn" type="button" data-copy="irm https://fleet.cenvero.org/install.ps1 | iex"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
-              <p class="install-note">Run from an elevated PowerShell prompt (PowerShell 5.1 or later). It fetches a checksum-pinned <code>minisign</code> verifier if you have none, installs <code>fleet.exe</code> and adds it to <code>PATH</code>.</p>
+              <p class="install-note">Run in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned <code>minisign</code> verifier if you have none, installs <code>fleet.exe</code> to <code>%USERPROFILE%\.local\bin</code> and adds it to your user <code>PATH</code>.</p>
             </div>
           </div>
           <p>The install script needs <code>curl</code> and <code>tar</code>, and offers to install <code>jq</code> and <code>minisign</code> if they are missing — signature verification cannot be skipped.</p>

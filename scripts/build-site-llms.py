@@ -65,7 +65,7 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Install:**
   - macOS or Linux with Homebrew: `brew tap cenvero/fleet && brew install cenvero-fleet`
   - Linux or macOS install script: `curl -fsSL https://fleet.cenvero.org/install | sh`
-  - Windows, from an elevated PowerShell prompt: `irm https://fleet.cenvero.org/install.ps1 | iex`
+  - Windows, in PowerShell 5.1 or later (no administrator rights needed; installs to `%USERPROFILE%\\.local\\bin` and adds it to the user PATH): `irm https://fleet.cenvero.org/install.ps1 | iex`
   - From source (Go 1.26): `git clone https://github.com/cenvero/fleet && cd fleet && make build`
 - **First steps:** `fleet init`, then `fleet server add web-01 192.0.2.10 --login-user root`, then `fleet exec web-01 uptime` or `fleet dashboard`.
 - **Upgrade:** `fleet update apply` (self-managed installs) or `brew upgrade cenvero-fleet` followed by `fleet sync-agent` (Homebrew).
