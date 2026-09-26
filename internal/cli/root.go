@@ -166,6 +166,11 @@ func NewRootCommand() *cobra.Command {
 			// load it and authorize this invocation against its scope.
 			return enforceToken(cmd, configDir, tokenID)
 		},
+		// Runs only after a command's RunE succeeded (cobra skips it on error).
+		PersistentPostRunE: func(cmd *cobra.Command, _ []string) error {
+			notifyDestructiveOperation(cmd, configDir)
+			return nil
+		},
 	}
 
 	root.Version = version.Version
