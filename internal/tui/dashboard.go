@@ -36,10 +36,12 @@ func dashPromptID(choice int) string   { return "dash-prompt-" + strconv.Itoa(ch
 func dashRefreshToggleID() string      { return "dash-refresh-toggle" }
 func dashOverviewBoxID(box int) string { return "dash-ovbox-" + strconv.Itoa(box) }
 
-// pageStyle is shared with the file manager views.
+// pageStyle is shared with the file manager views. Its colours are chosen to
+// survive termenv's 256-colour quantisation: the previous #e7ecef text became
+// index 232 (near-black) on 256-colour terminals.
 var pageStyle = lipgloss.NewStyle().
 	Padding(1, 2).
-	Foreground(lipgloss.Color("#e7ecef")).
+	Foreground(lipgloss.Color("#dadada")).
 	Background(lipgloss.Color("#0a0e14"))
 
 type dashboardTab int

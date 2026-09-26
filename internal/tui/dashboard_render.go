@@ -71,6 +71,9 @@ type dashStyleSpec struct {
 	monoBold      bool
 	monoReverse   bool
 	monoUnderline bool
+	// bar marks a subtle background (header bar, unfocused selection) that a
+	// 16-colour terminal cannot render faithfully; there it is dropped.
+	bar bool
 }
 
 var dashStyleSpecs = [numDStyles]dashStyleSpec{
@@ -82,30 +85,30 @@ var dashStyleSpecs = [numDStyles]dashStyleSpec{
 	sAccentBold:    {fg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoBold: true},
 	sOK:            {fg: [2]string{"#00d4aa", "#00806a"}},
 	sWarn:          {fg: [2]string{"#ffd166", "#9a6400"}, bold: true},
-	sCrit:          {fg: [2]string{"#ff6b6b", "#c62828"}, bold: true, monoBold: true},
+	sCrit:          {fg: [2]string{"#ff6b6b", "#af0000"}, bold: true, monoBold: true},
 	sInfo:          {fg: [2]string{"#74c0fc", "#1c6fb5"}},
 	sBorder:        {fg: [2]string{"#2b3d49", "#b4c2ca"}},
-	sBorderFocus:   {fg: [2]string{"#00d4aa", "#00806a"}},
+	sBorderFocus:   {fg: [2]string{"#00d4aa", "#00806a"}, monoBold: true},
 	sTitle:         {fg: [2]string{"#c9d6dd", "#2d3b43"}, bold: true, monoBold: true},
-	sTitleFocus:    {fg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoBold: true},
+	sTitleFocus:    {fg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoBold: true, monoReverse: true},
 	sSel:           {fg: [2]string{"#04231d", "#ffffff"}, bg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoReverse: true},
-	sSelBlur:       {bg: [2]string{"#1d2c36", "#dde6eb"}, monoUnderline: true},
-	sHdr:           {fg: [2]string{"#e7ecef", "#1d2a31"}, bg: [2]string{"#101a23", "#e4ecf0"}},
+	sSelBlur:       {bg: [2]string{"#1d2c36", "#dde6eb"}, monoUnderline: true, bar: true},
+	sHdr:           {fg: [2]string{"#e7ecef", "#1d2a31"}, bg: [2]string{"#101a23", "#e4ecf0"}, bar: true},
 	sHdrBrand:      {fg: [2]string{"#04231d", "#ffffff"}, bg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoReverse: true, monoBold: true},
-	sHdrMuted:      {fg: [2]string{"#8fa7b3", "#52656f"}, bg: [2]string{"#101a23", "#e4ecf0"}},
-	sHdrOK:         {fg: [2]string{"#00d4aa", "#00806a"}, bg: [2]string{"#101a23", "#e4ecf0"}, bold: true},
-	sHdrWarn:       {fg: [2]string{"#ffd166", "#9a6400"}, bg: [2]string{"#101a23", "#e4ecf0"}, bold: true, monoBold: true},
-	sHdrCrit:       {fg: [2]string{"#ff6b6b", "#c62828"}, bg: [2]string{"#101a23", "#e4ecf0"}, bold: true, monoBold: true},
+	sHdrMuted:      {fg: [2]string{"#8fa7b3", "#52656f"}, bg: [2]string{"#101a23", "#e4ecf0"}, bar: true},
+	sHdrOK:         {fg: [2]string{"#00d4aa", "#00806a"}, bg: [2]string{"#101a23", "#e4ecf0"}, bold: true, bar: true},
+	sHdrWarn:       {fg: [2]string{"#ffd166", "#9a6400"}, bg: [2]string{"#101a23", "#e4ecf0"}, bold: true, monoBold: true, bar: true},
+	sHdrCrit:       {fg: [2]string{"#ff6b6b", "#af0000"}, bg: [2]string{"#101a23", "#e4ecf0"}, bold: true, monoBold: true, bar: true},
 	sTab:           {fg: [2]string{"#8fa7b3", "#52656f"}},
 	sTabActive:     {fg: [2]string{"#04231d", "#ffffff"}, bg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoReverse: true, monoBold: true},
 	sTabCount:      {fg: [2]string{"#5f7480", "#8a9aa5"}},
-	sTabCrit:       {fg: [2]string{"#ff6b6b", "#c62828"}, bold: true, monoBold: true},
+	sTabCrit:       {fg: [2]string{"#ff6b6b", "#af0000"}, bold: true, monoBold: true},
 	sKey:           {fg: [2]string{"#36f0c0", "#00806a"}, bold: true, monoBold: true},
 	sColHead:       {fg: [2]string{"#6f8793", "#6a7c86"}, bold: true, monoUnderline: true},
 	sColHeadSort:   {fg: [2]string{"#00d4aa", "#00806a"}, bold: true, monoBold: true, monoUnderline: true},
 	sPrompt:        {fg: [2]string{"#241a00", "#ffffff"}, bg: [2]string{"#ffd166", "#9a6400"}, bold: true, monoReverse: true, monoBold: true},
 	sPromptKey:     {fg: [2]string{"#241a00", "#ffffff"}, bg: [2]string{"#ffe7a8", "#b87a00"}, bold: true, monoReverse: true, monoBold: true},
-	sTrack:         {fg: [2]string{"#24343f", "#cfd9df"}},
+	sTrack:         {fg: [2]string{"#24343f", "#bcbcbc"}},
 	sOverlayBorder: {fg: [2]string{"#00d4aa", "#00806a"}, bold: true},
 }
 
@@ -171,14 +174,30 @@ func dashBuildPalette(profile termenv.Profile, dark bool) *dashPalette {
 			if spec.faint {
 				parts = append(parts, termenv.FaintSeq)
 			}
-			if c := spec.fg[shade]; c != "" {
-				if col := profile.Color(c); col != nil {
-					parts = append(parts, col.Sequence(false))
+			fg, bg := spec.fg[shade], spec.bg[shade]
+			if profile == termenv.ANSI && bg != "" {
+				// 16 colours cannot show the palette's tinted backgrounds:
+				// subtle bars lose theirs (the unfocused selection falls back
+				// to an underline); solid chips (selection, active tab,
+				// prompt) become the chip colour in reverse video.
+				if spec.bar {
+					if spec.monoUnderline {
+						parts = append(parts, termenv.UnderlineSeq)
+					}
+				} else {
+					fg = bg
+					parts = append(parts, termenv.ReverseSeq)
+				}
+				bg = ""
+			}
+			if fg != "" {
+				if seq := dashColorSeq(profile, fg, false); seq != "" {
+					parts = append(parts, seq)
 				}
 			}
-			if c := spec.bg[shade]; c != "" {
-				if col := profile.Color(c); col != nil {
-					parts = append(parts, col.Sequence(true))
+			if bg != "" {
+				if seq := dashColorSeq(profile, bg, true); seq != "" {
+					parts = append(parts, seq)
 				}
 			}
 		}
@@ -187,6 +206,72 @@ func dashBuildPalette(profile termenv.Profile, dark bool) *dashPalette {
 		}
 	}
 	return p
+}
+
+// dashColorSeq is the SGR parameter for hex in profile. 256-colour output is
+// quantised here rather than by termenv: termenv (v0.16) never picks the
+// xterm grey ramp and maps some light greys to near-black (#e7ecef becomes
+// index 232), which made text invisible on 256-colour terminals.
+func dashColorSeq(profile termenv.Profile, hex string, background bool) string {
+	if profile == termenv.ANSI256 {
+		idx, ok := dashNearest256(hex)
+		if !ok {
+			return ""
+		}
+		if background {
+			return "48;5;" + strconv.Itoa(idx)
+		}
+		return "38;5;" + strconv.Itoa(idx)
+	}
+	col := profile.Color(hex)
+	if col == nil {
+		return ""
+	}
+	return col.Sequence(background)
+}
+
+// dashParseHex parses "#rrggbb".
+func dashParseHex(hex string) (r, g, b int, ok bool) {
+	if len(hex) != 7 || hex[0] != '#' {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.ParseUint(hex[1:], 16, 32)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return int(v >> 16 & 0xff), int(v >> 8 & 0xff), int(v & 0xff), true
+}
+
+// dashXterm256 is the RGB value of xterm palette index i (16..255: the 6x6x6
+// cube and the 24-step grey ramp; 0..15 are terminal-defined and never used).
+func dashXterm256(i int) (int, int, int) {
+	if i >= 232 {
+		v := 8 + (i-232)*10
+		return v, v, v
+	}
+	i -= 16
+	levels := [6]int{0, 95, 135, 175, 215, 255}
+	return levels[i/36], levels[(i/6)%6], levels[i%6]
+}
+
+// dashNearest256 is the xterm-256 index closest to hex, using the "redmean"
+// weighted RGB distance (a cheap perceptual approximation).
+func dashNearest256(hex string) (int, bool) {
+	r, g, b, ok := dashParseHex(hex)
+	if !ok {
+		return 0, false
+	}
+	best, bestD := 16, -1
+	for i := 16; i < 256; i++ {
+		cr, cg, cb := dashXterm256(i)
+		rm := (r + cr) / 2
+		dr, dg, db := r-cr, g-cg, b-cb
+		d := (512+rm)*dr*dr/256 + 4*dg*dg + (767-rm)*db*db/256
+		if bestD < 0 || d < bestD {
+			best, bestD = i, d
+		}
+	}
+	return best, true
 }
 
 // ---------------------------------------------------------------------------
