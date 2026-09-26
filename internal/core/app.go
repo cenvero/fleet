@@ -1258,7 +1258,44 @@ func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, 
 	return a.callRPCContext(context.Background(), server, env)
 }
 
+// lastSeenRefreshAge bounds how often a successful call rewrites a server's
+// record just to refresh Observed.LastSeen: at most once per server per 30s,
+// however busy the server is.
+const lastSeenRefreshAge = 30 * time.Second
+
+// callRPCContext performs one control RPC and, when the agent answered,
+// refreshes the server's "last seen" (see noteServerSeen). Pooled and relayed
+// calls never redial, so without this LastSeen froze at the last dial.
 func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+	resp, err := a.callRPCContextRaw(ctx, server, env)
+	if err == nil {
+		a.noteServerSeen(server)
+	}
+	return resp, err
+}
+
+// noteServerSeen marks a server reachable and seen now, rewriting its record
+// only when the stored LastSeen is older than lastSeenRefreshAge (or it is
+// marked unreachable). It re-reads the record first so it never reverts fields
+// that changed during the call (e.g. a redial's fresh hello).
+func (a *App) noteServerSeen(server ServerRecord) {
+	fresh := func(s ServerRecord) bool {
+		return s.Observed.Reachable && time.Since(s.Observed.LastSeen) < lastSeenRefreshAge
+	}
+	if fresh(server) {
+		return
+	}
+	current, err := a.GetServer(server.Name)
+	if err != nil || fresh(current) {
+		return
+	}
+	current.Observed.Reachable = true
+	current.Observed.LastSeen = time.Now().UTC()
+	current.Observed.LastError = ""
+	_ = a.SaveServer(current)
+}
+
+func (a *App) callRPCContextRaw(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		env.DeadlineUnixMilli = deadline.UnixMilli()
 	}
