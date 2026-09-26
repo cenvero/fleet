@@ -24,8 +24,9 @@ import (
 // is aborted before the rest of the fleet is touched.
 //
 // The per-server work reuses App.SyncAgent (the same mechanism behind
-// `fleet sync-agent`), called one server at a time so the rollout can stop
-// between batches; this command only adds the batching + health gate around it.
+// `fleet sync-agent`), called per server — concurrently within a batch, while
+// the batches themselves run one after another so the rollout can stop between
+// them; this command only adds the batching + health gate around it.
 //
 // NOTE: no top-level command is registered here. The main loop should attach this
 // under the existing `fleet agent` parent, e.g.
@@ -146,43 +147,64 @@ func selectAgentUpdateServers(app *core.App, configDir, group string) ([]string,
 	return core.NewTagStore(configDir).ServersMatching(group, names)
 }
 
-// updateBatch updates the agent on each server in order, reusing App.SyncAgent
-// (called per server so the rollout can gate between batches). It prints a line
-// per server and returns an error listing every server whose update failed.
+// agentUpdateParallelism bounds how many servers of one batch are updated at
+// once — the same bound App.SyncAgent applies to a multi-server sync.
+const agentUpdateParallelism = 8
+
+// updateBatch updates the agent on every server of one batch, reusing
+// App.SyncAgent per server (so one server's lookup failure cannot fail the
+// others). Servers within the batch update concurrently (bounded by
+// agentUpdateParallelism) — they used to go strictly one at a time, bypassing
+// SyncAgent's own pool — while batches stay sequential, so the canary gate
+// still runs between them. Result lines are printed in batch order as soon as
+// each prefix of the batch is done, identical to the sequential output, and
+// the returned error lists every failed server in order.
 func updateBatch(cmd *cobra.Command, app *core.App, servers []string) error {
 	out := cmd.OutOrStdout()
+	lines := make([]string, len(servers))
+	failedAt := make([]bool, len(servers))
+	flusher := core.NewOrderedFlusher(len(servers), func(i int) {
+		fmt.Fprint(out, lines[i])
+	})
+	core.ForEachLimit(len(servers), agentUpdateParallelism, func(i int) {
+		lines[i], failedAt[i] = updateOneAgent(cmd, app, servers[i])
+		flusher.Done(i)
+	})
 	var failed []string
-	for _, name := range servers {
-		res, err := app.SyncAgent(cmd.Context(), []string{name}, nil)
-		if err != nil {
-			fmt.Fprintf(out, "  %-24s ERROR  %v\n", name, err)
+	for i, name := range servers {
+		if failedAt[i] {
 			failed = append(failed, name)
-			continue
-		}
-		// SyncAgent on a single server yields exactly one agent result.
-		if len(res.Agents) == 0 {
-			fmt.Fprintf(out, "  %-24s ERROR  no result returned\n", name)
-			failed = append(failed, name)
-			continue
-		}
-		a := res.Agents[0]
-		displayVersion := version.DisplaySemVer(a.AgentVersion)
-		switch {
-		case a.Error != "":
-			fmt.Fprintf(out, "  %-24s ERROR  %s\n", name, a.Error)
-			failed = append(failed, name)
-		case a.AlreadySynced:
-			fmt.Fprintf(out, "  %-24s up-to-date (%s)\n", name, displayVersion)
-		case a.Updated:
-			fmt.Fprintf(out, "  %-24s updated -> %s\n", name, displayVersion)
-		default:
-			fmt.Fprintf(out, "  %-24s processed (%s)\n", name, displayVersion)
 		}
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%d server(s) failed: %s", len(failed), strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// updateOneAgent syncs one server's agent and returns its result line and
+// whether it failed.
+func updateOneAgent(cmd *cobra.Command, app *core.App, name string) (string, bool) {
+	res, err := app.SyncAgent(cmd.Context(), []string{name}, nil)
+	if err != nil {
+		return fmt.Sprintf("  %-24s ERROR  %v\n", name, err), true
+	}
+	// SyncAgent on a single server yields exactly one agent result.
+	if len(res.Agents) == 0 {
+		return fmt.Sprintf("  %-24s ERROR  no result returned\n", name), true
+	}
+	a := res.Agents[0]
+	displayVersion := version.DisplaySemVer(a.AgentVersion)
+	switch {
+	case a.Error != "":
+		return fmt.Sprintf("  %-24s ERROR  %s\n", name, a.Error), true
+	case a.AlreadySynced:
+		return fmt.Sprintf("  %-24s up-to-date (%s)\n", name, displayVersion), false
+	case a.Updated:
+		return fmt.Sprintf("  %-24s updated -> %s\n", name, displayVersion), false
+	default:
+		return fmt.Sprintf("  %-24s processed (%s)\n", name, displayVersion), false
+	}
 }
 
 // verifyHealthy re-probes each server and fails if any is unreachable or
