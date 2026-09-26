@@ -42,6 +42,14 @@ type ReverseSessionInfo struct {
 // agent's own inbound cap; transfers use far fewer.
 const maxReverseExtraChannels = 16
 
+// Reverse connections are probed with SSH keepalives so an agent that vanished
+// without a FIN is noticed (and its session cleared) within about a minute.
+// Variables so tests can shorten them.
+var (
+	reverseKeepaliveInterval  = transport.DefaultKeepaliveInterval
+	reverseKeepaliveMaxMissed = transport.DefaultKeepaliveMaxMissed
+)
+
 type reverseSession struct {
 	session *transport.Session // the channel the agent opened; always usable
 	conn    ssh.Conn           // opens additional channels back to the agent
@@ -274,9 +282,10 @@ const maxConcurrentReverseHandshakes = 256
 // reverseHandshakeSlots is a counting semaphore buffered to the cap above.
 var reverseHandshakeSlots = make(chan struct{}, maxConcurrentReverseHandshakes)
 
-// reversePostAuthTimeout bounds the synchronous post-auth RPCs (Hello + queued
-// metric replay) so a peer that completes auth but never answers can't pin the
-// connection goroutine indefinitely.
+// reversePostAuthTimeout bounds the synchronous post-auth Hello so a peer that
+// completes auth but never answers can't pin the connection goroutine
+// indefinitely. (The queued-metrics replay now runs after registration, with a
+// timeout per page: see metrics_replay.go.)
 const reversePostAuthTimeout = 30 * time.Second
 
 const (
@@ -396,111 +405,71 @@ func (h *ReverseHub) serveConnAfterAuth(rawConn net.Conn, authenticated func()) 
 			HostKeyFingerprint: conn.Permissions.Extensions["fingerprint"],
 			Hello:              hello,
 		}
-		replayed, replayErr := h.replayQueuedMetrics(serverName, session, hello.Capabilities)
-		if replayErr != nil {
-			_ = h.app.AuditLog.Append(logs.AuditEntry{
-				Action:   "metrics.replay.failed",
-				Target:   serverName,
-				Operator: h.app.operator(),
-				Details:  replayErr.Error(),
-			})
-		} else {
-			info.ReplayedMetrics = replayed
-		}
+		// Register first, replay second. Replaying a long offline backlog used
+		// to run before the session existed, so for the whole replay the server
+		// looked disconnected and every call to it failed.
 		h.setSession(serverName, session, info, conn)
 
+		// Probe the connection so an agent that disappears without closing it
+		// (power loss, a NAT dropping state) is cleared within about a minute.
+		// Closing the connection ends Wait below, which clears the session.
+		stopKeepalive := transport.StartKeepalive(conn, reverseKeepaliveInterval, reverseKeepaliveMaxMissed, nil)
 		go func(name string, session *transport.Session, sshConn *ssh.ServerConn) {
 			_ = sshConn.Wait()
+			stopKeepalive()
 			h.clearSession(name, "", session)
 		}(serverName, session, conn)
+
+		go h.replayAfterConnect(serverName, session, hello.Capabilities)
 	}
 	return nil
 }
 
-func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.Session, capabilities []string) (int, error) {
-	// Older agents implemented metrics.flush_queue destructively. Never probe it:
-	// absence of the explicit peek/ack capability means queued data stays on the
-	// agent until it is upgraded.
-	if !slices.Contains(capabilities, proto.CapabilityMetricsPeekAck) {
-		return 0, nil
+// replayAfterConnect drains the agent's offline metrics queue once the
+// session is registered and records the outcome.
+func (h *ReverseHub) replayAfterConnect(serverName string, session *transport.Session, capabilities []string) {
+	defer guardPanic("reverse metrics replay")
+	replayed, err := h.replayQueuedMetrics(serverName, session, capabilities)
+	if replayed > 0 {
+		h.noteReplayedMetrics(serverName, session, replayed)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), reversePostAuthTimeout)
-	defer cancel()
-	response, err := session.Call(ctx, proto.Envelope{
-		Action: proto.ActionMetricsPeekQueue,
-		Payload: proto.MetricsPayload{
-			Server: serverName,
-		},
-	})
 	if err != nil {
-		return 0, err
-	}
-	if response.Error != nil {
-		return 0, fmt.Errorf("%s: %s", response.Error.Code, response.Error.Message)
-	}
-
-	replay, err := proto.DecodePayload[proto.MetricsReplayResult](response.Payload)
-	if err != nil {
-		return 0, err
-	}
-	if len(replay.Snapshots) == 0 {
-		return 0, nil
-	}
-	if replay.BatchID == "" {
-		return 0, fmt.Errorf("peek/ack capable agent returned metrics without a batch id")
-	}
-	acknowledge := func() error {
-		ackResponse, err := session.Call(ctx, proto.Envelope{
-			Action:  proto.ActionMetricsAckQueue,
-			Payload: proto.MetricsReplayAck{BatchID: replay.BatchID},
+		_ = h.app.AuditLog.Append(logs.AuditEntry{
+			Action:   "metrics.replay.failed",
+			Target:   serverName,
+			Operator: h.app.operator(),
+			Details:  err.Error(),
 		})
-		if err != nil {
-			return err
-		}
-		if ackResponse.Error != nil {
-			return fmt.Errorf("%s: %s", ackResponse.Error.Code, ackResponse.Error.Message)
-		}
-		return nil
 	}
+}
 
-	server, err := h.app.GetServer(serverName)
-	if err != nil {
-		return 0, err
+// noteReplayedMetrics records on the live session how many queued snapshots
+// its connection replayed, if that session is still the registered one.
+func (h *ReverseHub) noteReplayedMetrics(serverName string, session *transport.Session, replayed int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if current := h.sessions[serverName]; current != nil && current.session == session {
+		current.info.ReplayedMetrics = replayed
 	}
+}
 
-	latest := server.Metrics
-	for _, snapshot := range replay.Snapshots {
-		if err := h.app.persistMetricsSnapshot(serverName, snapshot); err != nil {
-			return 0, err
-		}
-		if latest.Timestamp.IsZero() || snapshot.Timestamp.After(latest.Timestamp) {
-			latest = snapshot
-		}
+// callOn issues one RPC for serverName over the given agent connection. While
+// that connection is the registered session the call goes through CallContext,
+// so it takes a channel lane like any other caller instead of monopolising the
+// agent-opened channel; once the session has been replaced or cleared it fails
+// rather than wandering onto a newer connection.
+func (h *ReverseHub) callOn(ctx context.Context, serverName string, session *transport.Session, env proto.Envelope) (proto.Envelope, error) {
+	h.mu.RLock()
+	current := h.sessions[serverName]
+	h.mu.RUnlock()
+	if current != nil && current.session == session {
+		return h.CallContext(ctx, serverName, env)
 	}
-	server.Metrics = latest
-	server.Observed.LastSeen = time.Now().UTC()
-	server.Observed.LastError = ""
-	if err := h.app.SaveServer(server); err != nil {
-		return 0, err
+	if current != nil || session == nil {
+		return proto.Envelope{}, fmt.Errorf("reverse session for %q was replaced", serverName)
 	}
-	if err := h.app.evaluateMetricAlerts(serverName, latest); err != nil {
-		return 0, err
-	}
-	if err := h.app.clearCollectionFailureAlert(serverName); err != nil {
-		return 0, err
-	}
-	if err := h.app.AuditLog.Append(logs.AuditEntry{
-		Action:   "metrics.replay",
-		Target:   serverName,
-		Operator: h.app.operator(),
-		Details:  fmt.Sprintf("snapshots=%d", len(replay.Snapshots)),
-	}); err != nil {
-		return 0, err
-	}
-	if err := acknowledge(); err != nil {
-		return 0, fmt.Errorf("acknowledge replayed metrics: %w", err)
-	}
-	return len(replay.Snapshots), nil
+	// Not registered at all (e.g. called directly by a test): use the channel.
+	return session.Call(ctx, env)
 }
 
 func (h *ReverseHub) Call(server string, env proto.Envelope) (proto.Envelope, error) {

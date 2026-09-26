@@ -226,10 +226,10 @@ func TestRunReverseRetriesAndReplaysQueuedMetrics(t *testing.T) {
 	waitForReverseSession(t, hub, "reverse-node")
 	waitForMetricReplay(t, app, "reverse-node")
 
-	info, err := hub.Status("reverse-node")
-	if err != nil {
-		t.Fatalf("Status(reverse-node) error = %v", err)
-	}
+	// The session is registered before the replay runs (so the server is
+	// reachable during it); the replay's outcome lands on the session when it
+	// completes.
+	info := waitForReplayedMetrics(t, hub, "reverse-node")
 	if info.ReplayedMetrics == 0 {
 		t.Fatalf("expected replayed metrics to be recorded, got %#v", info)
 	}
@@ -350,6 +350,21 @@ func waitForReverseSession(t *testing.T, hub *ReverseHub, server string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("reverse session for %q did not become ready", server)
+}
+
+func waitForReplayedMetrics(t *testing.T, hub *ReverseHub, server string) ReverseSessionInfo {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		info, err := hub.Status(server)
+		if err == nil && info.ReplayedMetrics > 0 {
+			return info
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replayed metrics for %q were not recorded on the session: %#v (err=%v)", server, info, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func waitForMetricReplay(t *testing.T, app *App, server string) {
