@@ -6,10 +6,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -58,12 +61,39 @@ type SQLBackendConfig struct {
 	ConnMaxLifetime string `toml:"conn_max_lifetime" json:"conn_max_lifetime"`
 }
 
+// Store is one workload's database. A Store from Open is connected (and its
+// schema migrated) up front; one from OpenLazy connects on first use, so a CLI
+// command that never touches the database never pays for opening it.
 type Store struct {
+	mu       sync.Mutex // guards db/sqlDB/closed during a lazy connect or Close
+	cfg      DatabaseConfig
 	db       *gorm.DB
 	sqlDB    *sql.DB
 	workload Workload
 	backend  Backend
+	closed   bool
 }
+
+// ErrStoreClosed is returned by operations on a Store after Close.
+var ErrStoreClosed = errors.New("store is closed")
+
+// schemaVersion identifies the table/index layout Init produces. Bump it
+// whenever a model's GORM tags change or migrate() learns something new; a
+// database whose recorded version is at least this skips AutoMigrate on open
+// (versions: 1 = implicit, before versioning; 2 = composite
+// metric_snapshots(server, timestamp) index + version table).
+const schemaVersion = 2
+
+// schemaVersionRow records, per workload, the schemaVersion the database was
+// last migrated to. Additive table: older binaries ignore it (and keep running
+// their own AutoMigrate, which never removes anything).
+type schemaVersionRow struct {
+	Workload  string    `gorm:"column:workload;primaryKey;size:64"`
+	Version   int       `gorm:"column:version;not null"`
+	UpdatedAt time.Time `gorm:"column:updated_at;not null;autoUpdateTime"`
+}
+
+func (schemaVersionRow) TableName() string { return "fleet_schema_versions" }
 
 type StateEntry struct {
 	Key   string `json:"key"`
@@ -98,10 +128,14 @@ type metricsRow struct {
 
 func (metricsRow) TableName() string { return "metrics_state" }
 
+// metricsSnapshotRow is one stored sample. Besides the original single-column
+// indexes it carries a composite (server, timestamp) index for per-server time
+// range reads (latest sample, sparklines); the timestamp index serves the
+// retention prune.
 type metricsSnapshotRow struct {
 	ID        uint64    `gorm:"column:id;primaryKey;autoIncrement"`
-	Server    string    `gorm:"column:server;not null;size:255;index"`
-	Timestamp time.Time `gorm:"column:timestamp;not null;index"`
+	Server    string    `gorm:"column:server;not null;size:255;index;index:idx_metric_snapshots_server_ts,priority:1"`
+	Timestamp time.Time `gorm:"column:timestamp;not null;index;index:idx_metric_snapshots_server_ts,priority:2"`
 	Payload   string    `gorm:"column:payload;type:text;not null"`
 }
 
@@ -211,28 +245,58 @@ func (c DatabaseConfig) PathFor(workload Workload) string {
 	}
 }
 
+// Open connects to the workload's database and brings its schema up to date
+// before returning, so configuration and connection errors surface here.
 func Open(cfg DatabaseConfig, workload Workload) (*Store, error) {
+	s, err := OpenLazy(cfg, workload)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.conn(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenLazy validates the configuration and returns a Store that connects and
+// migrates on first use (and retries on the next use if that fails). Close is
+// cheap and safe on a Store that never connected.
+func OpenLazy(cfg DatabaseConfig, workload Workload) (*Store, error) {
 	cfg = WithDefaults(cfg, "")
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	switch workload {
+	case WorkloadState, WorkloadMetrics, WorkloadEvents:
+	default:
+		return nil, fmt.Errorf("unsupported store workload %q", workload)
+	}
+	return &Store{cfg: cfg, workload: workload, backend: cfg.Backend}, nil
+}
 
-	db, sqlDB, err := openManagedDatabase(cfg, workload)
+// conn returns the connected handle, connecting and migrating first if needed.
+func (s *Store) conn() (*gorm.DB, error) {
+	if s == nil {
+		return nil, ErrStoreClosed
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrStoreClosed
+	}
+	if s.db != nil {
+		return s.db, nil
+	}
+	db, sqlDB, err := openManagedDatabase(s.cfg, s.workload)
 	if err != nil {
 		return nil, err
 	}
-
-	s := &Store{
-		db:       db,
-		sqlDB:    sqlDB,
-		workload: workload,
-		backend:  cfg.Backend,
-	}
-	if err := s.Init(); err != nil {
+	if err := initSchema(db, s.workload); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
-	return s, nil
+	s.db, s.sqlDB = db, sqlDB
+	return db, nil
 }
 
 func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.DB, error) {
@@ -255,7 +319,7 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 		if err := precreateSQLiteFiles(path); err != nil {
 			return nil, nil, err
 		}
-		dialector = sqlite.Open(path)
+		dialector = sqlite.Open(sqliteDSN(path))
 	case BackendPostgres:
 		dialector = postgres.Open(cfg.Postgres.DSN)
 	case BackendMySQL:
@@ -295,6 +359,20 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 	}
 
 	return db, sqlDB, nil
+}
+
+// sqliteDSN is the driver DSN for a database file. It asks the driver to run
+// PRAGMA synchronous=NORMAL on EVERY pooled connection (the pragma is
+// per-connection; a one-off Exec would only reach one of them). With WAL (set
+// below, persistent in the file) NORMAL is the documented safe setting: a crash
+// or power loss can lose the last commits but never corrupts the database, and
+// commits stop paying an fsync each. A path that itself contains '?' cannot
+// carry DSN parameters, so it is used verbatim (default synchronous=FULL).
+func sqliteDSN(path string) string {
+	if strings.Contains(path, "?") {
+		return path
+	}
+	return path + "?_pragma=synchronous(NORMAL)"
 }
 
 // sqliteFileSuffixes are the on-disk sidecars SQLite may create alongside the
@@ -376,9 +454,18 @@ func (c DatabaseConfig) sqlSettings() SQLBackendConfig {
 // pages that have not yet left the WAL are included; copying the main .db file
 // directly is not safe in WAL mode. The destination must not already exist.
 func (s *Store) SnapshotSQLite(ctx context.Context, destination string) error {
-	if s == nil || s.sqlDB == nil {
+	if s == nil {
 		return fmt.Errorf("snapshot sqlite store: store is closed")
 	}
+	if _, err := s.conn(); err != nil {
+		if errors.Is(err, ErrStoreClosed) {
+			return fmt.Errorf("snapshot sqlite store: store is closed")
+		}
+		return fmt.Errorf("snapshot sqlite store: %w", err)
+	}
+	s.mu.Lock()
+	sqlDB := s.sqlDB
+	s.mu.Unlock()
 	if s.backend != BackendSQLite {
 		return fmt.Errorf("snapshot sqlite store: backend %q is not sqlite", s.backend)
 	}
@@ -393,7 +480,7 @@ func (s *Store) SnapshotSQLite(ctx context.Context, destination string) error {
 
 	// VACUUM INTO accepts a bound filename expression. Using a parameter avoids
 	// constructing SQL from a filesystem path.
-	if _, err := s.sqlDB.ExecContext(ctx, "VACUUM INTO ?", destination); err != nil {
+	if _, err := sqlDB.ExecContext(ctx, "VACUUM INTO ?", destination); err != nil {
 		_ = os.Remove(destination)
 		return fmt.Errorf("snapshot sqlite store: online backup: %w", err)
 	}
@@ -456,21 +543,73 @@ func verifySQLiteSnapshot(ctx context.Context, snapshotPath string) error {
 	return nil
 }
 
+// Init connects if needed and makes sure the schema is current. Stores from
+// Open and OpenLazy already do this on connect; it is kept for callers that
+// want to force the migration step explicitly.
 func (s *Store) Init() error {
-	switch s.workload {
+	_, err := s.conn()
+	return err
+}
+
+// initSchema brings a freshly opened database's schema up to date. When the
+// database already records schemaVersion (or newer) for this workload the
+// AutoMigrate pass — several catalog queries per table on every CLI start — is
+// skipped entirely. Otherwise AutoMigrate runs as it always has (idempotent,
+// additive) and the version is recorded afterwards, so a crash mid-migration
+// just migrates again next time. Two processes may migrate an old database at
+// the same moment; GORM's check-then-create is not atomic, so if the first pass
+// fails and the schema is still not current, one more pass (a no-op for
+// whatever the other process already created) settles it.
+func initSchema(db *gorm.DB, workload Workload) error {
+	if schemaCurrent(db, workload) {
+		return nil
+	}
+	if err := migrateSchema(db, workload); err != nil {
+		if schemaCurrent(db, workload) {
+			return nil
+		}
+		if err := migrateSchema(db, workload); err != nil {
+			return err
+		}
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "workload"}},
+		DoUpdates: clause.AssignmentColumns([]string{"version", "updated_at"}),
+	}).Create(&schemaVersionRow{Workload: string(workload), Version: schemaVersion}).Error
+}
+
+func schemaCurrent(db *gorm.DB, workload Workload) bool {
+	var row schemaVersionRow
+	err := db.Where("workload = ?", string(workload)).Limit(1).Find(&row).Error
+	return err == nil && row.Workload == string(workload) && row.Version >= schemaVersion
+}
+
+func migrateSchema(db *gorm.DB, workload Workload) error {
+	switch workload {
 	case WorkloadState:
-		return s.db.AutoMigrate(&stateRow{})
+		return db.AutoMigrate(&stateRow{}, &schemaVersionRow{})
 	case WorkloadMetrics:
-		return s.db.AutoMigrate(&metricsRow{}, &metricsSnapshotRow{})
+		return db.AutoMigrate(&metricsRow{}, &metricsSnapshotRow{}, &schemaVersionRow{})
 	case WorkloadEvents:
-		return s.db.AutoMigrate(&eventRow{})
+		return db.AutoMigrate(&eventRow{}, &schemaVersionRow{})
 	default:
-		return fmt.Errorf("unsupported store workload %q", s.workload)
+		return fmt.Errorf("unsupported store workload %q", workload)
 	}
 }
 
+// Close releases the connection pool (if one was ever opened). Any later use of
+// the Store fails with ErrStoreClosed. Safe to call more than once.
 func (s *Store) Close() error {
-	if s == nil || s.sqlDB == nil {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.sqlDB == nil {
 		return nil
 	}
 	return s.sqlDB.Close()
@@ -478,47 +617,68 @@ func (s *Store) Close() error {
 
 func (s *Store) PutState(key, value string) error {
 	switch s.workload {
-	case WorkloadState:
-		row := stateRow{Key: key, Value: value}
-		return s.db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
-		}).Create(&row).Error
-	case WorkloadMetrics:
-		row := metricsRow{Key: key, Value: value}
-		return s.db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
-		}).Create(&row).Error
+	case WorkloadState, WorkloadMetrics:
 	default:
 		return fmt.Errorf("put state is unsupported for workload %q", s.workload)
+	}
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	return putStateRow(db, s.workload, key, value)
+}
+
+// putStateRow upserts one key/value row of a state-like workload.
+func putStateRow(db *gorm.DB, workload Workload, key, value string) error {
+	upsert := clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+	}
+	switch workload {
+	case WorkloadState:
+		row := stateRow{Key: key, Value: value}
+		return db.Clauses(upsert).Create(&row).Error
+	case WorkloadMetrics:
+		row := metricsRow{Key: key, Value: value}
+		return db.Clauses(upsert).Create(&row).Error
+	default:
+		return fmt.Errorf("put state is unsupported for workload %q", workload)
 	}
 }
 
 func (s *Store) GetState(key string) (string, error) {
 	switch s.workload {
-	case WorkloadState:
-		var row stateRow
-		if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
-			return "", err
-		}
-		return row.Value, nil
-	case WorkloadMetrics:
-		var row metricsRow
-		if err := s.db.Where("key = ?", key).Take(&row).Error; err != nil {
-			return "", err
-		}
-		return row.Value, nil
+	case WorkloadState, WorkloadMetrics:
 	default:
 		return "", fmt.Errorf("get state is unsupported for workload %q", s.workload)
 	}
+	db, err := s.conn()
+	if err != nil {
+		return "", err
+	}
+	if s.workload == WorkloadState {
+		var row stateRow
+		if err := db.Where("key = ?", key).Take(&row).Error; err != nil {
+			return "", err
+		}
+		return row.Value, nil
+	}
+	var row metricsRow
+	if err := db.Where("key = ?", key).Take(&row).Error; err != nil {
+		return "", err
+	}
+	return row.Value, nil
 }
 
 func (s *Store) AppendEvent(timestamp time.Time, category, payload string) error {
 	if s.workload != WorkloadEvents {
 		return fmt.Errorf("append event is unsupported for workload %q", s.workload)
 	}
-	return s.db.Create(&eventRow{
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	return db.Create(&eventRow{
 		Timestamp: timestamp.UTC(),
 		Category:  category,
 		Payload:   payload,
@@ -527,35 +687,48 @@ func (s *Store) AppendEvent(timestamp time.Time, category, payload string) error
 
 func (s *Store) ListStateEntries() ([]StateEntry, error) {
 	switch s.workload {
-	case WorkloadState:
-		var rows []stateRow
-		if err := s.db.Order("key asc").Find(&rows).Error; err != nil {
-			return nil, err
-		}
-		entries := make([]StateEntry, 0, len(rows))
-		for _, row := range rows {
-			entries = append(entries, StateEntry{Key: row.Key, Value: row.Value})
-		}
-		return entries, nil
-	case WorkloadMetrics:
-		var rows []metricsRow
-		if err := s.db.Order("key asc").Find(&rows).Error; err != nil {
-			return nil, err
-		}
-		entries := make([]StateEntry, 0, len(rows))
-		for _, row := range rows {
-			entries = append(entries, StateEntry{Key: row.Key, Value: row.Value})
-		}
-		return entries, nil
+	case WorkloadState, WorkloadMetrics:
 	default:
 		return nil, fmt.Errorf("list state entries is unsupported for workload %q", s.workload)
 	}
+	db, err := s.conn()
+	if err != nil {
+		return nil, err
+	}
+	if s.workload == WorkloadState {
+		var rows []stateRow
+		if err := db.Order("key asc").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		entries := make([]StateEntry, 0, len(rows))
+		for _, row := range rows {
+			entries = append(entries, StateEntry{Key: row.Key, Value: row.Value})
+		}
+		return entries, nil
+	}
+	var rows []metricsRow
+	if err := db.Order("key asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	entries := make([]StateEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, StateEntry{Key: row.Key, Value: row.Value})
+	}
+	return entries, nil
 }
 
 func (s *Store) ReplaceStateEntries(entries []StateEntry) error {
 	switch s.workload {
-	case WorkloadState:
-		return s.db.Transaction(func(tx *gorm.DB) error {
+	case WorkloadState, WorkloadMetrics:
+	default:
+		return fmt.Errorf("replace state entries is unsupported for workload %q", s.workload)
+	}
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	if s.workload == WorkloadState {
+		return db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&stateRow{}).Error; err != nil {
 				return err
 			}
@@ -568,31 +741,32 @@ func (s *Store) ReplaceStateEntries(entries []StateEntry) error {
 			}
 			return tx.CreateInBatches(rows, 200).Error
 		})
-	case WorkloadMetrics:
-		return s.db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&metricsRow{}).Error; err != nil {
-				return err
-			}
-			if len(entries) == 0 {
-				return nil
-			}
-			rows := make([]metricsRow, 0, len(entries))
-			for _, entry := range entries {
-				rows = append(rows, metricsRow{Key: entry.Key, Value: entry.Value})
-			}
-			return tx.CreateInBatches(rows, 200).Error
-		})
-	default:
-		return fmt.Errorf("replace state entries is unsupported for workload %q", s.workload)
 	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&metricsRow{}).Error; err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+		rows := make([]metricsRow, 0, len(entries))
+		for _, entry := range entries {
+			rows = append(rows, metricsRow{Key: entry.Key, Value: entry.Value})
+		}
+		return tx.CreateInBatches(rows, 200).Error
+	})
 }
 
 func (s *Store) ListEvents() ([]EventEntry, error) {
 	if s.workload != WorkloadEvents {
 		return nil, fmt.Errorf("list events is unsupported for workload %q", s.workload)
 	}
+	db, err := s.conn()
+	if err != nil {
+		return nil, err
+	}
 	var rows []eventRow
-	if err := s.db.Order("timestamp asc").Order("id asc").Find(&rows).Error; err != nil {
+	if err := db.Order("timestamp asc").Order("id asc").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	entries := make([]EventEntry, 0, len(rows))
@@ -610,7 +784,11 @@ func (s *Store) ReplaceEvents(entries []EventEntry) error {
 	if s.workload != WorkloadEvents {
 		return fmt.Errorf("replace events is unsupported for workload %q", s.workload)
 	}
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&eventRow{}).Error; err != nil {
 			return err
 		}
@@ -633,19 +811,98 @@ func (s *Store) AppendMetricSnapshot(server string, timestamp time.Time, payload
 	if s.workload != WorkloadMetrics {
 		return fmt.Errorf("append metric snapshot is unsupported for workload %q", s.workload)
 	}
-	return s.db.Create(&metricsSnapshotRow{
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	return db.Create(&metricsSnapshotRow{
 		Server:    server,
 		Timestamp: timestamp.UTC(),
 		Payload:   payload,
 	}).Error
 }
 
+// RecordMetricSnapshot stores one sample in a single transaction: it upserts
+// the latest-value state row (key) and appends the history row. Doing both in
+// one commit halves the commits (and, in rollback-journal setups, the fsyncs)
+// per sample compared with PutState + AppendMetricSnapshot, and a reader never
+// sees one without the other.
+func (s *Store) RecordMetricSnapshot(key, server string, timestamp time.Time, payload string) error {
+	if s.workload != WorkloadMetrics {
+		return fmt.Errorf("record metric snapshot is unsupported for workload %q", s.workload)
+	}
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := putStateRow(tx, WorkloadMetrics, key, payload); err != nil {
+			return err
+		}
+		return tx.Create(&metricsSnapshotRow{
+			Server:    server,
+			Timestamp: timestamp.UTC(),
+			Payload:   payload,
+		}).Error
+	})
+}
+
+// metricPruneBatch bounds how many rows one prune statement deletes, so a large
+// backlog is removed in short transactions that never hold the write lock long.
+const metricPruneBatch = 5000
+
+// PruneMetricSnapshots deletes metric_snapshots rows with a timestamp before
+// cutoff, in bounded batches (using the timestamp index), and returns how many
+// rows were removed. It works on every supported backend.
+func (s *Store) PruneMetricSnapshots(ctx context.Context, cutoff time.Time) (int64, error) {
+	if s.workload != WorkloadMetrics {
+		return 0, fmt.Errorf("prune metric snapshots is unsupported for workload %q", s.workload)
+	}
+	db, err := s.conn()
+	if err != nil {
+		return 0, err
+	}
+	var statement string
+	switch s.backend {
+	case BackendMySQL, BackendMariaDB:
+		// MySQL cannot LIMIT an IN (subquery) but supports DELETE ... LIMIT.
+		statement = "DELETE FROM `metric_snapshots` WHERE `timestamp` < ? LIMIT ?"
+	default:
+		// SQLite (without the optional DELETE ... LIMIT build flag) and Postgres.
+		statement = `DELETE FROM "metric_snapshots" WHERE "id" IN (SELECT "id" FROM "metric_snapshots" WHERE "timestamp" < ? LIMIT ?)`
+	}
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		res := db.WithContext(ctx).Exec(statement, cutoff.UTC(), metricPruneBatch)
+		if res.Error != nil {
+			return total, res.Error
+		}
+		total += res.RowsAffected
+		if res.RowsAffected < metricPruneBatch {
+			return total, nil
+		}
+		// Yield between batches so pollers and CLI writers get the lock.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func (s *Store) LatestMetricSnapshot(server string) (MetricSnapshotEntry, error) {
 	if s.workload != WorkloadMetrics {
 		return MetricSnapshotEntry{}, fmt.Errorf("latest metric snapshot is unsupported for workload %q", s.workload)
 	}
+	db, err := s.conn()
+	if err != nil {
+		return MetricSnapshotEntry{}, err
+	}
 	var row metricsSnapshotRow
-	if err := s.db.Where("server = ?", server).Order("timestamp desc").Order("id desc").Take(&row).Error; err != nil {
+	if err := db.Where("server = ?", server).Order("timestamp desc").Order("id desc").Take(&row).Error; err != nil {
 		return MetricSnapshotEntry{}, err
 	}
 	return MetricSnapshotEntry{
@@ -659,7 +916,11 @@ func (s *Store) ListMetricSnapshots(server string, limit int) ([]MetricSnapshotE
 	if s.workload != WorkloadMetrics {
 		return nil, fmt.Errorf("list metric snapshots is unsupported for workload %q", s.workload)
 	}
-	query := s.db.Order("timestamp desc").Order("id desc")
+	db, err := s.conn()
+	if err != nil {
+		return nil, err
+	}
+	query := db.Order("timestamp desc").Order("id desc")
 	if server != "" {
 		query = query.Where("server = ?", server)
 	}
