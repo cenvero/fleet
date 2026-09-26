@@ -25,6 +25,9 @@ const (
 	DoctorOK   DoctorStatus = "ok"
 	DoctorWarn DoctorStatus = "warn"
 	DoctorFail DoctorStatus = "fail"
+	// DoctorSkip marks a check that does not apply to the server (for
+	// example the agent port of a reverse-mode agent, which dials out).
+	DoctorSkip DoctorStatus = "skip"
 )
 
 // DoctorCheck is a single line of the checklist.
@@ -40,10 +43,10 @@ type DoctorReport struct {
 	Checks []DoctorCheck `json:"checks"`
 }
 
-// OK reports whether every check passed (no warn, no fail).
+// OK reports whether every check passed or was skipped (no warn, no fail).
 func (r DoctorReport) OK() bool {
 	for _, c := range r.Checks {
-		if c.Status != DoctorOK {
+		if c.Status != DoctorOK && c.Status != DoctorSkip {
 			return false
 		}
 	}
@@ -72,6 +75,9 @@ type doctorExec func(command string) (ExecResultLike, error)
 type DoctorProbe struct {
 	Server    string
 	AgentPort int
+	// Reverse marks a reverse-mode server: its agent dials out to the
+	// controller and listens on no port, so the agent-port check is skipped.
+	Reverse bool
 	// Now is the controller's reference time for the clock-skew check. When
 	// zero, time.Now() is used. Tests set it for determinism.
 	Now time.Time
@@ -114,7 +120,11 @@ func RunDoctor(probe DoctorProbe, exec doctorExec) DoctorReport {
 	// 2. Agent port reachable — verify something is listening on the recorded
 	// agent SSH port from the server's side (loopback). We test the port from
 	// the remote host so a controller-side firewall doesn't taint the result.
-	add(checkAgentPort(probe.AgentPort, exec))
+	if probe.Reverse {
+		add(DoctorCheck{Name: "agent port reachable", Status: DoctorSkip, Detail: "reverse mode: the agent dials out and listens on no port"})
+	} else {
+		add(checkAgentPort(probe.AgentPort, exec))
+	}
 
 	// 3. sshd reachable — a listener on port 22 (or sshd active).
 	add(checkSSHD(exec))
@@ -137,7 +147,7 @@ func RunDoctor(probe DoctorProbe, exec doctorExec) DoctorReport {
 	// results, without changing the fixed checklist shape.
 	if !online {
 		for i := range report.Checks {
-			if report.Checks[i].Name == "agent online" {
+			if report.Checks[i].Name == "agent online" || report.Checks[i].Status == DoctorSkip {
 				continue
 			}
 			if report.Checks[i].Detail == "" {

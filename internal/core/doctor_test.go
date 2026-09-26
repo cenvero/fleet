@@ -145,6 +145,40 @@ func TestRunDoctorAgentPortClosedWarns(t *testing.T) {
 	}
 }
 
+// TestRunDoctorSkipsAgentPortForReverseMode is the regression for a spurious
+// "nothing listening on port 2222" warning on reverse-mode servers, whose agent
+// dials out and listens on no port.
+func TestRunDoctorSkipsAgentPortForReverseMode(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	rules := healthyRules(now)
+	rules[1] = doctorFakeRule{match: "/dev/tcp/127.0.0.1/'2222'", result: ExecResultLike{Stdout: "closed"}}
+	probed := false
+	exec := doctorFakeExec(rules...)
+	report := RunDoctor(DoctorProbe{Server: "rev", AgentPort: 2222, Reverse: true, Now: now}, func(command string) (ExecResultLike, error) {
+		if strings.Contains(command, "'2222'") {
+			probed = true
+		}
+		return exec(command)
+	})
+	if probed {
+		t.Fatal("reverse-mode doctor probed the agent port")
+	}
+	st, _ := doctorStatusOf(report, "agent port reachable")
+	if st != DoctorSkip {
+		t.Fatalf("agent port check = %v; want skip", st)
+	}
+	if !report.OK() || report.Failed() || len(report.Checks) != 7 {
+		t.Fatalf("a skipped check must not spoil a healthy report: %+v", report.Checks)
+	}
+	// Offline annotation leaves the skipped check's note alone.
+	offline := RunDoctor(DoctorProbe{Server: "rev", AgentPort: 2222, Reverse: true, Now: now}, nil)
+	for _, c := range offline.Checks {
+		if c.Name == "agent port reachable" && (c.Status != DoctorSkip || strings.Contains(c.Detail, "not reliably online")) {
+			t.Fatalf("skipped check with an offline agent = %+v", c)
+		}
+	}
+}
+
 func TestRunDoctorNilExec(t *testing.T) {
 	report := RunDoctor(DoctorProbe{Server: "s", AgentPort: 2222, Now: time.Unix(1_700_000_000, 0)}, nil)
 	if st, _ := doctorStatusOf(report, "agent online"); st != DoctorFail {
