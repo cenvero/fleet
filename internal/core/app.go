@@ -941,16 +941,13 @@ func (a *App) ExecCommandAll(command string) []ExecServerResult {
 		return []ExecServerResult{{Error: err}}
 	}
 	results := make([]ExecServerResult, len(servers))
-	var wg sync.WaitGroup
-	for i, server := range servers {
-		wg.Add(1)
-		go func(i int, name string) {
-			defer wg.Done()
-			result, err := a.ExecCommand(name, command)
-			results[i] = ExecServerResult{Server: name, Result: result, Error: err}
-		}(i, server.Name)
-	}
-	wg.Wait()
+	// Bounded: in reverse mode every call is one daemon control connection, and
+	// the daemon drops connections beyond its limit (see DefaultFanoutLimit).
+	ForEachLimit(len(servers), DefaultFanoutLimit, func(i int) {
+		name := servers[i].Name
+		result, err := a.ExecCommand(name, command)
+		results[i] = ExecServerResult{Server: name, Result: result, Error: err}
+	})
 	return results
 }
 
