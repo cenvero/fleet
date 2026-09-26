@@ -8,10 +8,12 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
@@ -113,10 +115,16 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 		server.MetricsQueue = NewFileMetricsQueue(opts.MetricsQueuePath)
 	}
 
-	backoff := opts.MinRetryDelay
+	// Offline metrics are queued on their own steady ticker, independent of the
+	// reconnect loop, and only while no session is up.
+	var connected atomic.Bool
+	stopOffline := startOfflineMetrics(ctx, opts.OfflineMetricsInterval, server.metricsCollector(), server.metricsQueue(), &connected)
+	defer stopOffline()
+
+	retry := newReconnectBackoff(opts.MinRetryDelay, opts.MaxRetryDelay)
 
 	for {
-		authenticated, err := runReverseSession(ctx, opts, server)
+		authenticated, err := runReverseSession(ctx, opts, server, &connected)
 		if authenticated {
 			// The controller accepted this agent identity. Never present the one-use
 			// credential on later reconnects, and remove the bootstrap file so it is
@@ -140,13 +148,7 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 			return nil
 		}
 
-		wait := backoff
-		if err == nil {
-			backoff = opts.MinRetryDelay
-		} else {
-			backoff = nextBackoff(backoff, opts.MaxRetryDelay)
-		}
-		if err := waitForReconnect(ctx, wait, opts.OfflineMetricsInterval, server.metricsCollector(), server.metricsQueue()); err != nil {
+		if err := waitForReconnect(ctx, retry.next(authenticated, err)); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -155,7 +157,53 @@ func RunReverse(ctx context.Context, opts ReverseOptions, server Server) error {
 	}
 }
 
-func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) (bool, error) {
+// reconnectBackoff decides how long the reverse agent waits before its next
+// connection attempt.
+type reconnectBackoff struct {
+	min, max, current time.Duration
+	jitter            func(time.Duration) time.Duration
+}
+
+func newReconnectBackoff(minDelay, maxDelay time.Duration) *reconnectBackoff {
+	return &reconnectBackoff{min: minDelay, max: maxDelay, current: minDelay, jitter: reconnectJitter}
+}
+
+// next returns the delay before the next attempt, given how the last one ended.
+//
+// A session that authenticated and later ended cleanly — the usual picture of
+// a controller restart — proves the controller was reachable, so the delay
+// starts over from the minimum. The reset used to happen only after the wait
+// had already been taken from the old value, so after any earlier outage the
+// agent sat out the leftover backoff (up to --retry-max, 30 s by default)
+// before reconnecting to a controller that was back within a second. Failed
+// attempts keep doubling the delay up to the maximum as before.
+//
+// Every delay is jittered by ±20% so a fleet of agents that lost the same
+// controller at the same moment does not come back in lockstep.
+func (b *reconnectBackoff) next(authenticated bool, err error) time.Duration {
+	if authenticated && err == nil {
+		b.current = b.min
+	}
+	wait := b.current
+	if err != nil {
+		b.current = nextBackoff(b.current, b.max)
+	}
+	if b.jitter != nil {
+		wait = b.jitter(wait)
+	}
+	return wait
+}
+
+// reconnectJitter spreads d uniformly over [0.8d, 1.2d].
+var reconnectJitter = func(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	// #nosec G404 -- jitter only de-synchronises reconnect timing; it guards nothing.
+	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64()))
+}
+
+func runReverseSession(ctx context.Context, opts ReverseOptions, server Server, connected *atomic.Bool) (bool, error) {
 	signer, err := fleetcrypto.EnsureEd25519Signer(server.HostKeyPath)
 	if err != nil {
 		return false, err
@@ -213,6 +261,12 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
+	// Probe the controller so a connection whose far end vanished without a
+	// FIN (controller host lost, NAT state dropped) is torn down within about a
+	// minute and the agent reconnects, instead of waiting on it indefinitely.
+	// Every controller answers the probe, older ones included.
+	stopKeepalive := transport.StartKeepalive(client, reverseKeepaliveInterval, reverseKeepaliveMaxMissed, nil)
+	defer stopKeepalive()
 
 	// Accept extra fleet-rpc channels the controller opens back to us before
 	// opening our own, so none is missed in between.
@@ -233,6 +287,10 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server) 
 	go ssh.DiscardRequests(requests)
 
 	server.Mode = transport.ModeReverse
+	if connected != nil {
+		connected.Store(true)
+		defer connected.Store(false)
+	}
 	done := make(chan error, 1)
 	go func() {
 		server.serveRPC(channel)
@@ -320,32 +378,61 @@ func serveReverseInboundChannels(inbound <-chan ssh.NewChannel, server Server) {
 	}
 }
 
-func waitForReconnect(ctx context.Context, delay, interval time.Duration, collector MetricsCollector, queue MetricsQueue) error {
-	if interval > 0 {
-		collectOfflineMetric(ctx, collector, queue)
-	}
-	if delay <= 0 {
-		return nil
-	}
+// Keepalive settings for the agent's connection to the controller; variables so
+// tests can shorten them.
+var (
+	reverseKeepaliveInterval  = transport.DefaultKeepaliveInterval
+	reverseKeepaliveMaxMissed = transport.DefaultKeepaliveMaxMissed
+)
 
+func waitForReconnect(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
-
-	var ticker *time.Ticker
-	if interval > 0 {
-		ticker = time.NewTicker(interval)
-		defer ticker.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
+}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return nil
-		case <-tickerChan(ticker):
-			collectOfflineMetric(ctx, collector, queue)
+// startOfflineMetrics queues one local metrics snapshot per interval for as
+// long as the agent has no live session with the controller, so the history the
+// controller replays later has the configured resolution.
+//
+// Snapshots used to be taken inside the reconnect wait: one on every attempt,
+// plus one per interval during the wait. With the default --retry-max (30 s)
+// shorter than --offline-metrics-interval (1 m) every wait ended before its
+// ticker fired, so the queue grew at one snapshot per attempt — twice the
+// configured rate, and faster still with shorter retry settings. A steady
+// ticker decouples the two.
+func startOfflineMetrics(ctx context.Context, interval time.Duration, collector MetricsCollector, queue MetricsQueue, connected *atomic.Bool) (stop func()) {
+	if interval <= 0 || collector == nil || queue == nil {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if connected == nil || !connected.Load() {
+					collectOfflineMetric(ctx, collector, queue)
+				}
+			}
 		}
+	}()
+	return func() {
+		cancel()
+		<-done
 	}
 }
 
@@ -369,11 +456,4 @@ func nextBackoff(current, maxDelay time.Duration) time.Duration {
 		return maxDelay
 	}
 	return next
-}
-
-func tickerChan(ticker *time.Ticker) <-chan time.Time {
-	if ticker == nil {
-		return nil
-	}
-	return ticker.C
 }
