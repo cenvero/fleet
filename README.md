@@ -3,7 +3,7 @@
 Command your fleet.
 
 > [!IMPORTANT]
-> Before doing anything with Cenvero Fleet—installing, configuring, operating, contributing, or publishing a release—read this README in full. Maintainers publishing a stable version must also follow the [WinGet publishing guide](docs/winget-publishing.md).
+> Before doing anything with Cenvero Fleet—installing, configuring, operating, contributing, or publishing a release—read this README in full.
 
 Cenvero Fleet is a self-hosted, operator-owned fleet management platform for Linux, macOS, and Windows servers. The controller runs on infrastructure you choose, stores its state in a directory you control, and manages remote nodes over encrypted SSH-based channels using both direct and reverse transport modes.
 
@@ -62,26 +62,13 @@ For the public one-command installer entrypoint:
 curl -fsSL https://fleet.cenvero.org/install | sh
 ```
 
-For Windows through Windows Package Manager:
-
-```powershell
-winget install --id Cenvero.Fleet --exact --source winget
-```
-
-WinGet installs a per-user ZIP/portable package, verifies the release archive against the SHA-256 in Microsoft's catalog manifest, and owns controller upgrades and removal:
-
-```powershell
-winget upgrade --id Cenvero.Fleet --exact --source winget
-winget uninstall --id Cenvero.Fleet --exact --source winget
-```
-
-For a direct native Windows install using PowerShell 5.1 or later:
+For Windows, using PowerShell 5.1 or later:
 
 ```powershell
 irm https://fleet.cenvero.org/install.ps1 | iex
 ```
 
-The direct installer automatically downloads a checksum-pinned official `minisign` verifier when one is not already installed, verifies the Fleet archive signature and checksum, installs `fleet.exe`, and adds its directory to the user `PATH`. If the persistent `PATH` update fails, the installer prints the directory to add manually. WinGet does not invoke this script or consume the `.minisig` sidecar; it uses catalog hash validation and Microsoft's validation/scanning pipeline.
+The Windows installer automatically downloads a checksum-pinned official `minisign` verifier when one is not already installed, verifies the Fleet archive signature and checksum, installs `fleet.exe`, and adds its directory to the user `PATH`. If the persistent `PATH` update fails, the installer prints the directory to add manually.
 
 The `install` entrypoint dispatches to the correct hosted installer for the detected platform. On Linux and macOS it runs the POSIX installer directly. From a Windows-compatible shell such as Git Bash, it hands off to the PowerShell installer.
 
@@ -407,8 +394,6 @@ fleet update check
 fleet update apply
 fleet update rollback
 ```
-
-On a WinGet installation, `fleet update apply`, rollback, channel selection, and executable removal defer to Windows Package Manager. Use `winget upgrade --id Cenvero.Fleet --exact --source winget` for the controller and `fleet sync-agent` for managed agents. WinGet refreshes source metadata but does not run background package upgrades automatically; unattended controller upgrades require an operator-managed Scheduled Task or enterprise deployment policy, run under the same user that installed the package.
 
 Release artifacts are minisign-signed, and both the installers and the updater verify signatures and checksums before swapping binaries. Signature verification is **fail-closed on every channel**: a manifest entry with no minisign signature is refused (a SHA-256 checksum alone is never accepted in its place). Updates are also **anti-rollback protected** — the updater refuses a target older than the running version or below the channel's `min_supported` floor — and downloads are confined to an `https`-only scheme allowlist with size/decompression bounds.
 
