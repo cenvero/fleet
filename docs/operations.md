@@ -282,8 +282,8 @@ fleet inventory --refresh        # re-probe every server and rewrite the cache
 Structured systemd control and journal access for any unit:
 
 ```bash
-fleet svc web-01 status nginx.service --json
-fleet svc web-01 restart nginx.service
+fleet svc status web-01 nginx.service --json
+fleet svc restart web-01 nginx.service
 fleet journal web-01 --unit nginx.service --since 1h --grep error
 fleet journal web-01 --unit nginx.service --follow
 ```

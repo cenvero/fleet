@@ -311,7 +311,7 @@ Observability:
 
 - `fleet health [--json] [--group EXPR] [--watch]` — per-server checks (offline, swap, disk, reboot, clock skew, high load)
 - `fleet top` — live CPU/mem/swap/disk/load table across servers
-- `fleet svc <server> status|start|stop|restart|enable|disable <unit>` — structured systemd control
+- `fleet svc status|start|stop|restart|enable|disable <server> <unit>` — structured systemd control
 - `fleet journal <server> --unit <name> [--since 1h] [--follow]` — page or follow a unit's journal
 - `fleet drift capture <server> --paths …` / `fleet drift <server>` — config-drift baseline and check
 - `fleet inventory [--json] [--refresh]` — machine-readable fleet snapshot (OS, resources, ports, services, tags)

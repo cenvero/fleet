@@ -224,6 +224,10 @@ func (a *App) Status() (Status, error) {
 }
 
 func (a *App) UpdateChannel(channel string) error {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if channel != "stable" && channel != "beta" {
+		return fmt.Errorf("unknown update channel %q (want stable or beta)", channel)
+	}
 	a.Config.Updates.Channel = channel
 	if err := SaveConfig(ConfigPath(a.ConfigDir), a.Config); err != nil {
 		return err

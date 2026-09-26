@@ -36,6 +36,7 @@ Omit sections that have no entries for that release.
 
 ### Added
 
+- `fleet version` (with `--json`) prints the controller version, OS and architecture.
 - WinGet-ready `Cenvero.Fleet` ZIP/portable manifests for Windows x64 and ARM64,
   generated and validated against immutable GitHub release assets.
 - Generalized self-managed, Homebrew, and WinGet controller ownership detection,
@@ -133,6 +134,14 @@ Omit sections that have no entries for that release.
   prints `[]` instead of `null` when there are no alerts.
 - `fleet doctor --json` exited 0 when checks failed; it now exits 1 like the text
   report.
+- `fleet tag <server>` no longer reports "no tags" (or stores tags) for a server that
+  isn't in the fleet; `fleet update channel` accepts only `stable` or `beta`;
+  `fleet file defaults set --parallel` rejects negative values.
+- `fleet config edit` saves the edited file only if it parses and validates (a broken
+  `config.toml` made every command fail); otherwise it offers to re-open the editor.
+- `fleet file compress` accepts items as full paths in the archive's directory, as its
+  help showed; the `fleet svc` help and docs show the real `svc <action> <server> <unit>`
+  form; `fleet report` prints the running version.
 - The notification SSRF guard pointed at an "allow-internal" setting that could not
   be set: `fleet notify add` now takes `--allow-internal`, re-adding a target
   updates it, and `fleet notify list` shows it.

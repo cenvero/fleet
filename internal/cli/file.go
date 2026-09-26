@@ -769,8 +769,12 @@ func splitRemoteCompressPaths(style core.TargetPathStyle, archive string, items 
 	names = make([]string, len(items))
 	for i, item := range items {
 		base := style.Base(item)
-		if item != base || base == ".." || base == "." || strings.ContainsAny(base, `/\`) {
-			return "", "", nil, fmt.Errorf("invalid item %q: items must be plain names in the archive's directory (no path separators or '..')", item)
+		// An item is a plain name in the archive's directory, or that same
+		// entry written as a full path (/srv/public next to /srv/site.tar.gz).
+		// Join cleans, so a path with "." or ".." components never matches.
+		inDir := item == base || item == style.Join(dir, base)
+		if !inDir || base == ".." || base == "." || strings.ContainsAny(base, `/\`) {
+			return "", "", nil, fmt.Errorf("invalid item %q: items must be names (or full paths) of entries in the archive's directory %s", item, dir)
 		}
 		names[i] = base
 	}
@@ -787,10 +791,12 @@ func newFileCompressCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "compress <server> <archive> <item>...",
 		Short: "Compress files/folders into an archive on a server (zip, tar.gz, ...)",
-		Long: "Create <archive> on <server> containing the given items (which live in the same\n" +
-			"directory as <archive>). Format is taken from the archive extension, or --format.\n\n" +
-			"  fleet file compress web-01 /srv/site.tar.gz /srv/public /srv/index.html\n" +
-			"  fleet file compress web-01 /tmp/logs.zip /var/log/app.log --format zip",
+		Long: "Create <archive> on <server> containing the given items, which must live in the\n" +
+			"same directory as <archive>: give their names, or their full paths in that directory.\n" +
+			"Format is taken from the archive extension, or --format.\n\n" +
+			"  fleet file compress web-01 /srv/site.tar.gz public index.html\n" +
+			"  fleet file compress web-01 /srv/site.tar.gz /srv/public /srv/index.html   # same\n" +
+			"  fleet file compress web-01 /var/log/app-logs.zip app.log app.log.1 --format zip",
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
@@ -961,6 +967,9 @@ func newFileDefaultsCommand(configDir *string) *cobra.Command {
 					return err
 				}
 			}
+			if parallel < 0 {
+				return fmt.Errorf("--parallel must be a positive number of streams (0 restores the built-in default)")
+			}
 
 			if len(args) == 1 {
 				server, err := app.GetServer(args[0])
@@ -981,7 +990,7 @@ func newFileDefaultsCommand(configDir *string) *cobra.Command {
 			return writeJSON(cmd, app.Config.Runtime.FileTransfer)
 		},
 	}
-	setCmd.Flags().IntVar(&parallel, "parallel", 0, "default number of parallel streams")
+	setCmd.Flags().IntVar(&parallel, "parallel", 0, "default number of parallel streams (0 restores the built-in default)")
 	setCmd.Flags().StringVar(&chunkSize, "chunk-size", "", "default chunk size, e.g. 4M, 8M")
 	setCmd.Flags().StringVar(&remoteDir, "remote-dir", "", "default remote directory for uploads")
 	defaultsCmd.AddCommand(setCmd)

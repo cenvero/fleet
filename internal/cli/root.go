@@ -208,6 +208,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newAdjustInitCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
+	root.AddCommand(newVersionCommand())
 	root.AddCommand(newContextCommand())
 	root.AddCommand(newAutomationCommand(&configDir))
 	root.AddCommand(newShellInitCommand())
@@ -1988,9 +1989,10 @@ func newConfigCommand(configDir *string) *cobra.Command {
 	})
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "edit",
-		Short: "Open the configuration in $EDITOR",
+		Short: "Open the configuration in $EDITOR (saved only if it is valid)",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return openInEditor(cmd, *configDir, core.ConfigPath(*configDir))
+			return runConfigEdit(cmd, *configDir)
 		},
 	})
 	configCmd.AddCommand(&cobra.Command{
@@ -2417,7 +2419,11 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				}
 				return fmt.Errorf("update channel not configurable for %s installs", manager.DisplayName())
 			}
-			return app.UpdateChannel(args[0])
+			if err := app.UpdateChannel(args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "update channel set to %s\n", app.Config.Updates.Channel)
+			return nil
 		},
 	})
 	return updateCmd
@@ -2606,6 +2612,30 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 	return cmd
 }
 
+// newVersionCommand is `fleet version`, the spelled-out form of `fleet --version`
+// that scripts, bug reports and AI agents reach for first.
+func newVersionCommand() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the fleet controller version",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if asJSON {
+				return writeJSON(cmd, map[string]string{
+					"version": version.Version,
+					"os":      runtime.GOOS,
+					"arch":    runtime.GOARCH,
+				})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet %s (%s)\n", version.Version, goRuntimeInfo())
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the version as JSON")
+	return cmd
+}
+
 func newReportCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "report",
@@ -2618,10 +2648,10 @@ func newReportCommand() *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), "  Docs           https://fleet.cenvero.org/docs")
 			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "When reporting, please include:")
-			fmt.Fprintf(cmd.OutOrStdout(), "  • Fleet version  fleet version\n")
+			fmt.Fprintf(cmd.OutOrStdout(), "  • Fleet version  %s\n", version.Version)
 			fmt.Fprintf(cmd.OutOrStdout(), "  • OS and arch    %s\n", goRuntimeInfo())
 			fmt.Fprintln(cmd.OutOrStdout(), "  • Steps to reproduce the issue")
-			fmt.Fprintln(cmd.OutOrStdout(), "  • Relevant logs  fleet logs audit")
+			fmt.Fprintln(cmd.OutOrStdout(), "  • Relevant logs  fleet logs (audit log), fleet logs --server <name> --service <svc>")
 			return nil
 		},
 	}
