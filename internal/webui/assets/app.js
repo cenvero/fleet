@@ -3872,7 +3872,7 @@ function renderOverview() {
     card("Online", d.summary.online, d.summary.online ? "ok" : "", null, "online", "activity"),
     card("Offline", d.summary.offline + d.summary.other, d.summary.offline ? "bad" : "", null, "offline", "alert"),
     card("Open alerts", d.alerts_restricted ? "—" : a.critical + a.warning + a.info, a.critical ? "bad" : a.warning ? "warn" : "",
-      d.alerts_restricted ? "hidden by your token" : [h("span", { class: "badge crit", text: a.critical + " critical" }), h("span", { class: "badge warn", text: a.warning + " warning" })], "alerts", "alert"),
+      d.alerts_restricted ? "hidden by your token" : [h("span", { class: a.critical ? "badge crit" : "badge zero", text: a.critical + " critical" }), h("span", { class: a.warning ? "badge warn" : "badge zero", text: a.warning + " warning" })], "alerts", "alert"),
   );
   const notes = [];
   if (ov.error) notes.push("Showing data from " + fmtRelative(new Date(ov.lastOk).toISOString()) + " — refresh failed: " + friendlyError(ov.error));

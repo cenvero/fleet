@@ -334,6 +334,7 @@ input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.info { background: var(--accent-soft); color: var(--accent-text); }
 .badge.ok { background: color-mix(in srgb, var(--ok-fill) 14%, transparent); color: var(--ok); }
+.badge.zero { background: var(--surface-2); color: var(--text-3); }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; display: inline-block; }
 .dot.online { background: var(--ok-fill); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-fill) 22%, transparent); }
