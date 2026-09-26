@@ -119,6 +119,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/read", s.guard(s.handleRead))
 	mux.HandleFunc("/api/checksum", s.guard(s.handleChecksum))
 	mux.HandleFunc("/api/progress", s.guard(s.handleProgress))
+	// Transfer tracking. GET-only endpoints never change state; the one
+	// mutation (cancel) is POST so the CSRF check covers it.
+	mux.HandleFunc("/api/transfers", s.guard(getOnly(s.handleTransfers)))
+	mux.HandleFunc("/api/transfers/stream", s.guard(getOnly(s.handleTransferStream)))
+	mux.HandleFunc("/api/transfers/cancel", s.guard(postOnly(s.handleTransferCancel)))
 	// Mutating endpoints are POST-only so the guard's Origin/CSRF check applies
 	// (a state-changing GET would slip past it).
 	mux.HandleFunc("/api/mkdir", s.guard(postOnly(s.handleMkdir)))
@@ -166,6 +171,19 @@ func securityHeaders(next http.Handler) http.Handler {
 func postOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// getOnly rejects anything but GET for read-only endpoints, so no read
+// endpoint can be driven by a (CSRF-exempt-looking) non-GET method.
+func getOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -664,7 +682,22 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 		}
 	}
 
-	id := s.hub.start()
+	kind := "copy"
+	if move {
+		kind = "move"
+	}
+	id, err := s.hub.startMeta(transferMeta{
+		Kind:      kind,
+		Label:     s.displayBase(srcServer, srcPath),
+		SrcServer: srcServer,
+		SrcPath:   srcPath,
+		DstServer: dstServer,
+		DstPath:   dstPath,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	go func() {
 		prog := func(u core.ProgressUpdate) { s.hub.update(id, u) }
 		var err error
@@ -834,7 +867,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tmp.Close()
 
-	id := s.hub.start()
+	id, err := s.hub.startMeta(transferMeta{Kind: "upload", Label: name, SrcPath: name, DstServer: server, DstPath: remotePath})
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		writeError(w, err)
+		return
+	}
 	go func() {
 		defer os.Remove(tmpPath)
 		_, err := s.app.UploadFile(server, tmpPath, remotePath, core.FileTransferOptions{}, func(u core.ProgressUpdate) {
@@ -1121,6 +1159,10 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 // if the underlying transfer never reports Done.
 const maxSSELifetime = 30 * time.Minute
 
+// progressUnknownGrace is how long /api/progress waits for an id to appear
+// (a tracked download registers when its GET arrives) before giving up.
+var progressUnknownGrace = 20 * time.Second
+
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
@@ -1142,6 +1184,8 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
+	opened := time.Now()
+	seen := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -1149,8 +1193,16 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 			snap, ok := s.hub.snapshot(id)
 			if !ok {
+				// An id that never appears (or has expired) must not pin a
+				// connection for the whole SSE lifetime.
+				if seen || time.Since(opened) > progressUnknownGrace {
+					fmt.Fprint(w, "event: gone\ndata: {}\n\n")
+					flusher.Flush()
+					return
+				}
 				continue
 			}
+			seen = true
 			payload, _ := json.Marshal(snap)
 			fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()
@@ -1571,93 +1623,6 @@ func freeTargetDuplicateName(style core.TargetPathStyle, p string, exists func(s
 			return candidate
 		}
 	}
-}
-
-// ---- progress hub ----
-
-type progressHub struct {
-	mu    sync.Mutex
-	items map[string]*liveTransfer
-}
-
-type liveTransfer struct {
-	upd  core.ProgressUpdate
-	done bool
-	err  string
-}
-
-// progressSnapshot is the SSE payload.
-type progressSnapshot struct {
-	BytesDone     int64   `json:"bytes_done"`
-	TotalBytes    int64   `json:"total_bytes"`
-	RatePerSec    float64 `json:"rate_per_sec"`
-	ActiveStreams int     `json:"active_streams"`
-	Percent       int     `json:"percent"`
-	Done          bool    `json:"done"`
-	Error         string  `json:"error,omitempty"`
-}
-
-func newProgressHub() *progressHub {
-	return &progressHub{items: make(map[string]*liveTransfer)}
-}
-
-func (h *progressHub) start() string {
-	id, _ := randomToken()
-	h.mu.Lock()
-	h.items[id] = &liveTransfer{}
-	h.mu.Unlock()
-	return id
-}
-
-func (h *progressHub) update(id string, u core.ProgressUpdate) {
-	h.mu.Lock()
-	if t, ok := h.items[id]; ok {
-		t.upd = u
-	}
-	h.mu.Unlock()
-}
-
-func (h *progressHub) finish(id string, err error) {
-	h.mu.Lock()
-	if t, ok := h.items[id]; ok {
-		t.done = true
-		if err != nil {
-			t.err = err.Error()
-		} else if t.upd.TotalBytes > 0 {
-			t.upd.BytesDone = t.upd.TotalBytes
-		}
-	}
-	h.mu.Unlock()
-	// Drop the record a little later so a slow SSE poller can still read the
-	// terminal state.
-	go func() {
-		time.Sleep(30 * time.Second)
-		h.mu.Lock()
-		delete(h.items, id)
-		h.mu.Unlock()
-	}()
-}
-
-func (h *progressHub) snapshot(id string) (progressSnapshot, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	t, ok := h.items[id]
-	if !ok {
-		return progressSnapshot{}, false
-	}
-	pct := 0
-	if t.upd.TotalBytes > 0 {
-		pct = int(t.upd.BytesDone * 100 / t.upd.TotalBytes)
-	}
-	return progressSnapshot{
-		BytesDone:     t.upd.BytesDone,
-		TotalBytes:    t.upd.TotalBytes,
-		RatePerSec:    t.upd.RatePerSec,
-		ActiveStreams: t.upd.ActiveStreams,
-		Percent:       pct,
-		Done:          t.done,
-		Error:         t.err,
-	}, true
 }
 
 // ---- helpers ----
