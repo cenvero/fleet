@@ -264,10 +264,11 @@ func (m *model) renderHeader(r *drctx, W int) string {
 	// Right: live/paused/refreshing + data age.
 	var right []dseg
 	switch {
-	case m.inflight && !m.loadedAt.IsZero():
-		right = append(right, dseg{sHdrMuted, "⟳ refreshing"})
+	case m.inflight && !m.loadedAt.IsZero() && r.now.Sub(m.lastStart) >= time.Second:
+		// Only a refresh that is taking a while is worth a flicker.
+		right = append(right, dseg{sHdrMuted, "⟳ refreshing"}, dseg{sHdrMuted, " · "})
 	case m.lastErr != nil:
-		right = append(right, dseg{sHdrCrit, "✕ refresh failed: " + dashClean(dashFirstLine(m.lastErr.Error()))})
+		right = append(right, dseg{sHdrCrit, "✕ refresh failed: " + dashClean(dashFirstLine(m.lastErr.Error()))}, dseg{sHdrMuted, " · "})
 	}
 	toggleStart := len(right)
 	if m.paused {
@@ -464,7 +465,7 @@ type dhint struct{ key, label string }
 func (m *model) hints() []dhint {
 	switch {
 	case m.overlay == dashOverlayHelp:
-		return []dhint{{"esc", "close help"}}
+		return []dhint{{"?", "toggle help"}}
 	case m.zoom:
 		return []dhint{{"esc", "back"}, {"j/k", "move"}, {"?", "help"}}
 	}
@@ -1888,7 +1889,7 @@ func (m *model) renderServicesTab(r *drctx, body drect) []string {
 	cols := dashFitCols([]dcol{
 		{key: vcServer, title: "SERVER", w: 8, grow: growTo(8, dashMaxW(nv, 24, func(i int) string { return svc(i).Server.Name }))},
 		{key: vcService, title: "SERVICE", w: 10, grow: growTo(10, dashMaxW(nv, 32, func(i int) string { return svc(i).Service.Name }))},
-		{key: vcState, title: "STATE", w: 14, grow: growTo(14, 2+dashMaxW(nv, 24, func(i int) string { return serviceState(svc(i).Service) }))},
+		{key: vcState, title: "STATE", w: 14, grow: growTo(14, 2+dashMaxW(nv, 24, func(i int) string { return serviceState(*svc(i).Service) }))},
 		{key: vcCrit, title: "CRIT", w: 4, drop: 2},
 		{key: vcAction, title: "LAST", w: 8, drop: 3},
 		{key: vcLog, title: "LOG", w: 10, grow: growTo(10, dashMaxW(nv, 40, func(i int) string { return svc(i).Service.LogPath })), drop: 4},
@@ -1912,12 +1913,12 @@ func (m *model) renderServicesTab(r *drctx, body drect) []string {
 		case vcService:
 			dashCell(l, c, sBold, sv.Service.Name, sel)
 		case vcState:
-			st, glyph := dashServiceGlyph(sv.Service)
+			st, glyph := dashServiceGlyph(*sv.Service)
 			if sel {
 				st = sSel
 			}
 			l.putW(st, glyph, 1)
-			dashCell(l, dcol{w: c.w - 1}, st, " "+serviceState(sv.Service), sel)
+			dashCell(l, dcol{w: c.w - 1}, st, " "+serviceState(*sv.Service), sel)
 		case vcCrit:
 			txt := ""
 			if sv.Service.Critical {
@@ -1947,8 +1948,8 @@ func (m *model) serviceDetailBox(r *drctx, w, h int) []string {
 		return b.render()
 	}
 	b.title = sv.Service.Name
-	st, glyph := dashServiceGlyph(sv.Service)
-	b.meta, b.metaSty = glyph+" "+serviceState(sv.Service), st
+	st, glyph := dashServiceGlyph(*sv.Service)
+	b.meta, b.metaSty = glyph+" "+serviceState(*sv.Service), st
 	l := newDLine(r.p, iw)
 	var lines []string
 	emit := func() { lines = append(lines, l.String()); l = newDLine(r.p, iw) }
@@ -2042,6 +2043,9 @@ func (m *model) renderLogsTab(r *drctx, body drect) []string {
 			dashCell(l, c, sBold, lp.Service, sel)
 		case lcLines:
 			txt, st := "empty", sDim
+			if lp.Path == "" && !lp.Available {
+				txt = "·" // not read yet (periodic refreshes skip previews)
+			}
 			if lp.Available {
 				txt, st = strconv.Itoa(len(lp.Lines)), sMuted
 				if lp.Truncated {
@@ -2505,8 +2509,8 @@ var dashHelp = []struct {
 	}},
 	{"Servers", []dhint{
 		{"o O", "cycle sort column / reverse"},
-		{"s", "ssh into the selected server"},
-		{"f", "file manager on the selected server"},
+		{"s", "ssh into the row's server (any tab)"},
+		{"f", "file manager on the row's server"},
 		{"c", "reconnect (confirm)"},
 		{"m", "collect metrics now"},
 	}},
@@ -2528,17 +2532,33 @@ var dashHelp = []struct {
 }
 
 func (m *model) renderHelp(r *drctx, body drect) []string {
-	// Two columns when wide enough.
-	colW := 52
+	keyW := 0
+	total := 0
+	for _, sec := range dashHelp {
+		total += len(sec.keys) + 2
+		for _, k := range sec.keys {
+			keyW = max(keyW, dashWidth(k.key))
+		}
+	}
+	labelW := 0
+	for _, sec := range dashHelp {
+		for _, k := range sec.keys {
+			labelW = max(labelW, dashWidth(k.label))
+		}
+	}
+	colW := 2 + keyW + 2 + labelW
 	cols := 1
-	if body.w >= 2*colW+8 {
+	if body.w >= 2*colW+4+4 && body.h < total+2 {
 		cols = 2
 	}
+	if body.w < colW+4 {
+		colW = max(body.w-4, 10)
+	}
+	// Split sections into balanced columns.
 	var colsLines [2][]string
-	half := (len(dashHelp) + 1) / 2
-	for i, sec := range dashHelp {
-		ci := 0
-		if cols == 2 && i >= half {
+	ci, acc := 0, 0
+	for _, sec := range dashHelp {
+		if cols == 2 && ci == 0 && acc >= (total+1)/2 {
 			ci = 1
 		}
 		l := newDLine(r.p, colW)
@@ -2547,12 +2567,13 @@ func (m *model) renderHelp(r *drctx, body drect) []string {
 		for _, k := range sec.keys {
 			l.reset(colW)
 			l.pad(sNone, 2)
-			l.text(sKey, k.key, 16)
-			l.pad(sNone, 1)
+			l.text(sKey, k.key, keyW)
+			l.pad(sNone, 2)
 			l.text(sMuted, k.label, l.room())
 			colsLines[ci] = append(colsLines[ci], l.String())
 		}
 		colsLines[ci] = append(colsLines[ci], dashRunSpace.n(colW))
+		acc += len(sec.keys) + 2
 	}
 	var content []string
 	if cols == 2 {
@@ -2569,6 +2590,9 @@ func (m *model) renderHelp(r *drctx, body drect) []string {
 		}
 	} else {
 		content = colsLines[0]
+	}
+	for len(content) > 0 && strings.TrimSpace(dashStripSGR(content[len(content)-1])) == "" {
+		content = content[:len(content)-1]
 	}
 	iw := colW*cols + 4*(cols-1)
 	w := min(iw+4, body.w)

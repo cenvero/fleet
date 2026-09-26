@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -307,7 +308,11 @@ func (m *model) runAction(a dashAction) tea.Cmd {
 		}
 		tail := &dashTailBuffer{max: 4096}
 		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
-		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		execProcess := rt.execProcess
+		if execProcess == nil {
+			execProcess = tea.ExecProcess
+		}
+		return execProcess(cmd, func(err error) tea.Msg {
 			return dashActionMsg{action: a, err: err, output: tail.String()}
 		})
 	}
@@ -332,6 +337,14 @@ func (m *model) applyAction(msg dashActionMsg) tea.Cmd {
 	if !msg.action.interactive {
 		m.busy = ""
 	}
+	var exitErr *exec.ExitError
+	if msg.action.interactive && errors.As(msg.err, &exitErr) && strings.TrimSpace(msg.output) == "" {
+		// An interactive session (shell, file manager, log follow) ending with
+		// a non-zero status is not a dashboard error: report it neutrally.
+		m.setFlash(msg.action.done+" (exit "+strconv.Itoa(exitErr.ExitCode())+")", false)
+		m.lastStart = time.Time{}
+		return m.startRefresh()
+	}
 	if msg.err != nil {
 		detail := dashLastLine(msg.output)
 		if detail == "" {
@@ -341,6 +354,11 @@ func (m *model) applyAction(msg dashActionMsg) tea.Cmd {
 		m.setFlash(what+" failed: "+detail, true)
 	} else {
 		m.setFlash("✓ "+msg.action.done, false)
+		if len(msg.action.args) > 0 && msg.action.args[0] == "alerts" {
+			// The handled alert re-sorts below the open ones; keep the cursor
+			// where it is so it lands on the next alert to triage.
+			m.selKeys[tabAlerts] = ""
+		}
 	}
 	// Reflect the change (and anything else that moved while we were away).
 	m.lastStart = time.Time{}

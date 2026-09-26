@@ -783,7 +783,8 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 		Use:   "dashboard",
 		Short: "Launch the terminal dashboard",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return tui.RunDashboard(*configDir)
+			// Dashboard actions re-run this binary; hand them the verified token.
+			return tui.RunDashboardWithOptions(tui.DashboardOptions{ConfigDir: *configDir, Token: resolveTokenID(cmd)})
 		},
 	}
 }

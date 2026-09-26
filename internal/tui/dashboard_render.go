@@ -638,25 +638,6 @@ func dashResetIf(on string) string {
 	return dashSGRReset
 }
 
-// joinCols concatenates equally tall column blocks line by line.
-func dashJoinCols(blocks ...[]string) []string {
-	if len(blocks) == 0 {
-		return nil
-	}
-	h := len(blocks[0])
-	out := make([]string, h)
-	for i := 0; i < h; i++ {
-		var sb strings.Builder
-		for _, blk := range blocks {
-			if i < len(blk) {
-				sb.WriteString(blk[i])
-			}
-		}
-		out[i] = sb.String()
-	}
-	return out
-}
-
 // blankLines returns n lines of w spaces.
 func dashBlankLines(w, n int) []string {
 	out := make([]string, n)

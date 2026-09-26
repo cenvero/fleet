@@ -41,6 +41,8 @@ type dashLoader struct {
 	app       *core.App
 	stamp     dashFileStamp
 	closed    bool
+	// servers skips re-decoding unchanged server files between refreshes.
+	servers core.ServerListCache
 }
 
 type dashFileStamp struct {
@@ -107,11 +109,14 @@ func (l *dashLoader) Close() {
 	}
 }
 
-func (l *dashLoader) load() (core.DashboardData, error) {
+// load reads a dashboard dataset. Only a full load reads every tracked
+// service's cached log for the previews; periodic refreshes list the log
+// sources and leave the reading to the one log on screen.
+func (l *dashLoader) load(full bool) (core.DashboardData, error) {
 	var data core.DashboardData
 	err := l.with(func(app *core.App) error {
 		var err error
-		data, err = app.DashboardData(core.DashboardOptions{RecentAudit: dashRecentAudit})
+		data, err = app.DashboardData(core.DashboardOptions{RecentAudit: dashRecentAudit, SkipLogPreviews: !full, ServerCache: &l.servers})
 		return err
 	})
 	return data, err
@@ -178,8 +183,10 @@ type dashSrvRow struct {
 }
 
 type serviceRow struct {
-	Server    core.ServerRecord
-	Service   core.ServiceRecord
+	// Server and Service point into the snapshot the row was derived from
+	// (never copied: sorting rows of full server records is expensive).
+	Server    *core.ServerRecord
+	Service   *core.ServiceRecord
 	Reachable bool
 	srv       int // index into snapshot.Servers
 	rank      int
@@ -339,14 +346,15 @@ func dashBuildBase(snap *core.DashboardSnapshot, allAlerts []fleetalerts.Alert, 
 	// Services, problems first.
 	for i := range snap.Servers {
 		s := &snap.Servers[i]
-		for _, svc := range s.Services {
+		for j := range s.Services {
+			svc := &s.Services[j]
 			b.services = append(b.services, serviceRow{
-				Server:    *s,
+				Server:    s,
 				Service:   svc,
 				Reachable: s.Observed.Reachable,
 				srv:       i,
-				rank:      dashSvcRank(svc),
-				search:    strings.ToLower(s.Name + " " + svc.Name + " " + serviceState(svc) + " " + svc.Description),
+				rank:      dashSvcRank(*svc),
+				search:    strings.ToLower(s.Name + " " + svc.Name + " " + serviceState(*svc) + " " + svc.Description),
 			})
 		}
 	}
@@ -428,23 +436,37 @@ func dashMeanP95(values []float64) (float64, float64) {
 const dashTopN = 16
 
 func dashTopRows(snap *core.DashboardSnapshot, rows []dashSrvRow, metric func(*core.ServerRecord) float64) []int {
-	out := make([]int, 0, dashTopN)
+	// Keep the dashTopN hottest reachable servers with an insertion into a
+	// small sorted buffer: O(n·k) with k=16, no full sort per metric.
+	type hot struct {
+		v    float64
+		name string
+		i    int
+	}
+	top := make([]hot, 0, dashTopN+1)
 	for i := range rows {
 		s := &snap.Servers[rows[i].idx]
 		if !rows[i].hasMetrics || !s.Observed.Reachable {
 			continue
 		}
-		out = append(out, i)
-	}
-	sort.SliceStable(out, func(a, b int) bool {
-		va, vb := metric(&snap.Servers[rows[out[a]].idx]), metric(&snap.Servers[rows[out[b]].idx])
-		if va != vb {
-			return va > vb
+		h := hot{v: metric(s), name: s.Name, i: i}
+		pos := len(top)
+		for pos > 0 && (top[pos-1].v < h.v || (top[pos-1].v == h.v && top[pos-1].name > h.name)) {
+			pos--
 		}
-		return snap.Servers[rows[out[a]].idx].Name < snap.Servers[rows[out[b]].idx].Name
-	})
-	if len(out) > dashTopN {
-		out = out[:dashTopN]
+		if pos >= dashTopN {
+			continue
+		}
+		top = append(top, hot{})
+		copy(top[pos+1:], top[pos:])
+		top[pos] = h
+		if len(top) > dashTopN {
+			top = top[:dashTopN]
+		}
+	}
+	out := make([]int, len(top))
+	for k, h := range top {
+		out[k] = h.i
 	}
 	return out
 }
@@ -691,16 +713,15 @@ func dashBytes(b uint64) string {
 }
 
 func dashUptime(sec uint64) string {
-	d := time.Duration(sec) * time.Second
 	switch {
 	case sec == 0:
 		return "-"
-	case d < time.Hour:
-		return strconv.Itoa(int(d.Minutes())) + "m"
-	case d < 48*time.Hour:
-		return strconv.Itoa(int(d.Hours())) + "h"
+	case sec < 3600:
+		return strconv.FormatUint(sec/60, 10) + "m"
+	case sec < 48*3600:
+		return strconv.FormatUint(sec/3600, 10) + "h"
 	default:
-		return strconv.Itoa(int(d.Hours()/24)) + "d"
+		return strconv.FormatUint(sec/86400, 10) + "d"
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -31,26 +32,14 @@ func dashAlertRowID(i int) string      { return "dash-ovalert-" + strconv.Itoa(i
 func dashViewerID() string             { return "dash-viewer" }
 func dashHelpID() string               { return "dash-help" }
 func dashPromptID(choice int) string   { return "dash-prompt-" + strconv.Itoa(choice) }
-func dashFooterKeyID(i int) string     { return "dash-fkey-" + strconv.Itoa(i) }
-func dashActivityRowID(i int) string   { return "dash-ovaudit-" + strconv.Itoa(i) }
-func dashServiceRowID(i int) string    { return dashRowID(int(tabServices), i) }
-func dashDetailToggleID() string       { return "dash-detail-toggle" }
 func dashRefreshToggleID() string      { return "dash-refresh-toggle" }
-func dashTabsRightID() string          { return "dash-tabs-right" }
-func dashFilterID(tab int) string      { return "dash-filter-" + strconv.Itoa(tab) }
 func dashOverviewBoxID(box int) string { return "dash-ovbox-" + strconv.Itoa(box) }
 
-// These two lipgloss styles are shared with the file manager views.
-var (
-	pageStyle = lipgloss.NewStyle().
-			Padding(1, 2).
-			Foreground(lipgloss.Color("#e7ecef")).
-			Background(lipgloss.Color("#0a0e14"))
-
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#00d4aa"))
-)
+// pageStyle is shared with the file manager views.
+var pageStyle = lipgloss.NewStyle().
+	Padding(1, 2).
+	Foreground(lipgloss.Color("#e7ecef")).
+	Background(lipgloss.Color("#0a0e14"))
 
 type dashboardTab int
 
@@ -75,6 +64,11 @@ const (
 	dashLogTailLines    = 400
 	dashFlashFor        = 6 * time.Second
 	dashDebounce        = 120 * time.Millisecond
+	// dashFullEvery is how often an automatic refresh also re-reads every
+	// cached log preview (manual refreshes always do).
+	dashFullEvery = 2 * time.Minute
+	// dashTailEvery throttles re-reading the log on screen.
+	dashTailEvery = 10 * time.Second
 )
 
 // DashboardOptions configures RunDashboardWithOptions.
@@ -100,6 +94,9 @@ type dashRuntime struct {
 	token     string
 	configDir string
 	environ   func() []string
+	// execProcess hands the terminal to an interactive child (tea.ExecProcess;
+	// replaceable in tests).
+	execProcess func(*exec.Cmd, tea.ExecCallback) tea.Cmd
 
 	// Frame cache: View returns the previous frame untouched while the model
 	// revision and terminal size are unchanged (idle ticks, mouse motion).
@@ -129,6 +126,8 @@ type dashHist struct {
 
 type dashLogTail struct {
 	stamp   string // identity of the preview the tail was read for
+	gen     uint64 // data generation it was read in
+	at      time.Time
 	preview core.CachedLogPreview
 	err     error
 }
@@ -168,6 +167,8 @@ type model struct {
 	inflight   bool
 	refreshSeq uint64
 	lastStart  time.Time
+	lastFull   time.Time
+	forceFull  bool
 	interval   time.Duration
 	paused     bool
 	now        time.Time
@@ -242,16 +243,17 @@ func RunDashboardWithOptions(opts DashboardOptions) error {
 
 func newDashRuntime(loader *dashLoader, dark bool, exe, token, configDir string) *dashRuntime {
 	return &dashRuntime{
-		loader:    loader,
-		dark:      dark,
-		exe:       exe,
-		token:     strings.TrimSpace(token),
-		configDir: configDir,
-		environ:   os.Environ,
-		hist:      map[string]dashHist{},
-		histBusy:  map[string]bool{},
-		logTail:   map[string]dashLogTail{},
-		logBusy:   map[string]bool{},
+		loader:      loader,
+		dark:        dark,
+		exe:         exe,
+		token:       strings.TrimSpace(token),
+		configDir:   configDir,
+		environ:     os.Environ,
+		execProcess: tea.ExecProcess,
+		hist:        map[string]dashHist{},
+		histBusy:    map[string]bool{},
+		logTail:     map[string]dashLogTail{},
+		logBusy:     map[string]bool{},
 	}
 }
 
@@ -284,6 +286,8 @@ type dashboardLoadedMsg struct {
 	err  error
 	seq  uint64
 	took time.Duration
+	// full is set when log previews were read (see dashLoader.load).
+	full bool
 }
 
 type dashClockMsg time.Time
@@ -302,27 +306,28 @@ type dashLogDueMsg struct{ key string }
 type dashLogMsg struct {
 	key     string
 	stamp   string
+	gen     uint64
 	preview core.CachedLogPreview
 	err     error
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.loadCmd(m.refreshSeq), dashClockCmd())
+	return tea.Batch(m.loadCmd(m.refreshSeq, true), dashClockCmd())
 }
 
 func dashClockCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return dashClockMsg(t) })
 }
 
-func (m model) loadCmd(seq uint64) tea.Cmd {
+func (m model) loadCmd(seq uint64, full bool) tea.Cmd {
 	if m.rt == nil || m.rt.loader == nil {
 		return nil
 	}
 	loader := m.rt.loader
 	return func() tea.Msg {
 		start := time.Now()
-		data, err := loader.load()
-		return dashboardLoadedMsg{data: data, err: err, seq: seq, took: time.Since(start)}
+		data, err := loader.load(full)
+		return dashboardLoadedMsg{data: data, err: err, seq: seq, took: time.Since(start), full: full}
 	}
 }
 
@@ -331,10 +336,13 @@ func (m *model) startRefresh() tea.Cmd {
 	if m.inflight || m.rt == nil {
 		return nil
 	}
+	now := m.clock()
+	full := m.forceFull || m.lastFull.IsZero() || now.Sub(m.lastFull) >= dashFullEvery
+	m.forceFull = false
 	m.inflight = true
 	m.refreshSeq++
-	m.lastStart = m.clock()
-	return m.loadCmd(m.refreshSeq)
+	m.lastStart = now
+	return m.loadCmd(m.refreshSeq, full)
 }
 
 func (m *model) clock() time.Time {
@@ -401,7 +409,13 @@ func (m *model) applyLoad(msg dashboardLoadedMsg) tea.Cmd {
 		}
 		return nil
 	}
+	previous := m.snapshot.CachedLogs
 	m.snapshot = msg.data.DashboardSnapshot
+	if msg.full {
+		m.lastFull = now
+	} else {
+		m.snapshot.CachedLogs = mergeLogPreviews(previous, msg.data.LogSources)
+	}
 	m.alertsAll = msg.data.Alerts
 	stats := msg.data.AlertStats
 	m.alertStats = &stats
@@ -413,6 +427,24 @@ func (m *model) applyLoad(msg dashboardLoadedMsg) tea.Cmd {
 	m.loadTook = msg.took
 	m.rebuild(true)
 	return m.afterMove()
+}
+
+// mergeLogPreviews lists the current log sources, carrying over the previews a
+// previous full load read (sources not read yet have an empty Path).
+func mergeLogPreviews(previous []core.CachedLogPreview, sources []core.DashboardLogSource) []core.CachedLogPreview {
+	byKey := make(map[string]*core.CachedLogPreview, len(previous))
+	for i := range previous {
+		byKey[previous[i].Server+"\x00"+previous[i].Service] = &previous[i]
+	}
+	out := make([]core.CachedLogPreview, 0, len(sources))
+	for _, src := range sources {
+		if p, ok := byKey[src.Server+"\x00"+src.Service]; ok {
+			out = append(out, *p)
+			continue
+		}
+		out = append(out, core.CachedLogPreview{Server: src.Server, Service: src.Service})
+	}
+	return out
 }
 
 func (m *model) onClock(t time.Time) tea.Cmd {
@@ -522,6 +554,11 @@ func (m *model) restoreSelections() {
 		cur := m.cursorPtr(tab)
 		n := m.listLen(tab)
 		key := m.selKeys[tab]
+		if tab == tabOps && *cur == 0 {
+			// The audit trail is newest-first: an operator watching the
+			// newest entry keeps watching the newest entry.
+			key = ""
+		}
 		found := -1
 		if key != "" {
 			for i := 0; i < n; i++ {
@@ -676,7 +713,9 @@ func (m *model) afterMove() tea.Cmd {
 	if m.activeTab == tabLogs {
 		if lp := m.selectedLog(); lp != nil {
 			key := lp.Server + "\x00" + lp.Service
-			if e, ok := m.rt.logTail[key]; !ok || e.stamp != dashLogStamp(lp) {
+			e, ok := m.rt.logTail[key]
+			stale := ok && e.gen != m.gen && m.clock().Sub(e.at) >= dashTailEvery
+			if !ok || e.stamp != dashLogStamp(lp) || stale {
 				m.rt.logWant = key
 				cmds = append(cmds, tea.Tick(dashDebounce, func(time.Time) tea.Msg { return dashLogDueMsg{key: key} }))
 			}
@@ -745,7 +784,7 @@ func (m *model) fetchLogTail(key string) tea.Cmd {
 	if lp == nil || lp.Server+"\x00"+lp.Service != key {
 		return nil
 	}
-	server, service, stamp := lp.Server, lp.Service, dashLogStamp(lp)
+	server, service, stamp, gen := lp.Server, lp.Service, dashLogStamp(lp), m.gen
 	m.rt.logBusy[key] = true
 	loader := m.rt.loader
 	return func() tea.Msg {
@@ -755,7 +794,7 @@ func (m *model) fetchLogTail(key string) tea.Cmd {
 			preview, err = app.DashboardLogTail(server, service, dashLogTailLines)
 			return err
 		})
-		return dashLogMsg{key: key, stamp: stamp, preview: preview, err: err}
+		return dashLogMsg{key: key, stamp: stamp, gen: gen, preview: preview, err: err}
 	}
 }
 
@@ -767,7 +806,7 @@ func (m *model) applyLogTail(msg dashLogMsg) bool {
 	if len(m.rt.logTail) > 64 {
 		clear(m.rt.logTail)
 	}
-	m.rt.logTail[msg.key] = dashLogTail{stamp: msg.stamp, preview: msg.preview, err: msg.err}
+	m.rt.logTail[msg.key] = dashLogTail{stamp: msg.stamp, gen: msg.gen, at: m.clock(), preview: msg.preview, err: msg.err}
 	lp := m.selectedLog()
 	return lp != nil && lp.Server+"\x00"+lp.Service == msg.key
 }
@@ -849,6 +888,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			return nil, true
 		}
 		m.setFlash("refreshing…", false)
+		m.forceFull = true
 		return m.startRefresh(), true
 	case "p":
 		m.paused = !m.paused
