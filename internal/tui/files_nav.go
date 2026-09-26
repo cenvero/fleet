@@ -442,6 +442,7 @@ func (m filesModel) openGoto(side int) filesModel {
 		val += pane.pathStyle.Separator()
 	}
 	m.gotoValue = val
+	m.gotoPrefill = val
 	m.gotoErr = ""
 	m.gotoIndex = -1
 	m.gotoSugg = m.gotoCompletions(side, val)
@@ -597,6 +598,13 @@ func (m filesModel) handleGotoKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		switch {
 		case msg.Type == tea.KeyRunes && len(msg.Runes) > 0:
+			// The dialog opens pre-filled with the current folder so a name
+			// typed next descends into it. Starting an absolute or home path
+			// ("/", "\", "~") instead replaces the untouched pre-fill, rather
+			// than appending to it and producing <cwd>/<typed absolute path>.
+			if m.gotoValue == m.gotoPrefill && strings.ContainsRune(`/\~`, msg.Runes[0]) {
+				m.gotoValue = ""
+			}
 			m.gotoValue += string(msg.Runes)
 		case msg.Type == tea.KeySpace:
 			m.gotoValue += " "

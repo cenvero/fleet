@@ -533,6 +533,42 @@ func TestGotoResolvesAndValidates(t *testing.T) {
 	}
 }
 
+// TestGotoTypingAbsolutePathReplacesPrefill: the dialog opens pre-filled with
+// the current folder; typing "/…" or "~…" must start a new path instead of
+// being appended to it, while a plain name still descends from the pre-fill.
+func TestGotoTypingAbsolutePathReplacesPrefill(t *testing.T) {
+	t.Parallel()
+	base := filesModel{width: 120, height: 40, right: paneState{
+		source: "web-01", remote: true, pathStyle: core.TargetPathPOSIX,
+		root: "/", cwd: "/srv/app", selected: map[int]bool{},
+	}}
+	typeText := func(m filesModel, s string) filesModel {
+		for _, r := range s {
+			mm, _ := m.handleGotoKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			m = mm.(filesModel)
+		}
+		return m
+	}
+
+	m := typeText(base.openGoto(1), "/var/log")
+	if m.gotoValue != "/var/log" {
+		t.Fatalf("absolute path after pre-fill = %q, want /var/log", m.gotoValue)
+	}
+	m = typeText(base.openGoto(1), "~/data")
+	if m.gotoValue != "~/data" {
+		t.Fatalf("home path after pre-fill = %q, want ~/data", m.gotoValue)
+	}
+	m = typeText(base.openGoto(1), "logs")
+	if m.gotoValue != "/srv/app/logs" {
+		t.Fatalf("relative name after pre-fill = %q, want /srv/app/logs", m.gotoValue)
+	}
+	// Once edited, a later "/" is just a path separator.
+	m = typeText(base.openGoto(1), "logs/2026")
+	if m.gotoValue != "/srv/app/logs/2026" {
+		t.Fatalf("separator after editing = %q", m.gotoValue)
+	}
+}
+
 func TestLocalGotoCompletesAndFocusesFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

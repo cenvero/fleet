@@ -413,11 +413,12 @@ type filesModel struct {
 	helpScroll int
 
 	// go to path
-	gotoSide  int
-	gotoValue string
-	gotoErr   string
-	gotoSugg  []string
-	gotoIndex int
+	gotoSide    int
+	gotoValue   string
+	gotoPrefill string // the pre-filled current folder, until the user edits it
+	gotoErr     string
+	gotoSugg    []string
+	gotoIndex   int
 
 	// quick jump
 	jumpSide    int
