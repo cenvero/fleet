@@ -199,12 +199,16 @@ func fmBuildPalette(prof termenv.Profile) *fmPalette {
 	p.zDir = fmPaintOf(zb().Foreground(fmDirC).Bold(true))
 
 	if p.noColor {
-		// Without colour, row state must be carried by attributes alone.
-		p.sel = fmPaintOf(lipgloss.NewStyle().Reverse(true).Bold(true))
-		p.cursor = fmPaintOf(lipgloss.NewStyle().Underline(true))
+		// Without colour (NO_COLOR / dumb terminals) termenv drops every SGR
+		// sequence, attributes included, so row state is drawn with raw
+		// attribute codes: reverse video for the cursor, underline for the
+		// cursor of the inactive pane, bold for marked rows. NO_COLOR forbids
+		// colour, not emphasis.
+		p.sel = fmPaint{pre: "\x1b[7;1m", suf: "\x1b[0m"}
+		p.cursor = fmPaint{pre: "\x1b[4m", suf: "\x1b[0m"}
 		p.hover = fmPaint{}
-		p.mark = fmPaintOf(lipgloss.NewStyle().Bold(true))
-		p.drop = fmPaintOf(lipgloss.NewStyle().Reverse(true))
+		p.mark = fmPaint{pre: "\x1b[1m", suf: "\x1b[0m"}
+		p.drop = fmPaint{pre: "\x1b[7m", suf: "\x1b[0m"}
 	} else {
 		p.sel = fmPaintOf(on(fmAccent).Foreground(fmInk).Bold(true))
 		p.cursor = fmPaintOf(on(fmCursorBg).Foreground(fmText))
@@ -226,7 +230,7 @@ func fmBuildPalette(prof termenv.Profile) *fmPalette {
 	p.toolLabel = fmPaintOf(tool().Foreground(fmMutedC))
 	p.toolSep = fmPaintOf(tool().Foreground(fmBorderC))
 	if p.noColor {
-		p.toolHot = fmPaintOf(lipgloss.NewStyle().Reverse(true))
+		p.toolHot = fmPaint{pre: "\x1b[7m", suf: "\x1b[0m"}
 	} else {
 		p.toolHot = fmPaintOf(on(fmHoverBg).Foreground(fmText))
 	}

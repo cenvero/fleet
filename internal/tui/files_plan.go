@@ -219,6 +219,13 @@ func (m filesModel) destDir(toSide, targetIdx int) string {
 // executePlan queues one transfer per item according to the chosen collision
 // policy.
 func (m filesModel) executePlan(plan *transferPlan) (tea.Model, tea.Cmd) {
+	mm, _ := m.executePlanQueued(plan)
+	m = mm.(filesModel)
+	return m, m.pumpTransfers()
+}
+
+// executePlanQueued adds the plan's rows to the queue without starting them.
+func (m filesModel) executePlanQueued(plan *transferPlan) (tea.Model, tea.Cmd) {
 	m.overlay = overlayNone
 	m.plan = nil
 	src := m.paneRefConst(plan.fromSide)
@@ -304,7 +311,7 @@ func (m filesModel) executePlan(plan *transferPlan) (tea.Model, tea.Cmd) {
 	}
 	m.setStatus(levelOK, msg)
 	m.clearSelection(plan.fromSide)
-	return m, m.pumpTransfers()
+	return m, nil
 }
 
 // ---- dialog ----

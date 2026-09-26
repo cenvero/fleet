@@ -84,7 +84,7 @@ func (m filesModel) openEditor(side int) (tea.Model, tea.Cmd) {
 	}
 	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	m.overlay = overlayEditor
-	m.editor = editorState{
+	m.editor = &editorState{
 		active: true, side: side, source: pane.source,
 		path: full, name: it.name, mode: editorView,
 		status: "loading…",
@@ -175,12 +175,12 @@ func isBinary(data []byte) bool {
 // the editor into the read-only highlighted view.
 func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 	// Ignore a stale load if the editor was closed or retargeted meanwhile.
-	if !m.editor.active || m.editor.path != msg.path {
+	if m.editor == nil || !m.editor.active || m.editor.path != msg.path {
 		return m, nil
 	}
 	if msg.err != nil {
 		m.overlay = overlayNone
-		m.editor = editorState{}
+		m.editor = nil
 		m.status = "open failed: " + msg.err.Error()
 		return m, nil
 	}
@@ -246,7 +246,7 @@ func (m filesModel) editorBodyHeight() int {
 
 // handleEditorKey routes keys while the editor overlay is open.
 func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	ed := &m.editor
+	ed := m.editor
 	switch msg.String() {
 	case "esc":
 		if ed.dirty && ed.mode == editorEdit {
@@ -298,7 +298,10 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // clampEditorScroll keeps the read-only viewer scroll within the content.
 func (m *filesModel) clampEditorScroll() {
-	ed := &m.editor
+	ed := m.editor
+	if ed == nil {
+		return
+	}
 	total := len(ed.viewLines)
 	if total == 0 {
 		total = strings.Count(ed.area.Value(), "\n") + 1
@@ -318,7 +321,7 @@ func (m *filesModel) clampEditorScroll() {
 // toggleEditorMode flips between the highlighted viewer and the editable
 // textarea, focusing/blurring the textarea accordingly.
 func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
-	ed := &m.editor
+	ed := m.editor
 	if ed.mode == editorView {
 		ed.mode = editorEdit
 		ed.status = ""
@@ -340,7 +343,7 @@ func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
 // closeEditor tears down the editor overlay without saving.
 func (m filesModel) closeEditor() (tea.Model, tea.Cmd) {
 	m.overlay = overlayNone
-	m.editor = editorState{}
+	m.editor = nil
 	m.status = "closed editor"
 	return m, nil
 }
@@ -348,7 +351,7 @@ func (m filesModel) closeEditor() (tea.Model, tea.Cmd) {
 // saveEditor writes the current content back to its source (local file or
 // remote upload) off the UI thread, then refreshes the owning pane.
 func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
-	ed := &m.editor
+	ed := m.editor
 	if ed.saving {
 		return m, nil
 	}
@@ -393,11 +396,15 @@ func saveFileFromEdit(app *core.App, source, full string, content []byte) error 
 // onEditorSaved updates editor state after a save completes and refreshes the
 // owning pane so the new size/mtime show immediately.
 func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
-	ed := &m.editor
-	ed.saving = false
-	if !ed.active {
+	ed := m.editor
+	if ed == nil || !ed.active {
+		// The editor was closed while the save was in flight.
+		if msg.err != nil {
+			m.setStatus(levelError, "save failed: "+msg.err.Error())
+		}
 		return m, nil
 	}
+	ed.saving = false
 	if msg.err != nil {
 		ed.status = "save failed: " + msg.err.Error()
 		m.status = "save failed: " + msg.err.Error()

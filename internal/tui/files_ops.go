@@ -50,7 +50,7 @@ func (m filesModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.helpScroll = 0
 			}
 		case overlayEditor:
-			if m.editor.mode == editorView {
+			if m.editor != nil && m.editor.mode == editorView {
 				m.editor.viewScrl += delta * 3
 				m.clampEditorScroll()
 			}

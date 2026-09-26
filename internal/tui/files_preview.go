@@ -306,6 +306,10 @@ func previewLocalFile(d *previewData, full string, it fileItem) {
 }
 
 func previewRemoteFile(d *previewData, app *core.App, server, full string, it fileItem) {
+	if it.size > previewRemoteMax && !looksTextual(it.name) {
+		d.note = "large remote file — contents not fetched for preview (" + humanSize(it.size) + ")"
+		return
+	}
 	if app == nil {
 		return
 	}
@@ -317,10 +321,6 @@ func previewRemoteFile(d *previewData, app *core.App, server, full string, it fi
 			return
 		}
 		previewContent(d, it.name, hb.Bytes(), hb.full, it.size)
-		return
-	}
-	if !looksTextual(it.name) {
-		d.note = "large remote file — contents not fetched for preview (" + humanSize(it.size) + ")"
 		return
 	}
 	res, err := app.TailRemoteFile(server, full, previewTailLines, "")

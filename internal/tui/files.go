@@ -402,8 +402,9 @@ type filesModel struct {
 	propsText string
 	propsKey  string
 
-	// editor overlay
-	editor editorState
+	// editor overlay (a pointer: textarea.Model is ~12 KB, and Bubble Tea
+	// boxes the whole model into an interface on every message)
+	editor *editorState
 
 	// filter input
 	filterSide int
@@ -770,7 +771,7 @@ func (m filesModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.clampScroll(0)
 		m.clampScroll(1)
-		if m.overlay == overlayEditor && m.editor.mode == editorEdit {
+		if m.overlay == overlayEditor && m.editor != nil && m.editor.mode == editorEdit {
 			w, h := m.editorAreaSize()
 			m.editor.area.SetWidth(w)
 			m.editor.area.SetHeight(h)
