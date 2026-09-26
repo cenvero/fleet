@@ -92,8 +92,10 @@ Omit sections that have no entries for that release.
 - `fleet exec --all/--group` exits non-zero when any server failed, `--propagate-exit`
   returns the first non-zero remote exit code, and `--json` lists every target (servers
   that did not run carry a `status`). A `--group` matching no server is an error.
-- `fleet approve <id>` now runs the approved command (with the options it was staged
-  with) and records the outcome; `--require-approval` refuses literal secret values.
+- `fleet approve <id>` now shows the full staged request (server, command, every
+  option, who staged it), asks for confirmation (`--yes` without a terminal), then runs
+  the command with the options it was staged with and records the outcome.
+  `--require-approval` refuses literal secret values and unregistered server names.
 - The update check never blocks a command for more than 1.5 s and records failures, so
   an offline controller retries at most every 10 minutes.
 - The daemon's control socket queues bursts of connections instead of dropping them,
@@ -130,7 +132,9 @@ Omit sections that have no entries for that release.
 
 - Remote text (file names, log lines, alert messages) is stripped of terminal escape
   sequences in the dashboard and file manager.
-- A scoped RBAC token is explicitly denied `fleet approve`.
+- A scoped RBAC token is explicitly denied `fleet approve`, a staged server name can
+  never be interpreted as a flag, and the approver's token reaches the child `fleet
+  exec` through the environment rather than its command line.
 - The web UI requires same-origin `POST`s for every mutation, sends additional
   isolation headers, refuses the controller's config directory in its Local source,
   and never renders previewed SVG/HTML.

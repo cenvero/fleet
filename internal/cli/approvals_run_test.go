@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -77,28 +78,53 @@ func TestRequireApprovalRefusesLiteralSecret(t *testing.T) {
 }
 
 // TestApprovedExecArgs pins the argv an approval runs with: the staged options,
-// --propagate-exit for an exact recorded exit code, and the command as ONE
-// argument after `--` so it can never be parsed as flags.
+// --propagate-exit for an exact recorded exit code, and the server and command
+// after `--` so neither can ever be parsed as a flag. No token ever appears on
+// the argv (it travels in FLEET_TOKEN).
 func TestApprovedExecArgs(t *testing.T) {
 	a := core.Approval{
 		ID: "abc", Server: "web-01", Command: "--help; rm -rf ./cache",
 		Exec: &core.ApprovalExec{Timeout: "30s", Retry: 1, Backoff: "5s", GuardWarn: true, Confirm: true,
 			OnFail: "echo undo", IdempotencyKey: "k", Secrets: []string{"A=@a", "B=@b"}},
 	}
-	got := approvedExecArgs("/cfg", "", a, true)
-	want := []string{"--config-dir", "/cfg", "exec", "web-01", "--propagate-exit", "--json",
+	got := approvedExecArgs("/cfg", a, true)
+	want := []string{"--config-dir", "/cfg", "exec", "--propagate-exit", "--json",
 		"--timeout", "30s", "--retry", "1", "--backoff", "5s", "--guard-warn", "--confirm",
 		"--on-fail", "echo undo", "--idempotency-key", "k", "--secret", "A=@a", "--secret", "B=@b",
-		"--", "--help; rm -rf ./cache"}
+		"--", "web-01", "--help; rm -rf ./cache"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv =\n  %q\nwant\n  %q", got, want)
 	}
 
 	// A legacy approval (staged by an older fleet, no options) runs with defaults.
-	legacy := approvedExecArgs("", "tok", core.Approval{Server: "db-01", Command: "uptime"}, false)
-	wantLegacy := []string{"--token", "tok", "exec", "db-01", "--propagate-exit", "--", "uptime"}
+	legacy := approvedExecArgs("", core.Approval{Server: "db-01", Command: "uptime"}, false)
+	wantLegacy := []string{"exec", "--propagate-exit", "--", "db-01", "uptime"}
 	if !reflect.DeepEqual(legacy, wantLegacy) {
 		t.Fatalf("legacy argv = %q, want %q", legacy, wantLegacy)
+	}
+
+	env := approvedExecEnv([]string{"PATH=/bin", "FLEET_TOKEN=old"}, "tok-123")
+	if !reflect.DeepEqual(env, []string{"PATH=/bin", "FLEET_TOKEN=tok-123"}) {
+		t.Fatalf("child env = %q; the --token must replace FLEET_TOKEN", env)
+	}
+	if got := approvedExecEnv([]string{"PATH=/bin", "FLEET_TOKEN=inherited"}, ""); !reflect.DeepEqual(got, []string{"PATH=/bin", "FLEET_TOKEN=inherited"}) {
+		t.Fatalf("without --token the environment must pass through, got %q", got)
+	}
+}
+
+// TestRequireApprovalRefusesFlagLikeServer: `exec --require-approval -- --all
+// uptime` must not stage a request whose "server" is --all.
+func TestRequireApprovalRefusesFlagLikeServer(t *testing.T) {
+	dir, fake := setupExecFanout(t, map[string]fakeExecBehavior{"srv-01": {}}, nil)
+	res := runExecFleet(t, dir, "exec", "--require-approval", "--", "--all", "uptime")
+	if res.err == nil {
+		t.Fatalf("staging server --all must fail; stdout=%q stderr=%q", res.stdout, res.stderr)
+	}
+	if list, _ := core.NewApprovalStore(dir).List(); len(list) != 0 {
+		t.Fatalf("nothing may be staged, got %+v", list)
+	}
+	if fake.calls.Load() != 0 {
+		t.Fatalf("agent saw %d call(s)", fake.calls.Load())
 	}
 }
 
@@ -114,14 +140,26 @@ func TestApproveRunsAndRecordsOutcome(t *testing.T) {
 	dir := initConfigDir(t, bin)
 
 	store := core.NewApprovalStore(dir)
-	id, err := store.StageExec("no-such-server", "uptime", time.Hour, &core.ApprovalExec{Timeout: "5s"})
+	id, err := store.StageExec("no-such-server", "uptime", time.Hour, &core.ApprovalExec{Timeout: "5s"}, "tester")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(bin, "--config-dir", dir, "approve", id)
+	// Without a terminal and without --yes nothing is approved: the full
+	// request is shown and the approval stays pending.
+	noYes := exec.Command(bin, "--config-dir", dir, "approve", id)
+	noYes.Env = append(noYes.Environ(), "FLEET_TOKEN=")
+	out, runErr := noYes.CombinedOutput()
+	if runErr == nil || !strings.Contains(string(out), "--yes") || !strings.Contains(string(out), "--timeout 5s") {
+		t.Fatalf("approve without --yes must show the options and refuse; err=%v out=%q", runErr, out)
+	}
+	if got, _ := store.Get(id); got.Status != core.ApprovalPending {
+		t.Fatalf("status after a refused approve = %s, want pending", got.Status)
+	}
+
+	cmd := exec.Command(bin, "--config-dir", dir, "approve", "--yes", id)
 	cmd.Env = append(cmd.Environ(), "FLEET_TOKEN=")
-	out, runErr := cmd.CombinedOutput()
+	out, runErr = cmd.CombinedOutput()
 	if runErr == nil {
 		t.Fatalf("approve of a command that cannot run must exit non-zero; out=%q", out)
 	}
@@ -137,7 +175,7 @@ func TestApproveRunsAndRecordsOutcome(t *testing.T) {
 		t.Fatalf("recorded approval = %+v, want failed with executed_at/exit_code/approved_at", got)
 	}
 
-	again := exec.Command(bin, "--config-dir", dir, "approve", id)
+	again := exec.Command(bin, "--config-dir", dir, "approve", "--yes", id)
 	again.Env = append(again.Environ(), "FLEET_TOKEN=")
 	if out, err := again.CombinedOutput(); err == nil || !strings.Contains(string(out), "not pending") {
 		t.Fatalf("a second approve must be refused; err=%v out=%q", err, out)
@@ -176,5 +214,31 @@ func TestScopedTokenCannotApprove(t *testing.T) {
 	}
 	if got, _ := approvals.Get(id); got.Status != core.ApprovalPending {
 		t.Fatalf("approval must stay pending after a denied approve, got %s", got.Status)
+	}
+}
+
+// TestApproveRefusesLegacyFlagLikeServer: an approval written by an older fleet
+// (no server validation at staging) whose server is "--all" must be refused at
+// approve time rather than handed to `fleet exec`.
+func TestApproveRefusesLegacyFlagLikeServer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess approval test skipped in -short mode")
+	}
+	bin := buildFleetBinary(t)
+	dir := initConfigDir(t, bin)
+	legacy := `[{"id":"0123456789abcdef","server":"--all","command":"uptime","status":"pending",` +
+		`"requested":"2026-01-01T00:00:00Z","expires":"2999-01-01T00:00:00Z"}]`
+	if err := os.WriteFile(core.ApprovalsPath(dir), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "--config-dir", dir, "approve", "--yes", "0123456789abcdef")
+	cmd.Env = append(cmd.Environ(), "FLEET_TOKEN=")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "invalid server name") {
+		t.Fatalf("approving a legacy --all approval: err=%v out=%q, want a refusal", err, out)
+	}
+	got, gerr := core.NewApprovalStore(dir).Get("0123456789abcdef")
+	if gerr != nil || got.Status != core.ApprovalPending {
+		t.Fatalf("legacy approval = %+v, %v; must stay pending (never approved or run)", got, gerr)
 	}
 }

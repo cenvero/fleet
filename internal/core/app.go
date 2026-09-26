@@ -1261,6 +1261,11 @@ func (a *App) dropPooledSession(serverName string) {
 	a.sessions.evict(serverName)
 }
 
+// Operator is the identity audited actions are attributed to: the verified RBAC
+// token (as "token:<name>") when one is in use, else the configured operator or
+// the local user.
+func (a *App) Operator() string { return a.operator() }
+
 func (a *App) operator() string {
 	// A verified RBAC token sets actingOperator via SetActingOperator (the CLI
 	// pre-run gate, AFTER it validates --token), so the audit log answers "which
