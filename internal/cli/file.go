@@ -113,6 +113,9 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 			if len(args) == 3 {
 				remote = args[2]
 			}
+			if err := refuseScopedProtectedPath(cmd, *configDir, app, args[1], recursive); err != nil {
+				return err
+			}
 			if recursive {
 				if remote == "" {
 					return fmt.Errorf("recursive upload requires a <remote> directory")
@@ -180,12 +183,20 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 				if dest == "" {
 					dest = "."
 				}
+				if err := refuseScopedProtectedPath(cmd, *configDir, app, dest, true); err != nil {
+					return err
+				}
 				n, err := app.DownloadDir(server, remote, dest, opts, nil)
 				if err != nil {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "downloaded %d files into %s\n", n, dest)
 				return nil
+			}
+			for _, target := range downloadLocalTargets(remote, local) {
+				if err := refuseScopedProtectedPath(cmd, *configDir, app, target, false); err != nil {
+					return err
+				}
 			}
 			progress, finish := newProgressReporter(cmd, "download")
 			result, err := app.DownloadFile(server, remote, local, opts, progress)

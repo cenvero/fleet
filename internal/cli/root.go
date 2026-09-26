@@ -1753,6 +1753,11 @@ func newServiceCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
+			if exportPath != "" {
+				if err := refuseScopedProtectedPath(cmd, *configDir, app, exportPath, false); err != nil {
+					return err
+				}
+			}
 			if cached && follow {
 				return fmt.Errorf("--cached cannot be combined with --follow")
 			}

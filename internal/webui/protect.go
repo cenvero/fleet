@@ -341,6 +341,26 @@ func (s *Server) protectedPaths() []string {
 	return append(paths, s.serverKeys...)
 }
 
+// CheckLocalPath applies the Local source's protected-location guard to a
+// controller-local path for callers outside the web UI (the CLI refuses a
+// scoped RBAC token the same locations). It returns an error when p is, lies
+// inside, resolves into or — with tree set — contains the controller's config
+// directory or any key, known-hosts, data, log or database location.
+func CheckLocalPath(app *core.App, p string, tree bool) error {
+	if app == nil {
+		return nil
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return err
+	}
+	g := (&Server{app: app}).pathGuard()
+	if tree {
+		return g.checkTree(abs)
+	}
+	return g.check(abs)
+}
+
 // cleanLocal validates a controller-side path exactly like cleanLocalPath and
 // additionally refuses protected locations. Every Local-source handler that
 // touches a single entry goes through it.
