@@ -7,7 +7,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/hex"
+	"errors"
 	"hash/fnv"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +117,28 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 	}
 
 	matcher := logtail.NewMatcher(payload.Search)
+	for attempt := 1; ; attempt++ {
+		result, err := readLogFile(file, info, payload, tailLines, matcher)
+		if err == nil {
+			return result, nil
+		}
+		// A file truncated while it is being read ends early: read it again
+		// at its new size (a cursor then no longer matches and resets).
+		if !errors.Is(err, io.ErrUnexpectedEOF) || attempt == maxLogReadAttempts {
+			return proto.LogReadResult{}, logReadFailed(err)
+		}
+		if info, err = file.Stat(); err != nil {
+			return proto.LogReadResult{}, logReadFailed(err)
+		}
+	}
+}
+
+// maxLogReadAttempts bounds re-reads of a log that keeps shrinking under us.
+const maxLogReadAttempts = 3
+
+// readLogFile answers a log.read of the regular file open as file, whose
+// size is info.Size().
+func readLogFile(file *os.File, info os.FileInfo, payload proto.LogReadPayload, tailLines int, matcher *logtail.Matcher) (proto.LogReadResult, error) {
 	size := info.Size()
 	reset := false
 	if payload.Cursor != nil {
@@ -132,7 +156,7 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 				MaxScan:  maxLogFollowScan,
 			})
 			if err != nil {
-				return proto.LogReadResult{}, logReadFailed(err)
+				return proto.LogReadResult{}, err
 			}
 			return proto.LogReadResult{
 				Path:   payload.Path,
@@ -148,7 +172,7 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 
 	tail, err := logtail.Tail(file, size, tailLines, matcher)
 	if err != nil {
-		return proto.LogReadResult{}, logReadFailed(err)
+		return proto.LogReadResult{}, err
 	}
 	return proto.LogReadResult{
 		Path:      payload.Path,

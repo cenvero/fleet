@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"reflect"
 	"strings"
@@ -316,6 +317,22 @@ func TestForwardLongLine(t *testing.T) {
 	res, err := Forward(bytes.NewReader(data), Position{}, int64(len(data)), NewMatcher("xx"), ForwardLimits{})
 	if err != nil || len(res.Lines) != 1 || res.Lines[0].Number != 2 {
 		t.Fatalf("max-1 line: res=%d lines err=%v", len(res.Lines), err)
+	}
+}
+
+// TestShrunkFileReportsUnexpectedEOF: a file that is shorter than the size it
+// was stat'ed at (truncated mid-read) surfaces io.ErrUnexpectedEOF, which the
+// agent retries at the new size.
+func TestShrunkFileReportsUnexpectedEOF(t *testing.T) {
+	r := strings.NewReader("abc\ndef\n")
+	if _, err := Tail(r, 1<<20, 5, nil); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Tail err = %v", err)
+	}
+	if _, err := Forward(r, Position{}, 1<<20, nil, ForwardLimits{}); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Forward err = %v", err)
+	}
+	if _, err := CountLines(r, 1<<20); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("CountLines err = %v", err)
 	}
 }
 
