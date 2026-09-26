@@ -652,8 +652,9 @@ func newFileCopyCommand(configDir *string) *cobra.Command {
 		Use:   "copy <srcServer:path> <dstServer:path>",
 		Short: "Copy a file (or directory with -r) directly between two servers",
 		Long: "Copy a file or, with -r, a whole directory tree from one managed server to\n" +
-			"another. Bytes are relayed through the controller (download then upload), so it\n" +
-			"works for every server mode and reuses the resumable, checksummed engine.\n\n" +
+			"another. Within one server the agent copies the file itself; across servers the\n" +
+			"bytes stream through the controller chunk by chunk (no temp copy), so it works\n" +
+			"for every server mode and reuses the resumable, checksummed engine.\n\n" +
 			"Examples:\n" +
 			"  fleet file copy web-01:/etc/hosts db-01:/tmp/hosts\n" +
 			"  fleet file copy web-01:/srv/app db-01:/srv/app -r",
@@ -709,7 +710,7 @@ func newFileServerMoveCommand(configDir *string) *cobra.Command {
 		Use:   "move <srcServer:path> <dstServer:path>",
 		Short: "Move a file (or directory with -r) between two servers",
 		Long: "Move a file or, with -r, a whole directory tree between managed servers.\n" +
-			"Within one server it's an efficient rename; across servers it copies (relayed\n" +
+			"Within one server it's an efficient rename; across servers it copies (streamed\n" +
 			"through the controller) then deletes the source. ('fleet file mv' renames within\n" +
 			"a single server.)\n\n" +
 			"Examples:\n" +
