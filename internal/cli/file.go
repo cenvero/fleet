@@ -842,7 +842,11 @@ func newFileExtractCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "extract <server> <archivePath>",
 		Short: "Extract an archive into its directory on a server",
-		Args:  cobra.ExactArgs(2),
+		Long: "Extract <archivePath> (zip, tar, tar.gz/tgz, tar.bz2 or tar.xz) into the directory that\n" +
+			"contains it. Files already there with the same names are overwritten. Archives with\n" +
+			"absolute or \"..\" member paths, links or special files are refused.\n\n" +
+			"  fleet file extract web-01 /srv/releases/site.tar.gz",
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
