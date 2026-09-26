@@ -25,6 +25,9 @@ const (
 	ActionFileMkdir     = "file.mkdir"
 	ActionFileDelete    = "file.delete"
 	ActionFileRename    = "file.rename"
+	ActionFilePut       = "file.put"
+	ActionFileCopy      = "file.copy"
+	ActionFileTree      = "file.tree"
 )
 
 // FileEntryType values classify directory entries independently of permission
@@ -80,6 +83,11 @@ type FileReadPayload struct {
 	// for agents advertising CapabilityBinaryFrames, so older agents — which
 	// ignore the unknown field — keep replying in the original encoding.
 	Binary bool `json:"binary,omitempty"`
+	// Stat asks the agent to also return the path's metadata (exactly what
+	// file.stat reports), so a download can plan from — and a small file can be
+	// fetched in — a single round trip. Sent only to agents advertising
+	// CapabilityFileReadStat; older agents ignore it and omit Entry.
+	Stat bool `json:"stat,omitempty"`
 }
 
 // WantsBinary implements proto.BinaryRequester.
@@ -91,6 +99,8 @@ type FileReadResult struct {
 	Data   []byte `json:"data,omitempty"` // empty when the bytes travel as a binary frame
 	SHA256 string `json:"sha256"`         // checksum of this chunk's raw bytes
 	EOF    bool   `json:"eof,omitempty"`
+	// Entry is the file's metadata, present only when the request set Stat.
+	Entry *FileEntry `json:"entry,omitempty"`
 }
 
 // TakeBinary/PutBinary let a chunk's bytes ride as a binary frame attachment
@@ -115,6 +125,14 @@ type FileOpenWritePayload struct {
 type FileOpenWriteResult struct {
 	TempPath     string `json:"temp_path"`
 	ResumeOffset int64  `json:"resume_offset"` // current size of the temp file
+	// Chunks lists byte ranges of the temp file whose content the agent has
+	// already verified against a chunk checksum (written and checked by this
+	// agent process, or made durable before a restart). A resuming controller
+	// compares them with its own chunk digests instead of asking the agent to
+	// re-read and re-hash the prefix. Omitted by agents without
+	// CapabilityFileChunkDigests; ranges it does not cover are still verified
+	// with file.probe.
+	Chunks []FileRangeChecksum `json:"chunks,omitempty"`
 }
 
 type FileWritePayload struct {
@@ -146,12 +164,26 @@ type FileFinalizePayload struct {
 	Mode        uint32 `json:"mode,omitempty"`
 	WholeSHA256 string `json:"whole_sha256"`
 	TotalSize   int64  `json:"total_size"`
+	// ChunkDigest is ChunkListDigest over the transfer's ordered chunk plan.
+	// An agent advertising CapabilityFileChunkDigests verifies the assembled
+	// file against the chunk checksums it already checked on every write, so
+	// it does not re-read and re-hash the whole file here. Older agents ignore
+	// it and verify WholeSHA256 by re-reading the file, exactly as before.
+	ChunkDigest string `json:"chunk_digest,omitempty"`
+	// Abort discards the upload: the agent closes and removes the temp file
+	// (and its resume sidecar) instead of installing it. Only sent to agents
+	// advertising CapabilityFileChunkDigests.
+	Abort bool `json:"abort,omitempty"`
 }
 
 type FileFinalizeResult struct {
 	Path   string `json:"path"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+	// ChunkDigest is set when the agent verified the upload through its chunk
+	// checksums (see FileFinalizePayload.ChunkDigest) instead of re-hashing the
+	// file; SHA256 then echoes the controller-supplied WholeSHA256.
+	ChunkDigest string `json:"chunk_digest,omitempty"`
 }
 
 // --- resume probe (works for an in-flight upload temp or an existing file) ---
@@ -198,4 +230,60 @@ type FileRenamePayload struct {
 
 type FileOpResult struct {
 	Path string `json:"path"`
+}
+
+// --- one-round-trip small-file upload (CapabilityFilePut) ---
+
+// FilePutPayload uploads a whole file that fits in one chunk. The agent writes
+// it to a private temp file beside the destination, verifies SHA256, syncs it
+// and atomically renames it into place — the same guarantees as
+// open_write/write/finalize, in one round trip instead of three. The result is
+// a FileFinalizeResult.
+type FilePutPayload struct {
+	Path   string `json:"path"`
+	Mode   uint32 `json:"mode,omitempty"` // final mode; default 0o644
+	Data   []byte `json:"data,omitempty"` // empty when the bytes travel as a binary frame
+	SHA256 string `json:"sha256"`         // required: SHA-256 of Data
+}
+
+// TakeBinary/PutBinary let the file ride as a binary frame attachment.
+func (p *FilePutPayload) TakeBinary() []byte {
+	data := p.Data
+	p.Data = nil
+	return data
+}
+
+func (p *FilePutPayload) PutBinary(b []byte) { p.Data = b }
+
+// --- same-server copy (CapabilityFileCopy) ---
+
+// FileCopyPayload copies a regular file to another path on the same agent
+// without relaying the bytes through the controller. The destination is
+// written like an upload (private temp file, fsync, atomic rename) and the
+// result is a FileFinalizeResult whose SHA256 is the digest of the bytes
+// copied.
+type FileCopyPayload struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Mode uint32 `json:"mode,omitempty"` // final mode; default: the source's permissions
+}
+
+// --- recursive listing (CapabilityFileTree) ---
+
+// FileTreePayload asks for every entry beneath Path in one round trip. The
+// agent never follows symlinks while walking and stops at MaxEntries/MaxDepth,
+// reporting Truncated so the caller can fall back to per-directory listing.
+type FileTreePayload struct {
+	Path       string `json:"path"`
+	ShowHidden bool   `json:"show_hidden,omitempty"`
+	MaxEntries int    `json:"max_entries,omitempty"`
+	MaxDepth   int    `json:"max_depth,omitempty"`
+}
+
+// FileTreeResult carries entries in the same form as FileListResult (absolute
+// agent-side paths), parents before children.
+type FileTreeResult struct {
+	Path      string      `json:"path"` // the resolved root, as file.list reports it
+	Entries   []FileEntry `json:"entries"`
+	Truncated bool        `json:"truncated,omitempty"`
 }
