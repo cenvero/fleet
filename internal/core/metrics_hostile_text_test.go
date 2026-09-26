@@ -103,6 +103,11 @@ func (q *endlessQueue) Acknowledge(string) error { return nil }
 // TestReverseReplayIsBoundedPerConnection: a reverse agent that never runs out
 // of "queued" metrics cannot make one connection write an unbounded history.
 func TestReverseReplayIsBoundedPerConnection(t *testing.T) {
+	// Not parallel: it lowers the package-level cap so the test stays quick
+	// under -race (persisting 20,000 snapshots takes seconds there).
+	oldCap := metricsReplayMaxSnapshots
+	metricsReplayMaxSnapshots = 3 * metricsReplayPageSize
+	t.Cleanup(func() { metricsReplayMaxSnapshots = oldCap })
 	app := replayTestApp(t, "endless")
 	hub := NewReverseHub(app, "test-token")
 	queue := &endlessQueue{MetricsQueue: agent.NewFileMetricsQueue(filepath.Join(t.TempDir(), "q.jsonl"))}

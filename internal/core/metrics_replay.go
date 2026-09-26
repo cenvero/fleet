@@ -27,12 +27,14 @@ const (
 	metricsReplayMaxPages = 200
 	// metricsReplayPageTimeout bounds each page's peek + persist + ack.
 	metricsReplayPageTimeout = 30 * time.Second
-	// metricsReplayMaxSnapshots bounds what one connection may replay in all.
-	// An agent queues at most 10,000 snapshots (an older agent returns them as
-	// one batch), so this only stops a hostile peer from writing an unbounded
-	// history into the controller's database on every reconnect.
-	metricsReplayMaxSnapshots = 20_000
 )
+
+// metricsReplayMaxSnapshots bounds what one connection may replay in all. An
+// agent queues at most 10,000 snapshots (an older agent returns them as one
+// batch), so this only stops a hostile peer from writing an unbounded history
+// into the controller's database on every reconnect. A var only so tests can
+// lower it.
+var metricsReplayMaxSnapshots = 20_000
 
 // replayQueuedMetrics drains a reverse agent's offline metrics queue: peek a
 // page, persist it, acknowledge it, repeat while the agent reports more. It
