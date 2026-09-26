@@ -245,10 +245,11 @@ the transfers dock. The same secure transfer engine runs underneath.
 - **Light and dark themes** follow the system setting, with a toggle that is
   remembered. On a phone the UI shows one pane at a time with a pane switcher and a
   bottom action bar; it also works well on tablets.
-- **Keyboard first**: arrows, `Enter` to open, `Backspace`/`Alt+↑` to go up, `Space`
-  and `Shift` to select, `Ctrl/Cmd+A`, `Delete`, `F2` to rename, `Ctrl/Cmd+C`/`V` to
-  copy between panes, a command palette on `Ctrl/Cmd+K`, and `?` for every shortcut.
-  Right-click (or long-press) opens a context menu.
+- **Keyboard first**: arrows, `Enter` to open, `Backspace` to go up, `Alt+←/→` for
+  back/forward, `F6` to switch panes, `Space` and `Shift` to select, `Ctrl/Cmd+A`,
+  `Delete`, `F2` to rename, `Ctrl/Cmd+C`/`X` then `Ctrl/Cmd+V` in the other pane to
+  copy or move, a command palette on `Ctrl/Cmd+K`, and `?` for every shortcut.
+  Right-click (or long-press, or `Shift+F10`) opens a context menu.
 - **Confirm dialogs** state exactly what will be copied, replaced or deleted, and
   toasts offer **Undo** where the operation can be undone. Breadcrumbs have an
   overflow menu and an editable path; each pane keeps back/forward history, and the
