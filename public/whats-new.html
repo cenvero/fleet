@@ -16,6 +16,7 @@
   <link rel="icon" href="/assets/img/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
+  <link rel="alternate" type="text/markdown" href="/whats-new.md" title="What's new in Cenvero Fleet (Markdown)">
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Cenvero Fleet">
@@ -42,6 +43,7 @@
     "@graph": [
       {
         "@type": "BreadcrumbList",
+        "@id": "https://fleet.cenvero.org/whats-new.html#breadcrumb",
         "itemListElement": [
           { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://fleet.cenvero.org/" },
           { "@type": "ListItem", "position": 2, "name": "What's new", "item": "https://fleet.cenvero.org/whats-new.html" }
@@ -55,6 +57,8 @@
         "description": "Release notes for Cenvero Fleet v2.0 through v2.4.3 and the changes in development.",
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "about": { "@id": "https://fleet.cenvero.org/#software" },
+        "breadcrumb": { "@id": "https://fleet.cenvero.org/whats-new.html#breadcrumb" },
+        "primaryImageOfPage": "https://fleet.cenvero.org/assets/og/og-whats-new.png",
         "dateModified": "2026-09-26",
         "inLanguage": "en"
       }
@@ -102,7 +106,7 @@
     <div class="container">
       <nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/">Home</a></li><li aria-current="page">What's new</li></ol></nav>
       <h1 id="page-title">What's new in <span class="grad-text">Cenvero Fleet</span></h1>
-      <p class="hero-lead">Release highlights, newest first. Every release is signed; upgrade with <code>fleet update apply</code> or <code>brew upgrade cenvero-fleet</code>. The complete, line-by-line history lives in the changelog.</p>
+      <p class="hero-lead">Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.4.3, released on 11 September 2026. Every release is signed; upgrade with <code>fleet update apply</code> or <code>brew upgrade cenvero-fleet</code>. The complete, line-by-line history lives in the changelog.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href="https://github.com/cenvero/fleet/releases"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Latest release</a>
         <a class="btn btn-secondary" href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg> Full changelog</a>

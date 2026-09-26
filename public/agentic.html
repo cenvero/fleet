@@ -16,6 +16,7 @@
   <link rel="icon" href="/assets/img/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
+  <link rel="alternate" type="text/markdown" href="/agentic.md" title="Agentic Fleet (Markdown)">
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Cenvero Fleet">
@@ -42,6 +43,7 @@
     "@graph": [
       {
         "@type": "BreadcrumbList",
+        "@id": "https://fleet.cenvero.org/agentic.html#breadcrumb",
         "itemListElement": [
           { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://fleet.cenvero.org/" },
           { "@type": "ListItem", "position": 2, "name": "Agentic AI", "item": "https://fleet.cenvero.org/agentic.html" }
@@ -55,10 +57,16 @@
         "description": "How Cenvero Fleet lets AI coding agents such as Claude Code and Codex discover and operate a server fleet over SSH, with a self-describing CLI, JSON output and guard rails.",
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "about": { "@id": "https://fleet.cenvero.org/#software" },
+        "breadcrumb": { "@id": "https://fleet.cenvero.org/agentic.html#breadcrumb" },
+        "primaryImageOfPage": "https://fleet.cenvero.org/assets/og/og-agentic.png",
         "inLanguage": "en"
       },
       {
         "@type": "FAQPage",
+        "@id": "https://fleet.cenvero.org/agentic.html#faq",
+        "url": "https://fleet.cenvero.org/agentic.html",
+        "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
+        "about": { "@id": "https://fleet.cenvero.org/#software" },
         "mainEntity": [
           { "@type": "Question", "name": "Can an AI agent like Claude control my servers over SSH?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Run fleet skill claude to install a /fleet slash command for Claude Code (or fleet skill codex for Codex). When you type /fleet, the agent runs fleet context to learn the entire CLI, then controls your servers over an authenticated, host-key-pinned SSH channel using your keys on your machine. There is no cloud control plane." } },
           { "@type": "Question", "name": "Why is Cenvero Fleet better than raw SSH for AI agents?", "acceptedAnswer": { "@type": "Answer", "text": "Raw SSH gives an agent a free-form shell with no structure, no discoverability and no guard rails. Fleet exposes a self-describing CLI: fleet context and fleet ai <command> generate the complete, current reference from the installed binary, commands return structured JSON, and risky operations can be scoped, staged for approval or wrapped in a dead-man's switch." } },
@@ -113,7 +121,7 @@
       <div>
         <nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/">Home</a></li><li aria-current="page">Agentic AI</li></ol></nav>
         <h1 id="page-title">The SSH control plane <span class="grad-text">built for AI agents.</span></h1>
-        <p class="hero-lead">Cenvero Fleet turns a fleet of servers into something an AI coding agent — Claude Code, Codex — can actually understand and operate: a self-describing CLI, structured JSON and guard rails, all over one authenticated SSH channel. Your keys, your machine, no cloud.</p>
+        <p class="hero-lead">Cenvero Fleet, the open-source, self-hosted server fleet manager, turns a fleet of servers into something an AI coding agent — Claude Code, Codex — can actually understand and operate: a self-describing CLI, structured JSON and guard rails, all over one authenticated SSH channel. Your keys, your machine, no cloud.</p>
         <div class="hero-cta">
           <a class="btn btn-primary btn-lg" href="#get-started"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-bot"/></svg> Connect your agent</a>
           <a class="btn btn-secondary btn-lg" href="#how">How it works</a>

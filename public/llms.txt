@@ -1,26 +1,27 @@
 # Cenvero Fleet
 
-> Cenvero Fleet is a free, open-source (AGPL-3.0-or-later), self-hosted fleet manager for Linux, macOS and Windows servers. A single controller binary (`fleet`) manages agents (`fleet-agent`) over encrypted, host-key-pinned SSH — in direct mode, or in reverse mode where the agent dials out so servers behind NAT need no inbound ports. There is no cloud account or hosted control plane.
+> Cenvero Fleet is a free, open-source (AGPL-3.0-or-later), self-hosted fleet manager for Linux, macOS and Windows servers. A single controller binary (`fleet`) manages agents (`fleet-agent`) over encrypted, host-key-pinned SSH — directly, or in reverse mode where the agent dials out so servers behind NAT need no inbound port. There is no cloud account or hosted control plane.
 
-It provides persistent shells, concurrent commands across the fleet or a tag group with JSON output, chunked/parallel/checksummed/resumable file transfer, live directory sync, services, logs, journald, metrics, alerts, Slack/webhook notifications, jobs, cron, drift detection, a terminal dashboard, a dual-pane terminal file manager, and a localhost web UI. Safety features include fail-closed scoped RBAC tokens, encrypted named secrets, an approval queue, command policy, a dead-man's switch (`fleet guard`), signed anti-rollback updates and a hash-chained audit log.
+Fleet provides persistent shells, concurrent commands across the fleet or a tag group with JSON output, chunked, parallel, checksummed and resumable file transfer, live directory sync, services, logs, journald, metrics, alerts, Slack and webhook notifications, background jobs, cron, playbooks, drift detection, a terminal dashboard, a dual-pane terminal file manager and a localhost web file manager. Safety features include fail-closed scoped RBAC tokens, encrypted named secrets, approvals, command policy, a dead-man's switch (`fleet guard`), minisign-signed anti-rollback updates and a hash-chained audit log. AI coding agents such as Claude Code and Codex can operate it: `fleet skill claude|codex|agents` installs an integration, `fleet context` prints the complete CLI reference generated from the installed binary, and `fleet ai <command>` prints the full help for one command. Install with `brew tap cenvero/fleet && brew install cenvero-fleet`, `curl -fsSL https://fleet.cenvero.org/install | sh`, or on Windows `irm https://fleet.cenvero.org/install.ps1 | iex`. The latest stable release is v2.4.3 (2026-09-11); the documentation follows the main branch and says which commands ship after v2.4.3.
 
-AI coding agents (Claude Code, Codex) can operate it: `fleet skill claude` installs a /fleet command, `fleet context` prints the complete CLI reference generated from the installed binary, and `fleet ai <command>` gives machine-readable help for one command.
+## Docs
 
-## Pages
-
-- [Home](https://fleet.cenvero.org/): overview, install commands, features, FAQ
-- [Documentation](https://fleet.cenvero.org/docs/): install, configuration and every command
-- [Agentic AI](https://fleet.cenvero.org/agentic.html): letting AI agents operate servers safely
-- [What's new](https://fleet.cenvero.org/whats-new.html): release notes
-
-## Install
-
-- macOS / Linux (Homebrew): `brew tap cenvero/fleet && brew install cenvero-fleet`
-- Linux / macOS (script): `curl -fsSL https://fleet.cenvero.org/install | sh`
-- Windows (elevated PowerShell): `irm https://fleet.cenvero.org/install.ps1 | iex`
+- [Complete reference](https://fleet.cenvero.org/llms-full.txt): key facts, overview, full documentation, fleet-agent reference, agentic-AI guide and release notes in one Markdown file
+- [Documentation](https://fleet.cenvero.org/docs/index.md): install, setup, servers and transport modes, commands, files and sync, services, logs, health, alerts, automation, tokens, secrets, approvals, updates and the full command reference
+- [Agentic AI](https://fleet.cenvero.org/agentic.md): how AI coding agents such as Claude Code and Codex discover and operate servers through Fleet, with guard rails
+- [Overview](https://fleet.cenvero.org/index.md): what Fleet is, install commands, features, interfaces, transport, security and FAQ
+- [What's new](https://fleet.cenvero.org/whats-new.md): release notes from v2.0 to v2.4.3 and what is in development
 
 ## Source
 
-- [GitHub repository](https://github.com/cenvero/fleet)
-- [Releases](https://github.com/cenvero/fleet/releases)
-- [Changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)
+- [GitHub repository](https://github.com/cenvero/fleet): source code (Go), README and issues
+- [Releases](https://github.com/cenvero/fleet/releases): signed controller and agent archives for Linux, macOS and Windows
+- [Changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md): line-by-line history of every release
+- [Security policy](https://github.com/cenvero/fleet/security/policy): how to report a vulnerability privately (security@cenvero.org)
+
+## Optional
+
+- [Home page](https://fleet.cenvero.org/): HTML version of the overview
+- [Documentation (HTML)](https://fleet.cenvero.org/docs/): HTML version of the documentation
+- [Agentic AI (HTML)](https://fleet.cenvero.org/agentic.html): HTML version of the agentic-AI guide
+- [What's new (HTML)](https://fleet.cenvero.org/whats-new.html): HTML version of the release notes

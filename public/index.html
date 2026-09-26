@@ -16,6 +16,7 @@
   <link rel="icon" href="/assets/img/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
+  <link rel="alternate" type="text/markdown" href="/index.md" title="Cenvero Fleet (Markdown)">
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Cenvero Fleet">
@@ -54,24 +55,31 @@
         "@id": "https://fleet.cenvero.org/#website",
         "url": "https://fleet.cenvero.org/",
         "name": "Cenvero Fleet",
+        "description": "Official website and documentation of Cenvero Fleet, the free, open-source, self-hosted server fleet manager.",
         "inLanguage": "en",
-        "publisher": { "@id": "https://fleet.cenvero.org/#org" }
+        "publisher": { "@id": "https://fleet.cenvero.org/#org" },
+        "about": { "@id": "https://fleet.cenvero.org/#software" }
       },
       {
         "@type": "SoftwareApplication",
         "@id": "https://fleet.cenvero.org/#software",
         "name": "Cenvero Fleet",
         "url": "https://fleet.cenvero.org/",
-        "description": "Self-hosted, open-source fleet manager for Linux, macOS and Windows servers. Shell access, concurrent commands across servers, secure resumable file transfer, live directory sync, services, logs, metrics, alerts, a terminal dashboard, a terminal and web file manager, and a self-describing CLI that AI coding agents can operate — over encrypted, host-key-pinned SSH, with no cloud account.",
+        "description": "Cenvero Fleet is a free, open-source (AGPL-3.0-or-later), self-hosted fleet manager for Linux, macOS and Windows servers. A controller binary (fleet) manages agents (fleet-agent) over encrypted, host-key-pinned SSH in direct or reverse (NAT-friendly) mode, with persistent shells, concurrent commands across servers, secure resumable file transfer, live directory sync, services, logs, metrics, alerts, a terminal dashboard, terminal and web file managers, and a self-describing CLI that AI coding agents can operate. There is no cloud account or hosted control plane.",
         "applicationCategory": "DeveloperApplication",
         "applicationSubCategory": "Server and fleet management",
         "operatingSystem": "Linux, macOS, Windows",
-        "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+        "softwareRequirements": "The controller is a single binary with no runtime dependencies. Managed servers need SSH access; automatic agent installation needs Linux with systemd (macOS and Windows agents are set up manually).",
+        "softwareVersion": "2.4.3",
+        "releaseNotes": "https://fleet.cenvero.org/whats-new.html",
+        "license": "https://spdx.org/licenses/AGPL-3.0-or-later.html",
         "isAccessibleForFree": true,
         "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
         "downloadUrl": "https://github.com/cenvero/fleet/releases",
         "installUrl": "https://fleet.cenvero.org/#install",
-        "softwareHelp": "https://fleet.cenvero.org/docs/",
+        "softwareHelp": { "@type": "CreativeWork", "url": "https://fleet.cenvero.org/docs/" },
+        "sameAs": ["https://github.com/cenvero/fleet"],
+        "image": "https://fleet.cenvero.org/assets/img/icon-512.png",
         "screenshot": [
           "https://fleet.cenvero.org/assets/img/dashboard.webp",
           "https://fleet.cenvero.org/assets/img/file-manager.webp",
@@ -79,20 +87,38 @@
         ],
         "featureList": [
           "Agent auto-install over SSH with direct and reverse (NAT-friendly) transport",
-          "Concurrent commands across the fleet or a tag group with JSON output",
-          "Chunked, parallel, checksummed and resumable file transfer",
+          "Persistent interactive shells that survive network drops",
+          "Concurrent commands across the fleet or a tag group with JSON output, timeouts and retries",
+          "Chunked, parallel, SHA-256-checksummed and resumable file transfer, including server-to-server copies",
           "Live directory sync",
-          "Terminal dashboard, dual-pane terminal file manager and localhost web UI",
+          "Terminal dashboard, dual-pane terminal file manager and localhost web file manager",
           "Services, logs, journald, metrics, alerts and Slack/webhook notifications",
-          "Scoped RBAC tokens, named secrets, approvals, a dead-man's switch and an audit log",
-          "Self-describing CLI for AI coding agents such as Claude Code and Codex"
+          "Firewall and port management, SSH port tunnels, background jobs, cron and config drift detection",
+          "Idempotent playbooks and templates",
+          "Scoped RBAC tokens, encrypted named secrets, approvals, command policy, a dead-man's switch and a hash-chained audit log",
+          "Minisign-signed releases with anti-rollback updates",
+          "Self-describing CLI for AI coding agents such as Claude Code and Codex (fleet context, fleet ai, fleet skill)"
         ],
+        "keywords": "self-hosted server management, fleet management, SSH, remote command execution, file transfer, AI agents, Claude Code, Codex, open source",
         "author": { "@id": "https://fleet.cenvero.org/#org" },
         "publisher": { "@id": "https://fleet.cenvero.org/#org" }
       },
       {
+        "@type": "SoftwareSourceCode",
+        "@id": "https://fleet.cenvero.org/#source",
+        "name": "cenvero/fleet",
+        "codeRepository": "https://github.com/cenvero/fleet",
+        "programmingLanguage": "Go",
+        "license": "https://spdx.org/licenses/AGPL-3.0-or-later.html",
+        "targetProduct": { "@id": "https://fleet.cenvero.org/#software" },
+        "author": { "@id": "https://fleet.cenvero.org/#org" }
+      },
+      {
         "@type": "FAQPage",
         "@id": "https://fleet.cenvero.org/#faq",
+        "url": "https://fleet.cenvero.org/",
+        "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
+        "about": { "@id": "https://fleet.cenvero.org/#software" },
         "mainEntity": [
           { "@type": "Question", "name": "Is Cenvero Fleet free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Cenvero Fleet is free and open source under the AGPL-3.0-or-later license. There is no paid tier, no account and no hosted service." } },
           { "@type": "Question", "name": "Do I need a cloud account or a hosted control plane?", "acceptedAnswer": { "@type": "Answer", "text": "No. The controller is a binary on your own machine. It talks to your servers over encrypted, host-key-pinned SSH channels and keeps its state in a local directory with SQLite by default, or PostgreSQL, MySQL or MariaDB if you prefer." } },
@@ -150,7 +176,7 @@
       <div>
         <a class="pill" href="/whats-new.html"><span class="pill-tag">v2.4</span> What's new in Fleet <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-arrow-right"/></svg></a>
         <h1 id="hero-title">Every server you run, <span class="grad-text">one binary away.</span></h1>
-        <p class="hero-lead">Cenvero Fleet is a self-hosted fleet manager: shells, fan-out commands, secure file transfer, live sync, services, logs, metrics and alerts across Linux, macOS and Windows servers — over encrypted, host-key-pinned SSH. No cloud account, no hosted control plane. Built for humans and AI agents alike.</p>
+        <p class="hero-lead">Cenvero Fleet is a free, open-source, self-hosted server fleet manager: shells, fan-out commands, secure file transfer, live sync, services, logs, metrics and alerts across Linux, macOS and Windows servers — over encrypted, host-key-pinned SSH. No cloud account, no hosted control plane. Built for humans and AI agents alike.</p>
         <div class="hero-cta">
           <a class="btn btn-primary btn-lg" href="#install"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Install Fleet</a>
           <a class="btn btn-secondary btn-lg" href="/docs/"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-book-open"/></svg> Read the docs</a>
