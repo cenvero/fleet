@@ -28,7 +28,7 @@ func fmHelpGroups() []fmHelpGroup {
 			{"PgUp PgDn", "page up / down"},
 			{"Home End", "first / last item"},
 			{"↵  →  l", "open folder · file info"},
-			{"←  h  ⌫", "parent folder (← moves in icon view)"},
+			{"←  h  ⌫", "parent folder"},
 			{"Tab  ⇧Tab", "switch pane"},
 			{"Alt+←  H", "back"},
 			{"Alt+→  L", "forward"},
@@ -37,7 +37,7 @@ func fmHelpGroups() []fmHelpGroup {
 			{"~", "home / server's start folder"},
 			{"'", "places: bookmarks & recent"},
 			{"b", "bookmark this folder"},
-			{"=", "mirror navigation in both panes"},
+			{"=", "mirror navigation (both panes)"},
 			{"s", "change pane source"},
 		}},
 		{"Select", []fmHelpEntry{

@@ -1035,23 +1035,27 @@ func (m filesModel) renderPaneBody(side, cw, rows int, isDropTarget bool, p *fmP
 	switch {
 	case pane.loading && pane.listedCwd != pane.cwd:
 		return centeredBlock(cw, rows, p, []fmStyledLine{{"Loading…", p.muted}})
-	case pane.err != nil && !(pane.loading && pane.listedCwd == pane.cwd):
+	case pane.err != nil:
+		// Stays visible while a retry is in flight (the title shows ↻).
 		return m.renderPaneError(side, cw, rows, p)
-	case len(pane.entries) == 0 || (len(pane.entries) == 1 && pane.entries[0].name == ".." && pane.filter != ""):
+	case realCountFast(pane.entries) == 0 && (pane.view != viewGrid || len(pane.entries) == 0):
+		msg := []fmStyledLine{
+			{"This folder is empty", p.muted},
+			{"", p.base},
+			{"n new folder · N new file · drop files here", p.dim},
+		}
 		if pane.filter != "" {
-			return centeredBlock(cw, rows, p, []fmStyledLine{
+			msg = []fmStyledLine{
 				{"No items match “" + fmFit(fmSanitize(pane.filter), cw-20) + "”", p.warn},
 				{"", p.base},
 				{"esc clear filter · / edit filter", p.dim},
-			})
+			}
 		}
-		if len(pane.entries) == 0 {
-			return centeredBlock(cw, rows, p, []fmStyledLine{
-				{"This folder is empty", p.muted},
-				{"", p.base},
-				{"n new folder · N new file · drop files here", p.dim},
-			})
+		if len(pane.entries) == 1 && rows > 1 {
+			// Keep ".." clickable above the message.
+			return append([]string{m.renderRow(side, 0, cw, isDropTarget)}, centeredBlock(cw, rows-1, p, msg)...)
 		}
+		return centeredBlock(cw, rows, p, msg)
 	}
 	if pane.view == viewGrid {
 		return m.renderGridLines(side, cw, rows, isDropTarget, p)
@@ -1387,10 +1391,15 @@ func classifyPaneError(err error, pane paneState) fmErrorInfo {
 		root := fmSanitize(pane.root)
 		info := fmErrorInfo{title: "Outside the allowed file roots"}
 		info.hint = append(info.hint, who+" only allows file access inside its --file-root.")
-		if root != "" && root != "/" {
-			info.hint = append(info.hint, "Allowed root: "+root)
+		if root != "" && root != "/" && !strings.HasSuffix(root, `:\`) {
+			info.hint = append(info.hint, "Allowed root: "+root, "~ go to allowed root · ⌫ up · : go to path")
+		} else {
+			// The agent did not advertise its root (older agent or a stale
+			// record): say how to find it instead of offering a dead end.
+			info.hint = append(info.hint,
+				"Press : and enter a folder inside that root, or refresh what",
+				"the agent advertises with: fleet server reconnect "+who)
 		}
-		info.hint = append(info.hint, "~ go to allowed root · ⌫ up · : go to path")
 		return info
 	case has("permission denied", "access is denied", "operation not permitted", "eacces"):
 		return fmErrorInfo{title: "Permission denied", hint: []string{
@@ -2162,7 +2171,7 @@ func (m filesModel) renderEditor() string {
 		BorderForeground(fmAccent).
 		Background(fmPanelBg).
 		Padding(0, 1).
-		Width(bw)
+		Width(bw + 2) // lipgloss widths include padding; content is bw
 	inner := header + "\n" + fmRule.Render(strings.Repeat("─", bw)) + "\n" + body + "\n" +
 		fmRule.Render(strings.Repeat("─", bw)) + "\n" + footer
 	return pageStyle.Render(box.Render(inner))

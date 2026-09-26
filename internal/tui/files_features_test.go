@@ -1074,3 +1074,35 @@ func TestNoColorKeepsCursorVisible(t *testing.T) {
 		t.Fatalf("NO_COLOR frame has %d lines", n)
 	}
 }
+
+// TestEditorFrameFitsScreen is a regression test: the editor's header and
+// rules were built for the padded width, so they wrapped and pushed the
+// title off the top of the screen.
+func TestEditorFrameFitsScreen(t *testing.T) {
+	t.Parallel()
+	for _, dim := range [][2]int{{80, 24}, {160, 45}, {220, 60}} {
+		m := sampleFilesModel(dim[0], dim[1])
+		m.overlay = overlayEditor
+		m.editor = &editorState{active: true, path: "/x/main.go", name: "main.go"}
+		mm, _ := m.onEditorLoaded(editorLoadedMsg{path: "/x/main.go", name: "main.go", content: "package main\n\nfunc main() {}\n"})
+		m = mm.(filesModel)
+		for _, mode := range []string{"view", "edit"} {
+			if mode == "edit" {
+				mm, _ = m.toggleEditorMode()
+				m = mm.(filesModel)
+			}
+			lines := frameLines(m.View())
+			if len(lines) != dim[1] {
+				t.Fatalf("%v %s: editor frame has %d lines, want %d", dim, mode, len(lines), dim[1])
+			}
+			for i, ln := range lines {
+				if w := lipgloss.Width(ln); w > dim[0] {
+					t.Fatalf("%v %s: line %d is %d wide", dim, mode, i, w)
+				}
+			}
+			if !strings.Contains(stripANSI(lines[2]), "main.go") {
+				t.Fatalf("%v %s: title not on the header line: %q", dim, mode, stripANSI(lines[2]))
+			}
+		}
+	}
+}

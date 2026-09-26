@@ -459,7 +459,7 @@ func (m filesModel) openContextMenu(side, idx, x, y int) filesModel {
 func (m filesModel) openActionsMenu(side, x, y int, overflow []toolButton, title string) filesModel {
 	var items []contextMenuItem
 	for _, b := range overflow {
-		items = append(items, contextMenuItem{key: b.key, label: b.label, action: b.action, enabled: true})
+		items = append(items, contextMenuItem{key: b.key, label: m.menuLabel(b), action: b.action, enabled: true})
 	}
 	items = append(items,
 		contextMenuItem{key: ":", label: "Go to path…", action: "goto", enabled: true},
@@ -478,6 +478,49 @@ func (m filesModel) openActionsMenu(side, x, y int, overflow []toolButton, title
 	m.menuX, m.menuY = x, y
 	m.menuSide, m.menuRow = side, -1
 	return m
+}
+
+// menuLabel is the descriptive label a toolbar action gets inside a menu.
+func (m filesModel) menuLabel(b toolButton) string {
+	switch b.action {
+	case "source":
+		return "Change source…"
+	case "edit":
+		return "View / edit"
+	case "newfolder":
+		return "New folder…"
+	case "newfile":
+		return "New file…"
+	case "rename":
+		return "Rename…"
+	case "delete":
+		return "Delete…"
+	case "copy":
+		return "Copy to other pane"
+	case "move":
+		return "Move to other pane"
+	case "compress":
+		return "Compress…"
+	case "chmod":
+		return "Permissions…"
+	case "props":
+		return "Properties"
+	case "filter":
+		return "Filter…"
+	case "preview":
+		if m.preview.on {
+			return "Hide preview"
+		}
+		return "Show preview"
+	case "hidden":
+		if m.showHidden {
+			return "Hide hidden files"
+		}
+		return "Show hidden files"
+	case "refresh":
+		return "Refresh"
+	}
+	return b.label
 }
 
 func (m filesModel) runContextAction(action string) (tea.Model, tea.Cmd) {
