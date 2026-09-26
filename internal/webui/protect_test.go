@@ -58,6 +58,9 @@ func TestLocalSourceRefusesConfigDir(t *testing.T) {
 				t.Fatalf("%s %s: %d %s", ep, target, code, body)
 			}
 		}
+		if code, _ := get("/api/preview", url.Values{"path": {target}, "kind": {"text"}}); code != http.StatusForbidden {
+			t.Fatalf("preview %s: %d", target, code)
+		}
 	}
 
 	posts := []struct {

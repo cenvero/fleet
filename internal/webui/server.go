@@ -128,8 +128,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/read", s.guard(s.handleRead))
 	mux.HandleFunc("/api/checksum", s.guard(s.handleChecksum))
 	mux.HandleFunc("/api/progress", s.guard(s.handleProgress))
-	// Transfer tracking. GET-only endpoints never change state; the one
-	// mutation (cancel) is POST so the CSRF check covers it.
+	// Read-only views and transfer tracking. GET-only endpoints never change
+	// state; the one mutation (cancel) is POST so the CSRF check covers it.
+	mux.HandleFunc("/api/preview", s.guard(getOnly(s.handlePreview)))
 	mux.HandleFunc("/api/transfers", s.guard(getOnly(s.handleTransfers)))
 	mux.HandleFunc("/api/transfers/stream", s.guard(getOnly(s.handleTransferStream)))
 	mux.HandleFunc("/api/transfers/cancel", s.guard(postOnly(s.handleTransferCancel)))
