@@ -69,7 +69,6 @@ Omit sections that have no entries for that release.
   chunk-digest finalize.
 - `FLEET_NO_DAEMON_RELAY=1` disables relaying direct-mode calls through a running
   daemon.
-
 - The `destructive` notification event now fires after destructive CLI commands
   (it was advertised but never sent).
 - The audit log records remote commands (`exec.run`), approval decisions, cmd-policy
@@ -118,6 +117,10 @@ Omit sections that have no entries for that release.
 - Pooled SSH connections send keepalives; reverse agents reconnect promptly with
   jitter; the reverse-mode offline metrics queue is capped and replayed in idempotent
   pages.
+- The public website (fleet.cenvero.org) is redesigned: light and dark themes, real
+  product screenshots, a current and complete documentation page, release notes, and
+  structured data for search. It loads no third-party fonts or scripts and runs under
+  a strict Content-Security-Policy.
 
 ### Fixed
 
