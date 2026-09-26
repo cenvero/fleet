@@ -87,6 +87,10 @@ type activeUpload struct {
 	totalSize int64
 	mode      uint32
 	done      bool
+	// finalizing is set (under fileManager.mu) once a finalize or abort has
+	// claimed the upload; open_write and a second finalize then answer
+	// transfer_busy until it has finished.
+	finalizing bool
 
 	// records remembers every verified chunk (offset -> length/checksum) so
 	// finalize can check the assembled file against the controller's chunk
@@ -446,6 +450,12 @@ func validTransferID(id string) bool {
 	return true
 }
 
+// transferBusy reports a transfer whose finalize is still running; the caller
+// should retry shortly.
+func transferBusy() *RPCError {
+	return &RPCError{Code: "transfer_busy", Message: "a finalize for this transfer is in progress; retry shortly"}
+}
+
 func invalidTransferID() *RPCError {
 	return &RPCError{Code: "invalid_transfer_id", Message: "transfer_id must be a bounded safe path component"}
 }
@@ -562,6 +572,37 @@ func reapStaleParts(dir, keepName string, now time.Time) {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
+}
+
+// reapInterval spaces out stale-temp sweeps of one directory. Every upload
+// used to list its whole destination directory first, which made uploading
+// many small files into one directory quadratic.
+const reapInterval = 5 * time.Minute
+
+var (
+	reapMu   sync.Mutex
+	reapLast = map[string]time.Time{}
+)
+
+// maybeReapStalePartsRoot runs reapStalePartsRoot at most once per
+// reapInterval for a directory.
+func maybeReapStalePartsRoot(root *os.Root, dirRel, keepName string, now time.Time) {
+	key := filepath.Join(root.Name(), dirRel)
+	reapMu.Lock()
+	if last, ok := reapLast[key]; ok && now.Sub(last) < reapInterval {
+		reapMu.Unlock()
+		return
+	}
+	if len(reapLast) >= 4096 {
+		for k, t := range reapLast {
+			if now.Sub(t) >= reapInterval {
+				delete(reapLast, k)
+			}
+		}
+	}
+	reapLast[key] = now
+	reapMu.Unlock()
+	reapStalePartsRoot(root, dirRel, keepName, now)
 }
 
 func reapStalePartsRoot(root *os.Root, dirRel, keepName string, now time.Time) {
@@ -906,6 +947,9 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.active[p.TransferID]; ok {
+		if existing.finalizing {
+			return proto.FileOpenWriteResult{}, transferBusy()
+		}
 		if existing.finalPath != real || existing.totalSize != p.TotalSize {
 			return proto.FileOpenWriteResult{}, &RPCError{Code: "transfer_conflict", Message: "transfer_id is already bound to a different destination or size"}
 		}
@@ -934,7 +978,7 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		_ = root.Close()
 		return proto.FileOpenWriteResult{}, err
 	}
-	reapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
+	maybeReapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
 	if info, err := root.Lstat(tempRel); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			_ = root.Close()
@@ -1073,8 +1117,24 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 		m.mu.Unlock()
 		return proto.FileFinalizeResult{}, &RPCError{Code: "transfer_conflict", Message: "finalize path or size does not match open upload"}
 	}
-	delete(m.active, p.TransferID)
+	if au.finalizing {
+		m.mu.Unlock()
+		return proto.FileFinalizeResult{}, transferBusy()
+	}
+	// Stay registered (as finalizing) until the temp file has been renamed or
+	// removed. Dropping the entry first let an open_write for the same
+	// transfer — a controller retrying after losing the finalize reply —
+	// reopen the temp file just before this finalize renamed it away, and
+	// that second upload then failed to install.
+	au.finalizing = true
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.active[p.TransferID] == au {
+			delete(m.active, p.TransferID)
+		}
+		m.mu.Unlock()
+	}()
 	defer au.root.Close()
 
 	au.mu.Lock()
@@ -1342,7 +1402,7 @@ func writeAtomically(root *os.Root, finalRel string, mode os.FileMode, fill func
 	if rerr := checkBlockedTransferPath(filepath.Join(root.Name(), tempRel)); rerr != nil {
 		return 0, rerr
 	}
-	reapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
+	maybeReapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
 	f, err := root.OpenFile(tempRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
 	if err != nil {
 		return 0, &RPCError{Code: "open_failed", Message: err.Error()}

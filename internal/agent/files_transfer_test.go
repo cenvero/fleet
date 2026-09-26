@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -293,6 +294,63 @@ func TestProbeRecordsHashedRangesForActiveUpload(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(dest); !bytes.Equal(got, content) {
 		t.Fatalf("content = %q", got)
+	}
+}
+
+// TestOpenWriteDuringFinalizeIsBusy is the regression test for a resumed upload
+// failing with rename_failed: an open_write that arrived while a finalize of
+// the same transfer was still running reopened the temp file just before the
+// finalize renamed it away, so the second upload could never be installed.
+func TestOpenWriteDuringFinalizeIsBusy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.bin")
+	data := []byte("finalize-race")
+	const id = "tid-busy"
+	m := NewFileManager().(*fileManager)
+	if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: int64(len(data)), TransferID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeChunk(t, m, id, dest, 0, data); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	au := m.active[id]
+	m.mu.Unlock()
+	au.mu.RLock() // a write still in flight keeps the finalize waiting
+	finalized := make(chan error, 1)
+	go func() {
+		_, err := m.Finalize(ctx, proto.FileFinalizePayload{TransferID: id, Path: dest, TotalSize: int64(len(data)), WholeSHA256: sumHex(data)})
+		finalized <- err
+	}()
+	for {
+		m.mu.Lock()
+		claimed := au.finalizing
+		m.mu.Unlock()
+		if claimed {
+			break
+		}
+		runtime.Gosched()
+	}
+	if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: int64(len(data)), TransferID: id}); rpcCode(err) != "transfer_busy" {
+		au.mu.RUnlock()
+		t.Fatalf("OpenWrite during finalize error = %v, want transfer_busy", err)
+	}
+	au.mu.RUnlock()
+	if err := <-finalized; err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	// Once finished, the same transfer can be uploaded again from scratch.
+	ow, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: int64(len(data)), TransferID: id})
+	if err != nil || ow.ResumeOffset != 0 {
+		t.Fatalf("OpenWrite after finalize = %+v, %v", ow, err)
+	}
+	if err := writeChunk(t, m, id, dest, 0, data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Finalize(ctx, proto.FileFinalizePayload{TransferID: id, Path: dest, TotalSize: int64(len(data)), WholeSHA256: sumHex(data)}); err != nil {
+		t.Fatalf("second Finalize: %v", err)
 	}
 }
 
