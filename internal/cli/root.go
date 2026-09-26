@@ -862,6 +862,17 @@ func newUICommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The UI acts with the authority of this invocation. When it was
+			// launched under an RBAC token (already vetted for `file ui` by the
+			// pre-run gate), the extra read-only views it offers — the Fleet
+			// overview's server list, alerts and tags — are held to the same
+			// token, exactly as `server list` / `alerts` / `tag` would be.
+			if actingOperator != "" {
+				srv.SetOperator(actingOperator)
+			}
+			if authz := uiCommandAuthorizer(cmd, *configDir); authz != nil {
+				srv.SetCommandAuthorizer(authz)
+			}
 			// Decide whether to open the browser BEFORE installing the signal
 			// handler, so Ctrl-C during the prompt still quits normally.
 			shouldOpen := decideOpenBrowser(cmd, open)
@@ -884,6 +895,49 @@ func newUICommand(configDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&addr, "addr", webui.DefaultAddr, "loopback bind address for the web UI")
 	cmd.Flags().StringVar(&open, "open", "auto", "open the web UI in a browser: auto (prompt when interactive), yes, or no")
 	return cmd
+}
+
+// uiCommandAuthorizer returns an RBAC check bound to the --token / FLEET_TOKEN
+// the web UI was launched with, or nil for an unscoped invocation. A token
+// that can no longer be loaded denies everything (fail closed).
+func uiCommandAuthorizer(cmd *cobra.Command, configDir string) func(command string) error {
+	tokenID := ""
+	if f := cmd.Flags().Lookup("token"); f != nil {
+		tokenID = strings.TrimSpace(f.Value.String())
+	}
+	if tokenID == "" {
+		tokenID = strings.TrimSpace(os.Getenv("FLEET_TOKEN"))
+	}
+	if tokenID == "" {
+		return nil
+	}
+	return func(command string) error {
+		token, err := core.NewTokenStore(configDir).Get(tokenID)
+		if err != nil {
+			return fmt.Errorf("denied: unknown or revoked token")
+		}
+		// Every read the web UI authorizes here is fleet-wide (the overview
+		// lists every server, alert and tag). core.Authorize only enforces a
+		// server scope when a target server is named, so a server-scoped token
+		// is refused outright, as the CLI refuses it an untargeted `server
+		// list` or a fleet-wide `top`/`health`. (Such a token cannot start the
+		// UI today; this keeps the overview closed if that ever changes.)
+		if len(token.Servers) > 0 || len(token.Groups) > 0 {
+			return fmt.Errorf("denied: a server-scoped token cannot read the fleet-wide %q view", command)
+		}
+		var names []string
+		if len(token.Groups) > 0 {
+			if app, aerr := openApp(configDir); aerr == nil {
+				if servers, serr := app.ListServers(); serr == nil {
+					for _, s := range servers {
+						names = append(names, s.Name)
+					}
+				}
+				_ = app.Close()
+			}
+		}
+		return core.Authorize(token, command, "", false, names, core.NewTagStore(configDir))
+	}
 }
 
 // decideOpenBrowser resolves the --open flag: "yes"/"no" are explicit; "auto"

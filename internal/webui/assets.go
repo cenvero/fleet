@@ -8,5 +8,8 @@ import "embed"
 //go:embed assets/index.html
 var indexHTML []byte
 
-//go:embed assets/app.js assets/app.css
+// Every asset the page loads is embedded: the UI never reaches a CDN or any
+// external origin, which is what lets the CSP stay at 'self'.
+//
+//go:embed assets/app.js assets/app.css assets/theme.js assets/favicon.svg
 var assets embed.FS

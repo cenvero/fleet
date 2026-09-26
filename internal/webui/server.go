@@ -20,11 +20,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -42,6 +42,16 @@ type Server struct {
 	app   *core.App
 	token string
 	hub   *progressHub
+	// files is the remote read surface used for streaming downloads and
+	// previews (the App itself outside tests).
+	files remoteFiles
+	// localGuard keeps the Local source out of the controller's config dir.
+	localGuard localGuard
+	// authorizer, when set, applies the RBAC token the UI was launched with
+	// to reads the UI performs beyond file management (the Fleet overview).
+	authorizer func(command string) error
+	// operator is the audit attribution for actions the UI records itself.
+	operator string
 }
 
 // New builds a web UI server with a fresh random session token.
@@ -50,11 +60,25 @@ func New(app *core.App) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{app: app, token: token, hub: newProgressHub()}, nil
+	s := &Server{app: app, token: token, hub: newProgressHub()}
+	if app != nil {
+		s.files = app
+		s.localGuard = newLocalGuard(app.ConfigDir)
+	}
+	return s, nil
 }
 
 // Token returns the per-process access token.
 func (s *Server) Token() string { return s.token }
+
+// SetCommandAuthorizer installs an RBAC check for the read-only views the UI
+// offers beyond file management. fn receives the CLI command the view is
+// equivalent to ("server", "alerts", "tag") and returns an error to deny it.
+func (s *Server) SetCommandAuthorizer(fn func(command string) error) { s.authorizer = fn }
+
+// SetOperator sets the audit-log operator label (e.g. "token:<name>") used for
+// entries the web UI writes itself.
+func (s *Server) SetOperator(op string) { s.operator = strings.TrimSpace(op) }
 
 // ListenAndServe binds addr (must be loopback) and serves until ctx is done.
 // It prints the access URL (with token) once. If addr is empty, DefaultAddr.
@@ -104,15 +128,24 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/app.js", s.staticAsset("app.js", "text/javascript"))
 	mux.HandleFunc("/app.css", s.staticAsset("app.css", "text/css"))
+	mux.HandleFunc("/theme.js", s.staticAsset("theme.js", "text/javascript"))
+	mux.HandleFunc("/favicon.svg", s.staticAsset("favicon.svg", "image/svg+xml"))
 
 	mux.HandleFunc("/api/servers", s.guard(s.handleServers))
 	mux.HandleFunc("/api/formats", s.guard(s.handleFormats))
 	mux.HandleFunc("/api/list", s.guard(s.handleList))
 	mux.HandleFunc("/api/upload", s.guard(s.handleUpload))
-	mux.HandleFunc("/api/download", s.guard(s.handleDownload))
+	mux.HandleFunc("/api/download", s.guard(getOnly(s.handleDownload)))
 	mux.HandleFunc("/api/read", s.guard(s.handleRead))
 	mux.HandleFunc("/api/checksum", s.guard(s.handleChecksum))
 	mux.HandleFunc("/api/progress", s.guard(s.handleProgress))
+	// Read-only views and transfer tracking. GET-only endpoints never change
+	// state; the one mutation (cancel) is POST so the CSRF check covers it.
+	mux.HandleFunc("/api/preview", s.guard(getOnly(s.handlePreview)))
+	mux.HandleFunc("/api/overview", s.guard(getOnly(s.handleOverview)))
+	mux.HandleFunc("/api/transfers", s.guard(getOnly(s.handleTransfers)))
+	mux.HandleFunc("/api/transfers/stream", s.guard(getOnly(s.handleTransferStream)))
+	mux.HandleFunc("/api/transfers/cancel", s.guard(postOnly(s.handleTransferCancel)))
 	// Mutating endpoints are POST-only so the guard's Origin/CSRF check applies
 	// (a state-changing GET would slip past it).
 	mux.HandleFunc("/api/mkdir", s.guard(postOnly(s.handleMkdir)))
@@ -151,6 +184,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy",
 			"default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		// Isolate the page from other origins' windows and keep its responses
+		// (file bytes, previews, JSON) from being embedded cross-origin.
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -160,6 +198,20 @@ func securityHeaders(next http.Handler) http.Handler {
 func postOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// getOnly rejects anything but GET for read-only endpoints, so no read
+// endpoint can be driven by a (CSRF-exempt-looking) non-GET method.
+func getOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -185,8 +237,11 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized: missing or bad token", http.StatusUnauthorized)
 			return
 		}
-		// CSRF: state-changing requests must originate from a loopback page.
-		if r.Method == http.MethodPost && !originLoopback(r) {
+		// CSRF: state-changing requests must originate from a loopback page —
+		// and, when the browser names the origin, from THIS page (same host
+		// and port), not some other local web app that learned nothing but
+		// could still try a blind POST.
+		if r.Method == http.MethodPost && (!originLoopback(r) || !originMatchesHost(r)) {
 			http.Error(w, "forbidden: bad origin", http.StatusForbidden)
 			return
 		}
@@ -221,6 +276,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: loopback only", http.StatusForbidden)
 		return
 	}
+	if !hostHeaderOK(r) {
+		http.Error(w, "forbidden: bad host header", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(indexHTML)
 }
@@ -228,7 +287,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) staticAsset(name, contentType string) http.HandlerFunc {
 	data, _ := assets.ReadFile("assets/" + name)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !isLoopbackRequest(r) {
+		if !isLoopbackRequest(r) || !hostHeaderOK(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -253,7 +312,8 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		BrowseRoot      string               `json:"browse_root"`
 		CaseInsensitive bool                 `json:"case_insensitive"`
 	}
-	localCaseInsensitive, err := core.LocalPathCaseInsensitive(initialLocalPath())
+	localStart := s.initialLocalRoot()
+	localCaseInsensitive, err := core.LocalPathCaseInsensitive(localStart)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -266,7 +326,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 			Reachable:       true,
 			OS:              runtime.GOOS,
 			PathStyle:       core.NativePathStyle(),
-			InitialRoot:     initialLocalPath(),
+			InitialRoot:     localStart,
 			BrowseRoot:      core.NativePathStyle().DefaultRoot(),
 			CaseInsensitive: localCaseInsensitive,
 		},
@@ -303,6 +363,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	hs := "0"
 	if showHidden {
 		hs = "1"
+	}
+	if server == "" {
+		// Refuse protected locations before the cache is even consulted.
+		clean, err := s.cleanLocal(dir)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		dir = clean
 	}
 	cacheKey := server + "\x00" + dir + "\x00" + hs
 	if result, ok := listCache.get(cacheKey); ok {
@@ -384,7 +453,7 @@ func (s *Server) nameOnlyPath(server, dir, name string) (string, error) {
 		return "", err
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(dir)
+		clean, err := s.cleanLocal(dir)
 		if err != nil {
 			return "", err
 		}
@@ -617,7 +686,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 	dstLocal := dstServer == ""
 	// Validate local endpoints up front so a bad path fails fast (and cleanly).
 	if srcLocal {
-		clean, err := cleanLocalPath(srcPath)
+		clean, err := s.cleanLocal(srcPath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -625,7 +694,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 		srcPath = clean
 	}
 	if dstLocal {
-		clean, err := cleanLocalPath(dstPath)
+		clean, err := s.cleanLocal(dstPath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -648,7 +717,22 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 		}
 	}
 
-	id := s.hub.start()
+	kind := "copy"
+	if move {
+		kind = "move"
+	}
+	id, err := s.hub.startMeta(transferMeta{
+		Kind:      kind,
+		Label:     s.displayBase(srcServer, srcPath),
+		SrcServer: srcServer,
+		SrcPath:   srcPath,
+		DstServer: dstServer,
+		DstPath:   dstPath,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	go func() {
 		prog := func(u core.ProgressUpdate) { s.hub.update(id, u) }
 		var err error
@@ -754,7 +838,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// controller. All lexical operations use filepath so this works on the
 	// controller's native OS (including Windows drive paths).
 	if server == "" {
-		dir, err := cleanLocalPath(rawDir)
+		dir, err := s.cleanLocal(rawDir)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -818,7 +902,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = tmp.Close()
 
-	id := s.hub.start()
+	id, err := s.hub.startMeta(transferMeta{Kind: "upload", Label: name, SrcPath: name, DstServer: server, DstPath: remotePath})
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		writeError(w, err)
+		return
+	}
 	go func() {
 		defer os.Remove(tmpPath)
 		_, err := s.app.UploadFile(server, tmpPath, remotePath, core.FileTransferOptions{}, func(u core.ProgressUpdate) {
@@ -827,66 +916,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		s.hub.finish(id, err)
 	}()
 	writeJSON(w, map[string]string{"id": id, "remote_path": remotePath})
-}
-
-func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	server := r.URL.Query().Get("server")
-	remotePath := r.URL.Query().Get("path")
-	if remotePath == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
-		return
-	}
-	if server == "" { // Local: stream the controller's file directly.
-		clean, err := cleanLocalPath(remotePath)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		info, err := os.Stat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if info.IsDir() {
-			writeError(w, fmt.Errorf("cannot download a directory"))
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(clean)))
-		http.ServeFile(w, r, clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
-		return
-	}
-	style, err := s.targetPathStyle(server)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	tmp, err := os.CreateTemp("", "fleet-webui-download-*")
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := s.app.DownloadFile(server, remotePath, tmpPath, core.FileTransferOptions{}, nil); err != nil {
-		writeError(w, err)
-		return
-	}
-	f, err := os.Open(tmpPath) // #nosec G304 -- temporary path was returned by os.CreateTemp and is controller-owned
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer f.Close()
-	info, _ := f.Stat()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", style.Base(remotePath)))
-	if info != nil {
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	}
-	_, _ = io.Copy(w, f)
 }
 
 // looksBinary reports whether b appears to be binary (and thus not safe to show
@@ -919,7 +948,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 	var data []byte
 	if server == "" { // Local: the controller's own filesystem.
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1013,7 +1042,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" { // Local
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1065,7 +1094,7 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p, err := s.nameOnlyPath(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		badRequest(w, err)
 		return
 	}
 	if server == "" { // Local
@@ -1105,6 +1134,10 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 // if the underlying transfer never reports Done.
 const maxSSELifetime = 30 * time.Minute
 
+// progressUnknownGrace is how long /api/progress waits for an id to appear
+// (a tracked download registers when its GET arrives) before giving up.
+var progressUnknownGrace = 20 * time.Second
+
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
@@ -1126,6 +1159,8 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
+	opened := time.Now()
+	seen := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -1133,8 +1168,16 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 			snap, ok := s.hub.snapshot(id)
 			if !ok {
+				// An id that never appears (or has expired) must not pin a
+				// connection for the whole SSE lifetime.
+				if seen || time.Since(opened) > progressUnknownGrace {
+					fmt.Fprint(w, "event: gone\ndata: {}\n\n")
+					flusher.Flush()
+					return
+				}
 				continue
 			}
+			seen = true
 			payload, _ := json.Marshal(snap)
 			fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()
@@ -1149,7 +1192,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p, err := s.nameOnlyPath(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		badRequest(w, err)
 		return
 	}
 	if server == "" { // Local
@@ -1171,7 +1214,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
 	recursive := r.URL.Query().Get("recursive") == "true"
 	if server == "" { // Local
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1218,9 +1261,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if server == "" {
-			clean, err := cleanLocalPath(from)
+			clean, err := s.cleanLocal(from)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				badRequest(w, err)
 				return
 			}
 			from = clean
@@ -1249,12 +1292,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if server == "" { // Local rename or same-pane move
-		cf, err := cleanLocalPath(from)
+		cf, err := s.cleanLocal(from)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		ct, err := cleanLocalPath(to)
+		ct, err := s.cleanLocal(to)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1295,7 +1338,7 @@ func (s *Server) handleCompress(w http.ResponseWriter, r *http.Request) {
 	var style core.TargetPathStyle
 	if server == "" {
 		style = core.NativePathStyle()
-		clean, err := cleanLocalPath(dir)
+		clean, err := s.cleanLocal(dir)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1343,7 +1386,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1369,7 +1412,7 @@ func (s *Server) handleChmod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1391,7 +1434,7 @@ func (s *Server) handleChecksum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1416,7 +1459,7 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := cleanLocalPath(p)
+		clean, err := s.cleanLocal(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1557,93 +1600,6 @@ func freeTargetDuplicateName(style core.TargetPathStyle, p string, exists func(s
 	}
 }
 
-// ---- progress hub ----
-
-type progressHub struct {
-	mu    sync.Mutex
-	items map[string]*liveTransfer
-}
-
-type liveTransfer struct {
-	upd  core.ProgressUpdate
-	done bool
-	err  string
-}
-
-// progressSnapshot is the SSE payload.
-type progressSnapshot struct {
-	BytesDone     int64   `json:"bytes_done"`
-	TotalBytes    int64   `json:"total_bytes"`
-	RatePerSec    float64 `json:"rate_per_sec"`
-	ActiveStreams int     `json:"active_streams"`
-	Percent       int     `json:"percent"`
-	Done          bool    `json:"done"`
-	Error         string  `json:"error,omitempty"`
-}
-
-func newProgressHub() *progressHub {
-	return &progressHub{items: make(map[string]*liveTransfer)}
-}
-
-func (h *progressHub) start() string {
-	id, _ := randomToken()
-	h.mu.Lock()
-	h.items[id] = &liveTransfer{}
-	h.mu.Unlock()
-	return id
-}
-
-func (h *progressHub) update(id string, u core.ProgressUpdate) {
-	h.mu.Lock()
-	if t, ok := h.items[id]; ok {
-		t.upd = u
-	}
-	h.mu.Unlock()
-}
-
-func (h *progressHub) finish(id string, err error) {
-	h.mu.Lock()
-	if t, ok := h.items[id]; ok {
-		t.done = true
-		if err != nil {
-			t.err = err.Error()
-		} else if t.upd.TotalBytes > 0 {
-			t.upd.BytesDone = t.upd.TotalBytes
-		}
-	}
-	h.mu.Unlock()
-	// Drop the record a little later so a slow SSE poller can still read the
-	// terminal state.
-	go func() {
-		time.Sleep(30 * time.Second)
-		h.mu.Lock()
-		delete(h.items, id)
-		h.mu.Unlock()
-	}()
-}
-
-func (h *progressHub) snapshot(id string) (progressSnapshot, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	t, ok := h.items[id]
-	if !ok {
-		return progressSnapshot{}, false
-	}
-	pct := 0
-	if t.upd.TotalBytes > 0 {
-		pct = int(t.upd.BytesDone * 100 / t.upd.TotalBytes)
-	}
-	return progressSnapshot{
-		BytesDone:     t.upd.BytesDone,
-		TotalBytes:    t.upd.TotalBytes,
-		RatePerSec:    t.upd.RatePerSec,
-		ActiveStreams: t.upd.ActiveStreams,
-		Percent:       pct,
-		Done:          t.done,
-		Error:         t.err,
-	}, true
-}
-
 // ---- helpers ----
 
 func randomToken() (string, error) {
@@ -1742,13 +1698,44 @@ func originLoopback(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// originMatchesHost tightens the loopback-origin rule to same-origin: when a
+// request carries an Origin, its host:port must be the Host the request was
+// sent to. (Requests with no Origin are covered by originLoopback's
+// Sec-Fetch-Site rule.) This stops a different local web app — another port on
+// 127.0.0.1 — from even attempting a state-changing request.
+func originMatchesHost(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSuffix(u.Host, "."), strings.TrimSuffix(r.Host, "."))
+}
+
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	if errors.Is(err, errProtectedPath) {
+		status = http.StatusForbidden
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadGateway)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// badRequest reports a validation failure (400), except that a refusal to
+// touch a protected path is a 403 like everywhere else.
+func badRequest(w http.ResponseWriter, err error) {
+	if errors.Is(err, errProtectedPath) {
+		writeError(w, err)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
