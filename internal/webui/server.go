@@ -418,6 +418,36 @@ func initialLocalPath() string {
 // returned in cleaned form. An empty path starts in the controller's native
 // working directory rather than assuming a POSIX root on every host. Relative
 // paths are rejected so browser input cannot be resolved implicitly.
+// errDotComponent refuses a Local mutation whose raw path has a "." or ".."
+// component. Such a path is never cleaned into a different target: after
+// cleaning, "/x/a/.." would silently become "/x" and a delete meant for "a"
+// would remove its parent. The agent refuses the same paths for servers.
+var errDotComponent = errors.New(`invalid path: "." and ".." components are not allowed; give the full path`)
+
+// errEmptyMutationPath refuses a Local mutation with no path. cleanLocalPath
+// maps "" to the starting directory, which is right for browsing but must
+// never make a delete or move act on the working directory.
+var errEmptyMutationPath = errors.New("invalid path: a path is required")
+
+// validateLocalMutationPath checks the RAW path of a Local operation that
+// creates, replaces, moves or removes something, before any cleaning.
+func validateLocalMutationPath(p string) error {
+	if strings.TrimSpace(p) == "" {
+		return errEmptyMutationPath
+	}
+	start := 0
+	for i := 0; i <= len(p); i++ {
+		if i < len(p) && p[i] != '/' && !os.IsPathSeparator(p[i]) {
+			continue
+		}
+		if part := p[start:i]; part == "." || part == ".." {
+			return fmt.Errorf("%w (%q)", errDotComponent, p)
+		}
+		start = i + 1
+	}
+	return nil
+}
+
 func cleanLocalPath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		p = initialLocalPath()
@@ -458,7 +488,7 @@ func (s *Server) nameOnlyPath(server, dir, name string) (string, error) {
 		return "", err
 	}
 	if server == "" {
-		clean, err := s.cleanLocal(dir)
+		clean, err := s.cleanLocalWrite(dir)
 		if err != nil {
 			return "", err
 		}
@@ -853,7 +883,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// controller. All lexical operations use filepath so this works on the
 	// controller's native OS (including Windows drive paths).
 	if server == "" {
-		dir, err := s.cleanLocal(rawDir)
+		dir, err := s.cleanLocalWrite(rawDir)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1061,7 +1091,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" { // Local
-		clean, err := s.cleanLocal(p)
+		clean, err := s.cleanLocalWrite(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1357,7 +1387,7 @@ func (s *Server) handleCompress(w http.ResponseWriter, r *http.Request) {
 	var style core.TargetPathStyle
 	if server == "" {
 		style = core.NativePathStyle()
-		clean, err := s.cleanLocal(dir)
+		clean, err := s.cleanLocalWrite(dir)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1411,7 +1441,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := s.cleanLocal(p)
+		clean, err := s.cleanLocalWrite(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1442,7 +1472,7 @@ func (s *Server) handleChmod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := s.cleanLocal(p)
+		clean, err := s.cleanLocalWrite(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1758,6 +1788,8 @@ func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	if isProtectedErr(err) {
 		status = http.StatusForbidden
+	} else if errors.Is(err, errDotComponent) || errors.Is(err, errEmptyMutationPath) {
+		status = http.StatusBadRequest
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
