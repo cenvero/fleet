@@ -6,13 +6,17 @@ The controller stores its working data inside the chosen config directory instea
 
 ## Default Layout
 
-The default config directory is:
+The default config directory depends on the platform:
 
-```text
-~/.cenvero-fleet
-```
+| Platform | Default |
+|---|---|
+| Linux | `~/.cenvero-fleet` |
+| macOS | `~/Library/Application Support/Cenvero Fleet` (an existing `~/.cenvero-fleet` keeps working) |
+| Windows | `%LOCALAPPDATA%\Cenvero Fleet` |
 
-Typical layout:
+`--config-dir <path>` or the `FLEET_CONFIG_DIR` environment variable picks another one.
+
+Typical layout (shown for `~/.cenvero-fleet`):
 
 ```text
 ~/.cenvero-fleet/

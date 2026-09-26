@@ -1,0 +1,26 @@
+# Cenvero Fleet
+
+> Cenvero Fleet is a free, open-source (AGPL-3.0-or-later), self-hosted fleet manager for Linux, macOS and Windows servers. A single controller binary (`fleet`) manages agents (`fleet-agent`) over encrypted, host-key-pinned SSH — in direct mode, or in reverse mode where the agent dials out so servers behind NAT need no inbound ports. There is no cloud account or hosted control plane.
+
+It provides persistent shells, concurrent commands across the fleet or a tag group with JSON output, chunked/parallel/checksummed/resumable file transfer, live directory sync, services, logs, journald, metrics, alerts, Slack/webhook notifications, jobs, cron, drift detection, a terminal dashboard, a dual-pane terminal file manager, and a localhost web UI. Safety features include fail-closed scoped RBAC tokens, encrypted named secrets, an approval queue, command policy, a dead-man's switch (`fleet guard`), signed anti-rollback updates and a hash-chained audit log.
+
+AI coding agents (Claude Code, Codex) can operate it: `fleet skill claude` installs a /fleet command, `fleet context` prints the complete CLI reference generated from the installed binary, and `fleet ai <command>` gives machine-readable help for one command.
+
+## Pages
+
+- [Home](https://fleet.cenvero.org/): overview, install commands, features, FAQ
+- [Documentation](https://fleet.cenvero.org/docs/): install, configuration and every command
+- [Agentic AI](https://fleet.cenvero.org/agentic.html): letting AI agents operate servers safely
+- [What's new](https://fleet.cenvero.org/whats-new.html): release notes
+
+## Install
+
+- macOS / Linux (Homebrew): `brew tap cenvero/fleet && brew install cenvero-fleet`
+- Linux / macOS (script): `curl -fsSL https://fleet.cenvero.org/install | sh`
+- Windows (elevated PowerShell): `irm https://fleet.cenvero.org/install.ps1 | iex`
+
+## Source
+
+- [GitHub repository](https://github.com/cenvero/fleet)
+- [Releases](https://github.com/cenvero/fleet/releases)
+- [Changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)

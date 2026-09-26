@@ -3,104 +3,284 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>What's New in Cenvero Fleet v2 — File Manager, Live Sync & Agentic AI</title>
-  <meta name="description" content="Cenvero Fleet v2 adds a secure file manager (CLI, terminal, and web), live directory sync, and agentic control for AI coding agents — plus security hardening. See everything new.">
-  <meta name="keywords" content="Cenvero Fleet v2, fleet changelog, file manager SSH, live directory sync, agentic AI SSH, fleet release notes">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>What's New in Cenvero Fleet — Release Notes and Changelog</title>
+  <meta name="description" content="Cenvero Fleet release notes from v2.0 to v2.4.3 — file managers, live sync, agentic AI, RBAC, secrets and security hardening — plus what's coming next.">
   <link rel="canonical" href="https://fleet.cenvero.org/whats-new.html">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#07090d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f8fb" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/assets/img/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Cenvero Fleet">
-  <meta property="og:title" content="What's New in Cenvero Fleet v2">
-  <meta property="og:description" content="A secure file manager, live directory sync, and agentic AI control — the biggest Fleet release yet.">
+  <meta property="og:locale" content="en_US">
   <meta property="og:url" content="https://fleet.cenvero.org/whats-new.html">
+  <meta property="og:title" content="What's new in Cenvero Fleet">
+  <meta property="og:description" content="Release notes for Cenvero Fleet — file managers, live sync, agentic AI control, RBAC, secrets and security hardening, plus what's coming next.">
+  <meta property="og:image" content="https://fleet.cenvero.org/assets/og/og-whats-new.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="What's new in Cenvero Fleet">
   <meta name="twitter:card" content="summary_large_image">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <meta name="twitter:title" content="What's new in Cenvero Fleet">
+  <meta name="twitter:description" content="Release notes for Cenvero Fleet — file managers, live sync, agentic AI control, RBAC, secrets, security hardening and what's next.">
+  <meta name="twitter:image" content="https://fleet.cenvero.org/assets/og/og-whats-new.png">
+  <meta name="twitter:image:alt" content="What's new in Cenvero Fleet">
+
+  <script src="/assets/theme.js"></script>
   <link rel="stylesheet" href="/site.css">
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://fleet.cenvero.org/" },
+          { "@type": "ListItem", "position": 2, "name": "What's new", "item": "https://fleet.cenvero.org/whats-new.html" }
+        ]
+      },
+      {
+        "@type": "WebPage",
+        "@id": "https://fleet.cenvero.org/whats-new.html#webpage",
+        "url": "https://fleet.cenvero.org/whats-new.html",
+        "name": "What's New in Cenvero Fleet — Release Notes and Changelog",
+        "description": "Release notes for Cenvero Fleet v2.0 through v2.4.3 and the changes in development.",
+        "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
+        "about": { "@id": "https://fleet.cenvero.org/#software" },
+        "dateModified": "2026-09-26",
+        "inLanguage": "en"
+      }
+    ]
+  }
+  </script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<nav class="nav">
-  <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
-  <div class="nav-links">
-    <a href="/agentic.html">Agentic AI</a>
-    <a href="/whats-new.html">What's new</a>
-    <a href="/docs/">Docs</a>
-    <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
-    <a href="https://github.com/cenvero/fleet">GitHub</a>
-    <a href="/docs/#install" class="nav-cta">Get Started</a>
-  </div>
-  <button class="nav-burger" onclick="toggleMenu(this)" aria-label="Menu"><span></span><span></span><span></span></button>
-</nav>
-<div class="nav-mobile" id="nav-mobile">
-  <a href="/agentic.html">Agentic AI</a>
-  <a href="/whats-new.html">What's new</a>
-  <a href="/docs/">Docs</a>
-  <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
-  <a href="https://github.com/cenvero/fleet">GitHub</a>
-  <a href="/docs/#install">Get Started</a>
-</div>
-
-<header class="ph wrap">
-  <div class="eyebrow"><i data-lucide="sparkles"></i> Major release · v2.0</div>
-  <h1>What's new in v2.</h1>
-  <p class="lede">v2 turns Cenvero Fleet into a file-moving, AI-driven control plane — all over the same authenticated, host-key-pinned SSH channel you already trust.</p>
-  <div class="hero-actions">
-    <a href="/docs/#install" class="btn btn-primary">Upgrade now</a>
-    <a href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md" class="btn btn-ghost">Full changelog</a>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="/" aria-label="Cenvero Fleet home">
+      <img src="/assets/img/logo-64.png" alt="" width="30" height="30">
+      <span>Cenvero <strong>Fleet</strong></span>
+    </a>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <ul>
+        <li><a href="/#features">Features</a></li>
+        <li><a href="/agentic.html">Agentic AI</a></li>
+        <li><a href="/docs/">Docs</a></li>
+        <li><a href="/whats-new.html" aria-current="page">What's new</a></li>
+        <li><a href="https://github.com/cenvero/fleet/releases">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="header-actions">
+      <button class="icon-btn theme-toggle" type="button" data-theme-toggle aria-label="Switch theme">
+        <svg class="icon icon-moon" aria-hidden="true"><use href="/assets/icons.svg#i-moon"/></svg>
+        <svg class="icon icon-sun" aria-hidden="true"><use href="/assets/icons.svg#i-sun"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/cenvero/fleet" aria-label="Cenvero Fleet on GitHub">
+        <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-github"/></svg>
+      </a>
+      <a class="btn btn-primary btn-sm btn-header" href="/#install">Install</a>
+      <button class="icon-btn menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu">
+        <svg class="icon icon-menu" aria-hidden="true"><use href="/assets/icons.svg#i-menu"/></svg>
+        <svg class="icon icon-x" aria-hidden="true"><use href="/assets/icons.svg#i-x"/></svg>
+      </button>
+    </div>
   </div>
 </header>
 
-<section class="wrap">
-  <div class="section-label">Headline features</div>
-  <h2>Three big additions.</h2>
-  <div class="grid cols-3">
-    <div class="card"><div class="ic"><i data-lucide="folder-sync"></i></div><h3>Secure file manager</h3><p>Move files with <code>fleet file</code>, a dual-pane terminal manager (<code>fleet files</code>), or a localhost web UI (<code>fleet file ui</code>). Chunked, parallel, SHA-256-checksummed, and resumable after a drop.</p></div>
-    <div class="card"><div class="ic"><i data-lucide="repeat"></i></div><h3>Live directory sync</h3><p><code>fleet sync</code> keeps a local folder and a server folder mirrored. Pick which side is the writer with <code>--from</code>; the replica overwrites differing files and (by default) deletes extras — live, until you stop it.</p></div>
-    <div class="card"><div class="ic"><i data-lucide="bot"></i></div><h3>Agentic control</h3><p><code>fleet skill claude</code> installs a <code>/fleet</code> command; the agent learns the whole CLI from <code>fleet context</code> and operates your fleet. <a href="/agentic.html" style="color:var(--accent)">Read why it's the best agentic SSH tool →</a></p></div>
-  </div>
-</section>
-
-<section class="wrap">
-  <div class="section-label">Also new</div>
-  <h2>More in v2.</h2>
-  <div class="grid cols-2">
-    <div class="card"><div class="ic"><i data-lucide="file-search"></i></div><h3>Inspect remote files</h3><p><code>fleet file stat</code>, <code>cat</code> (checksum-verified to stdout), and <code>tail</code> for quick remote inspection — plus <code>-r</code> recursive upload and download of whole directory trees.</p></div>
-    <div class="card"><div class="ic"><i data-lucide="mouse-pointer-click"></i></div><h3>Real mouse support</h3><p>Content-anchored mouse zones (bubblezone) across the dashboard and the file manager — click tabs and rows, drag files between panes.</p></div>
-    <div class="card"><div class="ic"><i data-lucide="shield-check"></i></div><h3>Hardened across the board</h3><p>A multi-round security audit of the whole codebase: <strong>fail-closed</strong> scoped RBAC tokens (per-server and per-secret, hashed at rest), reverse-mode agents that enroll with one-time join tokens, <strong>signed + anti-rollback</strong> updates, an agent <code>--file-root</code> sandbox, and host-key-pinned transport throughout.</p></div>
-    <div class="card"><div class="ic"><i data-lucide="settings-2"></i></div><h3>Transfer defaults</h3><p>Per-server and global defaults for remote directory, parallel streams, and chunk size — seeded on first connection and tunable any time.</p></div>
-  </div>
-</section>
-
-<section class="wrap">
-  <div class="callout prose">
-    <h2 style="font-size:1.4rem">Upgrade in seconds.</h2>
-    <div class="code"><pre><span class="tok">$</span> brew update &amp;&amp; brew upgrade cenvero-fleet
-<span style="color:var(--subtle)"># or: fleet update apply</span></pre></div>
-    <div class="hero-actions" style="justify-content:flex-start;margin-top:24px">
-      <a href="/docs/" class="btn btn-primary">Read the docs</a>
-      <a href="/agentic.html" class="btn btn-ghost">Explore Agentic Fleet</a>
+<main id="main">
+  <section class="hero page-hero" aria-labelledby="page-title">
+    <div class="container">
+      <nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/">Home</a></li><li aria-current="page">What's new</li></ol></nav>
+      <h1 id="page-title">What's new in <span class="grad-text">Cenvero Fleet</span></h1>
+      <p class="hero-lead">Release highlights, newest first. Every release is signed; upgrade with <code>fleet update apply</code> or <code>brew upgrade cenvero-fleet</code>. The complete, line-by-line history lives in the changelog.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="https://github.com/cenvero/fleet/releases"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Latest release</a>
+        <a class="btn btn-secondary" href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg> Full changelog</a>
+      </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<footer>
-  <div class="wrap">
-    <div>© 2026 Cenvero · AGPL-3.0-or-later</div>
-    <div class="footer-links">
-      <a href="/">Home</a>
-      <a href="/agentic.html">Agentic AI</a>
-      <a href="/whats-new.html">What's new</a>
-      <a href="/docs/">Docs</a>
-      <a href="https://github.com/cenvero/fleet">GitHub</a>
+  <section class="section pt-0" aria-label="Releases">
+    <div class="container">
+      <div class="timeline">
+
+        <article class="release upcoming" id="next" aria-labelledby="next-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="next-title">Next release</h2>
+              <span class="tag tag-violet">In development</span>
+            </div>
+            <p>Already on <code>main</code> and landing in the release after v2.4.3: a large performance pass, rebuilt terminal and web interfaces, and a round of safety and correctness fixes found by an end-to-end review of every command.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li><strong>Much faster at scale:</strong> fleet-wide <code>exec</code>, metrics polling, <code>health</code>, <code>top</code> and agent updates run servers concurrently; CLI calls reuse a running daemon's warm connection (about 550 → 90 ms per command at 50 ms latency); transfers and <code>fleet sync</code> are several times faster over latency.</li>
+              <li><strong>Terminal dashboard</strong> rebuilt as a live operations console with sparklines, filters and actions; the <strong>terminal file manager</strong> gains a transfer queue, previews, bookmarks and go-to.</li>
+              <li><strong>Redesigned web UI</strong> with light and dark themes, a phone layout, a command palette, previews, streaming downloads and a read-only <strong>Fleet overview</strong>.</li>
+              <li><strong><code>fleet start</code> / <code>fleet stop</code></strong> run and stop the daemon in the background, and <code>fleet status</code> shows whether it is running.</li>
+              <li><strong><code>fleet approve</code></strong> now shows the staged request, asks for confirmation and runs it with its original options.</li>
+              <li><code>--secret</code> values reach the whole remote command through its environment; the audit log records commands, approvals and token and secret changes.</li>
+              <li>The daemon's local control socket is <strong>mutually authenticated</strong>, and paths containing <code>..</code> are refused everywhere before any file operation.</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release" id="v2-4-3" aria-labelledby="v243-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v243-title">v2.4.3</h2>
+              <span class="tag tag-accent">Latest stable</span>
+              <time datetime="2026-09-11">11 Sep 2026</time>
+            </div>
+            <p>Restores SSH-first Linux agent onboarding while keeping fail-closed release verification, and fixes onboarding, port, version-display and updater regressions from the v2.4 line.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li>Auto-install opens the host-key-pinned SSH connection first, detects the target with <code>uname</code>, and has the server fetch only its own agent archive and signature — verified on the controller before anything is installed.</li>
+              <li>Onboarding refuses duplicate names early, keeps configured login and agent ports, and records clear <code>installing</code> / <code>failed</code> / <code>managed</code> states.</li>
+              <li>Retrying, cancellation-aware updater and manifest downloads that never leak signed URL parameters.</li>
+              <li>Agent versions and server states read the same across list, inventory, dashboard and notifications.</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release" id="v2-3-0" aria-labelledby="v230-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v230-title">v2.3.0</h2>
+              <time datetime="2026-06-21">21 Jun 2026</time>
+            </div>
+            <p>Shell completion overhaul, configurable job-log retention and session reconnect grace, and a safe re-pin path when a server's host key changes.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li><strong>Host-key re-pin prompt</strong> when a reinstalled server presents a new key (defaults to No; <code>--accept-new-host-key</code> for automation).</li>
+              <li><strong>Server-name tab completion</strong> everywhere, installed as a cached completion file with <code>fleet autocomplete install</code>.</li>
+              <li><strong><code>fleet config set</code></strong> for <code>job-log-retention</code> (default 7 days) and <code>session-grace</code> (default 10 minutes).</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release" id="v2-2" aria-labelledby="v22-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v22-title">v2.2</h2>
+              <time datetime="2026-06-12">12 Jun 2026</time>
+            </div>
+            <p>A new automation and access-control surface alongside a full-codebase security audit and four re-audit rounds.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li><strong>Automation:</strong> <code>exec --json/--timeout/--retry</code>, tags and inventory, <code>journal</code>, <code>top</code>, <code>cp</code>, notifications, cron, drift detection, playbooks, jobs, <code>doctor</code>, <code>health</code>, SSH tunnels, approvals, idempotency keys and a dead-man's switch.</li>
+              <li><strong>RBAC scoped tokens</strong> enforced controller-side and fail-closed, and <strong>named secrets</strong> encrypted at rest (AES-256-GCM) with output redaction.</li>
+              <li><strong>Signed, anti-rollback updates</strong> bound to the version in the signature, a hash-chained audit log, and pinned SSH algorithms.</li>
+              <li>v2.2.1: on Homebrew installs, agent updates run through <code>fleet sync-agent</code> and Homebrew owns the controller binary.</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release" id="v2-1-0" aria-labelledby="v210-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v210-title">v2.1.0</h2>
+              <time datetime="2026-06-09">9 Jun 2026</time>
+            </div>
+            <p>A major file-manager release across the CLI, the terminal UI and the web UI.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li>A built-in <strong>editor with syntax highlighting</strong> in both file managers.</li>
+              <li><strong>Compress and extract</strong> zip, tar.gz, tar.bz2, tar.xz and tar with <code>fleet file compress</code> / <code>extract</code>.</li>
+              <li>Permissions, checksums, duplicate, new file, filters, sortable columns — and up to six panes in the web UI.</li>
+              <li><code>fleet file move</code> between servers and parallel directory transfers.</li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="release" id="v2-0" aria-labelledby="v20-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v20-title">v2.0</h2>
+              <span class="tag tag-blue">Major release</span>
+              <time datetime="2026-06-09">9 Jun 2026</time>
+            </div>
+            <p>Fleet becomes a file-moving, AI-driven control plane — all over the same authenticated, host-key-pinned SSH channel.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li><strong>Secure file manager</strong> on three surfaces: the <code>fleet file</code> CLI, the dual-pane <code>fleet files</code> terminal UI and the localhost <code>fleet file ui</code> — chunked, parallel, SHA-256-checksummed and resumable.</li>
+              <li><strong>Live directory sync</strong> with <code>fleet sync</code>, choosing the writer side with <code>--from</code>.</li>
+              <li><strong>Agentic control:</strong> <code>fleet context</code>, <code>fleet ai</code> and <code>fleet skill claude|codex|agents</code>.</li>
+              <li>Server-to-server copies, mouse support in the terminal UIs, and an agent <code>--file-root</code> sandbox.</li>
+            </ul>
+          </div>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <section class="section pt-0" aria-labelledby="upgrade-title">
+    <div class="container">
+      <div class="cta-band">
+        <h2 id="upgrade-title">Upgrade in seconds.</h2>
+        <p>The controller verifies every release before it replaces itself, and rolls the same version out to your agents.</p>
+        <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet update apply            <span class="c"># self-managed installs</span>
+brew upgrade cenvero-fleet    <span class="c"># Homebrew, then: fleet sync-agent</span></pre></div>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="/docs/#updates">Update docs</a>
+          <a class="btn btn-secondary" href="/agentic.html">Explore Agentic Fleet</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href="/"><img src="/assets/img/logo-64.png" alt="" width="30" height="30" loading="lazy"><span>Cenvero <strong>Fleet</strong></span></a>
+        <p>Self-hosted fleet management over SSH for humans and AI agents. Free and open source.</p>
+      </div>
+      <nav aria-label="Product">
+        <h2>Product</h2>
+        <ul>
+          <li><a href="/#features">Features</a></li>
+          <li><a href="/agentic.html">Agentic AI</a></li>
+          <li><a href="/whats-new.html">What's new</a></li>
+          <li><a href="/#install">Install</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Documentation">
+        <h2>Documentation</h2>
+        <ul>
+          <li><a href="/docs/">Docs home</a></li>
+          <li><a href="/docs/#install">Getting started</a></li>
+          <li><a href="/docs/#file-manager">File manager</a></li>
+          <li><a href="/docs/#commands">Command reference</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Project">
+        <h2>Project</h2>
+        <ul>
+          <li><a href="https://github.com/cenvero/fleet">GitHub</a></li>
+          <li><a href="https://github.com/cenvero/fleet/releases">Releases</a></li>
+          <li><a href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/cenvero/fleet/security/policy">Security policy</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Cenvero · Licensed under AGPL-3.0-or-later</span>
+      <a href="mailto:security@cenvero.org">security@cenvero.org</a>
     </div>
   </div>
 </footer>
-<script>
-  function toggleMenu(btn){ document.getElementById('nav-mobile').classList.toggle('open'); }
-  window.addEventListener('DOMContentLoaded',()=>window.lucide&&lucide.createIcons());
-</script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>

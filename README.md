@@ -264,7 +264,7 @@ File manager and transfers (**new in v2**):
 - `fleet file mkdir|rm|mv <server> ...`
 - `fleet file edit <server:path>` — edit a remote file in `$EDITOR`, then re-upload atomically
 - `fleet file diff <serverA:path> <serverB:path>` (or `--group EXPR <path>`) — unified diff across servers
-- `fleet file compress|extract|chmod|checksum|duplicate <server> ...` — archive, permission, and copy ops on the host
+- `fleet file compress|extract <server> ...` — create and unpack archives on the host (chmod, checksum and duplicate are in the file managers below)
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
 - `fleet files [server...]` (also `fleet filemanager` / `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, List/Icons views, Finder-style drag-to-copy/move (local↔server **and** server↔server), a transfer queue with speed/ETA/retry, a preview pane, go-to/jump/bookmarks, and a `?` key reference
 - `fleet file ui` (also `fleet filemanager ui`) — premium **dual-pane** localhost browser file manager (Local + server panes, same operations, drag-to-copy/move, desktop-drop upload, live progress, light/dark themes, phone layout, command palette, previews, streaming downloads) plus a read-only **Fleet overview**

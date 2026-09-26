@@ -3,675 +3,564 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cenvero Fleet — Self-hosted SSH Fleet Management for Humans and AI Agents</title>
-  <meta name="description" content="Cenvero Fleet is a self-hosted fleet management platform for Linux, macOS, and Windows servers. Shell, services, logs, metrics, firewall, secure file transfer, live sync, scheduled jobs — and a self-describing CLI that lets AI agents like Claude Code operate your fleet. Encrypted, host-key-pinned channels in both directions, so servers behind NAT need no inbound access. No cloud required.">
-  <meta name="keywords" content="fleet management, self-hosted, SSH server management, agentic SSH, AI server management, Claude Code SSH, file transfer over SSH, live directory sync, Ansible alternative, no cloud DevOps, Cenvero Fleet">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Cenvero Fleet — Self-Hosted Server Fleet Management over SSH</title>
+  <meta name="description" content="Free, open-source, self-hosted fleet manager for Linux, macOS and Windows: shells, fan-out commands, file transfer, live sync, logs and alerts over SSH. No cloud.">
   <link rel="canonical" href="https://fleet.cenvero.org/">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#07090d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f8fb" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/assets/img/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/assets/img/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Cenvero Fleet">
-  <meta property="og:title" content="Cenvero Fleet — Self-hosted SSH Fleet Management for Humans and AI Agents">
-  <meta property="og:description" content="Manage every server from one binary — shell, services, logs, metrics, firewall, file transfer, live sync, scheduled jobs — and let an AI agent operate your fleet. Self-hosted, no cloud.">
+  <meta property="og:locale" content="en_US">
   <meta property="og:url" content="https://fleet.cenvero.org/">
+  <meta property="og:title" content="Cenvero Fleet — Self-hosted server fleet management over SSH">
+  <meta property="og:description" content="Shell, fan-out commands, file transfer, live sync, services, logs, metrics and alerts for every server — from one binary, with no cloud account. Built for humans and AI agents.">
+  <meta property="og:image" content="https://fleet.cenvero.org/assets/og/og-home.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Cenvero Fleet — manage every server from one binary. No cloud required.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Cenvero Fleet — SSH Fleet Management for Humans and AI Agents">
-  <meta name="twitter:description" content="Self-hosted fleet management from one binary — shell, services, logs, metrics, transfers, sync — with a self-describing CLI built for AI agents. No cloud required.">
+  <meta name="twitter:title" content="Cenvero Fleet — Self-hosted server fleet management over SSH">
+  <meta name="twitter:description" content="Shell, fan-out commands, file transfer, live sync, services, logs and alerts for every server — one binary, no cloud. Built for humans and AI agents.">
+  <meta name="twitter:image" content="https://fleet.cenvero.org/assets/og/og-home.png">
+  <meta name="twitter:image:alt" content="Cenvero Fleet — manage every server from one binary. No cloud required.">
+
+  <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/site.css">
 
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    "name": "Cenvero Fleet",
-    "applicationCategory": "DeveloperApplication",
-    "operatingSystem": "Linux, macOS, Windows",
-    "url": "https://fleet.cenvero.org/",
-    "description": "Cenvero Fleet is a self-hosted, SSH-based fleet manager for Linux, macOS, and Windows servers. It provides shell access, service control, logs, live metrics, secure resumable file transfer, live directory sync, and a self-describing CLI that AI coding agents such as Claude Code and Codex can use to operate the fleet — with no cloud dependency.",
-    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-    "license": "https://www.gnu.org/licenses/agpl-3.0.html"
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://fleet.cenvero.org/#org",
+        "name": "Cenvero",
+        "url": "https://fleet.cenvero.org/",
+        "logo": "https://fleet.cenvero.org/assets/img/icon-512.png",
+        "email": "security@cenvero.org",
+        "sameAs": ["https://github.com/cenvero"]
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://fleet.cenvero.org/#website",
+        "url": "https://fleet.cenvero.org/",
+        "name": "Cenvero Fleet",
+        "inLanguage": "en",
+        "publisher": { "@id": "https://fleet.cenvero.org/#org" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://fleet.cenvero.org/#software",
+        "name": "Cenvero Fleet",
+        "url": "https://fleet.cenvero.org/",
+        "description": "Self-hosted, open-source fleet manager for Linux, macOS and Windows servers. Shell access, concurrent commands across servers, secure resumable file transfer, live directory sync, services, logs, metrics, alerts, a terminal dashboard, a terminal and web file manager, and a self-describing CLI that AI coding agents can operate — over encrypted, host-key-pinned SSH, with no cloud account.",
+        "applicationCategory": "DeveloperApplication",
+        "applicationSubCategory": "Server and fleet management",
+        "operatingSystem": "Linux, macOS, Windows",
+        "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "downloadUrl": "https://github.com/cenvero/fleet/releases",
+        "installUrl": "https://fleet.cenvero.org/#install",
+        "softwareHelp": "https://fleet.cenvero.org/docs/",
+        "screenshot": [
+          "https://fleet.cenvero.org/assets/img/dashboard.webp",
+          "https://fleet.cenvero.org/assets/img/file-manager.webp",
+          "https://fleet.cenvero.org/assets/img/web-fleet.webp"
+        ],
+        "featureList": [
+          "Agent auto-install over SSH with direct and reverse (NAT-friendly) transport",
+          "Concurrent commands across the fleet or a tag group with JSON output",
+          "Chunked, parallel, checksummed and resumable file transfer",
+          "Live directory sync",
+          "Terminal dashboard, dual-pane terminal file manager and localhost web UI",
+          "Services, logs, journald, metrics, alerts and Slack/webhook notifications",
+          "Scoped RBAC tokens, named secrets, approvals, a dead-man's switch and an audit log",
+          "Self-describing CLI for AI coding agents such as Claude Code and Codex"
+        ],
+        "author": { "@id": "https://fleet.cenvero.org/#org" },
+        "publisher": { "@id": "https://fleet.cenvero.org/#org" }
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://fleet.cenvero.org/#faq",
+        "mainEntity": [
+          { "@type": "Question", "name": "Is Cenvero Fleet free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Cenvero Fleet is free and open source under the AGPL-3.0-or-later license. There is no paid tier, no account and no hosted service." } },
+          { "@type": "Question", "name": "Do I need a cloud account or a hosted control plane?", "acceptedAnswer": { "@type": "Answer", "text": "No. The controller is a binary on your own machine. It talks to your servers over encrypted, host-key-pinned SSH channels and keeps its state in a local directory with SQLite by default, or PostgreSQL, MySQL or MariaDB if you prefer." } },
+          { "@type": "Question", "name": "Can it manage servers behind NAT or a firewall?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. In reverse mode the agent dials out to the controller and keeps an authenticated session open, so the server needs no inbound port. Direct and reverse servers can be mixed in one fleet." } },
+          { "@type": "Question", "name": "Which operating systems are supported?", "acceptedAnswer": { "@type": "Answer", "text": "The controller runs on Linux, macOS and Windows. Agents are installed automatically on Linux servers with systemd; macOS and Windows agents can be set up manually. Service and firewall management are Linux features." } },
+          { "@type": "Question", "name": "How is Cenvero Fleet different from Ansible?", "acceptedAnswer": { "@type": "Answer", "text": "Ansible applies playbooks. Fleet is an interactive, always-connected control plane: live shells, fan-out commands with JSON output, file transfer and live sync, logs, metrics, alerts, a terminal dashboard and a web UI, plus a CLI that AI agents can discover and drive. You can use both." } },
+          { "@type": "Question", "name": "Can an AI agent operate my servers with Fleet?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Run fleet skill claude (or codex). The agent learns the whole CLI from fleet context and operates your fleet with your keys, on your machine — with scoped tokens, approvals, dry runs and a dead-man's switch as guard rails." } },
+          { "@type": "Question", "name": "How are releases and updates verified?", "acceptedAnswer": { "@type": "Answer", "text": "Every release is signed with minisign. The installer and the updater verify the signature, and refuse to roll back to an older version, before anything is replaced." } }
+        ]
+      }
+    ]
   }
   </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-  <style>
-    :root {
-      /* Deep, next-gen dark mode palette */
-      --bg: #030508;
-      --bg2: #080b11;
-      --card: rgba(10, 14, 22, 0.6);
-      --card-hover: rgba(15, 20, 30, 0.8);
-      --text: #f0f4f8;
-      --muted: #94a3b8;
-      --subtle: #475569;
-      --accent: #00ebb8;
-      --accent-hover: #00ffd0;
-      --accent-soft: rgba(0, 235, 184, 0.1);
-      --accent-border: rgba(0, 235, 184, 0.25);
-      --border: rgba(255, 255, 255, 0.08);
-      --mono: 'JetBrains Mono', ui-monospace, monospace;
-      --sans: 'Inter', system-ui, sans-serif;
-      --radius: 16px;
-      --nav-h: 64px;
-    }
-
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html { scroll-behavior: smooth; }
-    body {
-      font-family: var(--sans);
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      line-height: 1.6;
-      font-size: 15px;
-      overflow-x: hidden;
-    }
-    
-    /* Background Glow Effect */
-    body::before {
-      content: '';
-      position: absolute;
-      top: -10%;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 80vw;
-      height: 80vh;
-      background: radial-gradient(circle, rgba(0, 235, 184, 0.05) 0%, rgba(3, 5, 8, 0) 70%);
-      z-index: -1;
-      pointer-events: none;
-    }
-
-    a { color: var(--accent); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-
-    /* ── NAV ── */
-    .nav {
-      position: sticky; top: 0; z-index: 200;
-      height: var(--nav-h);
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 clamp(20px, 5vw, 60px);
-      background: rgba(3, 5, 8, 0.7);
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
-      border-bottom: 1px solid var(--border);
-    }
-    .nav-brand {
-      font-family: var(--mono); font-size: 1rem; font-weight: 600;
-      letter-spacing: 0.04em; color: var(--text);
-    }
-    .nav-brand span { color: var(--accent); }
-    .nav-links { display: flex; align-items: center; gap: 8px; }
-    .nav-links a {
-      padding: 8px 16px; border-radius: 8px;
-      color: var(--muted); font-size: 0.9rem; font-weight: 500;
-      transition: all 200ms ease;
-    }
-    .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
-    .nav-links .nav-cta {
-      color: var(--bg); background: var(--accent);
-      font-weight: 600; border: none;
-    }
-    .nav-links .nav-cta:hover { background: var(--accent-hover); box-shadow: 0 0 20px rgba(0, 235, 184, 0.3); }
-    
-    .nav-burger {
-      display: none; flex-direction: column; gap: 5px;
-      background: none; border: none; cursor: pointer; padding: 4px;
-    }
-    .nav-burger span {
-      display: block; width: 24px; height: 2px;
-      background: var(--text); border-radius: 2px;
-    }
-    .nav-mobile {
-      display: none; position: fixed; top: var(--nav-h); left: 0; right: 0;
-      background: rgba(3, 5, 8, 0.95); backdrop-filter: blur(20px);
-      border-bottom: 1px solid var(--border);
-      flex-direction: column; padding: 16px; gap: 8px; z-index: 199;
-    }
-    .nav-mobile.open { display: flex; }
-    .nav-mobile a {
-      padding: 12px 16px; border-radius: 10px;
-      color: var(--muted); font-size: 1rem; font-weight: 500;
-    }
-    .nav-mobile a:hover { color: var(--text); background: rgba(255,255,255,0.05); text-decoration: none; }
-
-    /* ── HERO (Redesigned Split Layout) ── */
-    .hero {
-      padding: clamp(60px, 12vh, 140px) clamp(20px, 5vw, 60px) clamp(40px, 8vh, 80px);
-      max-width: 1300px; margin: 0 auto;
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 60px;
-      align-items: center;
-    }
-    
-    .hero-content {
-      max-width: 600px;
-    }
-
-    .hero-badge {
-      display: inline-flex; align-items: center; gap: 8px;
-      font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
-      color: var(--accent); background: var(--accent-soft);
-      border: 1px solid var(--accent-border);
-      padding: 6px 16px; border-radius: 999px; margin-bottom: 32px;
-      text-transform: uppercase;
-      box-shadow: 0 0 20px rgba(0, 235, 184, 0.1);
-    }
-    .hero-badge::before { content: '●'; font-size: 0.6em; animation: pulse 2s infinite; }
-    
-    @keyframes pulse {
-      0% { opacity: 1; }
-      50% { opacity: 0.4; }
-      100% { opacity: 1; }
-    }
-
-    .hero h1 {
-      font-size: clamp(2.5rem, 5vw, 4.2rem); font-weight: 700;
-      letter-spacing: -0.04em; line-height: 1.05;
-      margin-bottom: 24px;
-      background: linear-gradient(180deg, #ffffff 0%, #94a3b8 100%);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    .hero p {
-      font-size: clamp(1.05rem, 2vw, 1.25rem); color: var(--muted);
-      margin-bottom: 40px; line-height: 1.7;
-    }
-    
-    .hero-actions { display: flex; gap: 16px; flex-wrap: wrap; }
-    .btn {
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 14px 28px; border-radius: 12px;
-      font-size: 0.95rem; font-weight: 600;
-      transition: all 200ms ease;
-      cursor: pointer; border: none;
-    }
-    .btn:hover { transform: translateY(-2px); text-decoration: none; }
-    .btn-primary {
-      background: var(--accent); color: #020806;
-      box-shadow: 0 8px 24px rgba(0, 235, 184, 0.2);
-    }
-    .btn-primary:hover { background: var(--accent-hover); box-shadow: 0 12px 32px rgba(0, 235, 184, 0.35); }
-    .btn-ghost {
-      background: rgba(255,255,255,0.03); color: var(--text);
-      border: 1px solid var(--border);
-      backdrop-filter: blur(10px);
-    }
-    .btn-ghost:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.2); }
-
-    /* ── TERMINAL WINDOW (Moved from Installation) ── */
-    .hero-terminal {
-      background: #06090e;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05) inset;
-      overflow: hidden;
-      position: relative;
-    }
-    
-    .hero-terminal::before {
-      content: '';
-      position: absolute;
-      top: 0; left: 0; right: 0; height: 1px;
-      background: linear-gradient(90deg, transparent, var(--accent-border), transparent);
-    }
-
-    .terminal-header {
-      background: rgba(255,255,255,0.02);
-      border-bottom: 1px solid var(--border);
-      padding: 12px 16px;
-      display: flex; justify-content: space-between; align-items: center;
-    }
-
-    .os-tabs { display: flex; gap: 8px; }
-    .os-tab {
-      display: flex; align-items: center; gap: 6px;
-      padding: 6px 14px; border-radius: 8px; border: 1px solid transparent;
-      background: none; color: var(--subtle); font-family: var(--sans);
-      font-size: 0.85rem; font-weight: 500; cursor: pointer;
-      transition: all 200ms ease;
-    }
-    .os-tab:hover { color: var(--muted); background: rgba(255,255,255,0.03); }
-    .os-tab.active {
-      background: rgba(255,255,255,0.05); color: var(--text);
-      border-color: var(--border);
-    }
-    .os-tab .tab-icon svg { width: 14px; height: 14px; }
-
-    .os-panel { display: none; padding: 24px; }
-    .os-panel.active { display: block; animation: fadeIn 0.3s ease; }
-    
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-
-    .install-box-label {
-      font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
-      text-transform: uppercase; color: var(--accent);
-      display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
-    }
-    .install-box-label .rec-pill {
-      background: var(--accent-soft); border: 1px solid var(--accent-border);
-      color: var(--accent); padding: 2px 8px; border-radius: 999px;
-      font-size: 0.65rem; letter-spacing: 0.05em;
-    }
-    .install-cmd-row {
-      display: flex; align-items: flex-start;
-      background: rgba(0,0,0,0.5); border: 1px solid var(--border);
-      border-radius: 10px; padding: 14px 16px; gap: 12px;
-      margin-bottom: 16px;
-    }
-    .install-cmd-row code {
-      flex: 1; font-family: var(--mono); font-size: 0.9rem;
-      color: var(--accent); background: none; padding: 0;
-      white-space: pre-wrap; word-break: break-all;
-    }
-    .install-cmd-row button {
-      flex-shrink: 0; align-self: flex-start;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border); color: var(--text);
-      font-family: var(--mono); font-size: 0.75rem; padding: 6px 14px;
-      border-radius: 8px; cursor: pointer; transition: all 200ms ease;
-    }
-    .install-cmd-row button:hover { background: var(--text); color: var(--bg); }
-
-    .install-box-alt {
-      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-      background: rgba(255,255,255,0.02); padding: 12px 16px; border-radius: 10px;
-    }
-    .install-box-alt span { font-size: 0.85rem; color: var(--muted); }
-    .install-box-alt code { font-family: var(--mono); font-size: 0.85rem; color: #a5b4fc; }
-    .install-box-alt button {
-      background: none; border: 1px solid var(--border);
-      color: var(--muted); font-family: var(--mono); font-size: 0.75rem;
-      padding: 4px 10px; border-radius: 6px; cursor: pointer;
-      transition: all 200ms ease;
-    }
-    .install-box-alt button:hover { border-color: var(--accent); color: var(--accent); }
-
-    .install-note { font-size: 0.85rem; color: var(--subtle); margin-top: 16px; font-family: var(--mono); }
-    .install-note code { font-size: 0.85rem; color: var(--muted); }
-
-    /* ── DIVIDER ── */
-    .divider { border: none; border-top: 1px solid var(--border); margin: 0; }
-
-    /* ── FEATURES ── */
-    .section { padding: clamp(60px, 10vw, 120px) clamp(20px, 5vw, 60px); max-width: 1300px; margin: 0 auto; }
-    .section-label {
-      font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.15em;
-      text-transform: uppercase; color: var(--accent); margin-bottom: 16px;
-    }
-    .section-title {
-      font-size: clamp(2rem, 4vw, 2.8rem); font-weight: 700;
-      letter-spacing: -0.03em; margin-bottom: 16px; line-height: 1.1;
-      color: var(--text);
-    }
-    .section-sub { color: var(--muted); font-size: 1.1rem; max-width: 600px; margin-bottom: 60px; line-height: 1.6; }
-
-    .features-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 24px;
-    }
-    .feature-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 32px;
-      transition: all 300ms ease;
-      backdrop-filter: blur(10px);
-    }
-    .feature-card:hover {
-      border-color: var(--accent-border);
-      background: var(--card-hover);
-      transform: translateY(-4px);
-      box-shadow: 0 12px 40px rgba(0,0,0,0.4);
-    }
-    .feature-icon {
-      width: 48px; height: 48px;
-      background: linear-gradient(135deg, rgba(0,235,184,0.1) 0%, rgba(0,235,184,0.02) 100%);
-      border: 1px solid var(--accent-border);
-      border-radius: 12px;
-      display: flex; align-items: center; justify-content: center;
-      margin-bottom: 24px;
-    }
-    .feature-icon svg { width: 22px; height: 22px; stroke: var(--accent); stroke-width: 1.8; }
-    .feature-card h3 {
-      font-size: 1.1rem; font-weight: 600; color: var(--text);
-      margin-bottom: 10px;
-    }
-    .feature-card p { font-size: 0.95rem; color: var(--muted); line-height: 1.6; }
-
-    /* ── QUICKSTART ── */
-    .qs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
-    
-    /* ── CODE BLOCKS ── */
-    .code-wrap { position: relative; margin: 24px 0; }
-    pre {
-      font-family: var(--mono); font-size: 0.9rem; line-height: 1.7;
-      background: #06090e;
-      border: 1px solid var(--border);
-      border-radius: 12px; padding: 24px;
-      overflow-x: auto; color: #e2e8f0;
-      box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
-    }
-    pre .c { color: #64748b; }
-    pre .kw { color: var(--accent); }
-    pre .flag { color: #a5b4fc; }
-    .copy-btn {
-      position: absolute; top: 12px; right: 12px;
-      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
-      color: var(--text); font-family: var(--mono); font-size: 0.75rem;
-      padding: 6px 12px; border-radius: 8px; cursor: pointer;
-      transition: all 200ms ease;
-    }
-    .copy-btn:hover { background: var(--text); color: var(--bg); }
-
-    /* ── FOOTER ── */
-    footer {
-      border-top: 1px solid var(--border);
-      padding: clamp(30px, 4vw, 40px) clamp(20px, 5vw, 60px);
-      display: flex; justify-content: space-between; align-items: center;
-      flex-wrap: wrap; gap: 16px;
-      color: var(--subtle); font-size: 0.9rem;
-      background: var(--bg2);
-    }
-    footer a { color: var(--muted); transition: color 200ms; }
-    footer a:hover { color: var(--text); }
-    .footer-links { display: flex; gap: 24px; flex-wrap: wrap; }
-
-    /* ── RESPONSIVE ── */
-    @media (max-width: 1024px) {
-      .hero { grid-template-columns: 1fr; text-align: center; gap: 40px; }
-      .hero-content { max-width: 100%; margin: 0 auto; }
-      .hero-actions { justify-content: center; }
-      .hero-terminal { text-align: left; }
-    }
-    @media (max-width: 768px) {
-      .nav-links { display: none; }
-      .nav-burger { display: flex; }
-      .qs-grid { grid-template-columns: 1fr; }
-      .hero h1 { font-size: 2.5rem; }
-    }
-    @media (max-width: 500px) {
-      .install-cmd-row { flex-direction: column; align-items: stretch; }
-      .install-cmd-row button { align-self: stretch; }
-    }
-  </style>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<nav class="nav">
-  <a class="nav-brand" href="/">cenvero / <span>fleet</span></a>
-  <div class="nav-links">
-    <a href="/agentic.html">Agentic AI</a>
-    <a href="/whats-new.html">What's new</a>
-    <a href="/docs/">Docs</a>
-    <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
-    <a href="https://github.com/cenvero/fleet">GitHub</a>
-    <a href="/docs/#install" class="nav-cta">Get Started</a>
-  </div>
-  <button class="nav-burger" onclick="toggleMenu(this)" aria-label="Menu">
-    <span></span><span></span><span></span>
-  </button>
-</nav>
-<div class="nav-mobile" id="nav-mobile">
-  <a href="/agentic.html">Agentic AI</a>
-  <a href="/whats-new.html">What's new</a>
-  <a href="/docs/">Docs</a>
-  <a href="https://github.com/cenvero/fleet/releases">Changelog</a>
-  <a href="https://github.com/cenvero/fleet">GitHub</a>
-  <a href="/docs/#install">Get Started</a>
-</div>
-
-<section class="hero">
-  <div class="hero-content">
-    <div class="hero-badge">Self-hosted fleet management</div>
-    <h1>Manage every server.<br>No cloud required.</h1>
-    <p>Cenvero Fleet is a self-hosted fleet management platform: shell access, service control, logs, live metrics, firewall rules, secure file transfers, live directory sync, scheduled jobs, and AI-agent control — all from one binary. Agents install themselves and connect either way, so servers behind NAT or a firewall need no inbound access. Every channel is encrypted and host-key-pinned.</p>
-    <div class="hero-actions">
-      <a href="/docs/" class="btn btn-primary">Read the docs</a>
-      <a href="https://github.com/cenvero/fleet/releases" class="btn btn-ghost">Download releases</a>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="/" aria-label="Cenvero Fleet home">
+      <img src="/assets/img/logo-64.png" alt="" width="30" height="30">
+      <span>Cenvero <strong>Fleet</strong></span>
+    </a>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <ul>
+        <li><a href="/#features">Features</a></li>
+        <li><a href="/agentic.html">Agentic AI</a></li>
+        <li><a href="/docs/">Docs</a></li>
+        <li><a href="/whats-new.html">What's new</a></li>
+        <li><a href="https://github.com/cenvero/fleet/releases">Releases</a></li>
+      </ul>
+    </nav>
+    <div class="header-actions">
+      <button class="icon-btn theme-toggle" type="button" data-theme-toggle aria-label="Switch theme">
+        <svg class="icon icon-moon" aria-hidden="true"><use href="/assets/icons.svg#i-moon"/></svg>
+        <svg class="icon icon-sun" aria-hidden="true"><use href="/assets/icons.svg#i-sun"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/cenvero/fleet" aria-label="Cenvero Fleet on GitHub">
+        <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-github"/></svg>
+      </a>
+      <a class="btn btn-primary btn-sm btn-header" href="/#install">Install</a>
+      <button class="icon-btn menu-toggle" type="button" data-menu-toggle aria-controls="site-nav" aria-expanded="false" aria-label="Open menu">
+        <svg class="icon icon-menu" aria-hidden="true"><use href="/assets/icons.svg#i-menu"/></svg>
+        <svg class="icon icon-x" aria-hidden="true"><use href="/assets/icons.svg#i-x"/></svg>
+      </button>
     </div>
   </div>
+</header>
 
-  <div class="hero-terminal">
-    <div class="terminal-header">
-      <div class="os-tabs" id="osTabs">
-        <button class="os-tab" data-os="mac" onclick="switchOS('mac')">
-          <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg></span>
-          macOS
-        </button>
-        <button class="os-tab" data-os="linux" onclick="switchOS('linux')">
-          <span class="tab-icon"><i data-lucide="terminal"></i></span>
-          Linux
-        </button>
-        <button class="os-tab" data-os="windows" onclick="switchOS('windows')">
-          <span class="tab-icon"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M3 12V6.75l6-1.32v6.57H3zm17 0V5l-9 1.26V12h9zM3 13h6v6.08l-6-1.29V13zm17 0h-9v6.74L20 18.5V13z"/></svg></span>
-          Windows
-        </button>
+<main id="main">
+
+  <!-- Hero -->
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="container hero-grid">
+      <div>
+        <a class="pill" href="/whats-new.html"><span class="pill-tag">v2.4</span> What's new in Fleet <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-arrow-right"/></svg></a>
+        <h1 id="hero-title">Every server you run, <span class="grad-text">one binary away.</span></h1>
+        <p class="hero-lead">Cenvero Fleet is a self-hosted fleet manager: shells, fan-out commands, secure file transfer, live sync, services, logs, metrics and alerts across Linux, macOS and Windows servers — over encrypted, host-key-pinned SSH. No cloud account, no hosted control plane. Built for humans and AI agents alike.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary btn-lg" href="#install"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Install Fleet</a>
+          <a class="btn btn-secondary btn-lg" href="/docs/"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-book-open"/></svg> Read the docs</a>
+        </div>
+        <ul class="hero-points">
+          <li><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-circle-check-big"/></svg> Free &amp; open source (AGPL)</li>
+          <li><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-circle-check-big"/></svg> Works behind NAT</li>
+          <li><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-circle-check-big"/></svg> Signed releases</li>
+        </ul>
+      </div>
+
+      <div class="window" role="img" aria-label="Terminal: running a command across the web servers, uploading a release and listing servers with Cenvero Fleet">
+        <div class="window-bar"><div class="dots"><span></span><span></span><span></span></div><span class="window-title">~/ops — fleet</span></div>
+<pre aria-hidden="true"><span class="t-prompt">$</span> <span class="t-cmd">fleet exec</span> <span class="t-flag">--group</span> <span class="t-str">role=web</span> <span class="t-cmd">-- systemctl is-active nginx</span>
+<span class="t-dim">===</span> <span class="t-bold">web-01</span> <span class="t-ok">[exit 0]</span> <span class="t-dim">===</span>
+active
+<span class="t-dim">===</span> <span class="t-bold">web-02</span> <span class="t-ok">[exit 0]</span> <span class="t-dim">===</span>
+active
+
+<span class="t-prompt">$</span> <span class="t-cmd">fleet file upload</span> web-01 ./site.tar.gz /srv/releases/
+<span class="t-ok">uploaded</span> /srv/releases/site.tar.gz <span class="t-dim">(48.2 MiB)</span>
+
+<span class="t-prompt">$</span> <span class="t-cmd">fleet server list</span>
+<span class="t-dim">NAME     MODE     STATUS  OS/ARCH      TAGS</span>
+db-01    direct   <span class="t-ok">online</span>  linux/amd64  <span class="t-vio">role=db</span>
+edge-01  <span class="t-blue">reverse</span>  <span class="t-ok">online</span>  linux/arm64  <span class="t-vio">role=edge</span>
+web-01   direct   <span class="t-ok">online</span>  linux/amd64  <span class="t-vio">role=web</span>
+web-02   direct   <span class="t-ok">online</span>  linux/amd64  <span class="t-vio">role=web</span></pre>
       </div>
     </div>
+  </section>
 
-    <div class="os-panel" data-os="mac">
-      <div class="install-box-label">
-        Homebrew <span class="rec-pill">recommended</span>
-      </div>
-      <div class="install-cmd-row">
-        <code>brew tap cenvero/fleet && brew install cenvero-fleet</code>
-        <button onclick="copyCmd(this,'brew tap cenvero/fleet\nbrew install cenvero-fleet')">copy</button>
-      </div>
-      <div class="install-box-alt">
-        <span>or one-liner:</span>
-        <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
-        <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
-      </div>
-      <p class="install-note"># After install, upgrade anytime with brew upgrade cenvero-fleet</p>
-    </div>
-
-    <div class="os-panel" data-os="linux">
-      <div class="install-box-label">One-liner</div>
-      <div class="install-cmd-row">
-        <code>curl -fsSL https://fleet.cenvero.org/install | sh</code>
-        <button onclick="copyCmd(this,'curl -fsSL https://fleet.cenvero.org/install | sh')">copy</button>
-      </div>
-      <p class="install-note"># Also available via Homebrew — brew tap cenvero/fleet && brew install cenvero-fleet</p>
-    </div>
-
-    <div class="os-panel" data-os="windows">
-      <div class="install-box-label">PowerShell</div>
-      <div class="install-cmd-row">
-        <code>irm https://fleet.cenvero.org/install.ps1 | iex</code>
-        <button onclick="copyCmd(this,'irm https://fleet.cenvero.org/install.ps1 | iex')">copy</button>
-      </div>
-      <p class="install-note"># Run from an elevated PowerShell prompt. Installs to %ProgramFiles%\fleet and adds it to PATH.</p>
-    </div>
-  </div>
-</section>
-
-<hr class="divider">
-
-<div class="section" id="v2">
-  <div class="section-label">Major release · v2</div>
-  <h2 class="section-title">What's new in v2</h2>
-  <p class="section-sub">v2 turns Fleet into a file-moving, AI-driven control plane — all over the same authenticated SSH channel you already use.</p>
-  <div class="features-grid">
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="folder-sync"></i></div>
-      <h3>Secure file manager</h3>
-      <p>Move files with <code>fleet file</code>, a dual-pane terminal manager (<code>fleet files</code>), or a localhost web UI (<code>fleet file ui</code>). Chunked, parallel, checksummed, and resumable.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="repeat"></i></div>
-      <h3>Live directory sync</h3>
-      <p>Pick a local folder and a server folder with <code>fleet sync</code>. Fleet pushes it once, then keeps it mirrored as you edit — live, until you stop the command.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="bot"></i></div>
-      <h3>Agentic control</h3>
-      <p>Run <code>fleet skill claude</code> and your AI coding agent learns the whole CLI from <code>fleet context</code> — then it can control any server and guide you, with your keys.</p>
-    </div>
-  </div>
-</div>
-
-<hr class="divider">
-
-<div class="section" id="agentic">
-  <div class="section-label">AI</div>
-  <h2 class="section-title">Let an AI agent run your fleet</h2>
-  <p class="section-sub">Fleet is built to be driven by Claude Code or Codex, not just humans. One command installs a tiny skill; the agent learns the rest from the binary and operates your servers — with your keys, on your machine, over SSH. No hosted control plane.</p>
-  <div class="install-cmd-row" style="max-width:680px">
-    <code>fleet skill claude&nbsp;&nbsp;# then your agent runs `fleet context` and takes it from there</code>
-    <button onclick="copyCmd(this,'fleet skill claude')">copy</button>
-  </div>
-  <p class="section-sub" style="margin-top:18px">Self-describing by design: <code>fleet context</code> and <code>fleet ai &lt;command&gt;</code> generate full, machine-readable help straight from the command tree — always in sync with the installed version, nothing to maintain by hand.</p>
-  <p class="section-sub" style="margin-top:18px"><strong>Whole deployments, not just single commands.</strong> An agent can carry a release end to end without leaving the CLI: upload the build (chunked, parallel, resumable), extract it, render config from templates and secrets, restart the service, then verify with status, logs and health checks — fanning out across the whole fleet with <code>fleet exec --all</code> or one tier with <code>--group role=web</code>. Long steps detach as jobs it can poll, and <code>fleet guard</code> arms a dead-man's switch that auto-reverts a risky change unless it's confirmed, so an unattended agent that locks itself out recovers on its own.</p>
-  <div class="hero-actions" style="margin-top:26px">
-    <a href="/agentic.html" class="btn btn-primary">Why Fleet is the best agentic SSH tool →</a>
-  </div>
-</div>
-
-<hr class="divider">
-
-<div class="section">
-  <div class="section-label">What it does</div>
-  <h2 class="section-title">Everything you need to run a fleet</h2>
-  <p class="section-sub">No agents to pre-install, no cloud accounts, no dashboards to subscribe to. Just a binary and SSH.</p>
-  <div class="features-grid">
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="zap"></i></div>
-      <h3>Agent Auto-install</h3>
-      <p>Add a server and fleet SSHes in, downloads the right agent binary, and sets up a systemd service automatically.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="arrow-left-right"></i></div>
-      <h3>Two transport modes</h3>
-      <p>Direct mode for reachable servers, reverse mode for servers behind NAT or firewalls. Mix both in one fleet.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="terminal"></i></div>
-      <h3>Shell &amp; exec</h3>
-      <p>Open a root shell with <code>fleet ssh</code> or run commands across all servers concurrently with <code>fleet exec --all</code>.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="settings-2"></i></div>
-      <h3>Service control</h3>
-      <p>Track, start, stop, and restart systemd services. Stream and cache logs for any tracked service.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="shield"></i></div>
-      <h3>Firewall management</h3>
-      <p>Manage UFW rules and open or close ports on any server directly from the controller.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="layout-dashboard"></i></div>
-      <h3>Terminal dashboard</h3>
-      <p>A full TUI with server health, metrics, services, logs, and alerts — all in one terminal window.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="bell"></i></div>
-      <h3>Alerts</h3>
-      <p>Metric threshold alerts with acknowledge and suppress actions. No external alerting system needed.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="shield-check"></i></div>
-      <h3>Signed releases</h3>
-      <p>Every release is signed with minisign. The installer verifies the signature before touching your binary.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon"><i data-lucide="refresh-cw"></i></div>
-      <h3>Self-updating</h3>
-      <p>One command updates the controller and rolls out the same version to every managed agent automatically.</p>
-    </div>
-  </div>
-</div>
-
-<hr class="divider">
-
-<div class="section">
-  <div class="section-label">Quick start</div>
-  <h2 class="section-title">Up and running in minutes</h2>
-  <div class="qs-grid">
-    <div>
-      <div class="code-wrap">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-        <pre><span class="c"># 1. Install (macOS — recommended)</span>
-brew tap cenvero/fleet
-brew install cenvero-fleet
-
-<span class="c"># Linux / macOS — one-liner</span>
-curl -fsSL https://fleet.cenvero.org/install | sh</pre>
-      </div>
-      <div class="code-wrap">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-        <pre><span class="c"># 2. Initialize the controller</span>
-fleet init</pre>
+  <!-- Install -->
+  <section class="section section-alt" id="install" aria-labelledby="install-title">
+    <div class="container">
+      <div class="grid grid-2 align-start">
+        <div class="section-head">
+          <span class="eyebrow">Install</span>
+          <h2 id="install-title">Up and running in a minute.</h2>
+          <p>The controller is a single signed binary with no runtime dependencies. Install it on the machine you manage your servers from — your laptop, a bastion host or a small VM.</p>
+          <ul class="checks">
+            <li>Release archives are <strong>minisign-verified</strong> before anything is installed.</li>
+            <li>Upgrade any time with <code>fleet update apply</code> (or <code>brew upgrade cenvero-fleet</code>).</li>
+            <li>Build from source with Go: <code>git clone https://github.com/cenvero/fleet &amp;&amp; make build</code>.</li>
+          </ul>
+        </div>
+        <div class="install">
+          <div class="tabs" role="tablist" aria-label="Operating system" data-os-tabs>
+            <button class="tab" role="tab" type="button" id="tab-macos" aria-controls="panel-macos" aria-selected="true" data-os="macos"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-laptop"/></svg>macOS</button>
+            <button class="tab" role="tab" type="button" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1" data-os="linux"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-terminal"/></svg>Linux</button>
+            <button class="tab" role="tab" type="button" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1" data-os="windows"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-monitor"/></svg>Windows</button>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="panel-macos" aria-labelledby="tab-macos">
+            <div class="cmd-label">Homebrew <span class="tag tag-accent">recommended</span></div>
+            <div class="cmd"><code>brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet</code><button class="copy-btn" type="button" data-copy="brew tap cenvero/fleet &amp;&amp; brew install cenvero-fleet"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
+            <div class="cmd-label">or the install script</div>
+            <div class="cmd"><code>curl -fsSL https://fleet.cenvero.org/install | sh</code><button class="copy-btn" type="button" data-copy="curl -fsSL https://fleet.cenvero.org/install | sh"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
+            <div class="cmd-label">Install script</div>
+            <div class="cmd"><code>curl -fsSL https://fleet.cenvero.org/install | sh</code><button class="copy-btn" type="button" data-copy="curl -fsSL https://fleet.cenvero.org/install | sh"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
+            <p class="install-note">Detects your CPU architecture, verifies the signature and installs <code>fleet</code>. Homebrew on Linux works too.</p>
+          </div>
+          <div class="tabpanel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
+            <div class="cmd-label">PowerShell</div>
+            <div class="cmd ps"><code>irm https://fleet.cenvero.org/install.ps1 | iex</code><button class="copy-btn" type="button" data-copy="irm https://fleet.cenvero.org/install.ps1 | iex"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
+            <p class="install-note">Run from an elevated PowerShell prompt. Installs to <code>%ProgramFiles%\fleet</code> and adds it to <code>PATH</code>.</p>
+          </div>
+        </div>
       </div>
     </div>
-    <div>
-      <div class="code-wrap">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-        <pre><span class="c"># 3. Add a server (interactive)</span>
-fleet server add
+  </section>
 
-<span class="c"># or non-interactive</span>
-fleet server add web-01 192.0.2.10 \
-  <span class="flag">--login-user</span> root</pre>
-      </div>
-      <div class="code-wrap">
-        <button class="copy-btn" onclick="copyCode(this)">copy</button>
-        <pre><span class="c"># 4. Use it</span>
-fleet ssh web-01
-fleet exec web-01 "uptime"
-fleet dashboard</pre>
+  <!-- Stats -->
+  <section class="section tight" aria-label="Fleet at a glance">
+    <div class="container">
+      <div class="stats">
+        <div class="stat"><strong>0</strong><span>cloud accounts or hosted services</span></div>
+        <div class="stat"><strong>2</strong><span>transport modes — direct &amp; reverse</span></div>
+        <div class="stat"><strong>3</strong><span>ways to work — CLI, terminal UI, web UI</span></div>
+        <div class="stat"><strong>AGPL</strong><span>open source, self-hosted, yours</span></div>
       </div>
     </div>
-  </div>
-</div>
+  </section>
 
-<hr class="divider">
+  <!-- Features -->
+  <section class="section" id="features" aria-labelledby="features-title">
+    <div class="container">
+      <div class="section-head center">
+        <span class="eyebrow">Features</span>
+        <h2 id="features-title">Everything you need to run a fleet.</h2>
+        <p>One controller replaces a drawer of scripts, SSH configs and dashboards — and every action is scriptable, auditable and available as JSON.</p>
+      </div>
+      <div class="bento">
+        <article class="card wide feature">
+          <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-terminal"/></svg></div>
+          <h3>Shells and fan-out commands</h3>
+          <p>Open a persistent shell that survives network drops, or run a command on one server, a tag group or the whole fleet at once — with ordered output, timeouts, per-server exit codes and <code>--json</code> for scripts.</p>
+          <div class="mini-code">fleet exec --group role=web --json -- uptime</div>
+        </article>
+        <article class="card wide feature">
+          <div class="card-icon violet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-folder-sync"/></svg></div>
+          <h3>File transfer that doesn't flinch</h3>
+          <p>Chunked, parallel, SHA-256-checksummed and resumable uploads and downloads, server-to-server copies, and <code>fleet sync</code> to keep a local folder mirrored to a server — live.</p>
+          <div class="mini-code">fleet sync web-01 ./site /srv/www</div>
+        </article>
+        <article class="card">
+          <div class="card-icon blue"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-arrow-left-right"/></svg></div>
+          <h3>Direct or reverse</h3>
+          <p>Reach servers directly, or let agents dial out from behind NAT and firewalls. Mix both in one fleet.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-zap"/></svg></div>
+          <h3>Agent auto-install</h3>
+          <p>Add a server and Fleet installs, verifies and starts its agent over SSH — with a preview before anything changes.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon pink"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-settings-2"/></svg></div>
+          <h3>Services, logs &amp; journald</h3>
+          <p>Start, stop and restart units, follow and search logs, query the journal, and keep a cached copy for offline reading.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon amber"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-activity"/></svg></div>
+          <h3>Metrics, alerts &amp; notifications</h3>
+          <p>CPU, memory, disk and load history, threshold alerts, and Slack or webhook notifications when servers go offline or jobs fail.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon blue"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-calendar-clock"/></svg></div>
+          <h3>Jobs, cron &amp; drift</h3>
+          <p>Run long tasks as detached jobs, manage crontabs, and detect config files that drift from a captured baseline.</p>
+        </article>
+        <article class="card">
+          <div class="card-icon violet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-bot"/></svg></div>
+          <h3>Built for AI agents</h3>
+          <p>A self-describing CLI that Claude Code or Codex learns in one command — then operates your fleet safely.</p>
+          <a class="card-link" href="/agentic.html">Agentic Fleet <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-arrow-right"/></svg></a>
+        </article>
+      </div>
+    </div>
+  </section>
 
-<footer>
-  <div>© 2026 Cenvero · AGPL-3.0-or-later</div>
-  <div class="footer-links">
-    <a href="/docs/">Docs</a>
-    <a href="https://github.com/cenvero/fleet">GitHub</a>
-    <a href="https://github.com/cenvero/fleet/releases">Releases</a>
-    <a href="mailto:security@cenvero.org">security@cenvero.org</a>
+  <!-- Showcase -->
+  <section class="section section-alt" id="interfaces" aria-labelledby="interfaces-title">
+    <div class="container">
+      <div class="section-head center">
+        <span class="eyebrow">Interfaces</span>
+        <h2 id="interfaces-title">Terminal, browser or script — your call.</h2>
+        <p>The same engine drives a live terminal dashboard, a dual-pane terminal file manager, a localhost web UI and a CLI that prints JSON.</p>
+      </div>
+      <div class="showcase-tabs" role="tablist" aria-label="Fleet interfaces">
+        <button class="tab" role="tab" type="button" id="st-dash" aria-controls="sp-dash" aria-selected="true"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-layout-dashboard"/></svg>Terminal dashboard</button>
+        <button class="tab" role="tab" type="button" id="st-files" aria-controls="sp-files" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-folder-tree"/></svg>File manager</button>
+        <button class="tab" role="tab" type="button" id="st-web" aria-controls="sp-web" aria-selected="false" tabindex="-1"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-monitor"/></svg>Web UI</button>
+      </div>
+      <div role="tabpanel" id="sp-dash" aria-labelledby="st-dash">
+        <figure class="shot">
+          <div class="shot-frame"><img src="/assets/img/dashboard-servers.webp" width="1600" height="771" loading="lazy" decoding="async" alt="The fleet dashboard terminal UI showing four servers with status, transport mode, CPU, memory, disk, load, agent version and tags, and a detail panel for db-01."></div>
+          <figcaption><strong><code>fleet dashboard</code></strong> — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse.</figcaption>
+        </figure>
+      </div>
+      <div role="tabpanel" id="sp-files" aria-labelledby="st-files" hidden>
+        <figure class="shot">
+          <div class="shot-frame"><img src="/assets/img/file-manager.webp" width="1600" height="771" loading="lazy" decoding="async" alt="The dual-pane terminal file manager with a local project on the left, the web-01 server on the right and a preview of index.html."></div>
+          <figcaption><strong><code>fleet files</code></strong> — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop.</figcaption>
+        </figure>
+      </div>
+      <div role="tabpanel" id="sp-web" aria-labelledby="st-web" hidden>
+        <figure class="shot">
+          <div class="shot-frame"><img src="/assets/img/web-fleet.webp" width="1600" height="867" loading="lazy" decoding="async" alt="The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags."></div>
+          <figcaption><strong><code>fleet file ui</code></strong> — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- Transport -->
+  <section class="section" id="transport" aria-labelledby="transport-title">
+    <div class="container">
+      <div class="split">
+        <div>
+          <span class="eyebrow">Transport</span>
+          <h2 id="transport-title" class="split-title">Reach every server — even the ones behind NAT.</h2>
+          <p>In <strong>direct mode</strong> the controller connects to the agent over SSH when it needs to. In <strong>reverse mode</strong> the agent dials out and keeps an authenticated session open, so the server needs no inbound port at all. Mix both in the same fleet.</p>
+          <ul class="checks">
+            <li>Ed25519 keys and <strong>trust-on-first-use host-key pinning</strong> in both directions.</li>
+            <li>Reverse agents enrol with a <strong>one-time token</strong> and the controller's fingerprint.</li>
+            <li>Pooled connections with keepalives; agents reconnect on their own after a drop.</li>
+          </ul>
+        </div>
+        <div class="diagram">
+          <svg viewBox="0 0 560 330" role="img" aria-labelledby="dia-title dia-desc">
+            <title id="dia-title">Direct and reverse transport modes</title>
+            <desc id="dia-desc">In direct mode the controller connects to the agent's SSH port. In reverse mode the agent connects out through a firewall to the controller, which reaches it over that session.</desc>
+            <defs>
+              <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow" d="M0 0L10 5L0 10z"/></marker>
+              <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow-2" d="M0 0L10 5L0 10z"/></marker>
+            </defs>
+            <text class="d-label" x="0" y="18">DIRECT</text>
+            <rect class="d-box-acc" x="0" y="34" width="170" height="74" rx="12"/>
+            <text class="d-text" x="20" y="66">Controller</text>
+            <text class="d-sub" x="20" y="88">fleet · your machine</text>
+            <rect class="d-box" x="390" y="34" width="170" height="74" rx="12"/>
+            <text class="d-text" x="410" y="66">web-01</text>
+            <text class="d-sub" x="410" y="88">fleet-agent :2222</text>
+            <path class="d-line" d="M176 71H382" marker-end="url(#ah)"/>
+            <text class="d-label" x="222" y="60">SSH, host key pinned</text>
+
+            <text class="d-label" x="0" y="190">REVERSE</text>
+            <rect class="d-box-acc" x="0" y="206" width="170" height="74" rx="12"/>
+            <text class="d-text" x="20" y="238">Controller</text>
+            <text class="d-sub" x="20" y="260">fleet daemon :9443</text>
+            <rect class="d-wall" x="338" y="196" width="18" height="94" rx="4"/>
+            <text class="d-sub" x="347" y="312" text-anchor="middle">NAT / firewall</text>
+            <rect class="d-box" x="390" y="206" width="170" height="74" rx="12"/>
+            <text class="d-text" x="410" y="238">edge-01</text>
+            <text class="d-sub" x="410" y="260">no inbound ports</text>
+            <path class="d-line-2" d="M384 243H176" marker-end="url(#ah2)"/>
+            <text class="d-label" x="190" y="232">agent dials out</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Agentic teaser -->
+  <section class="section section-alt" id="agentic" aria-labelledby="agentic-title">
+    <div class="container">
+      <div class="split reverse">
+        <div>
+          <span class="eyebrow">Agentic AI</span>
+          <h2 id="agentic-title" class="split-title">Let an AI agent run the fleet — with guard rails.</h2>
+          <p>One command teaches Claude Code or Codex the entire CLI. The agent reads <code>fleet context</code>, then deploys, debugs and verifies across your servers with your keys, on your machine — and every command returns JSON it can reason about.</p>
+          <ul class="checks">
+            <li><strong>Scoped, fail-closed tokens</strong> limit which servers, commands and secrets an agent can touch.</li>
+            <li><strong>Dry runs, approvals and idempotency keys</strong> keep unattended runs predictable.</li>
+            <li><strong><code>fleet guard</code></strong> reverts a risky change automatically unless it is confirmed.</li>
+          </ul>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="/agentic.html">Explore Agentic Fleet <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-arrow-right"/></svg></a>
+          </div>
+        </div>
+        <div class="window" role="img" aria-label="Terminal: installing the Fleet skill for Claude Code and asking the agent to restart nginx and show logs">
+          <div class="window-bar"><div class="dots"><span></span><span></span><span></span></div><span class="window-title">claude — ~/ops</span></div>
+<pre aria-hidden="true"><span class="t-prompt">$</span> <span class="t-cmd">fleet skill claude</span>
+<span class="t-ok">✓</span> /fleet installed — restart Claude, type /fleet
+
+<span class="t-vio">›</span> /fleet restart nginx on the web tier and
+  show me the last 20 error lines
+
+<span class="t-dim">● fleet context        learned 60+ commands</span>
+<span class="t-dim">● fleet exec</span> <span class="t-flag">--group</span> <span class="t-str">role=web</span> <span class="t-flag">--json</span> <span class="t-dim">-- \</span>
+    systemctl restart nginx
+  <span class="t-ok">web-01 exit 0 · web-02 exit 0</span>
+<span class="t-dim">● fleet journal</span> web-01 <span class="t-flag">--unit</span> nginx.service <span class="t-flag">--grep</span> error
+  <span class="t-dim">no errors since restart</span>
+
+<span class="t-acc">Both web servers restarted cleanly; no new errors.</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Security -->
+  <section class="section" id="security" aria-labelledby="security-title">
+    <div class="container">
+      <div class="section-head center">
+        <span class="eyebrow">Security</span>
+        <h2 id="security-title">Secure by default, auditable by design.</h2>
+        <p>Fleet runs with root-level reach across your infrastructure, so it is built to be boringly safe.</p>
+      </div>
+      <div class="grid grid-3">
+        <article class="card"><div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-fingerprint"/></svg></div><h3>Pinned, encrypted channels</h3><p>Ed25519 keys, trust-on-first-use host-key pinning, and one-time enrolment tokens for reverse agents. Key rotation verifies the new key before retiring the old one.</p></article>
+        <article class="card"><div class="card-icon blue"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-badge-check"/></svg></div><h3>Signed, anti-rollback updates</h3><p>Every release is minisign-signed. The installer and updater verify it and refuse downgrades; agent rollouts can be canaried.</p></article>
+        <article class="card"><div class="card-icon violet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-key-round"/></svg></div><h3>Scoped tokens &amp; secrets</h3><p>Fail-closed RBAC tokens per server, group and command; named secrets that reach commands through the environment and are redacted from output.</p></article>
+        <article class="card"><div class="card-icon pink"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-hand"/></svg></div><h3>Approvals &amp; command policy</h3><p>Stage risky commands for a human to review, deny or require confirmation for patterns, and dry-run anything first.</p></article>
+        <article class="card"><div class="card-icon amber"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg></div><h3>Tamper-evident audit log</h3><p>A hash-chained log of commands, transfers, approvals and key, token and secret changes — never the secret values.</p></article>
+        <article class="card"><div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-lock"/></svg></div><h3>Locked-down surfaces</h3><p>The web UI binds to loopback with a per-run token, CSRF checks and a strict CSP; agents can be confined to allow-listed directories.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick start -->
+  <section class="section section-alt" id="quickstart" aria-labelledby="quickstart-title">
+    <div class="container">
+      <div class="section-head center">
+        <span class="eyebrow">Quick start</span>
+        <h2 id="quickstart-title">From install to your first fan-out in four steps.</h2>
+      </div>
+      <ol class="steps grid grid-2">
+        <li>
+          <h3>Initialise the controller</h3>
+          <p>Creates the config directory, Ed25519 keys and databases.</p>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet init</pre></div>
+        </li>
+        <li>
+          <h3>Add a server</h3>
+          <p>Interactive by default; Fleet installs the agent over SSH.</p>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet server add web-01 192.0.2.10 <span class="f">--login-user</span> root</pre></div>
+        </li>
+        <li>
+          <h3>Tag and group</h3>
+          <p>Label servers once, then target them by expression.</p>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet tag web-01 role=web env=prod</pre></div>
+        </li>
+        <li>
+          <h3>Operate</h3>
+          <p>Shell in, fan out, or open the dashboard.</p>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet exec <span class="f">--group</span> role=web -- uptime
+fleet dashboard</pre></div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section" id="faq" aria-labelledby="faq-title">
+    <div class="container">
+      <div class="section-head center">
+        <span class="eyebrow">FAQ</span>
+        <h2 id="faq-title">Questions, answered.</h2>
+      </div>
+      <div class="faq">
+        <details>
+          <summary>Is Cenvero Fleet free?</summary>
+          <div class="faq-body"><p>Yes. Cenvero Fleet is free and open source under the AGPL-3.0-or-later license. There is no paid tier, no account and no hosted service.</p></div>
+        </details>
+        <details>
+          <summary>Do I need a cloud account or a hosted control plane?</summary>
+          <div class="faq-body"><p>No. The controller is a binary on your own machine. It talks to your servers over encrypted, host-key-pinned SSH channels and keeps its state in a local directory — SQLite by default, or PostgreSQL, MySQL or MariaDB if you prefer.</p></div>
+        </details>
+        <details>
+          <summary>Can it manage servers behind NAT or a firewall?</summary>
+          <div class="faq-body"><p>Yes. In reverse mode the agent dials out to the controller and keeps an authenticated session open, so the server needs no inbound port. Direct and reverse servers can be mixed in one fleet.</p></div>
+        </details>
+        <details>
+          <summary>Which operating systems are supported?</summary>
+          <div class="faq-body"><p>The controller runs on Linux, macOS and Windows. Agents are installed automatically on Linux servers with systemd; macOS and Windows agents can be set up manually. Service and firewall management are Linux features.</p></div>
+        </details>
+        <details>
+          <summary>How is Cenvero Fleet different from Ansible?</summary>
+          <div class="faq-body"><p>Ansible applies playbooks. Fleet is an interactive, always-connected control plane: live shells, fan-out commands with JSON output, file transfer and live sync, logs, metrics, alerts, a terminal dashboard and a web UI — plus a CLI that AI agents can discover and drive. Many teams use both.</p></div>
+        </details>
+        <details>
+          <summary>Can an AI agent operate my servers with Fleet?</summary>
+          <div class="faq-body"><p>Yes. Run <code>fleet skill claude</code> (or <code>codex</code>). The agent learns the whole CLI from <code>fleet context</code> and operates your fleet with your keys, on your machine — with scoped tokens, approvals, dry runs and a dead-man's switch as guard rails. <a href="/agentic.html">Read more about Agentic Fleet</a>.</p></div>
+        </details>
+        <details>
+          <summary>How are releases and updates verified?</summary>
+          <div class="faq-body"><p>Every release is signed with minisign. The installer and the updater verify the signature, and refuse to roll back to an older version, before anything is replaced.</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="section pt-0" aria-labelledby="cta-title">
+    <div class="container">
+      <div class="cta-band">
+        <h2 id="cta-title">Take back control of your fleet.</h2>
+        <p>Install the controller, add a server and run your first command across the fleet — all in a few minutes.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary btn-lg" href="#install"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Install Fleet</a>
+          <a class="btn btn-secondary btn-lg" href="https://github.com/cenvero/fleet"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-github"/></svg> View on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href="/"><img src="/assets/img/logo-64.png" alt="" width="30" height="30" loading="lazy"><span>Cenvero <strong>Fleet</strong></span></a>
+        <p>Self-hosted fleet management over SSH for humans and AI agents. Free and open source.</p>
+      </div>
+      <nav aria-label="Product">
+        <h2>Product</h2>
+        <ul>
+          <li><a href="/#features">Features</a></li>
+          <li><a href="/agentic.html">Agentic AI</a></li>
+          <li><a href="/whats-new.html">What's new</a></li>
+          <li><a href="/#install">Install</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Documentation">
+        <h2>Documentation</h2>
+        <ul>
+          <li><a href="/docs/">Docs home</a></li>
+          <li><a href="/docs/#install">Getting started</a></li>
+          <li><a href="/docs/#file-manager">File manager</a></li>
+          <li><a href="/docs/#commands">Command reference</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Project">
+        <h2>Project</h2>
+        <ul>
+          <li><a href="https://github.com/cenvero/fleet">GitHub</a></li>
+          <li><a href="https://github.com/cenvero/fleet/releases">Releases</a></li>
+          <li><a href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/cenvero/fleet/security/policy">Security policy</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Cenvero · Licensed under AGPL-3.0-or-later</span>
+      <a href="mailto:security@cenvero.org">security@cenvero.org</a>
+    </div>
   </div>
 </footer>
-
-<script>
-  function detectOS() {
-    const ua = navigator.userAgent;
-    if (/Windows/i.test(ua)) return 'windows';
-    if (/Mac|iPhone|iPad|iPod/i.test(ua) && !/Android/i.test(ua)) return 'mac';
-    return 'linux';
-  }
-  function switchOS(os) {
-    document.querySelectorAll('.os-tab').forEach(t => t.classList.toggle('active', t.dataset.os === os));
-    document.querySelectorAll('.os-panel').forEach(p => p.classList.toggle('active', p.dataset.os === os));
-  }
-  function copyCmd(btn, text) {
-    navigator.clipboard.writeText(text).then(() => {
-      const original = btn.textContent;
-      btn.textContent = 'copied!';
-      setTimeout(() => btn.textContent = original, 1800);
-    });
-  }
-  switchOS(detectOS());
-  lucide.createIcons();
-
-  function toggleMenu(btn) {
-    const m = document.getElementById('nav-mobile');
-    m.classList.toggle('open');
-  }
-  function copyCode(btn) {
-    const pre = btn.nextElementSibling;
-    navigator.clipboard.writeText(pre.innerText).then(() => {
-      btn.textContent = 'copied!';
-      setTimeout(() => btn.textContent = 'copy', 1800);
-    });
-  }
-</script>
+<script src="/assets/site.js" defer></script>
 </body>
 </html>
