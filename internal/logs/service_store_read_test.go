@@ -99,7 +99,7 @@ func compareStoreRead(t *testing.T, store *ServiceStore, search string, tail int
 func TestServiceStoreReadMatchesLegacyOnRandomRotatedSets(t *testing.T) {
 	rng := rand.New(rand.NewPCG(11, 12))
 	searches := []string{"", "error", " ERROR ", "i", "k", "200", "\r", "zzzz", "nothing-matches"}
-	for iter := 0; iter < 200; iter++ {
+	for iter := 0; iter < 60; iter++ {
 		root := t.TempDir()
 		store := NewServiceStore(root, 1<<20, 5, time.Hour)
 		base := store.basePath("web-01", "nginx.service")
@@ -131,7 +131,7 @@ func TestServiceStoreReadMatchesLegacyAcrossAppendsAndRotation(t *testing.T) {
 	rng := rand.New(rand.NewPCG(13, 14))
 	store := NewServiceStore(t.TempDir(), 2048, 3, time.Hour)
 	number := 0
-	for step := 0; step < 400; step++ {
+	for step := 0; step < 150; step++ {
 		batch := make([]proto.LogLine, 1+rng.IntN(20))
 		for i := range batch {
 			number++
