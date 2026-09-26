@@ -46,6 +46,9 @@ type Server struct {
 	files remoteFiles
 	// localGuard keeps the Local source out of the controller's config dir.
 	localGuard localGuard
+	// authorizer, when set, applies the RBAC token the UI was launched with
+	// to reads the UI performs beyond file management (the Fleet overview).
+	authorizer func(command string) error
 	// operator is the audit attribution for actions the UI records itself.
 	operator string
 }
@@ -66,6 +69,11 @@ func New(app *core.App) (*Server, error) {
 
 // Token returns the per-process access token.
 func (s *Server) Token() string { return s.token }
+
+// SetCommandAuthorizer installs an RBAC check for the read-only views the UI
+// offers beyond file management. fn receives the CLI command the view is
+// equivalent to ("server", "alerts", "tag") and returns an error to deny it.
+func (s *Server) SetCommandAuthorizer(fn func(command string) error) { s.authorizer = fn }
 
 // SetOperator sets the audit-log operator label (e.g. "token:<name>") used for
 // entries the web UI writes itself.
@@ -131,6 +139,7 @@ func (s *Server) routes() http.Handler {
 	// Read-only views and transfer tracking. GET-only endpoints never change
 	// state; the one mutation (cancel) is POST so the CSRF check covers it.
 	mux.HandleFunc("/api/preview", s.guard(getOnly(s.handlePreview)))
+	mux.HandleFunc("/api/overview", s.guard(getOnly(s.handleOverview)))
 	mux.HandleFunc("/api/transfers", s.guard(getOnly(s.handleTransfers)))
 	mux.HandleFunc("/api/transfers/stream", s.guard(getOnly(s.handleTransferStream)))
 	mux.HandleFunc("/api/transfers/cancel", s.guard(postOnly(s.handleTransferCancel)))
