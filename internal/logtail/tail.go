@@ -112,7 +112,6 @@ type ForwardResult struct {
 // span locates one line inside a region of whole lines.
 type span struct {
 	start, end int // text bytes: region[start:end]
-	next       int // offset just past the line's '\n'
 	idx        int // 0-based line index within the region
 }
 
@@ -156,7 +155,7 @@ func matchRegion(region []byte, m *Matcher, lower *[]byte, spans []span) ([]span
 			end--
 		}
 		if m.Match(region[off:end]) {
-			spans = append(spans, span{start: off, end: end, next: next, idx: idx})
+			spans = append(spans, span{start: off, end: end, idx: idx})
 		}
 		off = next
 	}
@@ -187,7 +186,7 @@ func matchBlock(region, hay, needle []byte, spans []span) []span {
 		if end > ls && region[end-1] == '\r' {
 			end--
 		}
-		spans = append(spans, span{start: ls, end: end, next: next, idx: idx})
+		spans = append(spans, span{start: ls, end: end, idx: idx})
 		pos = next
 	}
 	return spans
