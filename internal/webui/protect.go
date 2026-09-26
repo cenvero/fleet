@@ -236,12 +236,16 @@ func (g localGuard) checkFollowedTree(p string) error {
 // existingChain returns the identity of every existing ancestor-or-self of the
 // cleaned path p (following symlinks), deepest first, each with the components
 // of p beneath it.
+//
+// Security: p is the request path being checked; this is the guard itself,
+// and it only stats p and its ancestors to decide whether to refuse it.
 func existingChain(p string) []pathLink {
 	p = filepath.Clean(p)
 	var below []string // components under cur, innermost last-in
 	var out []pathLink
 	cur := p
 	for i := 0; i < 512; i++ {
+		// codeql[go/path-injection] read-only stat performed by the protected-path guard itself to decide whether to refuse the request
 		if info, err := os.Stat(cur); err == nil {
 			rest := make([]string, len(below))
 			for j := range below {
@@ -337,9 +341,38 @@ func (s *Server) protectedPaths() []string {
 	return append(paths, s.serverKeys...)
 }
 
+// CheckLocalPath applies the Local source's protected-location guard to a
+// controller-local path for callers outside the web UI (the CLI refuses a
+// scoped RBAC token the same locations). It returns an error when p is, lies
+// inside, resolves into or — with tree set — contains the controller's config
+// directory or any key, known-hosts, data, log or database location.
+func CheckLocalPath(app *core.App, p string, tree bool) error {
+	if app == nil {
+		return nil
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return err
+	}
+	g := (&Server{app: app}).pathGuard()
+	if tree {
+		return g.checkTree(abs)
+	}
+	return g.check(abs)
+}
+
 // cleanLocal validates a controller-side path exactly like cleanLocalPath and
 // additionally refuses protected locations. Every Local-source handler that
 // touches a single entry goes through it.
+//
+// Security: the Local source deliberately accepts any absolute path the
+// operator picks — it is the operator's own file manager, reachable only over
+// loopback with the per-process token, a loopback Host header and (for every
+// mutation) a same-origin POST. The trust boundary is therefore the protected
+// controller locations, not the path itself: cleanLocal, cleanLocalWrite and
+// cleanLocalTree are the checks every Local handler applies before touching
+// the filesystem, which is why CodeQL go/path-injection alerts on those
+// handlers (and on the core helpers they call) are false positives.
 func (s *Server) cleanLocal(p string) (string, error) {
 	clean, err := cleanLocalPath(p)
 	if err != nil {
@@ -455,6 +488,10 @@ func (s *Server) extractLocalGuarded(archive string) error {
 	}
 	// Keep the original base name so core picks the same format; the random
 	// prefix keeps the copy from colliding with any member.
+	//
+	// Security: staged is a single random-prefixed entry (filepath.Base of the
+	// already-guarded archive path) inside the private 0700 staging directory,
+	// which the Local source can never reach.
 	staged := filepath.Join(members, ".fleet-extract-"+tag[:16]+"-"+filepath.Base(archive))
 	if err := copyArchiveForStaging(archive, staged); err != nil {
 		return err
@@ -462,6 +499,7 @@ func (s *Server) extractLocalGuarded(archive string) error {
 	if err := s.app.ExtractArchive("", staged); err != nil {
 		return err
 	}
+	// codeql[go/path-injection] generated Base() name inside a freshly created private 0700 staging directory
 	if err := os.Remove(staged); err != nil {
 		return err
 	}
@@ -492,6 +530,7 @@ func (s *Server) extractLocalGuarded(archive string) error {
 
 // copyArchiveForStaging copies the archive into the private staging dir.
 func copyArchiveForStaging(src, dst string) error {
+	// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 	in, err := os.Open(src) // #nosec G304,G703 -- operator-selected local archive; the caller's guard refused protected paths
 	if err != nil {
 		return err
@@ -504,6 +543,7 @@ func copyArchiveForStaging(src, dst string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", filepath.Base(src))
 	}
+	// codeql[go/path-injection] generated Base() name inside a freshly created private 0700 staging directory
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304,G703 -- generated name inside a private 0700 staging dir
 	if err != nil {
 		return err

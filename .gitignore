@@ -10,3 +10,4 @@ tmp/
 _private/
 fleet
 fleet-agent
+__pycache__/

@@ -57,7 +57,7 @@ func (m fileAuthorizedKeysManager) Update(_ context.Context, payload proto.Autho
 	}
 
 	filtered := make([]string, 0, len(lines))
-	seen := make(map[string]struct{}, len(lines)+len(payload.AddKeys))
+	seen := make(map[string]struct{}, len(lines))
 	for _, line := range lines {
 		if _, remove := removeSet[line]; remove {
 			continue

@@ -12,6 +12,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -663,6 +664,10 @@ func listLocalDir(dir string, showHidden bool) (proto.FileListResult, error) {
 	if err != nil {
 		return proto.FileListResult{}, err
 	}
+	// Security: listing any operator-chosen directory is this file manager's
+	// purpose (loopback + per-process token + Host check); handleList has
+	// already refused protected locations via cleanLocal.
+	// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 	ents, err := os.ReadDir(clean)
 	if err != nil {
 		return proto.FileListResult{}, err
@@ -823,8 +828,10 @@ func (s *Server) transferLocalToServer(srcPath, dstServer, dstPath string, recur
 		return err
 	}
 	if recursive {
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		return os.RemoveAll(srcPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 	}
+	// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 	return os.Remove(srcPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 }
 
@@ -843,8 +850,10 @@ func (s *Server) transferServerToLocal(srcServer, srcPath, dstPath string, recur
 
 func transferLocalToLocal(srcPath, dstPath string, move bool) error {
 	if move {
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		return os.Rename(srcPath, dstPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 	}
+	// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 	info, err := os.Lstat(srcPath) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 	if err != nil {
 		return err
@@ -1002,6 +1011,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		info, err := os.Stat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err != nil {
 			writeError(w, err)
@@ -1014,6 +1024,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		// Read bounded via an explicit open + LimitReader instead of trusting the
 		// stat size: a file that grows between the stat and the read can't slip past
 		// the cap (TOCTOU), and O_NOFOLLOW refuses a symlinked target.
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		f, oerr := os.OpenFile(clean, os.O_RDONLY|oNoFollow, 0) // #nosec G304,G703 -- path validated by cleanLocalPath; O_NOFOLLOW set
 		if oerr != nil {
 			writeError(w, oerr)
@@ -1052,7 +1063,14 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, fmt.Errorf("file appears to be binary and cannot be edited as text"))
 		return
 	}
-	writeJSON(w, map[string]any{"content": string(data), "size": len(data)})
+	// sha256 is the version the editor opened; the save sends it back so a
+	// server file changed in the meantime is reported, not overwritten.
+	writeJSON(w, map[string]any{"content": string(data), "size": len(data), "sha256": sha256Hex(data)})
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // errEditTooLarge is the sentinel capWriter uses to abort an oversized remote
@@ -1077,12 +1095,21 @@ func (c *capWriter) Write(p []byte) (int, error) {
 
 // handleWrite saves edited text back to a file. The request body is the new
 // content (capped at maxEditBytes). Local writes hit the controller's disk at
-// 0o600; server writes spool to a controller temp then upload to the agent.
+// 0o600. Server writes use the agent's safe in-place edit, which keeps the
+// file's owner, group, mode and extended attributes, replaces it atomically,
+// and — given the sha256 the editor opened (?base=) — refuses with 409 if the
+// file changed on the server since. Agents too old for that get the
+// checksummed atomic upload.
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p := r.URL.Query().Get("path")
+	base := strings.ToLower(r.URL.Query().Get("base"))
 	if p == "" {
 		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if base != "" && !isHexSHA256(base) {
+		http.Error(w, "base must be a hex sha256", http.StatusBadRequest)
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxEditBytes))
@@ -1110,10 +1137,24 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "ok"})
+		writeJSON(w, map[string]string{"status": "ok", "sha256": sha256Hex(body)})
 		return
 	}
-	// Spool to a controller temp file, then upload to the target path on the agent.
+	res, err := s.app.EditRemoteFile(server, core.EditRequest{Path: p, Replace: true, Content: body, BaseSHA256: base})
+	switch {
+	case err == nil:
+		writeJSON(w, map[string]string{"status": "ok", "sha256": res.NewSHA256})
+		return
+	case core.EditErrorCode(err) == "edit_conflict":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "the file changed on the server since you opened it, so it was not overwritten; copy your changes, then reopen the file"})
+		return
+	case !errors.Is(err, core.ErrEditUnsupported):
+		writeError(w, err)
+		return
+	}
+	// An older agent: spool to a controller temp file, then upload.
 	tmp, err := os.CreateTemp("", "fleet-webui-edit-*")
 	if err != nil {
 		writeError(w, err)
@@ -1134,7 +1175,15 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok", "sha256": sha256Hex(body)})
+}
+
+func isHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // handleTouch creates a new empty file. Local: O_EXCL so it won't clobber an
@@ -1151,6 +1200,7 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 		// redirect the create outside the named path; O_EXCL guards the final
 		// component against clobbering an existing file/symlink.
 		p = resolveLocalWritePath(p)
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path validated, parent symlinks resolved, O_EXCL on final
 		if err != nil {
 			writeError(w, err)
@@ -1245,6 +1295,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" { // Local
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		if err := os.Mkdir(p, 0o750); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			writeError(w, err)
 			return
@@ -1276,8 +1327,10 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 		// passes recursive=true for directories but RemoveAll is safe either way.
 		var rmErr error
 		if recursive {
+			// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 			rmErr = os.RemoveAll(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		} else {
+			// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 			rmErr = os.Remove(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		}
 		if rmErr != nil {
@@ -1351,6 +1404,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		if err := os.Rename(cf, ct); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			writeError(w, err)
 			return
@@ -1528,6 +1582,7 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid source name: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		info, err := os.Lstat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err != nil {
 			writeError(w, err)
@@ -1699,6 +1754,7 @@ func symlinkClobberError(path string, err error) error {
 	}
 	symlinked := errors.Is(err, syscall.ELOOP)
 	if !symlinked {
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			symlinked = true
 		}

@@ -183,23 +183,36 @@ const catReadAhead = 4
 // SSH channel window; a few are requested ahead so a long link is not idle
 // between chunks.
 func (a *App) CatRemoteFile(serverName, remotePath string, w io.Writer) (int64, error) {
+	n, _, err := a.catRemoteFile(serverName, remotePath, w)
+	return n, err
+}
+
+// catRemoteFile is CatRemoteFile that also returns the file's metadata.
+func (a *App) catRemoteFile(serverName, remotePath string, w io.Writer) (int64, proto.FileStatResult, error) {
 	server, err := a.GetServer(serverName)
 	if err != nil {
-		return 0, err
+		return 0, proto.FileStatResult{}, err
 	}
 	conn, err := a.openTransferConn(server, 1)
 	if err != nil {
-		return 0, err
+		return 0, proto.FileStatResult{}, err
 	}
 	defer conn.closeFn()
 	const chunk = int64(DefaultChunkSizeBytes)
 	stat, first, err := statAndFirstChunk(conn, remotePath, chunk)
 	if err != nil {
-		return 0, err
+		return 0, stat, err
 	}
 	if err := requireRemoteRegular(stat.Entry, remotePath); err != nil {
-		return 0, err
+		return 0, stat, err
 	}
+	n, err := streamRemoteFile(conn, remotePath, stat, first, chunk, w)
+	return n, stat, err
+}
+
+// streamRemoteFile writes a remote file to w chunk by chunk, verifying each
+// chunk's SHA-256, starting from the first chunk statAndFirstChunk returned.
+func streamRemoteFile(conn *transferConn, remotePath string, stat proto.FileStatResult, first *proto.FileReadResult, chunk int64, w io.Writer) (int64, error) {
 	known := max(stat.Entry.Size, 0)
 	if known > chunk {
 		conn.grow(catReadAhead)

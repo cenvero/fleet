@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // AuditEntry is one appended audit record.
@@ -95,6 +96,29 @@ const maxAuditLineBytes = 4 * 1024 * 1024
 // auditTailChunk is how much the backwards tail reader reads per step.
 const auditTailChunk = 64 * 1024
 
+// Per-field bounds applied by Append. Entries embed text the controller does
+// not choose — agent error messages, agent-reported versions, remote paths —
+// and a single line over maxAuditLineBytes would leave the log unreadable and
+// make every later Append fail. json.Marshal expands a byte to at most six
+// (\u00XX), so these bounds keep any entry's line well under the limit.
+const (
+	maxAuditDetailsBytes = 512 << 10
+	maxAuditLabelBytes   = 4 << 10 // Action, Target, Operator
+)
+
+// boundAuditField truncates s to at most max bytes on a UTF-8 boundary and
+// says how much was dropped.
+func boundAuditField(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + fmt.Sprintf("…[truncated %d bytes]", len(s)-cut)
+}
+
 func NewAuditLog(path string) *AuditLog {
 	return &AuditLog{path: path}
 }
@@ -114,6 +138,10 @@ func (a *AuditLog) Append(entry AuditEntry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
 	}
+	entry.Action = boundAuditField(entry.Action, maxAuditLabelBytes)
+	entry.Target = boundAuditField(entry.Target, maxAuditLabelBytes)
+	entry.Operator = boundAuditField(entry.Operator, maxAuditLabelBytes)
+	entry.Details = boundAuditField(entry.Details, maxAuditDetailsBytes)
 
 	if err := os.MkdirAll(filepath.Dir(a.path), 0o700); err != nil {
 		return fmt.Errorf("create audit log directory: %w", err)
@@ -153,15 +181,13 @@ func (a *AuditLog) appendLocked(entry AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("marshal audit entry: %w", err)
 	}
-	line := make([]byte, 0, len(payload)+2)
+	line := append(payload, '\n')
 	if missingNewline {
 		// The last existing entry decoded fine but is not newline-terminated
 		// (e.g. the file was hand-edited). Terminate it so the new entry lands
 		// on its own line instead of being glued onto that one.
-		line = append(line, '\n')
+		line = append([]byte{'\n'}, line...)
 	}
-	line = append(line, payload...)
-	line = append(line, '\n')
 	a.tail = auditTailCache{}
 	if _, err := f.Write(line); err != nil {
 		return fmt.Errorf("append audit entry: %w", err)

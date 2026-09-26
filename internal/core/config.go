@@ -322,6 +322,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("runtime metrics poll interval: %w", err)
 		}
 	}
+	if err := c.Runtime.FileEdit.Validate(); err != nil {
+		return fmt.Errorf("runtime file edit: %w", err)
+	}
 	if v := strings.TrimSpace(c.Runtime.JobLogRetention); v != "" {
 		switch strings.ToLower(v) {
 		case "0", "off", "never", "disabled": // explicit "no pruning" — valid
@@ -547,7 +550,8 @@ func extractBackupToStage(inputPath, stage string, limits restoreLimits) error {
 	members := 0
 
 	for {
-		// lgtm[go/zipslip] - header.Name is sanitized via safeRestoreMemberName and pathWithinBase below before use
+		// header.Name is untrusted: safeRestoreMemberName (filepath.IsLocal)
+		// and pathWithinBase below confine every member to the stage.
 		header, err := tr.Next()
 		if err == io.EOF {
 			// tar.Reader stops at the tar terminator. Drain a bounded tail so the
@@ -640,6 +644,13 @@ func safeRestoreMemberName(name string) (string, error) {
 	}
 	clean := path.Clean(name)
 	if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") || filepath.IsAbs(name) {
+		return "", fmt.Errorf("backup archive contains unsafe path %q", name)
+	}
+	// The lexical checks above are POSIX-shaped. filepath.IsLocal applies the
+	// controller's own rules as well, so on Windows a rooted ("\x"),
+	// drive-relative ("C:x") or reserved device name ("NUL", "COM1") member is
+	// refused instead of being opened beneath the staging directory.
+	if !filepath.IsLocal(filepath.FromSlash(clean)) {
 		return "", fmt.Errorf("backup archive contains unsafe path %q", name)
 	}
 	return clean, nil

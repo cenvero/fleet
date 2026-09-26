@@ -70,6 +70,54 @@ type BootstrapRequest struct {
 	AgentRelease         *BootstrapAgentRelease
 	Uploads              []BootstrapUpload
 	RunCommand           string
+	// StagingDir, when set, is a fresh directory the executor creates owner-only
+	// (mkdir -m 0700, failing if the name exists in any form) before uploading
+	// anything, and removes afterwards. Every upload and the agent release
+	// destination must lie directly inside it. The staged names are visible to
+	// every local user on the target (the upload commands appear in the process
+	// list), so staging directly in /tmp would let such a user plant a file there
+	// for the login user — often root — to write the agent binary or install
+	// script into, keep ownership of, and rewrite before it is installed or run.
+	StagingDir string
+}
+
+// remoteStagingDir names the private directory a bootstrap, agent install or
+// teardown stages its files in on the target (see BootstrapRequest.StagingDir).
+func remoteStagingDir(token string) string { return "/tmp/cenvero-" + token }
+
+// buildStagingDirCommand creates dir owner-only. mkdir never reuses or follows
+// an existing entry, so the command fails if anyone created that name first.
+func buildStagingDirCommand(dir string) string {
+	return "umask 077 && mkdir -m 0700 -- " + shellQuote(dir)
+}
+
+// validateStagingLayout checks that, when a request names a staging directory,
+// every file it stages lies directly inside it.
+func validateStagingLayout(req BootstrapRequest) error {
+	dir := req.StagingDir
+	if dir == "" {
+		return nil
+	}
+	if !TargetPathPOSIX.IsAbs(dir) || TargetPathPOSIX.Clean(dir) != dir || TargetPathPOSIX.IsRoot(dir) {
+		return fmt.Errorf("invalid bootstrap staging directory %q", dir)
+	}
+	inside := func(p string) error {
+		if TargetPathPOSIX.Clean(p) != p || TargetPathPOSIX.Dir(p) != dir {
+			return fmt.Errorf("bootstrap file %q is outside the private staging directory %s", p, dir)
+		}
+		return nil
+	}
+	for _, upload := range req.Uploads {
+		if err := inside(upload.Path); err != nil {
+			return err
+		}
+	}
+	if req.AgentRelease != nil {
+		if err := inside(strings.TrimSpace(req.AgentRelease.DestinationPath)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type BootstrapUpload struct {
@@ -152,6 +200,7 @@ func (a *App) BootstrapServer(name string, opts BootstrapOptions) (BootstrapResu
 			{Path: resolved.tempUnitPath, Mode: 0o600, Content: []byte(serviceUnit)},
 		},
 		RunCommand: "/bin/sh " + shellQuote(resolved.tempScriptPath),
+		StagingDir: resolved.stagingDir,
 	}
 	if len(authorizedKeys) > 0 {
 		request.Uploads = append(request.Uploads, BootstrapUpload{
@@ -232,6 +281,7 @@ type resolvedBootstrapConfig struct {
 	tempAuthorizedKeysPath string
 	tempEnrollTokenPath    string
 	enrollTokenPath        string
+	stagingDir             string
 }
 
 func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions) (resolvedBootstrapConfig, error) {
@@ -329,6 +379,7 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 	if err != nil {
 		return resolvedBootstrapConfig{}, fmt.Errorf("generate unpredictable bootstrap paths: %w", err)
 	}
+	stagingDir := remoteStagingDir(token)
 	return resolvedBootstrapConfig{
 		loginUser:              loginUser,
 		loginPort:              loginPort,
@@ -341,12 +392,13 @@ func (a *App) resolveBootstrapConfig(server ServerRecord, opts BootstrapOptions)
 		serviceName:            serviceName,
 		useSudo:                opts.UseSudo,
 		acceptNewHostKey:       opts.AcceptNewHostKey,
-		tempBinaryPath:         "/tmp/cenvero-" + token + ".bin",
-		tempUnitPath:           "/tmp/cenvero-" + token + ".service",
-		tempScriptPath:         "/tmp/cenvero-" + token + ".sh",
-		tempAuthorizedKeysPath: "/tmp/cenvero-" + token + ".keys",
-		tempEnrollTokenPath:    "/tmp/cenvero-" + token + ".enroll",
+		tempBinaryPath:         stagingDir + "/agent.bin",
+		tempUnitPath:           stagingDir + "/agent.service",
+		tempScriptPath:         stagingDir + "/install.sh",
+		tempAuthorizedKeysPath: stagingDir + "/agent.keys",
+		tempEnrollTokenPath:    stagingDir + "/agent.enroll",
 		enrollTokenPath:        TargetPathPOSIX.Join(defaultStateDir, "enroll.token"),
+		stagingDir:             stagingDir,
 	}, nil
 }
 
@@ -574,6 +626,9 @@ func (e sshBootstrapExecutor) connect(ctx context.Context, req BootstrapRequest,
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapRequest) error {
+	if err := validateStagingLayout(req); err != nil {
+		return err
+	}
 	var authMethods []ssh.AuthMethod
 	if req.Password != "" {
 		authMethods = append(authMethods, ssh.Password(req.Password))
@@ -596,13 +651,30 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 	defer client.Close()
 
 	bootstrapSucceeded := false
+	stagingCreated := false
 	stagedPaths := make([]string, 0, len(req.Uploads)+1)
+	cleanup := func(ctx context.Context, c *ssh.Client) error {
+		if stagingCreated {
+			// The private directory holds every staged file.
+			return runRemoteCommand(ctx, c, "rm -rf -- "+shellQuote(req.StagingDir))
+		}
+		return cleanupRemoteStagingFiles(ctx, c, stagedPaths)
+	}
 	defer func() {
-		if bootstrapSucceeded || len(stagedPaths) == 0 {
+		if bootstrapSucceeded {
+			if stagingCreated {
+				// The run removed what it staged; drop the directory. Best effort.
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = cleanup(cleanupCtx, client)
+				cancelCleanup()
+			}
+			return
+		}
+		if len(stagedPaths) == 0 && !stagingCreated {
 			return
 		}
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
-		cleanupErr := cleanupRemoteStagingFiles(cleanupCtx, client, stagedPaths)
+		cleanupErr := cleanup(cleanupCtx, client)
 		cancelCleanup()
 		if cleanupErr == nil {
 			return
@@ -614,8 +686,15 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 			return
 		}
 		defer cleanupClient.Close()
-		_ = cleanupRemoteStagingFiles(reconnectCtx, cleanupClient, stagedPaths)
+		_ = cleanup(reconnectCtx, cleanupClient)
 	}()
+
+	if req.StagingDir != "" {
+		if err := runRemoteCommand(ctx, client, buildStagingDirCommand(req.StagingDir)); err != nil {
+			return fmt.Errorf("create private staging directory %s on the target: %w", req.StagingDir, err)
+		}
+		stagingCreated = true
+	}
 
 	var releaseUpload *BootstrapUpload
 	if req.AgentRelease != nil {

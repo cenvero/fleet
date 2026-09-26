@@ -151,9 +151,10 @@ func (a *App) AutoInstallAgentContext(ctx context.Context, serverName, loginUser
 	if err != nil {
 		return fmt.Errorf("generate unpredictable agent install paths: %w", err)
 	}
-	tempServicePath := "/tmp/cenvero-" + token + ".service"
-	tempKeysPath := "/tmp/cenvero-" + token + ".keys"
-	tempScriptPath := "/tmp/cenvero-" + token + ".sh"
+	stagingDir := remoteStagingDir(token)
+	tempServicePath := stagingDir + "/agent.service"
+	tempKeysPath := stagingDir + "/agent.keys"
+	tempScriptPath := stagingDir + "/install.sh"
 
 	uploads := []BootstrapUpload{
 		{Path: tempServicePath, Mode: 0o600, Content: []byte(serviceUnit)},
@@ -172,7 +173,7 @@ func (a *App) AutoInstallAgentContext(ctx context.Context, serverName, loginUser
 		if err != nil {
 			return fmt.Errorf("read agent binary: %w", err)
 		}
-		tempBinPath := "/tmp/cenvero-" + token + ".bin"
+		tempBinPath := stagingDir + "/agent.bin"
 		uploads = append(uploads, BootstrapUpload{
 			Path:    tempBinPath,
 			Mode:    0o700,
@@ -185,7 +186,7 @@ func (a *App) AutoInstallAgentContext(ctx context.Context, serverName, loginUser
 		// downloads only its matching manifest/archive/signature with wget or curl.
 		// The controller then verifies size, minisign binding, SHA-256, and archive
 		// contents before staging the extracted binary back on that same connection.
-		tempBinPath := "/tmp/cenvero-" + token + ".bin"
+		tempBinPath := stagingDir + "/agent.bin"
 		agentRelease = &BootstrapAgentRelease{
 			Version:         version.Version,
 			DestinationPath: tempBinPath,
@@ -229,6 +230,7 @@ func (a *App) AutoInstallAgentContext(ctx context.Context, serverName, loginUser
 		AgentRelease:         agentRelease,
 		Uploads:              uploads,
 		RunCommand:           "/bin/sh " + shellQuote(tempScriptPath),
+		StagingDir:           stagingDir,
 	}
 	if err := executor.Bootstrap(ctx, req); err != nil {
 		return fmt.Errorf("agent install: %w", err)
@@ -325,7 +327,8 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 	if err != nil {
 		return fmt.Errorf("generate unpredictable agent teardown path: %w", err)
 	}
-	tempTeardownPath := "/tmp/cenvero-" + token + ".sh"
+	teardownStagingDir := remoteStagingDir(token)
+	tempTeardownPath := teardownStagingDir + "/teardown.sh"
 	script := buildAgentTeardownScript(server.Agent.ServiceName, sudo, tempTeardownPath)
 	executor := sshBootstrapExecutor{networkDialContext: a.NetworkDialContext}
 	req := BootstrapRequest{
@@ -346,6 +349,7 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 			{Path: tempTeardownPath, Mode: 0o700, Content: []byte(script)},
 		},
 		RunCommand: "/bin/sh " + shellQuote(tempTeardownPath),
+		StagingDir: teardownStagingDir,
 	}
 	if err := executor.Bootstrap(context.Background(), req); err != nil {
 		return fmt.Errorf("agent teardown: %w", err)

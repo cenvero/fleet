@@ -74,8 +74,8 @@ func (m fileControllerKnownHostsManager) Update(_ context.Context, payload proto
 		removeSet[canonical] = struct{}{}
 	}
 
-	filtered := make([]knownHostEntry, 0, len(entries)+len(payload.AddKeys))
-	seen := make(map[string]struct{}, len(entries)+len(payload.AddKeys))
+	filtered := make([]knownHostEntry, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if _, remove := removeSet[entry.Key]; remove {
 			continue
