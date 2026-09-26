@@ -83,6 +83,18 @@ func reverseTransferRig(t *testing.T) (*App, *ReverseHub, context.CancelFunc) {
 		}, reverseServer)
 	}()
 	waitForReverseSession(t, hub, "reverse-node")
+	// The hub registers a session before it records the connection (with the
+	// agent's capabilities) in the server record; tests read that record.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if server, err := app.GetServer("reverse-node"); err == nil && server.Observed.Reachable {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reverse connection was not recorded in the server record")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	return app, hub, cancel
 }
 
