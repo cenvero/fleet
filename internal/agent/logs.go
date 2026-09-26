@@ -118,7 +118,14 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 	size := info.Size()
 	reset := false
 	if payload.Cursor != nil {
-		if from, ok := resumeLogCursor(file, info, payload.Cursor); ok {
+		from, ok := resumeLogCursor(file, info, payload.Cursor)
+		if !ok && size <= maxLogFollowBytes {
+			// Truncated, replaced or rotated since the cursor was issued, and
+			// the file is small, as it is right after a copytruncate or a
+			// rotation: everything in it is new, so read it from the start.
+			from, reset = logtail.Position{}, true
+		}
+		if ok || reset {
 			next, err := logtail.Forward(file, from, size, matcher, logtail.ForwardLimits{
 				MaxLines: maxLogTailLines,
 				MaxBytes: maxLogFollowBytes,
@@ -131,11 +138,11 @@ func (fileLogReader) Read(_ context.Context, payload proto.LogReadPayload) (prot
 				Path:   payload.Path,
 				Lines:  toProtoLines(next.Lines),
 				Cursor: newLogCursor(file, info, next.Next),
+				Reset:  reset,
 				More:   next.More,
 			}, nil
 		}
-		// Truncated, replaced or rotated since the cursor was issued: start
-		// over with a tail of whatever the path holds now.
+		// Replaced by a large file: start over with its tail.
 		reset = true
 	}
 

@@ -246,9 +246,9 @@ type LogReadPayload struct {
 	// Cursor, when set, asks for only the lines after that position (the
 	// Cursor of a previous LogReadResult for the same path): follow polling
 	// then reads just the newly appended bytes. If the file was truncated,
-	// replaced or rotated since, the agent answers with a fresh tail and sets
-	// LogReadResult.Reset. Agents that predate cursors ignore the field and
-	// return a plain tail without a Cursor.
+	// replaced or rotated since, the agent starts over on the current file and
+	// sets LogReadResult.Reset. Agents that predate cursors ignore the field
+	// and return a plain tail without a Cursor.
 	Cursor *LogCursor `json:"cursor,omitempty"`
 }
 
@@ -282,8 +282,10 @@ type LogReadResult struct {
 	// LogReadPayload.Cursor). Absent from agents without cursor support.
 	Cursor *LogCursor `json:"cursor,omitempty"`
 	// Reset reports that the request's Cursor no longer matched the file
-	// (truncated, replaced or rotated): Lines is a fresh tail of the current
-	// file and line numbering restarted.
+	// (truncated, replaced or rotated) and line numbering restarted: Lines
+	// start at the beginning of the current file when it is small (as right
+	// after a rotation, paged like any cursor read), otherwise they are its
+	// tail.
 	Reset bool `json:"reset,omitempty"`
 	// More reports that a cursor read stopped at a size limit before the end
 	// of the file; read again from Cursor straight away for the rest.

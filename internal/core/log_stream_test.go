@@ -196,30 +196,43 @@ func TestFollowServiceLogsWithCursorLosesNothing(t *testing.T) {
 	want = append(want, expectLines(6, 2005, "line-", 6)...)
 	h.waitFor(len(want))
 
-	// copytruncate-style truncation, then new lines.
-	if err := os.Truncate(logPath, 0); err != nil {
+	// copytruncate-style truncation, then (more than a tail window of) new
+	// lines before the next poll can see them.
+	var b strings.Builder
+	for i := 1; i <= 40; i++ {
+		fmt.Fprintf(&b, "trunc-%d\n", i)
+	}
+	if err := os.WriteFile(logPath, []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	writeTestLog(t, logPath, 1, 2, "trunc-")
-	want = append(want, expectLines(1, 2, "trunc-", 1)...)
+	want = append(want, expectLines(1, 40, "trunc-", 1)...)
 	h.waitFor(len(want))
-	writeTestLog(t, logPath, 3, 4, "trunc-")
-	want = append(want, expectLines(3, 4, "trunc-", 3)...)
+	writeTestLog(t, logPath, 41, 44, "trunc-")
+	want = append(want, expectLines(41, 44, "trunc-", 41)...)
 	h.waitFor(len(want))
 
-	// Rotation: the path atomically becomes a new file.
+	// Rotation: the path atomically becomes a new file that already holds
+	// more lines than the tail window.
 	tmp := filepath.Join(dir, "app.log.new")
-	writeTestLog(t, tmp, 1, 3, "rot-")
+	writeTestLog(t, tmp, 1, 50, "rot-")
 	if err := os.Link(logPath, logPath+".1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(tmp, logPath); err != nil {
 		t.Fatal(err)
 	}
-	want = append(want, expectLines(1, 3, "rot-", 1)...)
+	want = append(want, expectLines(1, 50, "rot-", 1)...)
 	h.waitFor(len(want))
-	writeTestLog(t, logPath, 4, 500, "rot-")
-	want = append(want, expectLines(4, 500, "rot-", 4)...)
+	writeTestLog(t, logPath, 51, 500, "rot-")
+	want = append(want, expectLines(51, 500, "rot-", 51)...)
+	h.waitFor(len(want))
+
+	// Rotation by rename, briefly leaving no file at the path.
+	if err := os.Rename(logPath, logPath+".2"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestLog(t, logPath, 1, 7, "gap-")
+	want = append(want, expectLines(1, 7, "gap-", 1)...)
 	h.waitFor(len(want))
 
 	if got := h.stop(); !reflect.DeepEqual(got, want) {
@@ -263,6 +276,74 @@ func TestFollowServiceLogsLegacyAgent(t *testing.T) {
 	h.waitFor(len(want))
 	if got := h.stop(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}
+
+// scriptedLogReader answers log.read from a fixed script, then repeats the
+// last step.
+type scriptedLogReader struct {
+	mu    sync.Mutex
+	steps []func() (proto.LogReadResult, error)
+	calls int
+}
+
+func (r *scriptedLogReader) Read(context.Context, proto.LogReadPayload) (proto.LogReadResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	step := r.steps[min(r.calls, len(r.steps)-1)]
+	r.calls++
+	return step()
+}
+
+func logResult(cursorLine int, reset bool, lines ...string) func() (proto.LogReadResult, error) {
+	return func() (proto.LogReadResult, error) {
+		res := proto.LogReadResult{Path: "/x", Lines: []proto.LogLine{}, Reset: reset, Cursor: &proto.LogCursor{Line: cursorLine}}
+		for _, l := range lines {
+			n, text, _ := strings.Cut(l, ":")
+			var num int
+			fmt.Sscan(n, &num)
+			res.Lines = append(res.Lines, proto.LogLine{Number: num, Text: text})
+		}
+		return res, nil
+	}
+}
+
+func logMissing() (proto.LogReadResult, error) {
+	return proto.LogReadResult{}, &agent.RPCError{Code: "log_open_failed", Message: "open /x: no such file or directory"}
+}
+
+// TestFollowServiceLogsRidesOutMissingFile: a file briefly missing mid-
+// rotation is retried; one missing for too long ends the follow with the error.
+func TestFollowServiceLogsRidesOutMissingFile(t *testing.T) {
+	t.Parallel()
+	reader := &scriptedLogReader{steps: []func() (proto.LogReadResult, error){
+		logResult(2, false, "1:a", "2:b"),
+		logMissing, logMissing, logMissing,
+		logResult(1, true, "1:x"),
+		logResult(1, false),
+	}}
+	h := startFollow(t, reader, "/x", "", 10)
+	h.waitFor(3)
+	if got := h.stop(); strings.Join(got, "|") != "1:a|2:b|1:x" {
+		t.Fatalf("got %v", got)
+	}
+
+	reader = &scriptedLogReader{steps: []func() (proto.LogReadResult, error){logResult(1, false, "1:a"), logMissing}}
+	h = startFollow(t, reader, "/x", "", 10)
+	select {
+	case err := <-h.done:
+		if err == nil || !strings.Contains(err.Error(), "log_open_failed") {
+			t.Fatalf("follow of a vanished log: err = %v", err)
+		}
+		h.done <- nil // let stop() see a clean exit
+	case <-time.After(10 * time.Second):
+		t.Fatal("follow of a vanished log did not give up")
+	}
+	if got := h.stop(); strings.Join(got, "|") != "1:a" {
+		t.Fatalf("got %v", got)
+	}
+	if reader.calls != 2+maxLogFollowOpenRetries {
+		t.Fatalf("reads = %d, want %d", reader.calls, 2+maxLogFollowOpenRetries)
 	}
 }
 

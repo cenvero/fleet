@@ -222,6 +222,48 @@ func TestLogReadCursorResetsOnTruncationAndRotation(t *testing.T) {
 	}
 }
 
+// TestLogReadCursorResetLargeFileUsesTail: when the path was replaced by a big
+// file (not a fresh rotation), a reset shows its tail rather than all of it.
+func TestLogReadCursorResetLargeFileUsesTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	writeLog(t, path, "old\n")
+	cur := readLog(t, proto.LogReadPayload{Path: path}).Cursor
+
+	var b strings.Builder
+	for i := 1; b.Len() <= maxLogFollowBytes; i++ {
+		fmt.Fprintf(&b, "big %07d %s\n", i, strings.Repeat("q", 100))
+	}
+	writeLog(t, path+".new", b.String())
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	total := strings.Count(b.String(), "\n")
+	res := readLog(t, proto.LogReadPayload{Path: path, TailLines: 2, Cursor: cur})
+	if !res.Reset || !res.Truncated || len(res.Lines) != 2 || res.Lines[1].Number != total || res.More {
+		t.Fatalf("large reset = reset %v truncated %v lines %v", res.Reset, res.Truncated, texts(res.Lines)[:min(2, len(res.Lines))])
+	}
+}
+
+// TestLogReadCursorResetReadsSmallFileFromStart: after a rotation the new
+// file is read from its first line, even beyond TailLines, so a follower
+// loses nothing written between the rotation and the next poll.
+func TestLogReadCursorResetReadsSmallFileFromStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	writeLog(t, path, "old 1\nold 2\n")
+	cur := readLog(t, proto.LogReadPayload{Path: path}).Cursor
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	writeLog(t, path, "new 1\nnew 2\nnew 3\nnew 4\n")
+	res := readLog(t, proto.LogReadPayload{Path: path, TailLines: 2, Cursor: cur})
+	if !res.Reset || res.Truncated || !reflect.DeepEqual(texts(res.Lines), []string{"1:new 1", "2:new 2", "3:new 3", "4:new 4"}) {
+		t.Fatalf("small reset = %+v", res)
+	}
+	if res.Cursor == nil || res.Cursor.Line != 4 {
+		t.Fatalf("cursor after reset = %+v", res.Cursor)
+	}
+}
+
 func mustStat(t *testing.T, path string) os.FileInfo {
 	t.Helper()
 	info, err := os.Stat(path)
