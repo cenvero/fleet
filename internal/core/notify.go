@@ -425,6 +425,12 @@ func ssrfBlockedErr(host string, ip net.IP, allowInternal bool) error {
 // request is refused if it would reach a blocked address (always 169.254.169.254;
 // also loopback/link-local/private unless the target opts in with AllowInternal).
 func (s *NotifyStore) Send(target NotifyTarget, event, message string) error {
+	return s.sendAt(target, event, message, time.Now())
+}
+
+// sendAt is Send with an explicit event time: queued notifications report when
+// the event happened, not when the background dispatcher got to deliver it.
+func (s *NotifyStore) sendAt(target NotifyTarget, event, message string, at time.Time) error {
 	var body []byte
 	var err error
 	switch target.Kind {
@@ -434,7 +440,7 @@ func (s *NotifyStore) Send(target NotifyTarget, event, message string) error {
 		body, err = json.Marshal(map[string]string{
 			"event":   event,
 			"message": message,
-			"time":    time.Now().UTC().Format(time.RFC3339),
+			"time":    at.UTC().Format(time.RFC3339),
 		})
 	default:
 		return fmt.Errorf("invalid kind %q", target.Kind)
@@ -482,6 +488,10 @@ func (s *NotifyStore) Send(target NotifyTarget, event, message string) error {
 // matching targets and returns a combined error if any failed. A nil error
 // means every matching target (possibly zero) was delivered successfully.
 func (s *NotifyStore) Fire(event, message string) error {
+	return s.fireAt(event, message, time.Now())
+}
+
+func (s *NotifyStore) fireAt(event, message string, at time.Time) error {
 	targets, err := s.List()
 	if err != nil {
 		return err
@@ -491,7 +501,7 @@ func (s *NotifyStore) Fire(event, message string) error {
 		if !t.Subscribed(event) {
 			continue
 		}
-		if sendErr := s.Send(t, event, message); sendErr != nil {
+		if sendErr := s.sendAt(t, event, message, at); sendErr != nil {
 			errs = append(errs, sendErr.Error())
 		}
 	}

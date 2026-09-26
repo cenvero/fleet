@@ -228,6 +228,12 @@ type MetricsSnapshot struct {
 	Load15           float64   `json:"load15,omitempty"`
 	UptimeSeconds    uint64    `json:"uptime_seconds,omitempty"`
 	ProcessCount     uint64    `json:"process_count,omitempty"`
+	// Swap usage. Additive: older agents omit these and older controllers ignore
+	// them. SwapReported tells "the agent reported swap (possibly none
+	// configured, total 0)" apart from "an older agent sent nothing".
+	SwapUsedBytes  uint64 `json:"swap_used_bytes,omitempty"`
+	SwapTotalBytes uint64 `json:"swap_total_bytes,omitempty"`
+	SwapReported   bool   `json:"swap_reported,omitempty"`
 }
 
 type FirewallInfo struct {
@@ -316,6 +322,11 @@ type ExecResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
+	// TimedOut is set by agents that killed the command because its deadline
+	// (the request deadline or the agent's own default limit) expired. Additive:
+	// older controllers ignore it, and older agents never set it (controllers
+	// then infer the timeout from a signal exit at the deadline).
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 func DecodeHelloPayload(payload any) (HelloPayload, error) {

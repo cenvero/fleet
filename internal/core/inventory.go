@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -135,15 +134,11 @@ func BuildInventory(prober inventoryProber, tags *TagStore, only string) (Invent
 	}
 
 	items := make([]InventoryItem, len(records))
-	var wg sync.WaitGroup
-	for i, rec := range records {
-		wg.Add(1)
-		go func(i int, rec ServerRecord) {
-			defer wg.Done()
-			items[i] = probeServer(prober, rec, allTags[rec.Name])
-		}(i, rec)
-	}
-	wg.Wait()
+	// Bounded fan-out: in reverse mode every probe is one daemon control
+	// connection, and the daemon drops connections beyond its limit.
+	ForEachLimit(len(records), DefaultFanoutLimit, func(i int) {
+		items[i] = probeServer(prober, records[i], allTags[records[i].Name])
+	})
 
 	sort.Slice(items, func(a, b int) bool { return items[a].Server < items[b].Server })
 	return Inventory{

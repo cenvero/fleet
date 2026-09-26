@@ -5,6 +5,7 @@ package logs
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -69,12 +70,43 @@ func entryDigest(e AuditEntry) string {
 type AuditLog struct {
 	path string
 	mu   sync.Mutex
+
+	// tail caches the Hash of the last entry on disk together with the identity,
+	// size and modification time of the file it belongs to. Append reuses it
+	// only while the file is provably unchanged since this instance's own last
+	// append; an append by another process (or another AuditLog instance for the
+	// same path) changes the size, so the tail is then re-read from disk.
+	tail auditTailCache
 }
+
+type auditTailCache struct {
+	valid   bool
+	info    os.FileInfo
+	size    int64
+	modTime time.Time
+	hash    string
+}
+
+// maxAuditLineBytes bounds a single audit line. It matches the bufio.Scanner
+// buffer ReadAll has always used, so the backwards tail reader accepts exactly
+// the lines the full reader accepts.
+const maxAuditLineBytes = 4 * 1024 * 1024
+
+// auditTailChunk is how much the backwards tail reader reads per step.
+const auditTailChunk = 64 * 1024
 
 func NewAuditLog(path string) *AuditLog {
 	return &AuditLog{path: path}
 }
 
+// Append adds one entry to the end of the log, linking it into the hash chain.
+//
+// Its cost does not depend on the size of the log: the previous entry's Hash is
+// found by reading the file backwards from the end (only the last line is
+// decoded) and is cached in memory between appends. The read-last-hash + append
+// sequence runs under a cross-process advisory lock on a "<log>.lock" sidecar,
+// so concurrent fleet processes can never both link to the same predecessor and
+// fork the chain.
 func (a *AuditLog) Append(entry AuditEntry) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -87,46 +119,209 @@ func (a *AuditLog) Append(entry AuditEntry) error {
 		return fmt.Errorf("create audit log directory: %w", err)
 	}
 
+	return withAuditFileLock(a.path+".lock", func() error {
+		return a.appendLocked(entry)
+	})
+}
+
+// appendLocked performs the append. The caller holds a.mu and the cross-process
+// file lock.
+func (a *AuditLog) appendLocked(entry AuditEntry) error {
+	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open audit log: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat audit log: %w", err)
+	}
+
 	// Tamper-evidence: link this entry to the previous one's hash. The previous
-	// hash is "" for the very first entry, or when the existing log is entirely
-	// legacy (un-hashed) — in which case the chain begins here. A caller-supplied
-	// Hash/PrevHash is always overwritten so the chain can be trusted.
-	prevHash, err := a.lastEntryHashLocked()
+	// hash is "" for the very first entry, or when the last existing entry is a
+	// legacy (un-hashed) one — in which case the chain begins here. A
+	// caller-supplied Hash/PrevHash is always overwritten so the chain can be
+	// trusted.
+	prevHash, missingNewline, err := a.lastEntryHashLocked(f, info)
 	if err != nil {
 		return err
 	}
 	entry.PrevHash = prevHash
 	entry.Hash = entryDigest(entry)
 
-	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open audit log: %w", err)
-	}
-	defer f.Close()
-
 	payload, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal audit entry: %w", err)
 	}
-	if _, err := f.Write(append(payload, '\n')); err != nil {
+	line := make([]byte, 0, len(payload)+2)
+	if missingNewline {
+		// The last existing entry decoded fine but is not newline-terminated
+		// (e.g. the file was hand-edited). Terminate it so the new entry lands
+		// on its own line instead of being glued onto that one.
+		line = append(line, '\n')
+	}
+	line = append(line, payload...)
+	line = append(line, '\n')
+	a.tail = auditTailCache{}
+	if _, err := f.Write(line); err != nil {
 		return fmt.Errorf("append audit entry: %w", err)
+	}
+	if after, err := f.Stat(); err == nil && after.Size() == info.Size()+int64(len(line)) {
+		a.tail = auditTailCache{valid: true, info: after, size: after.Size(), modTime: after.ModTime(), hash: entry.Hash}
 	}
 	return nil
 }
 
 // lastEntryHashLocked returns the Hash of the final entry currently on disk, or
-// "" when the log is missing, empty, or its last entry predates the chain (a
-// legacy un-hashed entry). The caller must hold a.mu. It reads the whole file —
-// audit logs are bounded and ReadAll already does the same.
-func (a *AuditLog) lastEntryHashLocked() (string, error) {
-	entries, err := a.readAllLocked()
+// "" when the log is empty or its last entry predates the chain (a legacy
+// un-hashed entry). missingNewline reports that the file does not end with a
+// newline. The caller must hold a.mu and the file lock. Only the last line is
+// read and decoded; an undecodable last line (e.g. a torn write) is an error,
+// exactly as it was when the whole file was decoded here.
+func (a *AuditLog) lastEntryHashLocked(f *os.File, info os.FileInfo) (hash string, missingNewline bool, err error) {
+	size := info.Size()
+	if size == 0 {
+		return "", false, nil
+	}
+	if c := a.tail; c.valid && c.size == size && c.modTime.Equal(info.ModTime()) && os.SameFile(c.info, info) {
+		// The cache is only ever filled by this instance's own completed append,
+		// which always ends with a newline.
+		return c.hash, false, nil
+	}
+	lines, endsWithNewline, err := readTailLines(f, size, 1)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if len(entries) == 0 {
-		return "", nil
+	if len(lines) == 0 {
+		return "", false, nil
 	}
-	return entries[len(entries)-1].Hash, nil
+	var last AuditEntry
+	if err := json.Unmarshal(lines[0], &last); err != nil {
+		return "", false, fmt.Errorf("decode audit entry: %w", err)
+	}
+	return last.Hash, !endsWithNewline, nil
+}
+
+// Tail returns the last n entries of the log in file order (oldest first). It
+// reads backwards from the end of the file, so its cost depends on n rather
+// than on the size of the log. A missing log yields nil. Lines are decoded
+// exactly as ReadAll decodes them; an undecodable line among the last n is an
+// error.
+func (a *AuditLog) Tail(n int) ([]AuditEntry, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	f, err := os.Open(a.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open audit log: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat audit log: %w", err)
+	}
+	lines, _, err := readTailLines(f, info.Size(), n)
+	if err != nil {
+		return nil, err
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	entries := make([]AuditEntry, 0, len(lines))
+	for _, line := range lines {
+		var entry AuditEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return nil, fmt.Errorf("decode audit entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// readTailLines returns (up to) the last n lines among the first size bytes of
+// f, oldest first. It follows bufio.ScanLines, so it agrees with ReadAll on what
+// a line is: lines are separated by '\n', a trailing '\r' is dropped, a final
+// line without a newline still counts, and a trailing newline does not start an
+// extra empty line. endsWithNewline reports whether the data ends with '\n'. A
+// line longer than maxAuditLineBytes fails the way the scanner does.
+func readTailLines(f *os.File, size int64, n int) (lines [][]byte, endsWithNewline bool, err error) {
+	if size <= 0 || n <= 0 {
+		return nil, false, nil
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], size-1); err != nil {
+		return nil, false, fmt.Errorf("read audit log: %w", err)
+	}
+	endsWithNewline = last[0] == '\n'
+	limit := size // the lines are the '\n'-separated segments of [0, limit)
+	if endsWithNewline {
+		limit--
+	}
+
+	// Walk backwards until [start, limit) holds the last n lines: either the
+	// n-th newline counting back from limit has been seen, or the start of the
+	// file has been reached. Chunks are collected newest-first and joined once.
+	var chunks [][]byte
+	start := limit
+	found := 0
+	sinceNewline := 0 // bytes of the (partial) line currently being walked
+	for start > 0 {
+		chunk := int64(auditTailChunk)
+		if chunk > start {
+			chunk = start
+		}
+		buf := make([]byte, chunk)
+		if _, err := f.ReadAt(buf, start-chunk); err != nil {
+			return nil, false, fmt.Errorf("read audit log: %w", err)
+		}
+		cut := -1
+		for i := len(buf) - 1; i >= 0; i-- {
+			if buf[i] != '\n' {
+				sinceNewline++
+				continue
+			}
+			sinceNewline = 0
+			found++
+			if found == n {
+				cut = i
+				break
+			}
+		}
+		if sinceNewline > maxAuditLineBytes {
+			// Longer than any line the scanner accepts: fail early instead of
+			// buffering an unbounded newline-free run of bytes.
+			return nil, false, fmt.Errorf("scan audit log: %w", bufio.ErrTooLong)
+		}
+		if cut >= 0 {
+			chunks = append(chunks, buf[cut+1:])
+			break
+		}
+		chunks = append(chunks, buf)
+		start -= chunk
+	}
+	for i, j := 0, len(chunks)-1; i < j; i, j = i+1, j-1 {
+		chunks[i], chunks[j] = chunks[j], chunks[i]
+	}
+	region := bytes.Join(chunks, nil)
+
+	parts := bytes.Split(region, []byte{'\n'})
+	if len(parts) > n {
+		parts = parts[len(parts)-n:]
+	}
+	lines = make([][]byte, 0, len(parts))
+	for _, part := range parts {
+		if len(part) > maxAuditLineBytes {
+			return nil, false, fmt.Errorf("scan audit log: %w", bufio.ErrTooLong)
+		}
+		lines = append(lines, bytes.TrimSuffix(part, []byte{'\r'}))
+	}
+	return lines, endsWithNewline, nil
 }
 
 func (a *AuditLog) ReadAll() ([]AuditEntry, error) {

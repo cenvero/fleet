@@ -6,6 +6,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenvero/fleet/internal/logs"
@@ -31,7 +33,7 @@ func (a *App) PruneJobLogs(ctx context.Context) (int, error) {
 	}
 	cutoff := time.Now().Add(-retention).UTC()
 	exec := func(server, command string) (string, int, error) {
-		res, err := a.ExecCommand(server, command)
+		res, err := a.ExecCommandContext(ctx, server, command)
 		if err != nil {
 			return "", 0, err
 		}
@@ -50,13 +52,8 @@ func (a *App) PruneJobLogs(ctx context.Context) (int, error) {
 	sweep := fmt.Sprintf(
 		"find /var/tmp -maxdepth 1 -name 'fleet-job-*.log' -type f -mtime +%d -delete 2>/dev/null || true", days)
 	servers, _ := a.ListServers()
-	for _, srv := range servers {
-		select {
-		case <-ctx.Done():
-			return removed, ctx.Err()
-		default:
-		}
-		_, _ = a.ExecCommand(srv.Name, sweep) // best-effort; unreachable servers skipped
+	if err := a.sweepOrphanJobLogs(ctx, servers, sweep); err != nil {
+		return removed, err
 	}
 
 	if removed > 0 {
@@ -68,6 +65,45 @@ func (a *App) PruneJobLogs(ctx context.Context) (int, error) {
 		})
 	}
 	return removed, pruneErr
+}
+
+// jobSweepCursor is where the next orphan sweep starts in the (sorted) server
+// list. The sweep runs under a time budget, and it used to start at the first
+// server every run and check the budget only between servers, so on a large or
+// slow fleet the late servers were never swept. Each run now resumes where the
+// previous one stopped; a new process starts at a random offset.
+var jobSweepCursor = func() *atomic.Int64 {
+	var c atomic.Int64
+	c.Store(rand.Int63()) // #nosec G404 -- load spreading, not security
+	return &c
+}()
+
+// sweepOrphanJobLogs runs the sweep command on every server, starting at the
+// rotating cursor and stopping as soon as ctx (the pruner's budget) expires —
+// including in the middle of a slow server's call. It returns ctx.Err() when it
+// had to stop early; the next run continues from the first server not swept.
+func (a *App) sweepOrphanJobLogs(ctx context.Context, servers []ServerRecord, sweep string) error {
+	n := len(servers)
+	if n == 0 {
+		return nil
+	}
+	start := int(jobSweepCursor.Load() % int64(n))
+	if start < 0 {
+		start += n
+	}
+	done := 0
+	defer func() { jobSweepCursor.Store(int64((start + done) % n)) }()
+	for ; done < n; done++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		srv := servers[(start+done)%n]
+		_, _ = a.ExecCommandContext(ctx, srv.Name, sweep) // best-effort; unreachable servers skipped
+		if err := ctx.Err(); err != nil {
+			return err // this server's sweep was cut short: retry it first next time
+		}
+	}
+	return nil
 }
 
 // runJobLogPruner runs the job-log pruner once at startup and then on a ticker
