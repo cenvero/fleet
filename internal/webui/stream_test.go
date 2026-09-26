@@ -563,6 +563,37 @@ func TestLocalDownloadStreamsWithRFC6266Name(t *testing.T) {
 	}
 }
 
+// Local download/preview keep the existing path rules: absolute paths only,
+// directories refused, and nothing is served for a relative path.
+func TestDownloadAndPreviewValidateLocalPaths(t *testing.T) {
+	s, ts := newTestServer(t)
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		endpoint string
+		q        url.Values
+		want     int
+	}{
+		{"/api/download", url.Values{"path": {"relative/file.txt"}}, http.StatusBadGateway},
+		{"/api/download", url.Values{"path": {"../../etc/passwd"}}, http.StatusBadGateway},
+		{"/api/download", url.Values{"path": {dir}}, http.StatusBadRequest},
+		{"/api/download", url.Values{}, http.StatusBadRequest},
+		{"/api/preview", url.Values{"path": {"relative.txt"}, "kind": {"text"}}, http.StatusBadGateway},
+		{"/api/preview", url.Values{"path": {dir}, "kind": {"text"}}, http.StatusBadRequest},
+		{"/api/preview", url.Values{"kind": {"text"}}, http.StatusBadRequest},
+	} {
+		tc.q.Set("t", s.Token())
+		res, err := http.Get(ts.URL + tc.endpoint + "?" + tc.q.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != tc.want {
+			t.Fatalf("%s %v: status %d (%s), want %d", tc.endpoint, tc.q, res.StatusCode, body, tc.want)
+		}
+	}
+}
+
 func TestDownloadRejectsNonGET(t *testing.T) {
 	s, ts := newTestServer(t)
 	code, _ := postAPI(t, s, ts.URL, "/api/download", url.Values{"path": {"/etc/hostname"}}, ts.URL)
