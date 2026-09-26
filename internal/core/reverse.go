@@ -261,6 +261,10 @@ type reverseControlRequest struct {
 	EnvelopeBinary []byte         `json:"envelope_binary,omitempty"`
 	Accept         []string       `json:"accept,omitempty"`
 	BinaryLength   *int           `json:"binary_length,omitempty"`
+	// Direct identifies the server record the caller resolved for a
+	// "call.direct" request, so the daemon only relays over its own pooled
+	// connection when both processes agree on where and how to connect.
+	Direct *controlDirectTarget `json:"direct,omitempty"`
 }
 
 func newReverseControlRequest(token, kind, server string, env proto.Envelope) reverseControlRequest {
@@ -896,6 +900,8 @@ func (a *App) RunDaemon(ctx context.Context) error {
 
 	hub := NewReverseHub(a, controlToken)
 	a.useHubInProcess(hub)
+	daemonApps.Store(a, struct{}{})
+	defer daemonApps.Delete(a)
 	errCh := make(chan error, 2)
 	go func() { errCh <- hub.Serve(ctx, reverseListener) }()
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()

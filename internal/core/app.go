@@ -1109,6 +1109,12 @@ func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto
 	}
 	switch server.Mode {
 	case transport.ModeDirect:
+		// With a daemon running, ride its warm pooled connection instead of
+		// paying a full SSH setup in this process (see direct_relay.go). Every
+		// policy check has already happened by the time a call gets here.
+		if out, handled, err := a.tryDaemonDirectRelay(ctx, server, env); handled {
+			return out, err
+		}
 		return a.callDirectPooledContext(ctx, server, env)
 	case transport.ModeReverse:
 		if a.ReverseRPCContext != nil {

@@ -71,12 +71,14 @@ var controlSlotWait = 15 * time.Second
 // Control-protocol capabilities a daemon advertises in reply to "hello".
 const (
 	controlCapBinaryFrame = "binary-frame"
+	controlCapDirectCall  = "direct-call"
 )
 
 // Control request types.
 const (
 	controlTypeCall       = "call"
 	controlTypeCallFramed = "call.framed"
+	controlTypeCallDirect = "call.direct"
 	controlTypeStatus     = "status"
 	controlTypeDisconnect = "disconnect"
 	controlTypeHello      = "hello"
@@ -84,7 +86,7 @@ const (
 
 // controlCapabilities lists what this daemon's control socket understands.
 func (h *ReverseHub) controlCapabilities() []string {
-	return []string{controlCapBinaryFrame}
+	return []string{controlCapBinaryFrame, controlCapDirectCall}
 }
 
 func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) error {
@@ -158,9 +160,9 @@ func (h *ReverseHub) handleControlConn(conn net.Conn) {
 	h.handleControl(conn, nil)
 }
 
-// acquireCallSlot bounds authenticated calls in progress. With wait set a
-// caller waits up to controlSlotWait for a slot; otherwise it is refused at
-// once.
+// acquireCallSlot bounds authenticated calls in progress. A direct relay does
+// not wait (the caller can simply dial the server itself); a reverse call
+// waits up to controlSlotWait, since the daemon is its only route.
 func (h *ReverseHub) acquireCallSlot(wait bool) (release func(), ok bool) {
 	if h.controlCalls == nil {
 		return func() {}, true
@@ -220,7 +222,7 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 
 	var attachment []byte
 	if req.BinaryLength != nil {
-		if req.Type != controlTypeCallFramed {
+		if req.Type != controlTypeCallFramed && req.Type != controlTypeCallDirect {
 			_ = writeControlError(conn, "decode_error", fmt.Sprintf("control request %q cannot carry an attachment", req.Type))
 			return
 		}
@@ -255,6 +257,39 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 		releaseCall()
 		if err != nil {
 			resp.Error = &proto.Error{Code: "reverse_call_failed", Message: err.Error()}
+			break
+		}
+		respAttachment = resp.setResponseFramed(out, framedResponse)
+	case controlTypeCallDirect:
+		releaseCall, ok := h.acquireCallSlot(false)
+		if !ok {
+			resp.Error = &proto.Error{Code: "control_busy", Message: "fleet daemon has too many calls in progress", Retry: true}
+			break
+		}
+		env := req.envelope()
+		if attachment != nil {
+			env.Binary = attachment
+		}
+		// A direct call keeps the semantics it has without the daemon: bounded
+		// by the caller's own deadline (if any) and by the caller hanging up,
+		// not by the control socket's I/O timeout.
+		if deadline := req.Envelope.DeadlineUnixMilli; deadline > 0 {
+			_ = conn.SetDeadline(time.UnixMilli(deadline).Add(5 * time.Second))
+		} else {
+			_ = conn.SetDeadline(time.Time{})
+		}
+		out, err := runControlCall(conn, req.Envelope.DeadlineUnixMilli, false, func(ctx context.Context) (proto.Envelope, error) {
+			return h.app.relayDirectCall(ctx, req.Server, req.Direct, env)
+		})
+		releaseCall()
+		_ = conn.SetWriteDeadline(time.Now().Add(controlIOTimeout))
+		if err != nil {
+			var mismatch *directRelayMismatchError
+			if errors.As(err, &mismatch) {
+				resp.Error = &proto.Error{Code: "direct_target_mismatch", Message: err.Error()}
+				break
+			}
+			resp.Error = &proto.Error{Code: "direct_call_failed", Message: err.Error()}
 			break
 		}
 		respAttachment = resp.setResponseFramed(out, framedResponse)
@@ -507,12 +542,27 @@ func (a *App) controlRoundTrip(ctx context.Context, peer *controlPeer, req rever
 	// socket deadline trails it slightly so it never races that and surfaces a
 	// bare "i/o timeout" instead; it only matters if the daemon stops answering.
 	const socketGrace = 2 * time.Second
-	deadline := time.Now().Add(controlIOTimeout)
-	if hasDeadline && requested.Before(deadline) {
-		deadline = requested.Add(socketGrace)
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
+	if req.Type == controlTypeCallDirect {
+		// A relayed direct call is bounded by the caller's own deadline only,
+		// exactly as the call would be if this process made it itself.
+		deadline := time.Time{}
+		if hasDeadline {
+			deadline = requested.Add(socketGrace)
+		}
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
+		}
+		if err := conn.SetWriteDeadline(time.Now().Add(controlIOTimeout)); err != nil {
+			return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
+		}
+	} else {
+		deadline := time.Now().Add(controlIOTimeout)
+		if hasDeadline && requested.Before(deadline) {
+			deadline = requested.Add(socketGrace)
+		}
+		if err := conn.SetDeadline(deadline); err != nil {
+			return reverseControlResponse{}, nil, fmt.Errorf("set reverse control deadline: %w", err)
+		}
 	}
 
 	if err := writeControlMessage(conn, req, attachment); err != nil {
@@ -543,7 +593,7 @@ func (a *App) controlRoundTrip(ctx context.Context, peer *controlPeer, req rever
 }
 
 func isControlCallType(kind string) bool {
-	return kind == controlTypeCall || kind == controlTypeCallFramed
+	return kind == controlTypeCall || kind == controlTypeCallFramed || kind == controlTypeCallDirect
 }
 
 // errControlUnsupported reports that the daemon does not implement a request
@@ -566,11 +616,12 @@ type controlResponseError struct {
 
 func (e *controlResponseError) Error() string { return e.Code + ": " + e.Message }
 
-// controlCall sends one RPC envelope through the daemon (kind "call" relays
-// it to a reverse agent). It negotiates binary framing for attachments, retries once
+// controlCall sends one RPC envelope through the daemon: kind is "call" for a
+// reverse agent or "call.direct" for a direct-mode server relayed over the
+// daemon's pool. It negotiates binary framing for attachments, retries once
 // with a fresh token if the daemon restarted, and falls back to base64 if an
 // older daemon has taken over the socket.
-func (a *App) controlCall(ctx context.Context, kind, serverName string, env proto.Envelope) (proto.Envelope, error) {
+func (a *App) controlCall(ctx context.Context, kind, serverName string, env proto.Envelope, direct *controlDirectTarget) (proto.Envelope, error) {
 	peer := a.controlPeer()
 	framed := false
 	if env.Binary != nil {
@@ -588,6 +639,7 @@ func (a *App) controlCall(ctx context.Context, kind, serverName string, env prot
 			Server:   serverName,
 			Envelope: env,
 			Accept:   []string{controlCapBinaryFrame},
+			Direct:   direct,
 		}
 		var attachment []byte
 		if env.Binary != nil {
@@ -655,7 +707,7 @@ func (a *App) controlSimple(kind, serverName string) (reverseControlResponse, er
 }
 
 func (a *App) callReverseControlContext(ctx context.Context, serverName string, env proto.Envelope) (proto.Envelope, error) {
-	return a.controlCall(ctx, controlTypeCall, serverName, env)
+	return a.controlCall(ctx, controlTypeCall, serverName, env, nil)
 }
 
 func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {

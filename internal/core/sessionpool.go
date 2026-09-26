@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -68,6 +69,9 @@ type pooledServer struct {
 	root     *transport.Session   // owns the underlying ssh.Client
 	idle     []*transport.Session // channels ready for reuse (root is one of them)
 	lastUsed time.Time
+	// established is when the connection was pooled; credential files changed
+	// after it mean the connection was authenticated with stale material.
+	established time.Time
 	// dead is set when the keepalive gave up on the connection; the entry is
 	// retired on the spot, and this stops any lookup racing that retirement
 	// from handing the connection out again.
@@ -317,7 +321,7 @@ func (sp *sessionPool) adopt(serverName string, sess *transport.Session) *lease 
 		existing.lastUsed = time.Now()
 		return &lease{pool: nil, name: serverName, sess: sess}
 	}
-	entry := &pooledServer{root: sess, lastUsed: time.Now()}
+	entry := &pooledServer{root: sess, lastUsed: time.Now(), established: time.Now()}
 	// Probe the connection while it is pooled. When the probe gives up it has
 	// already closed the connection; retiring the entry right away means the
 	// next caller redials instead of tripping over the corpse.
@@ -357,6 +361,39 @@ func (sp *sessionPool) has(serverName string) bool {
 	defer sp.mu.Unlock()
 	entry, ok := sp.entries[serverName]
 	return ok && !entry.dead && time.Since(entry.lastUsed) <= sessionIdleTTL
+}
+
+// evictIfCredentialsChanged drops the pooled connection for serverName when
+// either credential file (the private key, the known_hosts pins) was modified
+// after the connection was established — a rotated key or a re-pinned host key
+// written by another process, which could not evict this process's pool.
+func (sp *sessionPool) evictIfCredentialsChanged(serverName string, paths ...string) {
+	if sp == nil {
+		return
+	}
+	sp.mu.Lock()
+	entry, ok := sp.entries[serverName]
+	var established time.Time
+	if ok {
+		established = entry.established
+	}
+	sp.mu.Unlock()
+	if !ok {
+		return
+	}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue // a missing file fails the next dial on its own
+		}
+		if info.ModTime().After(established) {
+			sp.retire(serverName, entry)
+			return
+		}
+	}
 }
 
 // disconnectAll closes every pooled connection but leaves the pool usable, so a
