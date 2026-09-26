@@ -192,6 +192,7 @@ type model struct {
 	logSearch   string
 	zoom        bool
 	overlay     dashOverlay
+	helpScroll  int
 	prompt      *dashPrompt
 	flash       string
 	flashErr    bool
@@ -393,6 +394,22 @@ func (m *model) update(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		return m.afterMove(), true
 	case tea.KeyMsg:
+		// Several keys that arrive in one read (fast typing, key repeat on a
+		// busy machine, tmux send-keys) come as a single multi-rune message;
+		// outside text entry each rune is its own key press.
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste && !m.filtering && m.prompt == nil {
+			var cmds []tea.Cmd
+			changed := false
+			for _, r := range msg.Runes {
+				cmd, ch := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+				cmds = append(cmds, cmd)
+				changed = changed || ch
+				if m.filtering || m.prompt != nil {
+					break // the rest would be text for a prompt the operator has not seen
+				}
+			}
+			return tea.Batch(cmds...), changed
+		}
 		return m.handleKey(msg)
 	}
 	return nil, false
@@ -871,6 +888,13 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		switch key {
 		case "?", "esc", "q", "enter", "h", "f1":
 			m.overlay = dashOverlayNone
+			m.helpScroll = 0
+			return nil, true
+		case "j", "down", "pgdown", "ctrl+d":
+			m.helpScroll = min(m.helpScroll+1, 64)
+			return nil, true
+		case "k", "up", "pgup", "ctrl+u":
+			m.helpScroll = max(m.helpScroll-1, 0)
 			return nil, true
 		}
 		return nil, false
@@ -1236,7 +1260,10 @@ func (m *model) jumpToAlert(id string) {
 // ---------------------------------------------------------------------------
 
 func serviceState(service core.ServiceRecord) string {
-	state := dashIfEmpty(service.ActiveState)
+	state := service.ActiveState
+	if strings.TrimSpace(state) == "" {
+		state = "unknown"
+	}
 	if service.SubState != "" {
 		state += "/" + service.SubState
 	}

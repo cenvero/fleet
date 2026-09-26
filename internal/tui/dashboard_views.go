@@ -465,7 +465,7 @@ type dhint struct{ key, label string }
 func (m *model) hints() []dhint {
 	switch {
 	case m.overlay == dashOverlayHelp:
-		return []dhint{{"?", "toggle help"}}
+		return []dhint{{"j/k", "scroll"}}
 	case m.zoom:
 		return []dhint{{"esc", "back"}, {"j/k", "move"}, {"?", "help"}}
 	}
@@ -713,6 +713,18 @@ func dashMaxW(n, limit int, get func(i int) string) int {
 		}
 	}
 	return min(w, limit)
+}
+
+// dashWithoutEmpty removes the columns flagged in empty (optional columns
+// without any content in the current list).
+func dashWithoutEmpty(cols []dcol, empty map[int]bool) []dcol {
+	out := cols[:0:0]
+	for _, c := range cols {
+		if !empty[c.key] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // growTo is the grow budget that lets a column of base width w reach content
@@ -979,8 +991,10 @@ func (m *model) renderOverview(r *drctx, body drect) []string {
 		r.zone(dashOverviewBoxID(1), body.x+w1, body.x+W-1, body.y)
 	}
 
-	// Hot spots.
-	if hotH > 0 {
+	// Hot spots (or, for an empty fleet, how to get started).
+	if hotH > 0 && f.total == 0 {
+		parts = append(parts, dplaced{drect{0, kpiH, W, hotH}, m.gettingStartedBox(r, W, hotH)})
+	} else if hotH > 0 {
 		y := kpiH
 		if W >= 90 {
 			w1, w2 := W/3, W/3
@@ -1005,6 +1019,23 @@ func (m *model) renderOverview(r *drctx, body drect) []string {
 		)
 	}
 	return dplace(drect{0, 0, W, H}, parts...)
+}
+
+func (m *model) gettingStartedBox(r *drctx, w, h int) []string {
+	b := &dbox{p: r.p, w: w, h: h, title: "Get started", focus: true}
+	iw, _ := b.inner()
+	l := newDLine(r.p, iw)
+	for _, step := range []dhint{
+		{"fleet server add <name> <address>", "enroll a server (direct or --mode reverse)"},
+		{"fleet service add <server> <unit> --log <path>", "track a service and its log"},
+		{"fleet daemon", "collect metrics and raise alerts in the background"},
+	} {
+		l.reset(iw)
+		l.put(sKey, step.key)
+		l.put(sMuted, "  "+step.label)
+		b.lines = append(b.lines, l.String())
+	}
+	return b.render()
 }
 
 func (m *model) fleetBox(r *drctx, w, h int) []string {
@@ -1041,7 +1072,7 @@ func (m *model) fleetBox(r *drctx, w, h int) []string {
 		l.putW(sWarn, dashRunMid.n(deg), deg)
 		l.putW(sCrit, dashRunTrack.n(off), off)
 	} else {
-		l.put(sMuted, "no servers yet — add one with `fleet server add`")
+		l.put(sMuted, "no servers yet")
 	}
 	lines = append(lines, l.String())
 
@@ -1886,15 +1917,22 @@ func (m *model) renderServicesTab(r *drctx, body drect) []string {
 	iw := max(at.w-4, 1)
 	svc := func(i int) *serviceRow { return &m.base.services[m.views.services[i]] }
 	nv := len(m.views.services)
-	cols := dashFitCols([]dcol{
+	cols := []dcol{
 		{key: vcServer, title: "SERVER", w: 8, grow: growTo(8, dashMaxW(nv, 24, func(i int) string { return svc(i).Server.Name }))},
 		{key: vcService, title: "SERVICE", w: 10, grow: growTo(10, dashMaxW(nv, 32, func(i int) string { return svc(i).Service.Name }))},
 		{key: vcState, title: "STATE", w: 14, grow: growTo(14, 2+dashMaxW(nv, 24, func(i int) string { return serviceState(*svc(i).Service) }))},
 		{key: vcCrit, title: "CRIT", w: 4, drop: 2},
-		{key: vcAction, title: "LAST", w: 8, drop: 3},
+		{key: vcAction, title: "LAST", w: 6, grow: growTo(6, dashMaxW(nv, 12, func(i int) string { return svc(i).Service.LastAction })), drop: 3},
 		{key: vcLog, title: "LOG", w: 10, grow: growTo(10, dashMaxW(nv, 40, func(i int) string { return svc(i).Service.LogPath })), drop: 4},
 		{key: vcDesc, title: "DESCRIPTION", w: 12, grow: -1, drop: 5},
-	}, iw-1)
+	}
+	// Columns nobody has data for only take space from the ones that do.
+	cols = dashWithoutEmpty(cols, map[int]bool{
+		vcDesc:   dashMaxW(nv, 1, func(i int) string { return svc(i).Service.Description }) == 0,
+		vcAction: dashMaxW(nv, 1, func(i int) string { return svc(i).Service.LastAction }) == 0,
+		vcLog:    dashMaxW(nv, 1, func(i int) string { return svc(i).Service.LogPath }) == 0,
+	})
+	cols = dashFitCols(cols, iw-1)
 	n := len(m.views.services)
 	meta := dashJoinMeta(dashFilterMeta(m.filters[tabServices]), dashRangeMeta(m.offsets[tabServices], max(at.h-3, 0), n))
 	empty := "No tracked services yet — add one with `fleet service add`."
@@ -2090,7 +2128,11 @@ func (m *model) logViewerBox(r *drctx, body, at drect) []string {
 	if full {
 		src = "cached tail"
 	}
-	b.meta = dashJoinMeta(dashFilterMeta(m.logSearch), dashRangeMeta(top, ih, len(texts))+" lines", src)
+	unit := " lines"
+	if len(texts) == 1 {
+		unit = " line"
+	}
+	b.meta = dashJoinMeta(dashFilterMeta(m.logSearch), dashRangeMeta(top, ih, len(texts))+unit, src)
 	if len(texts) == 0 {
 		msg := "No cached lines yet — `L` follows the live log."
 		if m.logSearch != "" {
@@ -2144,7 +2186,7 @@ func (m *model) renderAlertsTab(r *drctx, body drect) []string {
 	iw := max(at.w-4, 1)
 	al := func(i int) *fleetalerts.Alert { return &m.base.alerts[m.views.alerts[i]] }
 	na := len(m.views.alerts)
-	cols := dashFitCols([]dcol{
+	cols := []dcol{
 		{key: acSev, title: "SEV", w: 4},
 		{key: acState, title: "STATE", w: 10},
 		{key: acServer, title: "SERVER", w: 8, grow: growTo(8, dashMaxW(na, 20, func(i int) string { return al(i).Server }))},
@@ -2152,7 +2194,16 @@ func (m *model) renderAlertsTab(r *drctx, body drect) []string {
 		{key: acCode, title: "CODE", w: 12, grow: growTo(12, dashMaxW(na, 28, func(i int) string { return al(i).Code })), drop: 3},
 		{key: acCount, title: "SEEN", w: 5, right: true, drop: 2},
 		{key: acAge, title: "AGE", w: 4, right: true},
-	}, iw-1)
+	}
+	repeated := false
+	for i := 0; i < na && !repeated; i++ {
+		repeated = al(i).Occurrences > 1
+	}
+	cols = dashWithoutEmpty(cols, map[int]bool{
+		acCode:  dashMaxW(na, 1, func(i int) string { return al(i).Code }) == 0,
+		acCount: !repeated,
+	})
+	cols = dashFitCols(cols, iw-1)
 	n := len(m.views.alerts)
 	s := m.base.stats
 	sevLabel := "sev " + alertSevLabels[m.alertSev]
@@ -2493,23 +2544,23 @@ var dashHelp = []struct {
 	keys    []dhint
 }{
 	{"Navigate", []dhint{
-		{"1-6 / tab / ←→", "switch tab"},
-		{"j k / ↑ ↓", "move selection"},
-		{"pgup pgdn", "page (ctrl+u / ctrl+d)"},
-		{"g G / home end", "first / last"},
-		{"enter", "open detail · read log · drill down"},
+		{"1-6 tab ←→", "switch tab"},
+		{"j k ↑ ↓", "move selection"},
+		{"pgup pgdn", "page (also ctrl+u / ctrl+d)"},
+		{"g G", "first / last (home / end)"},
+		{"enter", "detail · read log · drill down"},
 		{"esc", "back · clear filter"},
-		{"mouse", "click tabs, rows, headers; wheel scrolls"},
+		{"mouse", "click tabs/rows/headers, wheel"},
 	}},
 	{"Data", []dhint{
 		{"r", "refresh now"},
 		{"p", "pause / resume auto-refresh"},
 		{"+ -", "slower / faster refresh"},
-		{"/", "filter (words AND together; tag=value works)"},
+		{"/", "filter: words AND, tag=value ok"},
 	}},
 	{"Servers", []dhint{
-		{"o O", "cycle sort column / reverse"},
-		{"s", "ssh into the row's server (any tab)"},
+		{"o O", "next sort column / reverse"},
+		{"s", "ssh to the row's server"},
 		{"f", "file manager on the row's server"},
 		{"c", "reconnect (confirm)"},
 		{"m", "collect metrics now"},
@@ -2517,13 +2568,13 @@ var dashHelp = []struct {
 	{"Services & Logs", []dhint{
 		{"L", "follow the live log"},
 		{"R", "restart the service (confirm)"},
-		{"enter", "focus the log viewer; / searches lines"},
+		{"enter /", "read the log · search lines"},
 	}},
 	{"Alerts", []dhint{
 		{"a", "acknowledge (confirm)"},
-		{"z", "suppress for 1h/6h/24h/7d"},
+		{"z", "suppress 1h / 6h / 24h / 7d"},
 		{"u", "lift a suppression"},
-		{"v t", "cycle severity / state filter"},
+		{"v t", "severity / state filter"},
 	}},
 	{"General", []dhint{
 		{"?", "toggle this help"},
@@ -2598,7 +2649,13 @@ func (m *model) renderHelp(r *drctx, body drect) []string {
 	w := min(iw+4, body.w)
 	h := min(len(content)+2, body.h)
 	box := &dbox{p: r.p, w: w, h: h, title: "Keyboard & mouse", meta: "esc closes", focus: true}
-	biw, _ := box.inner()
+	biw, bih := box.inner()
+	if len(content) > bih {
+		// Small terminals: j/k scroll the help.
+		top := clamp(m.helpScroll, 0, len(content)-bih)
+		box.meta = dashRangeMeta(top, bih, len(content)) + " · j/k"
+		content = content[top : top+bih]
+	}
 	for _, c := range content {
 		if biw < iw {
 			l := newDLine(r.p, biw)

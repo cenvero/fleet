@@ -939,3 +939,27 @@ func drainBatch(cmd tea.Cmd) []tea.Msg {
 	}
 	return []tea.Msg{msg}
 }
+
+// Keys that arrive together in one read come as one multi-rune message.
+func TestCoalescedKeysAreHandledOneByOne(t *testing.T) {
+	m := newTestDash(t, 50, 160, 45)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2jjj")})
+	m = next.(model)
+	if m.activeTab != tabServers || m.serverIndex != 3 {
+		t.Fatalf("tab=%v index=%d, want Servers/3", m.activeTab, m.serverIndex)
+	}
+	// A confirmation key typed in the same burst as the action never
+	// confirms it: the operator has not seen the prompt yet.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5ay")})
+	m = next.(model)
+	if m.prompt == nil || m.busy != "" {
+		t.Fatalf("prompt should be open and nothing running (busy=%q)", m.busy)
+	}
+	// Inside the filter, a burst is text.
+	m = press(m, "esc", "2", "/")
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("node-01")})
+	m = next.(model)
+	if m.filters[tabServers] != "node-01" {
+		t.Fatalf("filter = %q", m.filters[tabServers])
+	}
+}
