@@ -31,6 +31,9 @@ func (a *App) ChmodPath(server, p, octalMode string) error {
 		return fmt.Errorf("invalid mode %q", octalMode)
 	}
 	if server == "" {
+		// Security: p is an operator-chosen controller path (CLI/TUI argument,
+		// or a web UI path the caller already vetted with cleanLocalWrite and
+		// the protected-path guard); changing its mode is the requested action.
 		return os.Chmod(p, os.FileMode(m)) // #nosec G302 -- operator-chosen mode
 	}
 	record, err := a.GetServer(server)
@@ -46,6 +49,8 @@ func (a *App) ChmodPath(server, p, octalMode string) error {
 // ChecksumPath returns the SHA-256 of a file. server=="" → local.
 func (a *App) ChecksumPath(server, p string) (string, error) {
 	if server == "" {
+		// Security: operator-chosen controller path (web UI callers vet it
+		// with cleanLocal and the protected-path guard first).
 		f, err := os.Open(p) // #nosec G304 -- operator-chosen path
 		if err != nil {
 			return "", err
@@ -258,6 +263,9 @@ func extractArgv(archivePath, dir string) (tool string, args []string) {
 func (a *App) CompressPaths(server, dir string, names []string, archiveName, format string) error {
 	if server == "" {
 		if format == "zip" {
+			// Security: dir is the operator-chosen working directory (the web UI
+			// vets it with cleanLocalWrite and checkLocalCompress) and Base keeps
+			// the archive name a single entry inside it.
 			_ = os.Remove(filepath.Join(dir, filepath.Base(archiveName))) // zip appends; start fresh
 		}
 		tool, args, err := compressArgv(names, archiveName, format)

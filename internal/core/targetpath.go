@@ -36,6 +36,10 @@ func NativePathStyle() TargetPathStyle { return TargetPathStyleForOS(runtime.GOO
 // LocalPathCaseInsensitive reports whether the filesystem that would contain p
 // aliases names by case. It probes the nearest existing directory with a private
 // temporary file and removes it before returning.
+//
+// Security: p is an operator-chosen controller path (CLI/TUI argument, or a
+// web UI path already vetted by cleanLocal and the protected-path guard). The
+// only write is a randomly named probe file that is removed again.
 func LocalPathCaseInsensitive(p string) (bool, error) {
 	dir := filepath.Clean(p)
 	for {

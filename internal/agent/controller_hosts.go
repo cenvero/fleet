@@ -74,6 +74,9 @@ func (m fileControllerKnownHostsManager) Update(_ context.Context, payload proto
 		removeSet[canonical] = struct{}{}
 	}
 
+	// Security: a sum of two in-memory slice lengths cannot overflow int, and
+	// AddKeys arrives from the authenticated controller inside an envelope
+	// capped at proto.MaxEnvelopeSize (16 MiB); these are capacity hints only.
 	filtered := make([]knownHostEntry, 0, len(entries)+len(payload.AddKeys))
 	seen := make(map[string]struct{}, len(entries)+len(payload.AddKeys))
 	for _, entry := range entries {

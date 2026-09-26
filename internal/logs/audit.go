@@ -153,6 +153,8 @@ func (a *AuditLog) appendLocked(entry AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("marshal audit entry: %w", err)
 	}
+	// Security: payload is the JSON of one in-process audit entry already held
+	// in memory, so len(payload)+2 cannot overflow int.
 	line := make([]byte, 0, len(payload)+2)
 	if missingNewline {
 		// The last existing entry decoded fine but is not newline-terminated

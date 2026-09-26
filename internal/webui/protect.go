@@ -236,6 +236,9 @@ func (g localGuard) checkFollowedTree(p string) error {
 // existingChain returns the identity of every existing ancestor-or-self of the
 // cleaned path p (following symlinks), deepest first, each with the components
 // of p beneath it.
+//
+// Security: p is the request path being checked; this is the guard itself,
+// and it only stats p and its ancestors to decide whether to refuse it.
 func existingChain(p string) []pathLink {
 	p = filepath.Clean(p)
 	var below []string // components under cur, innermost last-in
@@ -340,6 +343,15 @@ func (s *Server) protectedPaths() []string {
 // cleanLocal validates a controller-side path exactly like cleanLocalPath and
 // additionally refuses protected locations. Every Local-source handler that
 // touches a single entry goes through it.
+//
+// Security: the Local source deliberately accepts any absolute path the
+// operator picks — it is the operator's own file manager, reachable only over
+// loopback with the per-process token, a loopback Host header and (for every
+// mutation) a same-origin POST. The trust boundary is therefore the protected
+// controller locations, not the path itself: cleanLocal, cleanLocalWrite and
+// cleanLocalTree are the checks every Local handler applies before touching
+// the filesystem, which is why CodeQL go/path-injection alerts on those
+// handlers (and on the core helpers they call) are false positives.
 func (s *Server) cleanLocal(p string) (string, error) {
 	clean, err := cleanLocalPath(p)
 	if err != nil {
@@ -455,6 +467,10 @@ func (s *Server) extractLocalGuarded(archive string) error {
 	}
 	// Keep the original base name so core picks the same format; the random
 	// prefix keeps the copy from colliding with any member.
+	//
+	// Security: staged is a single random-prefixed entry (filepath.Base of the
+	// already-guarded archive path) inside the private 0700 staging directory,
+	// which the Local source can never reach.
 	staged := filepath.Join(members, ".fleet-extract-"+tag[:16]+"-"+filepath.Base(archive))
 	if err := copyArchiveForStaging(archive, staged); err != nil {
 		return err

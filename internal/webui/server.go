@@ -664,6 +664,9 @@ func listLocalDir(dir string, showHidden bool) (proto.FileListResult, error) {
 	if err != nil {
 		return proto.FileListResult{}, err
 	}
+	// Security: listing any operator-chosen directory is this file manager's
+	// purpose (loopback + per-process token + Host check); handleList has
+	// already refused protected locations via cleanLocal.
 	ents, err := os.ReadDir(clean)
 	if err != nil {
 		return proto.FileListResult{}, err

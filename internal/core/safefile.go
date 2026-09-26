@@ -126,6 +126,10 @@ func openVerifiedLocalDir(path string, perm os.FileMode) (*os.Root, error) {
 	if clean == string(filepath.Separator) || base == "." {
 		return os.OpenRoot(clean)
 	}
+	// Security: path is a destination the caller already chose and validated
+	// (operator input, a web UI path vetted by the protected-path guard, or a
+	// private staging directory); this helper only confines what happens
+	// beneath it.
 	if err := os.MkdirAll(parent, perm); err != nil {
 		return nil, err
 	}
@@ -297,6 +301,10 @@ func CopyLocalFileAtomic(src, dst string, mode os.FileMode) error {
 // destination traversal are rooted at verified directory descriptors and every
 // destination file is installed atomically.
 func CopyLocalTreeAtomic(src, dst string) error {
+	// Security: src and dst are operator-chosen controller paths (web UI
+	// callers vet both with cleanLocalTree and the protected-path guard);
+	// everything beneath them is walked through os.Root and symlinks are
+	// refused.
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
 		return err

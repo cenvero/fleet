@@ -1020,6 +1020,9 @@ func (a *App) downloadFile(serverName, remotePath, localPath string, opts FileTr
 	}
 	resolved := a.resolveTransferOptions(server, opts)
 	style := TargetPathStyleForServer(server)
+	// Security: localPath is the operator-chosen destination (CLI/TUI argument,
+	// or a web UI path vetted by cleanLocalTree and the protected-path guard);
+	// recursive callers instead confine localRel beneath localRoot.
 	if opts.localRoot != "" {
 		if !safeRel(filepath.FromSlash(opts.localRel)) {
 			return proto.FileStatResult{}, "", fmt.Errorf("refusing unsafe local destination %q", opts.localRel)
