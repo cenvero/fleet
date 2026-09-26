@@ -834,7 +834,7 @@ fleet file edit web-01 /etc/nginx/nginx.conf <span class="f">--history</span></p
             <table>
               <thead><tr><th scope="col">Command</th><th scope="col">Default</th><th scope="col">What it does</th></tr></thead>
               <tbody>
-                <tr><td><code>fleet config set edit-backups 20</code></td><td>10</td><td>Versions kept per file for <code>--undo</code> (0 turns the history off).</td></tr>
+                <tr><td><code>fleet config set edit-backups 20</code></td><td>10</td><td>Versions kept per file for <code>--undo</code>, as plain copies in the controller's owner-only config directory (0 turns the history off — use it if the files you edit hold secrets).</td></tr>
                 <tr><td><code>fleet config set edit-max-size 2M</code></td><td>8M</td><td>Largest file that can be viewed or edited (8 MiB at most).</td></tr>
                 <tr><td><code>fleet config set edit-require-hash on</code></td><td>off</td><td>Every non-interactive edit of an existing file must pass <code>--expect-sha256</code>.</td></tr>
               </tbody>

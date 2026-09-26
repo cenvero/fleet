@@ -86,7 +86,7 @@ func Apply(content []byte, ops []proto.FileEditOp, maxBytes int64) ([]byte, int,
 		var err *Error
 		switch op.Kind {
 		case proto.FileEditOpReplace, "":
-			buf, n, err = replace(buf, op, crlf)
+			buf, n, err = replace(buf, op, crlf, maxBytes)
 		case proto.FileEditOpInsert:
 			buf, n, err = insert(buf, op, crlf)
 		default:
@@ -115,7 +115,7 @@ func withLineEndings(s string, crlf bool) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
-func replace(buf []byte, op proto.FileEditOp, crlf bool) ([]byte, int, *Error) {
+func replace(buf []byte, op proto.FileEditOp, crlf bool, maxBytes int64) ([]byte, int, *Error) {
 	if op.Old == "" {
 		return nil, 0, errorf(CodeInvalidEdit, "the text to replace is empty (use an insert to add text)")
 	}
@@ -134,6 +134,17 @@ func replace(buf []byte, op proto.FileEditOp, crlf bool) ([]byte, int, *Error) {
 		return nil, 0, &Error{Code: CodeNotFound, Message: msg}
 	case count > 1 && !op.All:
 		return nil, 0, errorf(CodeNotUnique, "the text to replace occurs %d times; include more surrounding lines so it matches exactly once, or replace all occurrences", count)
+	}
+	n := 1
+	if op.All {
+		n = count
+	}
+	// Check the size before building the result: replacing many occurrences
+	// of a short text with a long one could otherwise ask for far more memory
+	// than any file may hold. (n ≤ len(buf) and the texts are bounded by the
+	// request size, so this cannot overflow int64.)
+	if size := int64(len(buf)) + int64(n)*(int64(len(repl))-int64(len(old))); maxBytes > 0 && size > maxBytes {
+		return nil, 0, errorf(CodeFileTooLarge, "the edited file would be %d bytes, over the %d-byte limit", size, maxBytes)
 	}
 	if op.All {
 		return bytes.ReplaceAll(buf, old, repl), count, nil

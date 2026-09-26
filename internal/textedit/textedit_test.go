@@ -150,6 +150,17 @@ func TestApplyHonoursMaxBytes(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesHugeReplaceAllBeforeAllocating(t *testing.T) {
+	t.Parallel()
+	// 100k occurrences × 1 MiB each would need ~100 GiB; it must be refused
+	// from the arithmetic, not by trying.
+	in := []byte(strings.Repeat("a", 100_000))
+	_, _, err := Apply(in, []proto.FileEditOp{replaceOp("a", strings.Repeat("b", 1<<20), true)}, proto.MaxEditFileBytes)
+	if codeOf(t, err) != CodeFileTooLarge {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestCountLines(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]int{"": 0, "a": 1, "a\n": 1, "a\nb": 2, "a\nb\n": 2, "\n": 1} {

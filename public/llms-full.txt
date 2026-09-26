@@ -851,7 +851,7 @@ An edit list looks like `[{"old":"a","new":"b"}, {"old":"x","new":"y","all":true
 
 | Command | Default | What it does |
 |---|---|---|
-| `fleet config set edit-backups 20` | 10 | Versions kept per file for `--undo` (0 turns the history off). |
+| `fleet config set edit-backups 20` | 10 | Versions kept per file for `--undo`, as plain copies in the controller's owner-only config directory (0 turns the history off — use it if the files you edit hold secrets). |
 | `fleet config set edit-max-size 2M` | 8M | Largest file that can be viewed or edited (8 MiB at most). |
 | `fleet config set edit-require-hash on` | off | Every non-interactive edit of an existing file must pass `--expect-sha256`. |
 

@@ -325,3 +325,39 @@ func TestEditRefusesFileTheAgentCannotWrite(t *testing.T) {
 		t.Fatalf("read-only file was replaced: %q", got)
 	}
 }
+
+func TestEditStaysInsideFileRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	SetAllowedFileRoots([]string{root})
+	defer SetAllowedFileRoots(nil)
+	secret := filepath.Join(outside, "secret.conf")
+	writeTestFile(t, secret, "token=a\n", 0o600)
+	fm := NewFileManager().(fileEditor)
+
+	if _, err := fm.Edit(context.Background(), editReplace(secret, "a", "b")); editErrCode(t, err) != "invalid_path" {
+		t.Fatalf("edit outside the root: %v", err)
+	}
+	// A symlink inside the root must not lead the edit outside it.
+	link := filepath.Join(root, "link.conf")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fm.Edit(context.Background(), editReplace(link, "a", "b")); editErrCode(t, err) != "invalid_path" {
+		t.Fatalf("edit through an escaping symlink: %v", err)
+	}
+	// Nor may a new file be created outside it.
+	body := []byte("x\n")
+	create := proto.FileEditPayload{Path: filepath.Join(outside, "new"), Replace: true, Create: true, Content: body, ContentSHA256: sha256Hex(body)}
+	if _, err := fm.Edit(context.Background(), create); editErrCode(t, err) != "invalid_path" {
+		t.Fatalf("create outside the root: %v", err)
+	}
+	if got := readTestFile(t, secret); got != "token=a\n" {
+		t.Fatalf("file outside the root changed: %q", got)
+	}
+	inside := filepath.Join(root, "app.conf")
+	writeTestFile(t, inside, "a\n", 0o644)
+	if _, err := fm.Edit(context.Background(), editReplace(inside, "a", "b")); err != nil {
+		t.Fatalf("edit inside the root: %v", err)
+	}
+}

@@ -150,7 +150,10 @@ editor does. It is built to be safe to hand to an AI agent:
 - **Undo.** The previous version of every edited file is kept on the controller
   (`data/edit-history`, 10 versions per file by default — `fleet config set
   edit-backups N`, 0 turns it off). `--undo` restores it, but only while the file is
-  still exactly what that edit produced; `--history` lists what is kept.
+  still exactly what that edit produced; `--history` lists what is kept. The kept
+  versions are plain copies in the controller's owner-only config directory (and so
+  in `fleet config backup` archives): if the files you edit hold secrets you do not
+  want copied there, set `edit-backups 0`.
 - **Readable results.** Every edit prints a unified diff, the old and new sha256,
   sizes, mode and owner (`--json` for a structured result), `--dry-run` shows the
   diff without writing, and every edit is recorded in the audit log. CRLF files keep

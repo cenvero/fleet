@@ -709,6 +709,14 @@ func bestEffortTargetServer(top string, args []string) string {
 	}
 	if serverArgCommands[top] {
 		if len(args) >= 1 {
+			// `file view|edit|download` also take the combined <server:path>
+			// form. Split it exactly as parseServerPath does for the command
+			// itself, so the scope check vets the server the command will use.
+			if top == "file" {
+				if i := strings.IndexByte(args[0], ':'); i > 0 {
+					return args[0][:i]
+				}
+			}
 			return args[0]
 		}
 	}

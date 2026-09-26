@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -90,8 +91,13 @@ func newFileViewCommand(configDir *string) *cobra.Command {
 				endings = ", CRLF line endings"
 			}
 			fmt.Fprintf(out, "# %s:%s  sha256=%s  %s  mode %04o  %d lines%s\n", server, remotePath, view.SHA256, humanizeBytes(view.Size), view.Mode&0o7777, view.Lines, endings)
+			tty := writerIsTerminal(out)
 			for i := max(start, 1); i <= end; i++ {
-				fmt.Fprintf(out, "%6d\t%s\n", i, strings.TrimRight(lines[i-1], "\r\n"))
+				line := strings.TrimRight(lines[i-1], "\r\n")
+				if tty {
+					line = terminalSafe(line)
+				}
+				fmt.Fprintf(out, "%6d\t%s\n", i, line)
 			}
 			return nil
 		},
@@ -99,6 +105,38 @@ func newFileViewCommand(configDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&lineRange, "lines", "", "only show lines START:END (1-based, inclusive; START: or :END for open ranges)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print the file (or the selected lines) and its metadata as JSON")
 	return cmd
+}
+
+// terminalSafe makes text that came from a server safe to print on a
+// terminal: control characters other than tab — ESC, which starts terminal
+// escape sequences, and the C1 controls among them — are shown as visible
+// escapes such as \x1b, and invalid UTF-8 as U+FFFD. It is applied only when
+// writing to a terminal; piped output (scripts, AI agents) stays byte-exact so
+// the text can be copied into --old.
+func terminalSafe(s string) string {
+	unsafe := func(r rune) bool { return (r < 0x20 && r != '\t') || (r >= 0x7f && r <= 0x9f) }
+	if !strings.ContainsFunc(s, unsafe) && utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unsafe(r) {
+			fmt.Fprintf(&b, "\\x%02x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// terminalSafeLines applies terminalSafe to each line of a diff, dropping the
+// "\r" of CRLF line endings rather than showing it.
+func terminalSafeLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = terminalSafe(strings.TrimSuffix(l, "\r"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // splitViewLines splits content into lines that keep their line endings.
@@ -438,7 +476,11 @@ func printEditResult(cmd *cobra.Command, server, remotePath string, res core.Edi
 	}
 	fmt.Fprintf(out, "  mode   %04o%s%s\n", res.Mode&0o7777, owner, kept)
 	if res.Diff != "" {
-		fmt.Fprint(out, res.Diff)
+		diff := res.Diff
+		if writerIsTerminal(out) {
+			diff = terminalSafeLines(diff)
+		}
+		fmt.Fprint(out, diff)
 		if res.DiffTruncated {
 			fmt.Fprintln(out, "(diff truncated)")
 		}
