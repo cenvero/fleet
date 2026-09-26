@@ -1295,15 +1295,6 @@ func serviceState(service core.ServiceRecord) string {
 	return state
 }
 
-// truncate shortens input to width bytes with a trailing "...". Used by the
-// file manager views.
-func truncate(input string, width int) string {
-	if width < 4 || len(input) <= width {
-		return input
-	}
-	return input[:width-3] + "..."
-}
-
 func dashIfEmpty(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "-"
