@@ -113,6 +113,14 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	// can signal the whole tree at once on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	if len(payload.Env) > 0 {
+		env, err := execEnvironment(payload.Env)
+		if err != nil {
+			return proto.ExecResult{}, err
+		}
+		cmd.Env = env
+	}
+
 	stdout := &cappedBuffer{max: maxExecOutputBytes}
 	stderr := &cappedBuffer{max: maxExecOutputBytes}
 	cmd.Stdout = stdout

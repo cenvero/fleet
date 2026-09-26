@@ -980,9 +980,80 @@ func (a *App) ExecCommandContext(ctx context.Context, serverName, command string
 	if err != nil {
 		return proto.ExecResult{}, err
 	}
+	return a.execPayloadContext(ctx, server, proto.ExecPayload{Command: command})
+}
+
+// ExecCommandEnvContext runs command with extra environment variables (e.g.
+// resolved --secret values) visible to the WHOLE command, not just its first
+// simple command. Agents advertising proto.CapabilityExecEnv get them in the
+// payload and set them on the process, so the values never appear on a command
+// line. Older POSIX agents get an `export VAR='value'; ` prefix instead. Older
+// Windows agents run commands through cmd.exe, where no quoting carries
+// arbitrary values safely, so the call is refused. Errors name variables only,
+// never values.
+func (a *App) ExecCommandEnvContext(ctx context.Context, serverName, command string, env map[string]string) (proto.ExecResult, error) {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	payload, err := execPayloadWithEnv(server, command, env)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	return a.execPayloadContext(ctx, server, payload)
+}
+
+// execPayloadWithEnv builds the shell.exec payload for command + env, choosing
+// the process-environment field or the POSIX export prefix (see
+// ExecCommandEnvContext).
+func execPayloadWithEnv(server ServerRecord, command string, env map[string]string) (proto.ExecPayload, error) {
+	if len(env) == 0 {
+		return proto.ExecPayload{Command: command}, nil
+	}
+	names := make([]string, 0, len(env))
+	for name := range env {
+		if !validShellEnvName(name) {
+			return proto.ExecPayload{}, fmt.Errorf("invalid environment variable name %q", name)
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	if slices.Contains(server.Capabilities, proto.CapabilityExecEnv) {
+		return proto.ExecPayload{Command: command, Env: env}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(server.Observed.OS), "windows") {
+		return proto.ExecPayload{}, fmt.Errorf("server %s runs an agent without environment support; update its agent to pass %s to a Windows command", server.Name, strings.Join(names, ", "))
+	}
+	var prefix strings.Builder
+	for _, name := range names {
+		prefix.WriteString("export ")
+		prefix.WriteString(name)
+		prefix.WriteString("=")
+		prefix.WriteString(shellQuote(env[name]))
+		prefix.WriteString("; ")
+	}
+	return proto.ExecPayload{Command: prefix.String() + command}, nil
+}
+
+func validShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) execPayloadContext(ctx context.Context, server ServerRecord, payload proto.ExecPayload) (proto.ExecResult, error) {
 	response, err := a.callRPCContext(ctx, server, proto.Envelope{
 		Action:  "shell.exec",
-		Payload: proto.ExecPayload{Command: command},
+		Payload: payload,
 	})
 	if err != nil {
 		return proto.ExecResult{}, err

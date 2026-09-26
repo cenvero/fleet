@@ -184,3 +184,14 @@ func printExecHuman(out, errw io.Writer, j execJSON, printHeader bool) {
 		fmt.Fprint(errw, j.Stderr)
 	}
 }
+
+// redactedError replaces an error's text (e.g. with secret values scrubbed)
+// while keeping it unwrappable, so errors.Is(err, context.DeadlineExceeded)
+// and friends still work.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e redactedError) Error() string { return e.msg }
+func (e redactedError) Unwrap() error { return e.err }
