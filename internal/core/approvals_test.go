@@ -100,6 +100,56 @@ func TestApprove(t *testing.T) {
 	}
 }
 
+// TestStageExecAndRecordResult: staged exec options round-trip, approve stamps
+// approved_at, and RecordResult records the run exactly once — executed for a
+// clean exit, failed for a non-zero exit or a run error.
+func TestStageExecAndRecordResult(t *testing.T) {
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	s := newTestStore(t, &now)
+	opts := &ApprovalExec{Timeout: "30s", Confirm: true, Secrets: []string{"K=@key"}}
+	id, err := s.StageExec("web-01", "deploy", time.Hour, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(id)
+	if err != nil || got.Exec == nil || got.Exec.Timeout != "30s" || !got.Exec.Confirm || len(got.Exec.Secrets) != 1 {
+		t.Fatalf("staged = %+v, %v", got, err)
+	}
+
+	// A result can only be recorded for an approved request.
+	if _, err := s.RecordResult(id, 0, nil); err == nil {
+		t.Fatal("RecordResult on a pending approval must fail")
+	}
+	approved, err := s.Approve(id)
+	if err != nil || approved.ApprovedAt == nil || !approved.ApprovedAt.Equal(now) {
+		t.Fatalf("approve = %+v, %v; want approved_at=%v", approved, err, now)
+	}
+	done, err := s.RecordResult(id, 0, nil)
+	if err != nil || done.Status != ApprovalExecuted || done.ExitCode == nil || *done.ExitCode != 0 || done.ExecutedAt == nil {
+		t.Fatalf("record = %+v, %v; want executed with exit 0", done, err)
+	}
+	if _, err := s.RecordResult(id, 0, nil); err == nil {
+		t.Fatal("a second RecordResult must fail: an approval runs once")
+	}
+
+	for _, tc := range []struct {
+		code int
+		err  error
+	}{{3, nil}, {-1, errors.New("fork failed")}} {
+		id, _ := s.Stage("web-01", "x", time.Hour)
+		if _, err := s.Approve(id); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.RecordResult(id, tc.code, tc.err)
+		if err != nil || got.Status != ApprovalFailed || *got.ExitCode != tc.code {
+			t.Fatalf("record(%d, %v) = %+v, %v; want failed", tc.code, tc.err, got, err)
+		}
+		if tc.err != nil && got.Error != tc.err.Error() {
+			t.Fatalf("error = %q, want %q", got.Error, tc.err.Error())
+		}
+	}
+}
+
 func TestReject(t *testing.T) {
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
 	s := newTestStore(t, &now)

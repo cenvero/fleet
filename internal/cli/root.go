@@ -373,6 +373,15 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'cmd-policy set'")
 			AuditDeniedHardExit(configDir, token.Name, "cmd-policy set (scoped token may not change cmd-policy)")
 			os.Exit(1)
+		case top == "approve":
+			// The approval queue is a human sign-off gate: a constrained credential
+			// (typically an AI agent) that staged a command must not be able to
+			// approve — and thereby run — it itself. (The RBAC v1 backstop below
+			// denies it too; this states the rule explicitly and survives any
+			// future widening of scopedLocalCommands.)
+			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'approve' (approvals need an operator)")
+			AuditDeniedHardExit(configDir, token.Name, "approve (scoped token may not approve staged commands)")
+			os.Exit(1)
 		case top == "token":
 			// Any token mutation beyond create/revoke (already handled above).
 			if sub != "" && sub != "list" {
@@ -2776,7 +2785,9 @@ Enforcement flags:
   --guard               block the command if it could lock out the controller
   --guard-warn          downgrade --guard to a warning (run anyway)
   --confirm             confirm a command that the cmd-policy marks confirm-required
-  --require-approval    stage the command for approval instead of running it
+  --require-approval    stage the command (with these options) for approval instead of
+                        running it; 'fleet approve <id>' then runs it (secrets must be
+                        VAR=@name references)
   --idempotency-key KEY return the cached result for KEY instead of re-running
   --on-fail '<cmd>'     run this command on the same server if the command fails
 
@@ -2841,6 +2852,19 @@ Examples:
 					}
 					secrets = append(secrets, rs)
 				}
+			}
+
+			// --require-approval persists the request so `fleet approve` can run it
+			// later. Only secret-store references (VAR=@name) can be persisted; a
+			// literal value would be written to approvals.json, so refuse it.
+			var stagedExec *core.ApprovalExec
+			if requireApprove {
+				for _, spec := range secretSpecs {
+					if _, rhs, _ := strings.Cut(spec, "="); !strings.HasPrefix(rhs, "@") {
+						return fmt.Errorf("--require-approval only supports stored secrets (--secret VAR=@name): a literal value would be persisted in the approval queue")
+					}
+				}
+				stagedExec = stagedApprovalExec(cmd, timeout, retries, backoff, guard, guardWarn, confirm, onFail, idempotencyKey, secretSpecs)
 			}
 
 			// redact applies configured output redaction and then scrubs every
@@ -2990,9 +3014,10 @@ Examples:
 						return true, "", fmt.Errorf("command matches cmd-policy confirm pattern %q — pass --confirm to run it", pat)
 					}
 				}
-				// 4. require-approval — stage and refuse.
+				// 4. require-approval — stage (with the exec options `fleet approve`
+				// must run it with) and refuse.
 				if requireApprove {
-					id, serr := approvals.Stage(server, command, core.DefaultApprovalTTL)
+					id, serr := approvals.StageExec(server, command, core.DefaultApprovalTTL, stagedExec)
 					if serr != nil {
 						return true, "", fmt.Errorf("stage approval: %w", serr)
 					}

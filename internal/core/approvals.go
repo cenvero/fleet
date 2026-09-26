@@ -17,12 +17,18 @@ import (
 )
 
 // Approval status values. A staged request is pending until an operator
-// approves or rejects it, or until its TTL elapses (expired).
+// approves or rejects it, or until its TTL elapses (expired). `fleet approve`
+// then runs the approved command and records its outcome: executed (exit 0) or
+// failed (non-zero exit, blocked, or not runnable). An approval left in
+// approved status was approved but its run never recorded an outcome (e.g. the
+// approving process was killed).
 const (
 	ApprovalPending  = "pending"
 	ApprovalApproved = "approved"
 	ApprovalRejected = "rejected"
 	ApprovalExpired  = "expired"
+	ApprovalExecuted = "executed"
+	ApprovalFailed   = "failed"
 )
 
 // DefaultApprovalTTL is used by Stage when the caller passes a non-positive ttl.
@@ -37,6 +43,30 @@ type Approval struct {
 	Status    string    `json:"status"`
 	Requested time.Time `json:"requested"`
 	Expires   time.Time `json:"expires"`
+
+	// Additive fields (older binaries ignore them). Exec holds the exec options
+	// the command was staged with; the rest record the decision and the run.
+	Exec       *ApprovalExec `json:"exec,omitempty"`
+	ApprovedAt *time.Time    `json:"approved_at,omitempty"`
+	ExecutedAt *time.Time    `json:"executed_at,omitempty"`
+	ExitCode   *int          `json:"exit_code,omitempty"`
+	Error      string        `json:"error,omitempty"`
+}
+
+// ApprovalExec records the `fleet exec` options a command was staged with, so
+// `fleet approve` runs it exactly as it was requested. Secrets are stored only
+// as VAR=@name references to the secret store — a literal secret value is never
+// written to approvals.json (exec refuses --require-approval with one).
+type ApprovalExec struct {
+	Timeout        string   `json:"timeout,omitempty"`
+	Retry          int      `json:"retry,omitempty"`
+	Backoff        string   `json:"backoff,omitempty"`
+	Guard          bool     `json:"guard,omitempty"`
+	GuardWarn      bool     `json:"guard_warn,omitempty"`
+	Confirm        bool     `json:"confirm,omitempty"`
+	OnFail         string   `json:"on_fail,omitempty"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	Secrets        []string `json:"secrets,omitempty"`
 }
 
 // Expired reports whether a still-pending approval has passed its expiry at the
@@ -173,6 +203,12 @@ func newApprovalID(entropy io.Reader) (string, error) {
 // after ttl, and returns its generated id. A non-positive ttl uses
 // DefaultApprovalTTL. Expired approvals are pruned to expired-status on the way.
 func (s *ApprovalStore) Stage(server, command string, ttl time.Duration) (string, error) {
+	return s.StageExec(server, command, ttl, nil)
+}
+
+// StageExec is Stage that also records the exec options (exec may be nil) the
+// command must run with once approved.
+func (s *ApprovalStore) StageExec(server, command string, ttl time.Duration, exec *ApprovalExec) (string, error) {
 	if strings.TrimSpace(server) == "" {
 		return "", fmt.Errorf("server name is required")
 	}
@@ -201,6 +237,7 @@ func (s *ApprovalStore) Stage(server, command string, ttl time.Duration) (string
 			Status:    ApprovalPending,
 			Requested: now.UTC(),
 			Expires:   now.UTC().Add(ttl),
+			Exec:      exec,
 		}
 		approvals = append(approvals, approval)
 		if err := s.write(approvals); err != nil {
@@ -248,6 +285,54 @@ func (s *ApprovalStore) decide(id, status string) (Approval, error) {
 			return persistOnError(fmt.Errorf("approval %q is %s, not pending", id, approvals[idx].Status))
 		}
 		approvals[idx].Status = status
+		if status == ApprovalApproved {
+			at := now.UTC()
+			approvals[idx].ApprovedAt = &at
+		}
+		if err := s.write(approvals); err != nil {
+			return err
+		}
+		result = approvals[idx]
+		return nil
+	})
+	return result, err
+}
+
+// RecordResult stores the outcome of running an approved command: executed for
+// a clean exit 0, failed otherwise (runErr set, or a non-zero exitCode). Only an
+// approval in approved status can take a result, so each approval runs — and is
+// recorded — at most once.
+func (s *ApprovalStore) RecordResult(id string, exitCode int, runErr error) (Approval, error) {
+	var result Approval
+	err := s.withWriteLock(func() error {
+		approvals, err := s.read()
+		if err != nil {
+			return err
+		}
+		idx := -1
+		for i := range approvals {
+			if approvals[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("approval %q not found", id)
+		}
+		if approvals[idx].Status != ApprovalApproved {
+			return fmt.Errorf("approval %q is %s, not approved", id, approvals[idx].Status)
+		}
+		at := s.clock().UTC()
+		code := exitCode
+		approvals[idx].ExecutedAt = &at
+		approvals[idx].ExitCode = &code
+		approvals[idx].Status = ApprovalExecuted
+		if runErr != nil || exitCode != 0 {
+			approvals[idx].Status = ApprovalFailed
+		}
+		if runErr != nil {
+			approvals[idx].Error = runErr.Error()
+		}
 		if err := s.write(approvals); err != nil {
 			return err
 		}
