@@ -1308,7 +1308,7 @@ func (a *App) noteServerSeen(server ServerRecord) {
 
 func (a *App) callRPCContextRaw(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	if deadline, ok := ctx.Deadline(); ok {
-		env.DeadlineUnixMilli = deadline.UnixMilli()
+		env.DeadlineUnixMilli = proto.DeadlineMillis(deadline)
 	}
 	switch server.Mode {
 	case transport.ModeDirect:

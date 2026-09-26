@@ -184,7 +184,7 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 	env.ProtocolVersion = proto.CurrentProtocolVersion
 	_, hasDeadline := ctx.Deadline()
 	if deadline, ok := ctx.Deadline(); ok {
-		env.DeadlineUnixMilli = deadline.UnixMilli()
+		env.DeadlineUnixMilli = proto.DeadlineMillis(deadline)
 	}
 
 	canCancel := s.SupportsCapability(proto.CapabilityRequestCancel)
