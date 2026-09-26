@@ -1075,6 +1075,84 @@ func TestNoColorKeepsCursorVisible(t *testing.T) {
 	}
 }
 
+// TestMouseFlows drives click, double-click, wheel, right-click and a
+// cross-pane drag-and-drop through Update, as the terminal would.
+func TestMouseFlows(t *testing.T) {
+	m := sampleFilesModel(160, 45)
+	m.frames = &frameCache{}
+	l := m.layout()
+	send := func(msg tea.MouseMsg) {
+		mm, _ := m.Update(msg)
+		m = mm.(filesModel)
+		_ = m.View()
+	}
+	rowY := func(idx int) int { return l.bodyY + idx - m.left.scroll }
+	lx := l.paneX[0] + 8
+	// Single click selects (moves the cursor) without acting.
+	send(tea.MouseMsg{X: lx, Y: rowY(3), Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	send(tea.MouseMsg{X: lx, Y: rowY(3), Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	if m.left.index != 3 || m.overlay != overlayNone {
+		t.Fatalf("click: index=%d overlay=%v", m.left.index, m.overlay)
+	}
+	// Double click on a file opens its properties.
+	send(tea.MouseMsg{X: lx, Y: rowY(3), Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	send(tea.MouseMsg{X: lx, Y: rowY(3), Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	if m.overlay != overlayProperties {
+		t.Fatalf("double click overlay = %v", m.overlay)
+	}
+	send(tea.MouseMsg{X: 1, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}) // click away closes
+	if m.overlay != overlayNone {
+		t.Fatal("clicking outside should close properties")
+	}
+	// Wheel scrolls the pane under the pointer.
+	send(tea.MouseMsg{X: lx, Y: rowY(1), Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	if m.left.index != 2 {
+		t.Fatalf("wheel up → index %d", m.left.index)
+	}
+	// Right-click opens the context menu on that row.
+	send(tea.MouseMsg{X: lx, Y: rowY(1), Action: tea.MouseActionPress, Button: tea.MouseButtonRight})
+	if m.overlay != overlayContextMenu || m.left.index != 1 {
+		t.Fatalf("right click: overlay=%v index=%d", m.overlay, m.left.index)
+	}
+	m = press(t, m, "esc")
+	// Drag app.tar.gz (row 2) onto the right pane → Copy/Move menu.
+	send(tea.MouseMsg{X: lx, Y: rowY(2), Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	send(tea.MouseMsg{X: lx + 30, Y: rowY(4), Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft})
+	if m.drag == nil || !m.drag.active {
+		t.Fatal("motion with the button held should start a drag")
+	}
+	if out := stripANSI(m.View()); !strings.Contains(out, "app.tar.gz") {
+		t.Fatal("drag ghost should show the dragged name")
+	}
+	rx := l.paneX[1] + 10
+	send(tea.MouseMsg{X: rx, Y: l.bodyY + 5, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft})
+	send(tea.MouseMsg{X: rx, Y: l.bodyY + 5, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	if m.overlay != overlayCopyMove || m.cmDrag == nil || m.cmDrag.primary.name != "app.tar.gz" {
+		t.Fatalf("drop: overlay=%v", m.overlay)
+	}
+	// Toolbar click runs its action.
+	fit := m.toolbarLayout(l.innerW)
+	m = press(t, m, "esc")
+	for _, sp := range fit.spans {
+		if sp.action == "view" {
+			send(tea.MouseMsg{X: l.padX + sp.x0 + 1, Y: l.toolbarY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+		}
+	}
+	if m.left.view != viewGrid {
+		t.Fatal("clicking View should switch the focused pane to icons")
+	}
+	// Ctrl-click toggles, shift-click extends.
+	m.left.view = viewList
+	send(tea.MouseMsg{X: lx, Y: rowY(2), Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Ctrl: true})
+	if !m.left.selected[2] {
+		t.Fatal("ctrl-click should select")
+	}
+	send(tea.MouseMsg{X: lx, Y: rowY(3), Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Shift: true})
+	if !m.left.selected[3] || !m.left.selected[2] {
+		t.Fatalf("shift-click should extend: %v", m.left.selected)
+	}
+}
+
 // TestEditorFrameFitsScreen is a regression test: the editor's header and
 // rules were built for the padded width, so they wrapped and pushed the
 // title off the top of the screen.
