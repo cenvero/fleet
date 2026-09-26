@@ -45,6 +45,11 @@ type editorState struct {
 	saving   bool
 	status   string // inline message inside the editor footer (errors, hints)
 	viewScrl int    // scroll offset (top line) for the read-only highlighted view
+
+	// viewLines caches the highlighted lines of viewSrc so scrolling the viewer
+	// does not re-tokenise the whole file on every frame.
+	viewLines []string
+	viewSrc   string
 }
 
 // editorLoadedMsg carries the result of loading a file into the editor.
@@ -54,6 +59,7 @@ type editorLoadedMsg struct {
 	path    string
 	name    string
 	content string
+	lines   []string // highlighted content, computed off the UI thread
 	err     error
 }
 
@@ -78,7 +84,7 @@ func (m filesModel) openEditor(side int) (tea.Model, tea.Cmd) {
 	}
 	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	m.overlay = overlayEditor
-	m.editor = editorState{
+	m.editor = &editorState{
 		active: true, side: side, source: pane.source,
 		path: full, name: it.name, mode: editorView,
 		status: "loading…",
@@ -93,7 +99,11 @@ func (m filesModel) editorLoadCmd(side int, source, full, name string) tea.Cmd {
 	app := m.app
 	return func() tea.Msg {
 		data, err := loadFileForEdit(app, source, full)
-		return editorLoadedMsg{side: side, source: source, path: full, name: name, content: data, err: err}
+		var lines []string
+		if err == nil {
+			lines = highlightLines(name, data)
+		}
+		return editorLoadedMsg{side: side, source: source, path: full, name: name, content: data, lines: lines, err: err}
 	}
 }
 
@@ -165,12 +175,12 @@ func isBinary(data []byte) bool {
 // the editor into the read-only highlighted view.
 func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 	// Ignore a stale load if the editor was closed or retargeted meanwhile.
-	if !m.editor.active || m.editor.path != msg.path {
+	if m.editor == nil || !m.editor.active || m.editor.path != msg.path {
 		return m, nil
 	}
 	if msg.err != nil {
 		m.overlay = overlayNone
-		m.editor = editorState{}
+		m.editor = nil
 		m.status = "open failed: " + msg.err.Error()
 		return m, nil
 	}
@@ -189,6 +199,11 @@ func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 
 	m.editor.area = ta
 	m.editor.content = msg.content
+	m.editor.viewLines = msg.lines
+	m.editor.viewSrc = msg.content
+	if m.editor.viewLines == nil {
+		m.editor.viewLines = highlightLines(msg.name, msg.content)
+	}
 	m.editor.dirty = false
 	m.editor.mode = editorView
 	m.editor.viewScrl = 0
@@ -203,7 +218,7 @@ func styleEditorTextarea(ta *textarea.Model) {
 	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(fmText)
 	ta.FocusedStyle.LineNumber = lipgloss.NewStyle().Foreground(fmDimC)
 	ta.FocusedStyle.CursorLineNumber = lipgloss.NewStyle().Foreground(fmAccent2)
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("#0f1a24"))
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().Background(fmColor("#0f1a24"))
 	ta.BlurredStyle.Text = lipgloss.NewStyle().Foreground(fmMutedC)
 	ta.BlurredStyle.LineNumber = lipgloss.NewStyle().Foreground(fmDimC)
 	ta.Cursor.Style = lipgloss.NewStyle().Foreground(fmAccent2)
@@ -231,7 +246,7 @@ func (m filesModel) editorBodyHeight() int {
 
 // handleEditorKey routes keys while the editor overlay is open.
 func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	ed := &m.editor
+	ed := m.editor
 	switch msg.String() {
 	case "esc":
 		if ed.dirty && ed.mode == editorEdit {
@@ -240,6 +255,10 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// from discarding edits silently.
 			ed.area.Blur()
 			ed.mode = editorView
+			if v := ed.area.Value(); v != ed.viewSrc {
+				ed.viewLines = highlightLines(ed.name, v)
+				ed.viewSrc = v
+			}
 			ed.status = "unsaved changes — Ctrl+S to save, Esc again to discard"
 			return m, nil
 		}
@@ -279,8 +298,14 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // clampEditorScroll keeps the read-only viewer scroll within the content.
 func (m *filesModel) clampEditorScroll() {
-	ed := &m.editor
-	total := strings.Count(ed.area.Value(), "\n") + 1
+	ed := m.editor
+	if ed == nil {
+		return
+	}
+	total := len(ed.viewLines)
+	if total == 0 {
+		total = strings.Count(ed.area.Value(), "\n") + 1
+	}
 	maxTop := total - m.editorBodyHeight()
 	if maxTop < 0 {
 		maxTop = 0
@@ -296,7 +321,7 @@ func (m *filesModel) clampEditorScroll() {
 // toggleEditorMode flips between the highlighted viewer and the editable
 // textarea, focusing/blurring the textarea accordingly.
 func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
-	ed := &m.editor
+	ed := m.editor
 	if ed.mode == editorView {
 		ed.mode = editorEdit
 		ed.status = ""
@@ -307,6 +332,10 @@ func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
 	}
 	ed.mode = editorView
 	ed.area.Blur()
+	if v := ed.area.Value(); v != ed.viewSrc {
+		ed.viewLines = highlightLines(ed.name, v)
+		ed.viewSrc = v
+	}
 	m.clampEditorScroll()
 	return m, nil
 }
@@ -314,7 +343,7 @@ func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
 // closeEditor tears down the editor overlay without saving.
 func (m filesModel) closeEditor() (tea.Model, tea.Cmd) {
 	m.overlay = overlayNone
-	m.editor = editorState{}
+	m.editor = nil
 	m.status = "closed editor"
 	return m, nil
 }
@@ -322,7 +351,7 @@ func (m filesModel) closeEditor() (tea.Model, tea.Cmd) {
 // saveEditor writes the current content back to its source (local file or
 // remote upload) off the UI thread, then refreshes the owning pane.
 func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
-	ed := &m.editor
+	ed := m.editor
 	if ed.saving {
 		return m, nil
 	}
@@ -367,11 +396,15 @@ func saveFileFromEdit(app *core.App, source, full string, content []byte) error 
 // onEditorSaved updates editor state after a save completes and refreshes the
 // owning pane so the new size/mtime show immediately.
 func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
-	ed := &m.editor
-	ed.saving = false
-	if !ed.active {
+	ed := m.editor
+	if ed == nil || !ed.active {
+		// The editor was closed while the save was in flight.
+		if msg.err != nil {
+			m.setStatus(levelError, "save failed: "+msg.err.Error())
+		}
 		return m, nil
 	}
+	ed.saving = false
 	if msg.err != nil {
 		ed.status = "save failed: " + msg.err.Error()
 		m.status = "save failed: " + msg.err.Error()
