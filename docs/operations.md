@@ -299,13 +299,18 @@ fleet drift capture web-01 --paths /etc/ssh/sshd_config,/etc/fstab
 fleet drift web-01               # report what changed since the baseline
 ```
 
-Send fleet events (offline, job-failed, drift) to Slack or a webhook:
+Send fleet events (offline, job-failed, drift, destructive) to Slack or a webhook:
 
 ```bash
 fleet notify add slack https://hooks.slack.com/... --on offline,job-failed,drift
 fleet notify list
 fleet notify test --event offline
 ```
+
+The `destructive` event fires after a destructive CLI command succeeds (for example
+`server remove`, `file rm`, firewall changes, `secret` changes, `sync`, `key rotate` or setting
+tags). The message names the command, the target server and the operator, never other
+arguments. `exec`, `ssh` and `job run` do not fire it.
 
 Targets on loopback, private or link-local addresses are refused unless added with
 `--allow-internal` (for a webhook receiver on the controller's own network); the cloud
@@ -354,9 +359,28 @@ fleet secret rm deploy_key
 fleet exec web-01 "./deploy.sh" --secret DEPLOY_KEY=@deploy_key
 ```
 
-`VAR=@name` resolves a stored secret into `$VAR`; `VAR=literal` injects a literal. Add reusable
+`VAR=@name` resolves a stored secret into `$VAR`; `VAR=literal` injects a literal. The variable
+is set in the environment of the whole remote command (every part of `a; b`, pipelines and
+subshells), and agents with the `exec.env` capability receive it outside the command line, so the
+value never shows up in the remote process list. Older Linux/macOS agents get an
+`export VAR='…';` prefix instead; older Windows agents refuse `--secret` with an error asking for
+an agent update. Add reusable
 redaction patterns with `fleet policy set redact-pattern '<regex>,<regex>'` (toggle the built-in
 defaults with `redact-defaults on|off`).
+
+### Audit trail
+
+Every state-changing action is appended to a hash-chained audit log (`logs/_audit.log`), readable
+with `fleet logs` and shown in the dashboard's **Ops** view. Alongside server, file, key and
+config changes it records:
+
+- `exec.run` — each remote command per server, with its exit code, `timed_out=true` or the error
+  (secret values appear only as `VAR=@name`; `on_fail=true` marks `--on-fail` runs)
+- `approval.stage`, `approval.approve`, `approval.reject` — the approval id and command
+- `cmd-policy.set`, `policy.set` (the redaction pattern count only)
+- `secret.set`, `secret.rotate`, `secret.remove` — the secret's name, never its value
+- `token.create`, `token.revoke` — the token name and its short display id, never the full id
+- `file.delete.failed` (and other `*.failed` file actions) for refused or failed attempts
 
 ### Dead-man's-switch (auto-rollback)
 
@@ -470,8 +494,11 @@ fleet agent version --all                      # report versions, flag mismatche
 fleet agent update --group role=web --canary 1 # update 1, health-check, then the rest
 ```
 
-`--canary N` updates a small batch of `N` servers first and only proceeds to the remainder if
-every canary comes back healthy.
+`--canary N` updates a small batch of `N` servers first and only proceeds to the remainder once
+every canary agent has reconnected, answers, and reports the new version (it retries for up to
+90 seconds while the agent restarts). Host health problems on a canary (no swap, high load, a
+full disk, a pending reboot, clock skew) are printed but do not stop the rollout; add
+`--strict-health` to also require a healthy host.
 
 ## Shell Integration
 

@@ -65,6 +65,13 @@ Omit sections that have no entries for that release.
 - `FLEET_NO_DAEMON_RELAY=1` disables relaying direct-mode calls through a running
   daemon.
 
+- The `destructive` notification event now fires after destructive CLI commands
+  (it was advertised but never sent).
+- The audit log records remote commands (`exec.run`), approval decisions, cmd-policy
+  and redaction policy changes, secret and token changes, and failed file operations.
+- `fleet agent update --strict-health` also requires canary hosts to pass host health
+  checks.
+
 ### Changed
 
 - WinGet owns controller update, rollback, channel, and uninstall lifecycle;
@@ -136,6 +143,14 @@ Omit sections that have no entries for that release.
   prints `[]` instead of `null` when there are no alerts.
 - `fleet doctor --json` exited 0 when checks failed; it now exits 1 like the text
   report.
+- `fleet exec --secret VAR=@name` set the variable only for the first simple command
+  (`a; b` or `echo $VAR` saw nothing) and put the value on the remote command line; it
+  now reaches the whole command through the process environment.
+- `fleet agent update --canary` aborted the rollout on healthy agents whose hosts had
+  no swap, high load or a pending reboot; the canary gate now checks that the updated
+  agent is back and reports the new version.
+- A server's "last seen" only moved when it reconnected, so the dashboard and web UI
+  showed healthy, polled servers as last seen long ago.
 - `fleet tag <server>` no longer reports "no tags" (or stores tags) for a server that
   isn't in the fleet; `fleet update channel` accepts only `stable` or `beta`;
   `fleet file defaults set --parallel` rejects negative values.
