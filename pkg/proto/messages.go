@@ -249,6 +249,30 @@ type LogReadPayload struct {
 	Search    string `json:"search,omitempty"`
 	TailLines int    `json:"tail_lines,omitempty"`
 	Follow    bool   `json:"follow,omitempty"`
+	// Cursor, when set, asks for only the lines after that position (the
+	// Cursor of a previous LogReadResult for the same path): follow polling
+	// then reads just the newly appended bytes. If the file was truncated,
+	// replaced or rotated since, the agent starts over on the current file and
+	// sets LogReadResult.Reset. Agents that predate cursors ignore the field
+	// and return a plain tail without a Cursor.
+	Cursor *LogCursor `json:"cursor,omitempty"`
+}
+
+// LogCursor is an opaque resume position in a log file, handed out by the agent
+// in LogReadResult.Cursor and echoed back unchanged in LogReadPayload.Cursor.
+type LogCursor struct {
+	// Offset is the byte offset just past the last complete ('\n'-terminated)
+	// line the agent has seen.
+	Offset int64 `json:"offset"`
+	// Line is the number of complete lines before Offset, so the first line
+	// after the cursor is number Line+1. A returned line numbered above Line
+	// is the file's unterminated last line, which the cursor does not consume.
+	Line int `json:"line"`
+	// FileID identifies the file (device and inode) to detect replacement.
+	FileID string `json:"file_id,omitempty"`
+	// Sum fingerprints the bytes just before Offset to detect truncation
+	// followed by regrowth past Offset.
+	Sum string `json:"sum,omitempty"`
 }
 
 type LogLine struct {
@@ -260,6 +284,18 @@ type LogReadResult struct {
 	Path      string    `json:"path"`
 	Lines     []LogLine `json:"lines"`
 	Truncated bool      `json:"truncated,omitempty"`
+	// Cursor is where a follow-up read should resume (see
+	// LogReadPayload.Cursor). Absent from agents without cursor support.
+	Cursor *LogCursor `json:"cursor,omitempty"`
+	// Reset reports that the request's Cursor no longer matched the file
+	// (truncated, replaced or rotated) and line numbering restarted: Lines
+	// start at the beginning of the current file when it is small (as right
+	// after a rotation, paged like any cursor read), otherwise they are its
+	// tail.
+	Reset bool `json:"reset,omitempty"`
+	// More reports that a cursor read stopped at a size limit before the end
+	// of the file; read again from Cursor straight away for the rest.
+	More bool `json:"more,omitempty"`
 }
 
 type UpdateApplyPayload struct {

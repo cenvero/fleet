@@ -4,7 +4,6 @@
 package logs
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,8 +11,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/cenvero/fleet/internal/logtail"
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
@@ -111,50 +112,146 @@ func (s *ServiceStore) Read(serverName, serviceName, search string, tailLines in
 	if err := s.expireCache(basePath, s.cursorPath(serverName, serviceName)); err != nil {
 		return proto.LogReadResult{}, err
 	}
-	paths := s.readPaths(basePath)
-
-	search = strings.ToLower(strings.TrimSpace(search))
-	lines := make([]proto.LogLine, 0, 128)
-	lineNumber := 0
-	for _, path := range paths {
-		file, err := os.Open(path) // #nosec G304 -- path is derived from the controller log root and validated server/service components
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return proto.LogReadResult{}, fmt.Errorf("open aggregated log %s: %w", path, err)
-		}
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			lineNumber++
-			line := scanner.Text()
-			if search != "" && !strings.Contains(strings.ToLower(line), search) {
-				continue
-			}
-			lines = append(lines, proto.LogLine{
-				Number: lineNumber,
-				Text:   line,
-			})
-		}
-		if err := scanner.Err(); err != nil {
-			_ = file.Close()
-			return proto.LogReadResult{}, fmt.Errorf("scan aggregated log %s: %w", path, err)
-		}
-		if err := file.Close(); err != nil {
-			return proto.LogReadResult{}, fmt.Errorf("close aggregated log %s: %w", path, err)
-		}
-	}
-
-	result := proto.LogReadResult{Path: basePath, Lines: lines}
+	paths := s.readPaths(basePath) // oldest backup first, current file last
 	if tailLines <= 0 {
 		tailLines = 200
 	}
-	if len(result.Lines) > tailLines {
-		result.Truncated = true
-		result.Lines = append([]proto.LogLine(nil), result.Lines[len(result.Lines)-tailLines:]...)
+	matcher := logtail.NewMatcher(search)
+
+	// The files read as one log, oldest first, numbered continuously. Read
+	// backwards from the end of the current file and open older files only
+	// while more lines are needed (or, once there are enough, to learn
+	// whether any older line matches too, which decides Truncated).
+	tails := make([]logtail.TailResult, len(paths))
+	have, truncated, first := 0, false, len(paths)
+	for i := len(paths) - 1; i >= 0; i-- {
+		first = i
+		res, found, err := tailCachedLog(paths[i], tailLines-have, matcher)
+		if err != nil {
+			return proto.LogReadResult{}, err
+		}
+		if !found {
+			continue
+		}
+		tails[i] = res
+		have += len(res.Lines)
+		if res.Truncated {
+			truncated = true
+			break
+		}
 	}
-	return result, nil
+	// Lines in the files older than the ones read, for numbering.
+	lineNumber := 0
+	for _, path := range paths[:first] {
+		n, err := countCachedLogLines(path)
+		if err != nil {
+			return proto.LogReadResult{}, err
+		}
+		lineNumber += n
+	}
+	lines := make([]proto.LogLine, 0, have)
+	for _, res := range tails[first:] {
+		for _, line := range res.Lines {
+			lines = append(lines, proto.LogLine{Number: lineNumber + line.Number, Text: line.Text})
+		}
+		lineNumber += res.TotalLines
+	}
+	return proto.LogReadResult{Path: basePath, Lines: lines, Truncated: truncated}, nil
+}
+
+// tailCachedLog returns the last n lines of one cached log file matched by m
+// (found is false when the file does not exist). Its line count is remembered
+// so the next read of the unchanged file skips counting.
+func tailCachedLog(path string, n int, m *logtail.Matcher) (logtail.TailResult, bool, error) {
+	file, err := os.Open(path) // #nosec G304 -- path is derived from the controller log root and validated server/service components
+	if err != nil {
+		if os.IsNotExist(err) {
+			return logtail.TailResult{}, false, nil
+		}
+		return logtail.TailResult{}, false, fmt.Errorf("open aggregated log %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return logtail.TailResult{}, false, fmt.Errorf("scan aggregated log %s: %w", path, err)
+	}
+	var res logtail.TailResult
+	if known, ok := cachedLineCount(path, info); ok {
+		res, err = logtail.TailKnown(file, info.Size(), n, m, known)
+	} else {
+		res, err = logtail.Tail(file, info.Size(), n, m)
+	}
+	if err != nil {
+		return logtail.TailResult{}, false, fmt.Errorf("scan aggregated log %s: %w", path, err)
+	}
+	rememberLineCount(path, info, res.TotalLines)
+	return res, true, nil
+}
+
+// countCachedLogLines returns how many lines a cached log file holds (0 if it
+// does not exist), counting only when the file changed since last time.
+// Rotated backups never change, so they are counted once per rotation.
+func countCachedLogLines(path string) (int, error) {
+	if info, err := os.Stat(path); err == nil {
+		if n, ok := cachedLineCount(path, info); ok {
+			return n, nil
+		}
+	}
+	file, err := os.Open(path) // #nosec G304 -- path is derived from the controller log root and validated server/service components
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("open aggregated log %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("scan aggregated log %s: %w", path, err)
+	}
+	n, err := logtail.CountLines(file, info.Size())
+	if err != nil {
+		return 0, fmt.Errorf("scan aggregated log %s: %w", path, err)
+	}
+	rememberLineCount(path, info, n)
+	return n, nil
+}
+
+// lineCounts remembers the line count of cached log files, keyed by path and
+// valid only while the file is the same file (device/inode) with the same size
+// and modification time. The files only ever grow by appends (which change
+// size and mtime) or move by rotation (which changes the file at the path).
+var lineCounts = struct {
+	sync.Mutex
+	entries map[string]lineCountEntry
+}{entries: map[string]lineCountEntry{}}
+
+type lineCountEntry struct {
+	info  os.FileInfo
+	lines int
+}
+
+// maxLineCountEntries bounds the cache (a handful of files per tracked
+// service); it is simply cleared when full.
+const maxLineCountEntries = 4096
+
+func cachedLineCount(path string, info os.FileInfo) (int, bool) {
+	lineCounts.Lock()
+	entry, ok := lineCounts.entries[path]
+	lineCounts.Unlock()
+	if !ok || !os.SameFile(entry.info, info) || entry.info.Size() != info.Size() || !entry.info.ModTime().Equal(info.ModTime()) {
+		return 0, false
+	}
+	return entry.lines, true
+}
+
+func rememberLineCount(path string, info os.FileInfo, lines int) {
+	lineCounts.Lock()
+	defer lineCounts.Unlock()
+	if len(lineCounts.entries) >= maxLineCountEntries {
+		clear(lineCounts.entries)
+	}
+	lineCounts.entries[path] = lineCountEntry{info: info, lines: lines}
 }
 
 func (s *ServiceStore) basePath(serverName, serviceName string) string {
