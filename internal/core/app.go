@@ -338,6 +338,13 @@ func (a *App) suggestServer(name string) string {
 	best := ""
 	bestDist := len(name) + 1
 	for _, s := range servers {
+		// The edit distance is at least the length difference, so a name more
+		// than 3 bytes longer or shorter than s.Name can never be suggested.
+		// Skipping it also keeps editDistance's (len+1)*(len+1) table small
+		// however long an unknown name the caller passes in.
+		if len(name) > len(s.Name)+3 || len(s.Name) > len(name)+3 {
+			continue
+		}
 		d := editDistance(name, s.Name)
 		if d < bestDist && d <= 3 {
 			bestDist = d

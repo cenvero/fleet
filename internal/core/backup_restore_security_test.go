@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -214,6 +215,60 @@ func TestRestoreRejectsSymlinkMemberAndDestination(t *testing.T) {
 			t.Fatalf("victim marker changed to %q", got)
 		}
 	})
+}
+
+func TestSafeRestoreMemberNameRequiresLocalPath(t *testing.T) {
+	accept := map[string]string{
+		"config.toml":          "config.toml",
+		"servers/web-01.toml":  "servers/web-01.toml",
+		"servers/./web.toml":   "servers/web.toml",
+		"keys/nested/../id":    "keys/id",
+		"data/state.db-wal":    "data/state.db-wal",
+		"logs/audit.log.1.bak": "logs/audit.log.1.bak",
+	}
+	for name, want := range accept {
+		got, err := safeRestoreMemberName(name)
+		if err != nil || got != want {
+			t.Errorf("safeRestoreMemberName(%q) = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	reject := []string{"", ".", "..", "../escape", "a/../../escape", "/etc/passwd", "a\x00b", `a\\b`}
+	if runtime.GOOS == "windows" {
+		// Only the controller's own path rules make these unsafe: rooted,
+		// drive-relative and device names would not stay a plain entry under
+		// the staging directory.
+		reject = append(reject, `\escape`, `C:escape`, `C:\escape`, "NUL", "servers/COM1", "CONOUT$")
+	}
+	for _, name := range reject {
+		if got, err := safeRestoreMemberName(name); err == nil {
+			t.Errorf("safeRestoreMemberName(%q) = %q, want an error", name, got)
+		}
+	}
+}
+
+func TestRestoreRejectsTraversalMemberWithoutEscaping(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "traversal.tar.gz")
+	archive := makeTestArchive(t, []testArchiveMember{
+		{name: "config.toml", body: []byte("new")},
+		{name: "../../escaped.toml", body: []byte("pwned")},
+	})
+	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := makeLiveConfig(t)
+	if err := RestoreBackup(archivePath, live); err == nil {
+		t.Fatal("RestoreBackup() accepted a member that escapes the restore directory")
+	}
+	assertLiveMarker(t, live)
+	for _, p := range []string{
+		filepath.Join(filepath.Dir(live), "escaped.toml"),
+		filepath.Join(filepath.Dir(filepath.Dir(live)), "escaped.toml"),
+	} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("traversal member written outside the restore directory at %s (err %v)", p, err)
+		}
+	}
 }
 
 func TestRestoreAggregateLimitLeavesLiveConfigUntouched(t *testing.T) {
