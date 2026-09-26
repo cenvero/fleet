@@ -235,6 +235,16 @@ type ReverseHub struct {
 	controlWaiters chan struct{}
 	// controlCalls bounds authenticated control calls in progress.
 	controlCalls chan struct{}
+
+	// bg tracks the goroutines a registered session leaves behind (clearing
+	// it when its connection ends, replaying its metrics backlog). They write
+	// the server record and the audit log, so Close waits for them: before,
+	// they could still be writing after the hub and the App were closed and
+	// the config directory was gone. bgClosed, under bgMu, stops new ones
+	// from starting once Close has begun.
+	bgMu     sync.Mutex
+	bgClosed bool
+	bg       sync.WaitGroup
 }
 
 // reverseControlRequest is the JSON wrapper a CLI process sends over the local
@@ -513,13 +523,19 @@ func (h *ReverseHub) serveConnAfterAuth(rawConn net.Conn, authenticated func()) 
 		// (power loss, a NAT dropping state) is cleared within about a minute.
 		// Closing the connection ends Wait below, which clears the session.
 		stopKeepalive := transport.StartKeepalive(conn, reverseKeepaliveInterval, reverseKeepaliveMaxMissed, nil)
-		go func(name string, session *transport.Session, sshConn *ssh.ServerConn) {
+		name, sshConn, capabilities := serverName, conn, hello.Capabilities
+		if !h.goTracked(func() {
 			_ = sshConn.Wait()
 			stopKeepalive()
 			h.clearSession(name, "", session)
-		}(serverName, session, conn)
-
-		go h.replayAfterConnect(serverName, session, hello.Capabilities)
+		}) {
+			// The hub closed while this connection was being set up: drop it
+			// here rather than leave a session nobody will clean up.
+			stopKeepalive()
+			h.clearSession(name, "hub closed", session)
+			return nil
+		}
+		h.goTracked(func() { h.replayAfterConnect(name, session, capabilities) })
 	}
 	return nil
 }
@@ -644,9 +660,14 @@ func (h *ReverseHub) Disconnect(server string) error {
 	return current.session.Close()
 }
 
+// Close disconnects every agent and returns once the goroutines those
+// sessions started have finished, so nothing writes to the App afterwards.
 func (h *ReverseHub) Close() {
+	h.bgMu.Lock()
+	h.bgClosed = true
+	h.bgMu.Unlock()
+
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	for name, session := range h.sessions {
 		session.closeExtraChannels()
 		if session.session != nil {
@@ -654,6 +675,26 @@ func (h *ReverseHub) Close() {
 		}
 		delete(h.sessions, name)
 	}
+	h.mu.Unlock()
+	// Closing each connection ends its Wait, so this does not block on a
+	// live agent; it waits only for writes already under way.
+	h.bg.Wait()
+}
+
+// goTracked runs fn on its own goroutine and makes Close wait for it. Once
+// Close has begun it runs nothing and reports false.
+func (h *ReverseHub) goTracked(fn func()) bool {
+	h.bgMu.Lock()
+	defer h.bgMu.Unlock()
+	if h.bgClosed {
+		return false
+	}
+	h.bg.Add(1)
+	go func() {
+		defer h.bg.Done()
+		fn()
+	}()
+	return true
 }
 
 func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {

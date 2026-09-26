@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cenvero/fleet/internal/agent"
 	"github.com/cenvero/fleet/internal/testutil"
@@ -45,7 +46,6 @@ func reverseTransferRig(t *testing.T) (*App, *ReverseHub, context.CancelFunc) {
 	}
 
 	hub := NewReverseHub(app, "test-token")
-	t.Cleanup(hub.Close)
 	app.ReverseRPC = hub.Call
 	app.ReverseStatusLookup = hub.Status
 
@@ -53,24 +53,96 @@ func reverseTransferRig(t *testing.T) (*App, *ReverseHub, context.CancelFunc) {
 		Mode:        transport.ModeReverse,
 		HostKeyPath: filepath.Join(t.TempDir(), "agent_reverse_key"),
 	}
+	agentKnownHosts := filepath.Join(t.TempDir(), "controller_known_hosts")
 	clientConn, serverConn := testutil.NewBufferedConnPair("127.0.0.1:41100", "127.0.0.1:9543")
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = hub.ServeConn(serverConn) }()
+	served, agentDone := make(chan struct{}), make(chan struct{})
+	// Cleanups run last-registered first: drop the agent, close the hub, and
+	// wait for both goroutines before the App and the temp dirs go away.
+	t.Cleanup(func() {
+		hub.Close()
+		<-served
+		<-agentDone
+	})
+	t.Cleanup(func() { cancel(); _ = clientConn.Close() })
 	go func() {
+		defer close(served)
+		_ = hub.ServeConn(serverConn)
+	}()
+	go func() {
+		defer close(agentDone)
 		_ = agent.RunReverse(ctx, agent.ReverseOptions{
 			EnrollToken:           testReverseEnroll,
 			ControllerFingerprint: testControllerFingerprint(t, app),
 			ControllerAddress:     "127.0.0.1:9543",
 			ServerName:            "reverse-node",
-			KnownHostsPath:        filepath.Join(t.TempDir(), "controller_known_hosts"),
+			KnownHostsPath:        agentKnownHosts,
 			NetworkDialContext: func(context.Context, string, string) (net.Conn, error) {
 				return clientConn, nil
 			},
 		}, reverseServer)
 	}()
 	waitForReverseSession(t, hub, "reverse-node")
-	t.Cleanup(func() { cancel(); _ = clientConn.Close() })
 	return app, hub, cancel
+}
+
+// TestReverseHubCloseWaitsForSessionCleanup pins down the cause of a flaky
+// TestReverseTransferRoundTrip ("TempDir RemoveAll cleanup: directory not
+// empty"): when an agent's connection ended, the hub cleared its session and
+// rewrote the server record on a goroutine nothing waited for, so the write
+// could land after Close, after the App was closed, while the config
+// directory was being removed. Close must wait for it.
+func TestReverseHubCloseWaitsForSessionCleanup(t *testing.T) {
+	app, hub, cancel := reverseTransferRig(t)
+	cancel() // keep the agent from reconnecting
+
+	// Hold the server records so the clean-up blocks at its write.
+	app.serverMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			app.serverMu.Unlock()
+		}
+	}()
+	if err := hub.Disconnect("reverse-node"); err != nil {
+		t.Fatalf("Disconnect() error = %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := hub.Status("reverse-node"); err != nil {
+			break // removed from the map; the record write comes next
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session was not cleared after the connection closed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		hub.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while the session clean-up was still writing the server record")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	app.serverMu.Unlock()
+	locked = false
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the clean-up could finish")
+	}
+	server, err := app.GetServer("reverse-node")
+	if err != nil {
+		t.Fatalf("GetServer() error = %v", err)
+	}
+	if server.Observed.Reachable {
+		t.Fatal("server record still says reachable after Close returned")
+	}
 }
 
 // TestReverseTransferUsesMultipleChannels is the point of reverse multiplexing:
