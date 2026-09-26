@@ -84,7 +84,8 @@ function friendlyError(err, server) {
   const msg = String((err && err.message) || err || "Unknown error");
   const where = server ? server : "this machine";
   if (/outside the agent's allowed file roots/i.test(msg)) return "That location is outside " + where + "'s allowed file roots.";
-  if (/configuration directory/i.test(msg)) return "The controller's configuration directory (keys, tokens, secrets) isn't available in the web UI.";
+  if (/contains the controller's configuration directory/i.test(msg)) return "That folder contains the controller's configuration directory or SSH keys, so the web UI won't copy, move, rename, archive or delete it as a whole. Select the items you need inside it instead.";
+  if (/configuration directory/i.test(msg)) return "The controller's configuration directory and key files (keys, tokens, secrets) aren't available in the web UI.";
   if (/access to .* is not permitted/i.test(msg)) return "The agent on " + where + " doesn't allow access to that location.";
   if (/permission denied/i.test(msg)) return "Permission denied.";
   if (/no such file|not found|does not exist|cannot find/i.test(msg)) return "It no longer exists — it may have been moved or deleted.";

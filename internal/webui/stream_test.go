@@ -196,18 +196,27 @@ func TestStreamDownloadSequential(t *testing.T) {
 	if fake.dlCalls != 0 {
 		t.Fatalf("small file must not start the parallel engine (calls=%d)", fake.dlCalls)
 	}
-	entries, err := s.app.AuditEntries()
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, e := range entries {
-		if e.Action == "file.download" && strings.Contains(e.Details, "web UI browser download") {
-			found = true
+	// The handler appends the audit entry after its final write, so a client
+	// that has read Content-Length bytes can get here first: wait for it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err := s.app.AuditEntries()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !found {
-		t.Fatalf("streamed download was not audited")
+		found := false
+		for _, e := range entries {
+			if e.Action == "file.download" && strings.Contains(e.Details, "web UI browser download") {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("streamed download was not audited")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
