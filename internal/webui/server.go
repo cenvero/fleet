@@ -45,8 +45,14 @@ type Server struct {
 	// files is the remote read surface used for streaming downloads and
 	// previews (the App itself outside tests).
 	files remoteFiles
-	// localGuard keeps the Local source out of the controller's config dir.
-	localGuard localGuard
+	// guardSnap is a short-lived snapshot of the protected-path guard that
+	// keeps the Local source away from the controller's config dir and key
+	// files (see pathGuard in protect.go); serverKeys are the last key paths read
+	// from the server records.
+	guardMu    sync.Mutex
+	guardAt    time.Time
+	guardSnap  localGuard
+	serverKeys []string
 	// authorizer, when set, applies the RBAC token the UI was launched with
 	// to reads the UI performs beyond file management (the Fleet overview).
 	authorizer func(command string) error
@@ -63,7 +69,6 @@ func New(app *core.App) (*Server, error) {
 	s := &Server{app: app, token: token, hub: newProgressHub()}
 	if app != nil {
 		s.files = app
-		s.localGuard = newLocalGuard(app.ConfigDir)
 	}
 	return s, nil
 }
@@ -457,7 +462,11 @@ func (s *Server) nameOnlyPath(server, dir, name string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(clean, name), nil
+		joined := filepath.Join(clean, name)
+		if err := s.pathGuard().check(joined); err != nil {
+			return "", err
+		}
+		return joined, nil
 	}
 	clean := style.Clean(dir)
 	if !style.IsAbs(clean) {
@@ -685,8 +694,14 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 	srcLocal := srcServer == ""
 	dstLocal := dstServer == ""
 	// Validate local endpoints up front so a bad path fails fast (and cleanly).
+	// Both ends are checked as whole trees whatever the recursive flag says:
+	// local copies and moves act on directories regardless, and a merge into a
+	// directory that contains a protected root could plant files in it. The
+	// tree check on dst also covers a single-file download onto an existing
+	// directory, which lands at dst/<name>: that path can only be protected if
+	// dst is inside or contains a protected root.
 	if srcLocal {
-		clean, err := s.cleanLocal(srcPath)
+		clean, err := s.cleanLocalTree(srcPath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -694,7 +709,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request, move boo
 		srcPath = clean
 	}
 	if dstLocal {
-		clean, err := s.cleanLocal(dstPath)
+		clean, err := s.cleanLocalTree(dstPath)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -849,6 +864,10 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		name := rawName
 		localPath := filepath.Join(dir, name)
+		if err := s.pathGuard().check(localPath); err != nil {
+			writeError(w, err)
+			return
+		}
 		out, err := core.CreateAtomicLocalFile(localPath, 0o600)
 		if err != nil {
 			writeError(w, symlinkClobberError(localPath, err))
@@ -1214,7 +1233,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	server, p := r.URL.Query().Get("server"), r.URL.Query().Get("path")
 	recursive := r.URL.Query().Get("recursive") == "true"
 	if server == "" { // Local
-		clean, err := s.cleanLocal(p)
+		clean, err := s.cleanLocalTree(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1261,7 +1280,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if server == "" {
-			clean, err := s.cleanLocal(from)
+			clean, err := s.cleanLocalTree(from)
 			if err != nil {
 				badRequest(w, err)
 				return
@@ -1292,12 +1311,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if server == "" { // Local rename or same-pane move
-		cf, err := s.cleanLocal(from)
+		cf, err := s.cleanLocalTree(from)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		ct, err := s.cleanLocal(to)
+		ct, err := s.cleanLocalTree(to)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1371,6 +1390,12 @@ func (s *Server) handleCompress(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = core.FormatFromName(archive)
 	}
+	if server == "" {
+		if err := s.checkLocalCompress(dir, names, archive, format); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	if err := s.app.CompressPaths(server, dir, names, archive, format); err != nil {
 		writeError(w, err)
 		return
@@ -1391,7 +1416,12 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		p = clean
+		if err := s.extractLocalGuarded(clean); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
 	}
 	if err := s.app.ExtractArchive(server, p); err != nil {
 		writeError(w, err)
@@ -1459,7 +1489,7 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if server == "" {
-		clean, err := s.cleanLocal(p)
+		clean, err := s.cleanLocalTree(p)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -1476,6 +1506,10 @@ func (s *Server) handleDuplicate(w http.ResponseWriter, r *http.Request) {
 		dst := freeLocalDuplicateName(clean, func(c string) bool { _, e := os.Lstat(c); return e == nil }) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 		if err := validatePathComponent(core.NativePathStyle(), filepath.Base(dst)); err != nil {
 			http.Error(w, "invalid duplicate name: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.pathGuard().checkTree(dst); err != nil {
+			writeError(w, err)
 			return
 		}
 		if info.IsDir() {
@@ -1722,7 +1756,7 @@ func writeJSON(w http.ResponseWriter, payload any) {
 
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
-	if errors.Is(err, errProtectedPath) {
+	if isProtectedErr(err) {
 		status = http.StatusForbidden
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1733,7 +1767,7 @@ func writeError(w http.ResponseWriter, err error) {
 // badRequest reports a validation failure (400), except that a refusal to
 // touch a protected path is a 403 like everywhere else.
 func badRequest(w http.ResponseWriter, err error) {
-	if errors.Is(err, errProtectedPath) {
+	if isProtectedErr(err) {
 		writeError(w, err)
 		return
 	}

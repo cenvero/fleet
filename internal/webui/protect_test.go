@@ -139,7 +139,7 @@ func TestInitialLocalRootAvoidsConfigDir(t *testing.T) {
 		t.Skipf("chdir: %v", err)
 	}
 	got := s.initialLocalRoot()
-	if s.localGuard.check(got) != nil {
+	if s.pathGuard().check(got) != nil {
 		t.Fatalf("initial root %q is protected", got)
 	}
 	resolvedCfg, _ := filepath.EvalSymlinks(cfg)
