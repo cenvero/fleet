@@ -8,9 +8,8 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -43,11 +42,13 @@ type ReverseSessionInfo struct {
 const maxReverseExtraChannels = 16
 
 // Reverse connections are probed with SSH keepalives so an agent that vanished
-// without a FIN is noticed (and its session cleared) within about a minute.
-// Variables so tests can shorten them.
+// without a FIN is noticed (and its session cleared) within about a minute, and
+// opening an extra channel back to an agent is bounded. Variables so tests can
+// shorten them.
 var (
 	reverseKeepaliveInterval  = transport.DefaultKeepaliveInterval
 	reverseKeepaliveMaxMissed = transport.DefaultKeepaliveMaxMissed
+	reverseChannelOpenTimeout = transport.DefaultChannelOpenTimeout
 )
 
 type reverseSession struct {
@@ -60,43 +61,107 @@ type reverseSession struct {
 	// serialises on the agent-opened one, exactly as before.
 	multiplex bool
 
+	// lanes bounds concurrent calls on a multiplexed session to the channels
+	// it can offer: every extra channel plus the primary. A caller beyond that
+	// waits here — honouring its context — instead of piling onto the primary
+	// channel, where it used to queue invisibly behind whoever held it, past
+	// its own deadline, while pinning a daemon control slot.
+	lanes chan struct{}
+	// done is closed when the session is retired so lane waiters give up at
+	// once instead of waiting out their deadline on a dead connection.
+	done      chan struct{}
+	closeOnce sync.Once
+
 	mu     sync.Mutex
 	idle   []*transport.Session // extra channels free for reuse
 	opened int                  // extra channels created so far
 }
 
+func newReverseSession(session *transport.Session, conn ssh.Conn, info ReverseSessionInfo) *reverseSession {
+	rs := &reverseSession{
+		session: session,
+		conn:    conn,
+		info:    info,
+		multiplex: slices.Contains(info.Hello.Capabilities, proto.CapabilityReverseMultiplex) &&
+			conn != nil,
+		done: make(chan struct{}),
+	}
+	if rs.multiplex {
+		rs.lanes = make(chan struct{}, maxReverseExtraChannels+1)
+	}
+	return rs
+}
+
+// markDone releases anyone waiting for a lane on this session.
+func (rs *reverseSession) markDone() {
+	if rs == nil || rs.done == nil {
+		return
+	}
+	rs.closeOnce.Do(func() { close(rs.done) })
+}
+
+// acquireLane waits for a free channel lane on a multiplexed session. Sessions
+// without multiplexing have a single channel whose own lock serialises callers,
+// so they need no lane.
+func (rs *reverseSession) acquireLane(ctx context.Context) (release func(), err error) {
+	if rs.lanes == nil {
+		return func() {}, nil
+	}
+	select {
+	case rs.lanes <- struct{}{}:
+		return func() { <-rs.lanes }, nil
+	case <-rs.done:
+		return nil, fmt.Errorf("reverse session for %q closed while waiting for a free channel", rs.info.Server)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // leaseChannel borrows a channel for one RPC. It prefers an idle extra channel,
 // then opens a new one, and finally falls back to the agent-opened channel. The
 // bool reports whether the caller should return it via releaseChannel; the
-// primary channel is shared and must not be pooled.
-func (rs *reverseSession) leaseChannel() (*transport.Session, bool) {
+// primary channel is shared and must not be pooled. An error means the agent
+// connection could not even open a channel in time and should be retired.
+func (rs *reverseSession) leaseChannel(ctx context.Context) (*transport.Session, bool, error) {
 	if !rs.multiplex || rs.conn == nil {
-		return rs.session, false
+		return rs.session, false, nil
 	}
 	rs.mu.Lock()
 	if n := len(rs.idle); n > 0 {
 		sess := rs.idle[n-1]
 		rs.idle = rs.idle[:n-1]
 		rs.mu.Unlock()
-		return sess, true
+		return sess, true, nil
 	}
 	if rs.opened >= maxReverseExtraChannels {
 		rs.mu.Unlock()
-		return rs.session, false // at the cap: share the primary channel
+		// At the cap. The lane this caller holds guarantees the primary channel
+		// is the one left free (unless extra opens were refused, in which case
+		// callers share it exactly as before).
+		return rs.session, false, nil
 	}
 	rs.opened++
 	rs.mu.Unlock()
 
-	channel, requests, err := rs.conn.OpenChannel(transport.RPCChannelType, nil)
+	// Opening waits for the agent's confirmation, so it happens outside rs.mu
+	// and is bounded: without a timeout a half-dead connection held the caller
+	// until TCP gave up.
+	channel, requests, err := transport.OpenChannelTimeout(ctx, rs.conn, transport.RPCChannelType, nil, reverseChannelOpenTimeout)
 	if err != nil {
-		// An agent that rejects inbound channels (or a connection on its way
-		// out) drops us back to the single-channel path rather than failing.
 		rs.mu.Lock()
 		if rs.opened > 0 {
 			rs.opened--
 		}
 		rs.mu.Unlock()
-		return rs.session, false
+		switch {
+		case errors.Is(err, transport.ErrChannelOpenTimeout):
+			return nil, false, err
+		case ctx.Err() != nil:
+			return nil, false, ctx.Err()
+		}
+		// An agent that rejects inbound channels (or a connection on its way
+		// out) drops us back to the single-channel path rather than failing.
+		return rs.session, false, nil
 	}
 	go ssh.DiscardRequests(requests)
 	sess := &transport.Session{
@@ -107,7 +172,7 @@ func (rs *reverseSession) leaseChannel() (*transport.Session, bool) {
 		Channel:            channel,
 	}
 	sess.SetCapabilities(rs.info.Hello.Capabilities)
-	return sess, true
+	return sess, true, nil
 }
 
 func (rs *reverseSession) releaseChannel(sess *transport.Session, healthy bool) {
@@ -133,6 +198,7 @@ func (rs *reverseSession) releaseChannel(sess *transport.Session, healthy bool) 
 // closeExtraChannels tears down the pooled channels. The primary channel and the
 // underlying connection are owned by the caller.
 func (rs *reverseSession) closeExtraChannels() {
+	rs.markDone()
 	rs.mu.Lock()
 	idle := rs.idle
 	rs.idle = nil
@@ -162,6 +228,11 @@ type ReverseHub struct {
 	activeTotal    int
 	activeByServer map[string]int
 	controlSlots   chan struct{}
+	// controlWaiters bounds how many control connections may be queued waiting
+	// for a handler slot; beyond it a connection is refused outright.
+	controlWaiters chan struct{}
+	// controlCalls bounds authenticated control calls in progress.
+	controlCalls chan struct{}
 }
 
 // reverseControlRequest is the JSON wrapper a CLI process sends over the local
@@ -173,12 +244,23 @@ type ReverseHub struct {
 // file chunk. This hop is a local loopback socket, not the SSH transport, so the
 // attachment is carried here as an explicit field. Without it a reverse-mode
 // transfer against a binary-frame-capable agent ships chunks with no bytes.
+//
+// That field is base64 inside JSON, which costs ~30 ms and ~17 MB of garbage
+// per 2 MiB chunk on each side. A daemon that advertises controlCapBinaryFrame
+// (in reply to a "hello") also accepts the "call.framed" request type, where
+// BinaryLength announces that the attachment follows the JSON line as raw
+// bytes; and a caller that lists controlCapBinaryFrame in Accept gets the
+// response's attachment the same way. Older daemons ignore Accept and reject
+// the unknown type before doing anything, so both directions fall back to the
+// original encoding.
 type reverseControlRequest struct {
 	Token          string         `json:"token"`
 	Type           string         `json:"type"`
 	Server         string         `json:"server"`
 	Envelope       proto.Envelope `json:"envelope,omitempty"`
 	EnvelopeBinary []byte         `json:"envelope_binary,omitempty"`
+	Accept         []string       `json:"accept,omitempty"`
+	BinaryLength   *int           `json:"binary_length,omitempty"`
 }
 
 func newReverseControlRequest(token, kind, server string, env proto.Envelope) reverseControlRequest {
@@ -203,8 +285,12 @@ func (r reverseControlRequest) envelope() proto.Envelope {
 type reverseControlResponse struct {
 	Response       *proto.Envelope     `json:"response,omitempty"`
 	ResponseBinary []byte              `json:"response_binary,omitempty"`
+	BinaryLength   *int                `json:"binary_length,omitempty"`
 	Status         *ReverseSessionInfo `json:"status,omitempty"`
 	Error          *proto.Error        `json:"error,omitempty"`
+	// Capabilities answers a "hello": the control-protocol features this daemon
+	// understands.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // setResponse stores an envelope and lifts its binary frame into a field that
@@ -233,6 +319,8 @@ func NewReverseHub(app *App, controlToken string) *ReverseHub {
 		controlToken:   controlToken,
 		activeByServer: make(map[string]int),
 		controlSlots:   make(chan struct{}, maxConcurrentControlConnections),
+		controlWaiters: make(chan struct{}, maxQueuedControlConnections),
+		controlCalls:   make(chan struct{}, maxInFlightControlCalls),
 	}
 }
 
@@ -486,7 +574,19 @@ func (h *ReverseHub) CallContext(ctx context.Context, server string, env proto.E
 	// Borrow a channel so concurrent callers do not queue behind one another.
 	// Against an agent without CapabilityReverseMultiplex this returns the
 	// single agent-opened channel and behaves exactly as it always did.
-	sess, pooled := current.leaseChannel()
+	releaseLane, err := current.acquireLane(ctx)
+	if err != nil {
+		return proto.Envelope{}, err
+	}
+	defer releaseLane()
+	sess, pooled, err := current.leaseChannel(ctx)
+	if err != nil {
+		if errors.Is(err, transport.ErrChannelOpenTimeout) {
+			// The connection could not answer a channel open: it is dead.
+			h.clearSession(server, err.Error(), current.session)
+		}
+		return proto.Envelope{}, err
+	}
 	response, err := sess.Call(ctx, env)
 	if err != nil {
 		if transport.SessionUsableAfterError(err) {
@@ -497,6 +597,11 @@ func (h *ReverseHub) CallContext(ctx context.Context, server string, env proto.E
 		}
 		if pooled {
 			current.releaseChannel(sess, false)
+			// The caller giving up only cost this extra channel (Call closed
+			// it); the connection and its other channels are fine.
+			if ctx.Err() != nil {
+				return proto.Envelope{}, err
+			}
 		}
 		// A framing or transport failure makes the whole connection suspect.
 		h.clearSession(server, err.Error(), current.session)
@@ -538,116 +643,6 @@ func (h *ReverseHub) Close() {
 		}
 		delete(h.sessions, name)
 	}
-}
-
-const (
-	maxControlRequestBytes          = 32 << 20
-	controlIOTimeout                = 30 * time.Second
-	maxConcurrentControlConnections = 32
-)
-
-func (h *ReverseHub) ServeControl(ctx context.Context, listener net.Listener) error {
-	if err := requireLoopbackListener(listener); err != nil {
-		_ = listener.Close()
-		return err
-	}
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("accept control connection: %w", err)
-		}
-		select {
-		case h.controlSlots <- struct{}{}:
-			go func() {
-				defer func() { <-h.controlSlots }()
-				defer guardPanic("control connection")
-				h.handleControlConn(conn)
-			}()
-		default:
-			_ = conn.Close()
-		}
-	}
-}
-
-func (h *ReverseHub) handleControlConn(conn net.Conn) {
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(controlIOTimeout))
-
-	limited := &io.LimitedReader{R: conn, N: maxControlRequestBytes + 1}
-	decoder := json.NewDecoder(limited)
-	var req reverseControlRequest
-	if err := decoder.Decode(&req); err != nil {
-		_ = json.NewEncoder(conn).Encode(reverseControlResponse{
-			Error: &proto.Error{Code: "decode_error", Message: "invalid control request"},
-		})
-		return
-	}
-	buffered, _ := io.ReadAll(decoder.Buffered())
-	if limited.N <= 0 || len(strings.TrimSpace(string(buffered))) != 0 {
-		_ = json.NewEncoder(conn).Encode(reverseControlResponse{
-			Error: &proto.Error{Code: "request_too_large", Message: "control request exceeds limit or contains trailing data"},
-		})
-		return
-	}
-
-	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(h.controlToken)) != 1 {
-		_ = json.NewEncoder(conn).Encode(reverseControlResponse{
-			Error: &proto.Error{Code: "unauthorized", Message: "invalid control token"},
-		})
-		return
-	}
-
-	var resp reverseControlResponse
-	switch req.Type {
-	case "call":
-		callCtx, cancel := context.WithTimeout(context.Background(), controlIOTimeout)
-		if deadline := req.Envelope.DeadlineUnixMilli; deadline > 0 {
-			requested := time.UnixMilli(deadline)
-			if current, ok := callCtx.Deadline(); !ok || requested.Before(current) {
-				cancel()
-				callCtx, cancel = context.WithDeadline(context.Background(), requested)
-			}
-		}
-		// The CLI closes this loopback connection when its context is cancelled.
-		// Continue reading after the one complete request solely to observe that
-		// close and cancel the daemon-side call; otherwise a deadline-free Ctrl-C
-		// would leave the remote process running until controlIOTimeout.
-		go func() {
-			_, _ = io.Copy(io.Discard, conn)
-			cancel()
-		}()
-		out, err := h.CallContext(callCtx, req.Server, req.envelope())
-		cancel()
-		if err != nil {
-			resp.Error = &proto.Error{Code: "reverse_call_failed", Message: err.Error()}
-			break
-		}
-		resp.setResponse(out)
-	case "status":
-		info, err := h.Status(req.Server)
-		if err != nil {
-			resp.Error = &proto.Error{Code: "reverse_status_failed", Message: err.Error()}
-			break
-		}
-		resp.Status = &info
-	case "disconnect":
-		if err := h.Disconnect(req.Server); err != nil {
-			resp.Error = &proto.Error{Code: "reverse_disconnect_failed", Message: err.Error()}
-			break
-		}
-	default:
-		resp.Error = &proto.Error{Code: "unsupported_action", Message: fmt.Sprintf("control request %q is not supported", req.Type)}
-	}
-
-	_ = json.NewEncoder(conn).Encode(resp)
 }
 
 func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
@@ -758,13 +753,7 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 			_ = existing.session.Close()
 		}
 	}
-	h.sessions[serverName] = &reverseSession{
-		session: session,
-		conn:    conn,
-		info:    info,
-		multiplex: slices.Contains(info.Hello.Capabilities, proto.CapabilityReverseMultiplex) &&
-			conn != nil,
-	}
+	h.sessions[serverName] = newReverseSession(session, conn, info)
 	h.mu.Unlock()
 
 	server, err := h.app.GetServer(serverName)
@@ -847,133 +836,6 @@ func (a *App) reverseDisconnect(serverName string) error {
 	return a.callReverseDisconnect(serverName)
 }
 
-func (a *App) callReverseControlContext(ctx context.Context, serverName string, env proto.Envelope) (proto.Envelope, error) {
-	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
-		return proto.Envelope{}, err
-	}
-	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", a.Config.Runtime.ControlAddress)
-	if err != nil {
-		return proto.Envelope{}, fmt.Errorf("connect to local reverse control at %s: %w", a.Config.Runtime.ControlAddress, err)
-	}
-	defer conn.Close()
-	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stopCancel()
-	deadline := time.Now().Add(controlIOTimeout)
-	if requested, ok := ctx.Deadline(); ok && requested.Before(deadline) {
-		deadline = requested
-		env.DeadlineUnixMilli = requested.UnixMilli()
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return proto.Envelope{}, fmt.Errorf("set reverse control deadline: %w", err)
-	}
-
-	token, err := a.readControlToken()
-	if err != nil {
-		return proto.Envelope{}, err
-	}
-	if err := json.NewEncoder(conn).Encode(
-		newReverseControlRequest(token, "call", serverName, env),
-	); err != nil {
-		if ctx.Err() != nil {
-			return proto.Envelope{}, ctx.Err()
-		}
-		return proto.Envelope{}, err
-	}
-
-	var resp reverseControlResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		if ctx.Err() != nil {
-			return proto.Envelope{}, ctx.Err()
-		}
-		return proto.Envelope{}, err
-	}
-	if resp.Error != nil {
-		return proto.Envelope{}, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-	}
-	out, ok := resp.responseEnvelope()
-	if !ok {
-		return proto.Envelope{}, fmt.Errorf("reverse control did not return a response envelope")
-	}
-	return out, nil
-}
-
-func (a *App) callReverseStatus(serverName string) (ReverseSessionInfo, error) {
-	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
-		return ReverseSessionInfo{}, err
-	}
-	conn, err := net.DialTimeout("tcp", a.Config.Runtime.ControlAddress, 2*time.Second)
-	if err != nil {
-		return ReverseSessionInfo{}, fmt.Errorf("connect to local reverse control at %s: %w", a.Config.Runtime.ControlAddress, err)
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(controlIOTimeout)); err != nil {
-		return ReverseSessionInfo{}, err
-	}
-
-	token, err := a.readControlToken()
-	if err != nil {
-		return ReverseSessionInfo{}, err
-	}
-	if err := json.NewEncoder(conn).Encode(reverseControlRequest{
-		Token:  token,
-		Type:   "status",
-		Server: serverName,
-	}); err != nil {
-		return ReverseSessionInfo{}, err
-	}
-
-	var resp reverseControlResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return ReverseSessionInfo{}, err
-	}
-	if resp.Error != nil {
-		return ReverseSessionInfo{}, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-	}
-	if resp.Status == nil {
-		return ReverseSessionInfo{}, fmt.Errorf("reverse control did not return session status")
-	}
-	return *resp.Status, nil
-}
-
-func (a *App) callReverseDisconnect(serverName string) error {
-	if err := validateLoopbackControlAddress(a.Config.Runtime.ControlAddress); err != nil {
-		return err
-	}
-	conn, err := net.DialTimeout("tcp", a.Config.Runtime.ControlAddress, 2*time.Second)
-	if err != nil {
-		return fmt.Errorf("connect to local reverse control at %s: %w", a.Config.Runtime.ControlAddress, err)
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(controlIOTimeout)); err != nil {
-		return err
-	}
-
-	token, err := a.readControlToken()
-	if err != nil {
-		return err
-	}
-	if err := json.NewEncoder(conn).Encode(reverseControlRequest{
-		Token:  token,
-		Type:   "disconnect",
-		Server: serverName,
-	}); err != nil {
-		return err
-	}
-
-	var resp reverseControlResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return err
-	}
-	if resp.Error != nil {
-		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-	}
-	return nil
-}
-
-func (a *App) controlTokenPath() string {
-	return filepath.Join(a.ConfigDir, "data", "control.token")
-}
-
 func (a *App) generateControlToken() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -988,19 +850,6 @@ func (a *App) generateControlToken() (string, error) {
 		return "", fmt.Errorf("write control token: %w", err)
 	}
 	return token, nil
-}
-
-func (a *App) readControlToken() (string, error) {
-	data, err := os.ReadFile(a.controlTokenPath())
-	if err != nil {
-		return "", fmt.Errorf("read control token: %w", err)
-	}
-	// Trim surrounding whitespace: the token is compared byte-for-byte with a
-	// constant-time compare, so a trailing newline introduced by an editor or a
-	// manual rewrite of the file would fail authentication with no useful
-	// diagnostic. generateControlToken writes no newline, so this is
-	// forward-compatible robustness, not a behavior change today.
-	return strings.TrimSpace(string(data)), nil
 }
 
 func validateLoopbackControlAddress(address string) error {
@@ -1046,6 +895,7 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	}
 
 	hub := NewReverseHub(a, controlToken)
+	a.useHubInProcess(hub)
 	errCh := make(chan error, 2)
 	go func() { errCh <- hub.Serve(ctx, reverseListener) }()
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()
@@ -1060,6 +910,26 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	case err := <-errCh:
 		hub.Close()
 		return err
+	}
+}
+
+// useHubInProcess points the daemon's own reverse-mode calls straight at its
+// hub. Without this the daemon's metrics poller (and anything else it runs)
+// reached its reverse agents the way a separate CLI process does: a TCP
+// connection to its own control socket per call, a re-read of control.token
+// from disk, JSON (and base64 for any attachment) both ways, and one of the
+// socket's limited handler slots — which it then competed for with real CLI and
+// web UI callers. Hooks a caller has already installed (tests) are kept.
+// Call before starting anything that issues RPCs.
+func (a *App) useHubInProcess(hub *ReverseHub) {
+	if a.ReverseRPCContext == nil && a.ReverseRPC == nil {
+		a.ReverseRPCContext = hub.CallContext
+	}
+	if a.ReverseStatusLookup == nil {
+		a.ReverseStatusLookup = hub.Status
+	}
+	if a.ReverseDisconnect == nil {
+		a.ReverseDisconnect = hub.Disconnect
 	}
 }
 
