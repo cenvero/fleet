@@ -41,6 +41,7 @@ type fakeRemote struct {
 	catFailAfter     int64 // fail once this many bytes were written (0 = never)
 	catExtra         []byte
 	catWriteErr      error // first error returned by the response writer
+	catWritten       int64 // bytes the sequential reader got accepted
 	catDone          chan struct{}
 	dlData           []byte
 	dlDelay          time.Duration
@@ -91,6 +92,9 @@ func (f *fakeRemote) CatRemoteFile(_, _ string, w io.Writer) (int64, error) {
 			return n, err
 		}
 		n += int64(end - off)
+		f.mu.Lock()
+		f.catWritten = n
+		f.mu.Unlock()
 	}
 	if len(f.catExtra) > 0 {
 		if _, err := w.Write(f.catExtra); err != nil {
@@ -225,17 +229,21 @@ func TestStreamDownloadFirstByteBeforeCompletion(t *testing.T) {
 	if _, err := io.ReadFull(res.Body, one); err != nil {
 		t.Fatal(err)
 	}
+	// Deterministic check (no wall-clock race): when the browser gets its
+	// first byte, the remote reader must still be far from the end.
+	fake.mu.Lock()
+	readSoFar := fake.catWritten
+	fake.mu.Unlock()
 	first := time.Since(start)
 	rest, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	total := time.Since(start)
 	if !bytes.Equal(append(one, rest...), data) {
 		t.Fatalf("content mismatch")
 	}
-	if first > total/2 {
-		t.Fatalf("first byte after %v of %v: response was not streamed", first, total)
+	if readSoFar >= int64(len(data))/2 {
+		t.Fatalf("first byte arrived only after %d of %d bytes were read (%v): response was not streamed", readSoFar, len(data), first)
 	}
 }
 
@@ -248,7 +256,6 @@ func TestStreamDownloadSwitchesToParallelCopy(t *testing.T) {
 	fake.dlDelay = 150 * time.Millisecond // parallel finishes first
 	s, base := newStreamTestServer(t, fake)
 
-	start := time.Now()
 	res, err := http.Get(downloadURL(base, s, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -261,11 +268,15 @@ func TestStreamDownloadSwitchesToParallelCopy(t *testing.T) {
 	if !bytes.Equal(body, data) {
 		t.Fatalf("content mismatch after switch (%d bytes)", len(body))
 	}
-	if el := time.Since(start); el > time.Second {
-		t.Fatalf("download took %v; the parallel copy should have finished it", el)
+	fake.mu.Lock()
+	fromSequential, calls := fake.catWritten, fake.dlCalls
+	fake.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("parallel engine calls = %d", calls)
 	}
-	if fake.dlCalls != 1 {
-		t.Fatalf("parallel engine calls = %d", fake.dlCalls)
+	// The tail must have come from the parallel copy, not the slow reader.
+	if fromSequential >= int64(len(data)) {
+		t.Fatalf("sequential reader delivered all %d bytes; the stream never switched", fromSequential)
 	}
 }
 

@@ -243,8 +243,10 @@ func (s *Server) startBackgroundDownload(server, remotePath string) *bgDownload 
 	}
 	bg := &bgDownload{dir: dir, path: filepath.Join(dir, "payload"), done: make(chan struct{})}
 	go func() {
-		defer func() { <-backgroundDownloadSlots }()
+		// Deferred in this order so the slot is free before anyone observes
+		// the download as done.
 		defer close(bg.done)
+		defer func() { <-backgroundDownloadSlots }()
 		bg.stat, bg.err = s.files.DownloadFile(server, remotePath, bg.path, core.FileTransferOptions{}, nil)
 	}()
 	return bg

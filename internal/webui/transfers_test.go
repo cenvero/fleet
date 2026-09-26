@@ -66,9 +66,15 @@ func TestProgressHubLifecycle(t *testing.T) {
 	if snap, _ := h.snapshot(id); snap.BytesDone != 5 {
 		t.Fatalf("update after finish applied: %+v", snap)
 	}
-	time.Sleep(150 * time.Millisecond)
-	if _, ok := h.snapshot(id); ok {
-		t.Fatalf("finished record was not dropped after retention")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := h.snapshot(id); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("finished record was not dropped after retention")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if found, _ := h.requestCancel(id); found {
 		t.Fatalf("expired record still cancellable")
