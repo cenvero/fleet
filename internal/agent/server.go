@@ -606,7 +606,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload:         snapshot,
 			})
 		case proto.ActionMetricsPeekQueue:
-			batch, err := s.metricsQueue().Peek()
+			batch, err := s.peekMetricsQueue(request.Payload)
 			if err != nil {
 				_ = encode(errorEnvelope(request, err))
 				continue
@@ -619,6 +619,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload: proto.MetricsReplayResult{
 					BatchID:   batch.ID,
 					Snapshots: batch.Snapshots,
+					More:      batch.More,
 				},
 			})
 		case proto.ActionMetricsAckQueue:
