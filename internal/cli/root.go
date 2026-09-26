@@ -138,7 +138,7 @@ func NewRootCommand() *cobra.Command {
 				os.Exit(1)
 			}
 			// Check for pending config migrations and show a one-line hint.
-			if cfg, err := core.LoadConfig(core.ConfigPath(configDir)); err == nil {
+			if cfg, err := core.LoadConfigShared(core.ConfigPath(configDir)); err == nil {
 				if hint := core.AdjustInitHint(cfg); hint != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
 				}

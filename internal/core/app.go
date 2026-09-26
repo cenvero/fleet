@@ -4,6 +4,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,22 +82,28 @@ func (a *App) SetActingOperator(op string) {
 	a.actingOperator = strings.TrimSpace(op)
 }
 
+// Open loads the controller at configDir. The config is decoded once per
+// process and content (see LoadConfigShared), and the state/metrics databases
+// are opened lazily: they connect — and check or migrate their schema — on
+// first use, so commands that never touch them (server list, status, exec, ...)
+// never pay for it. Database errors therefore surface at first use rather than
+// here; only an invalid database configuration fails Open.
 func Open(configDir string) (*App, error) {
 	if configDir == "" {
 		configDir = DefaultConfigDir("")
 	}
-	cfg, err := LoadConfig(ConfigPath(configDir))
+	cfg, err := LoadConfigShared(ConfigPath(configDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrNotInitialized
 		}
 		return nil, err
 	}
-	stateDB, err := store.Open(cfg.Database, store.WorkloadState)
+	stateDB, err := store.OpenLazy(cfg.Database, store.WorkloadState)
 	if err != nil {
 		return nil, err
 	}
-	metricsDB, err := store.Open(cfg.Database, store.WorkloadMetrics)
+	metricsDB, err := store.OpenLazy(cfg.Database, store.WorkloadMetrics)
 	if err != nil {
 		_ = stateDB.Close()
 		return nil, err
@@ -120,6 +127,44 @@ func Open(configDir string) (*App, error) {
 		fmt.Fprintf(os.Stderr, "warning: passphrase-protected keys are not yet supported at runtime; connections will fail until this is wired\n")
 	}
 	return app, nil
+}
+
+// sharedConfig caches the last config this process decoded, keyed by the path
+// and the file's exact bytes, so the CLI's pre-run checks and Open share one
+// TOML decode (~0.3ms) per invocation. Keying on content (not mtime) means any
+// change to the file — including one made by this process — is always seen.
+var sharedConfig struct {
+	sync.Mutex
+	path string
+	data []byte
+	cfg  Config
+}
+
+// LoadConfigShared is LoadConfig, memoized per process on the file's content.
+// Config holds only value fields, so each caller gets an independent copy.
+func LoadConfigShared(path string) (Config, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- the controller's own config path
+	if err != nil {
+		return LoadConfig(path) // same error (and os.IsNotExist behaviour) as before
+	}
+	sharedConfig.Lock()
+	if sharedConfig.path == path && sharedConfig.data != nil && bytes.Equal(sharedConfig.data, data) {
+		cfg := sharedConfig.cfg
+		sharedConfig.Unlock()
+		return cfg, nil
+	}
+	sharedConfig.Unlock()
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		return cfg, err
+	}
+	// Only memoize if the file did not change while LoadConfig was reading it.
+	if again, rerr := os.ReadFile(path); rerr == nil && bytes.Equal(again, data) { // #nosec G304 -- same path as above
+		sharedConfig.Lock()
+		sharedConfig.path, sharedConfig.data, sharedConfig.cfg = path, data, cfg
+		sharedConfig.Unlock()
+	}
+	return cfg, nil
 }
 
 func (a *App) Close() error {
