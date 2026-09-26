@@ -2517,8 +2517,15 @@ func openApp(configDir string) (*core.App, error) {
 	if app != nil && actingOperator != "" {
 		app.SetActingOperator(actingOperator)
 	}
+	if app != nil && openAppHook != nil {
+		openAppHook(app)
+	}
 	return app, err
 }
+
+// openAppHook, when non-nil, adjusts every App the CLI opens. Tests use it to
+// install in-process RPC fakes; it is never set in production.
+var openAppHook func(*core.App)
 
 func writeJSON(cmd *cobra.Command, payload any) error {
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -2614,6 +2621,13 @@ type execJSON struct {
 	DurationMs int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out"`
 	AgentError string `json:"agent_error,omitempty"`
+
+	// Additive fields. Status is set only for targets where the command did NOT
+	// run (see execStatus*); a result that ran keeps exactly the shape above.
+	Status     string `json:"status,omitempty"`
+	Error      string `json:"error,omitempty"`       // why it was blocked (policy/guard/confirm, or its on-fail)
+	ApprovalID string `json:"approval_id,omitempty"` // --require-approval: the staged approval
+	Command    string `json:"command,omitempty"`     // --dry-run: what would run (secret refs only, never values)
 }
 
 // classifyAgentError labels a transport/agent failure: unreachable | auth | agent-error.
@@ -2719,7 +2733,7 @@ func flagValue(cmd *cobra.Command, name string) string {
 func newExecCommand(configDir *string) *cobra.Command {
 	var all, asJSON, propagateExit bool
 	var timeout, backoff time.Duration
-	var retries int
+	var retries, parallel int
 	// Exec-time enforcement flags (FL-003/007/008/010/012/013/027/032).
 	var (
 		dryRun         bool
@@ -2744,6 +2758,17 @@ Flags:
   --retry N         retry ONLY transport failures (never re-runs a command that ran)
   --backoff 2s      delay between transport retries
   --propagate-exit  exit the fleet process with the remote command's exit code
+  --parallel N      with --all/--group, run on up to N servers at once (default 16;
+                    1 = one server at a time). Output order never changes: each
+                    server's block is printed in target order.
+
+Exit status with --all/--group (the single-server rules, applied to every target):
+  non-zero when any server failed: blocked by policy, unreachable, timed out, or a
+  non-zero remote exit. With --json the array lists EVERY target (targets that did
+  not run carry "status": blocked|staged|dry-run|cached, plus "error" when
+  blocked); only a policy block makes the exit status non-zero there. With
+  --propagate-exit the first non-zero remote exit code in target order becomes
+  the exit status.
 
 Enforcement flags:
   --dry-run             print 'would run: <cmd>' for the target(s) and exit without running
@@ -2880,17 +2905,26 @@ Examples:
 
 			// runOnce applies a deadline that is carried in the RPC envelope. The
 			// transport closes the timed-out channel and the agent independently uses
-			// the same deadline to kill the complete remote process group.
+			// the same deadline to kill the complete remote process group. Whichever
+			// side notices first, the result is reported as a timeout (see
+			// execTimedOut): the agent's own kill used to race the controller's
+			// deadline and surface as a bare exit -1 or a transport error.
 			runOnce := func(server, command string) (proto.ExecResult, bool, error) {
 				command = secretEnvPrefix() + command
 				if timeout <= 0 {
+					start := time.Now()
 					r, e := app.ExecCommandContext(commandCtx, server, command)
+					if e == nil && agentDefaultLimitHit(r, time.Since(start)) {
+						return proto.ExecResult{}, true,
+							fmt.Errorf("timed out after %s (the agent's default command limit): %w", agentDefaultExecTimeout, context.DeadlineExceeded)
+					}
 					return r, false, e
 				}
 				execCtx, cancel := context.WithTimeout(commandCtx, timeout)
 				defer cancel()
+				deadline, _ := execCtx.Deadline()
 				r, e := app.ExecCommandContext(execCtx, server, command)
-				if errors.Is(e, context.DeadlineExceeded) || errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+				if execTimedOut(execCtx, commandCtx, timeout, deadline, time.Now(), r, e) {
 					return proto.ExecResult{}, true, fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
 				}
 				return r, false, e
@@ -2905,7 +2939,11 @@ Examples:
 					if agentErr == nil || timedOut || attempt >= retries {
 						return
 					}
-					time.Sleep(backoff)
+					select {
+					case <-time.After(backoff):
+					case <-commandCtx.Done():
+						return
+					}
 				}
 			}
 			toJSON := func(server string, r proto.ExecResult, timedOut bool, agentErr error, dur time.Duration) execJSON {
@@ -2924,49 +2962,52 @@ Examples:
 			// preflight runs the policy/safety checks that must pass before a command
 			// executes on a server, in the fixed order:
 			//   deny-list -> guard -> confirm-required -> require-approval.
-			// It returns (blocked=true, err) to refuse the command, or
-			// (false, nil) to proceed. A non-nil err on block carries the reason.
-			preflight := func(server, command string) (bool, error) {
+			// It returns (blocked=true, "", err) to refuse the command,
+			// (true, approvalID, nil) when the command was staged for approval, or
+			// (false, "", nil) to proceed. A non-nil err on block carries the reason.
+			// Human notes go to w (per server, so concurrent targets never interleave).
+			preflight := func(w execWriters, server, command string) (bool, string, error) {
 				// 1. deny-list (always on).
 				if cmdPolicy != nil {
 					if denied, pat := cmdPolicy.MatchDeny(command); denied {
-						return true, fmt.Errorf("command blocked by cmd-policy deny pattern %q", pat)
+						return true, "", fmt.Errorf("command blocked by cmd-policy deny pattern %q", pat)
 					}
 				}
 				// 2. guard — detect self-lockout risk.
 				if guard || guardWarn {
 					if warnings := core.AnalyzeCommandSafety(command, agentPortFor(server)); len(warnings) > 0 {
-						for _, w := range warnings {
-							fmt.Fprintf(cmd.ErrOrStderr(), "guard [%s]: %s\n", server, w)
+						for _, warning := range warnings {
+							fmt.Fprintf(w.err, "guard [%s]: %s\n", server, warning)
 						}
 						if !guardWarn {
-							return true, fmt.Errorf("command blocked by --guard on %s (pass --guard-warn to run anyway)", server)
+							return true, "", fmt.Errorf("command blocked by --guard on %s (pass --guard-warn to run anyway)", server)
 						}
 					}
 				}
 				// 3. confirm-required.
 				if cmdPolicy != nil {
 					if needs, pat := cmdPolicy.MatchConfirm(command); needs && !confirm {
-						return true, fmt.Errorf("command matches cmd-policy confirm pattern %q — pass --confirm to run it", pat)
+						return true, "", fmt.Errorf("command matches cmd-policy confirm pattern %q — pass --confirm to run it", pat)
 					}
 				}
 				// 4. require-approval — stage and refuse.
 				if requireApprove {
 					id, serr := approvals.Stage(server, command, core.DefaultApprovalTTL)
 					if serr != nil {
-						return true, fmt.Errorf("stage approval: %w", serr)
+						return true, "", fmt.Errorf("stage approval: %w", serr)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "staged approval %s for %s — run: fleet approve %s\n", id, server, id)
-					return true, nil
+					fmt.Fprintf(w.note, "staged approval %s for %s — run: fleet approve %s\n", id, server, id)
+					return true, id, nil
 				}
-				return false, nil
+				return false, "", nil
 			}
 
 			// execOne runs the full per-server pipeline for one target and prints the
 			// result in human mode (used by single-server and --all/--group human
-			// paths). It returns the execJSON it produced (for --json aggregation),
-			// a skip flag (preflight short-circuited: approval staged, dry-run, or
-			// idempotency hit), and a fatal error (deny/guard/confirm block).
+			// paths). It returns the execJSON it produced (for --json aggregation;
+			// targets that did not run carry a Status), a skip flag (preflight
+			// short-circuited: blocked, approval staged, dry-run, or idempotency hit),
+			// and a fatal error (deny/guard/confirm block).
 			// idemKey derives the per-(server,command) cache key from the bare
 			// --idempotency-key. CRITICAL: keying on the bare flag alone collides
 			// across servers (under --all/--group every server would return the
@@ -2979,30 +3020,34 @@ Examples:
 				return hex.EncodeToString(sum[:])
 			}
 
-			execOne := func(server, command string, printHeader, human bool) (execJSON, bool, error) {
-				if blocked, berr := preflight(server, command); blocked {
-					return execJSON{}, true, berr
+			execOne := func(w execWriters, server, command string, printHeader, human bool) (execJSON, bool, error) {
+				if blocked, approvalID, berr := preflight(w, server, command); blocked {
+					if berr != nil {
+						return execJSON{Server: server, Status: execStatusBlocked, Error: redact(berr.Error())}, true, berr
+					}
+					return execJSON{Server: server, Status: execStatusStaged, ApprovalID: approvalID}, true, nil
 				}
 				// idempotency-hit: return the cached result instead of running.
 				if idempotencyKey != "" {
 					if cached, ok := idemStore.Get(idemKey(server, command)); ok {
 						if human {
-							fmt.Fprintf(cmd.OutOrStdout(), "idempotency-key %s: cached result\n%s\n", idempotencyKey, redact(cached))
+							fmt.Fprintf(w.out, "idempotency-key %s: cached result\n%s\n", idempotencyKey, redact(cached))
 						}
 						var cj execJSON
 						if uerr := json.Unmarshal([]byte(cached), &cj); uerr == nil {
 							cj.Stdout = redact(cj.Stdout)
 							cj.Stderr = redact(cj.Stderr)
+							cj.Status = execStatusCached
 							return cj, true, nil
 						}
-						return execJSON{Server: server, Stdout: redact(cached)}, true, nil
+						return execJSON{Server: server, Stdout: redact(cached), Status: execStatusCached}, true, nil
 					}
 				}
 				// dry-run: print the resolved command and skip execution. The secret
 				// DISPLAY prefix (VAR=@name) is shown, NEVER the resolved value.
 				if dryRun {
-					fmt.Fprintf(cmd.OutOrStdout(), "would run: %s%s [%s]\n", secretDisplayPrefix(), command, server)
-					return execJSON{Server: server}, true, nil
+					fmt.Fprintf(w.note, "would run: %s%s [%s]\n", secretDisplayPrefix(), command, server)
+					return execJSON{Server: server, Status: execStatusDryRun, Command: secretDisplayPrefix() + command}, true, nil
 				}
 				// run, then redact, then handle on-fail.
 				r, timedOut, dur, agentErr := run(server, command)
@@ -3018,26 +3063,29 @@ Examples:
 					// The on-fail command is a full remote command and MUST pass the
 					// same preflight gate as the main one (deny-list, guard, confirm,
 					// require-approval). Without this it was a complete gate bypass.
-					if blocked, berr := preflight(server, onFail); blocked {
+					if blocked, _, berr := preflight(w, server, onFail); blocked {
 						if human {
-							printExecHuman(cmd, j, printHeader)
+							printExecHuman(w.out, w.err, j, printHeader)
 							if berr != nil {
-								fmt.Fprintf(cmd.ErrOrStderr(), "--- on-fail blocked: %v ---\n", berr)
+								fmt.Fprintf(w.err, "--- on-fail blocked: %v ---\n", berr)
 							}
+						}
+						if berr != nil {
+							j.Error = redact("on-fail blocked: " + berr.Error())
 						}
 						return j, false, berr
 					}
 					or, oTimedOut, oDur, oAgentErr := run(server, onFail)
 					oj := toJSON(server, or, oTimedOut, oAgentErr, oDur)
 					if human {
-						printExecHuman(cmd, j, printHeader)
-						fmt.Fprintf(cmd.OutOrStdout(), "--- on-fail: %s ---\n", onFail)
-						printExecHuman(cmd, oj, false)
+						printExecHuman(w.out, w.err, j, printHeader)
+						fmt.Fprintf(w.out, "--- on-fail: %s ---\n", onFail)
+						printExecHuman(w.out, w.err, oj, false)
 					}
 					return j, false, nil
 				}
 				if human {
-					printExecHuman(cmd, j, printHeader)
+					printExecHuman(w.out, w.err, j, printHeader)
 				}
 				return j, false, nil
 			}
@@ -3066,28 +3114,48 @@ Examples:
 				return nil, false, nil
 			}
 
+			if parallel < 1 {
+				return fmt.Errorf("--parallel must be at least 1")
+			}
 			targets, multi, err := resolveTargets()
 			if err != nil {
 				return err
 			}
 
+			// In --json mode stdout carries only JSON: human notes (staged
+			// approvals, dry-run lines) go to stderr instead.
+			noteStream := cmd.OutOrStdout()
+			if asJSON {
+				noteStream = cmd.ErrOrStderr()
+			}
+
 			if multi {
-				command := strings.Join(args, " ")
-				out := make([]execJSON, len(targets))
-				skipped := make([]bool, len(targets))
-				errs := make([]error, len(targets))
-				for i, name := range targets {
-					j, skip, eerr := execOne(name, command, true, !asJSON)
-					out[i], skipped[i], errs[i] = j, skip, eerr
+				if len(targets) == 0 && group != "" {
+					return fmt.Errorf("no servers match --group %q", group)
 				}
+				command := strings.Join(args, " ")
+				n := len(targets)
+				out := make([]execJSON, n)
+				skipped := make([]bool, n)
+				errs := make([]error, n)
+				// Servers run concurrently (bounded by --parallel), but each one's
+				// output is captured and replayed in target order as soon as every
+				// earlier target has finished, so the printed result is identical
+				// to running them one after another.
+				captures := make([]execCapture, n)
+				flusher := core.NewOrderedFlusher(n, func(i int) {
+					captures[i].replay(cmd.OutOrStdout(), cmd.ErrOrStderr())
+					captures[i] = execCapture{}
+				})
+				core.ForEachLimit(n, parallel, func(i int) {
+					w := captures[i].writers(asJSON)
+					out[i], skipped[i], errs[i] = execOne(w, targets[i], command, true, !asJSON)
+					flusher.Done(i)
+				})
 				if asJSON {
-					emitted := out[:0]
-					for i := range out {
-						if !skipped[i] && errs[i] == nil {
-							emitted = append(emitted, out[i])
-						}
-					}
-					if encErr := json.NewEncoder(cmd.OutOrStdout()).Encode(emitted); encErr != nil {
+					// Every target is listed, in target order; targets that did not
+					// run carry a status (and the block reason in "error").
+					if encErr := json.NewEncoder(cmd.OutOrStdout()).Encode(out); encErr != nil {
 						return encErr
 					}
 				}
@@ -3097,7 +3165,13 @@ Examples:
 						fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", targets[i], errs[i])
 					}
 				}
-				return nil
+				code, failure := fanoutExitStatus(out, skipped, errs, asJSON, propagateExit)
+				if code != 0 {
+					_ = app.Close()
+					exitProcess(code)
+					return nil
+				}
+				return failure
 			}
 
 			if len(args) < 2 {
@@ -3106,7 +3180,8 @@ Examples:
 			serverName := args[0]
 			command := strings.Join(args[1:], " ")
 
-			j, skip, eerr := execOne(serverName, command, false, !asJSON)
+			direct := execWriters{out: cmd.OutOrStdout(), err: cmd.ErrOrStderr(), note: noteStream}
+			j, skip, eerr := execOne(direct, serverName, command, false, !asJSON)
 			if eerr != nil {
 				return eerr
 			}
@@ -3123,7 +3198,7 @@ Examples:
 				}
 				if propagateExit && j.AgentError == "" && !j.TimedOut && j.ExitCode != 0 {
 					_ = app.Close()
-					os.Exit(j.ExitCode)
+					exitProcess(j.ExitCode)
 				}
 				return nil // JSON mode never errors on a remote non-zero exit
 			}
@@ -3139,7 +3214,7 @@ Examples:
 			if j.ExitCode != 0 {
 				if propagateExit {
 					_ = app.Close()
-					os.Exit(j.ExitCode)
+					exitProcess(j.ExitCode)
 				}
 				return fmt.Errorf("exit status %d", j.ExitCode)
 			}
@@ -3147,6 +3222,7 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "run on all servers concurrently")
+	cmd.Flags().IntVar(&parallel, "parallel", execDefaultParallel, "with --all/--group, run on up to N servers at once (1 = one at a time); output stays in target order")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "structured JSON output (stdout/stderr/exit_code/duration/agent_error)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the command after this duration (e.g. 30s)")
 	cmd.Flags().IntVar(&retries, "retry", 0, "retry transport failures up to this many times")
@@ -3244,29 +3320,6 @@ func validateEnvVarName(name string) error {
 		return fmt.Errorf("empty env var name in --secret")
 	}
 	return nil
-}
-
-// printExecHuman renders a single exec result in human mode, mirroring the
-// original --all output format. printHeader adds the "=== server [status] ==="
-// banner (used for multi-server output); single-server output omits it.
-func printExecHuman(cmd *cobra.Command, j execJSON, printHeader bool) {
-	if printHeader {
-		switch {
-		case j.AgentError != "":
-			fmt.Fprintf(cmd.OutOrStdout(), "=== %s [%s] ===\n%s\n", j.Server, classifyAgentErrorStr(j.AgentError), j.AgentError)
-			return
-		case j.TimedOut:
-			fmt.Fprintf(cmd.OutOrStdout(), "=== %s [timed out] ===\n", j.Server)
-		default:
-			fmt.Fprintf(cmd.OutOrStdout(), "=== %s [exit %d] ===\n", j.Server, j.ExitCode)
-		}
-	}
-	if j.Stdout != "" {
-		fmt.Fprint(cmd.OutOrStdout(), j.Stdout)
-	}
-	if j.Stderr != "" {
-		fmt.Fprint(cmd.ErrOrStderr(), j.Stderr)
-	}
 }
 
 // classifyAgentErrorStr is classifyAgentError for an already-stringified error.

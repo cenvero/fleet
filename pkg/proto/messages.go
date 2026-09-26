@@ -316,6 +316,11 @@ type ExecResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
+	// TimedOut is set by agents that killed the command because its deadline
+	// (the request deadline or the agent's own default limit) expired. Additive:
+	// older controllers ignore it, and older agents never set it (controllers
+	// then infer the timeout from a signal exit at the deadline).
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 func DecodeHelloPayload(payload any) (HelloPayload, error) {
