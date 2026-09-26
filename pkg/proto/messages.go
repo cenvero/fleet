@@ -228,6 +228,12 @@ type MetricsSnapshot struct {
 	Load15           float64   `json:"load15,omitempty"`
 	UptimeSeconds    uint64    `json:"uptime_seconds,omitempty"`
 	ProcessCount     uint64    `json:"process_count,omitempty"`
+	// Swap usage. Additive: older agents omit these and older controllers ignore
+	// them. SwapReported tells "the agent reported swap (possibly none
+	// configured, total 0)" apart from "an older agent sent nothing".
+	SwapUsedBytes  uint64 `json:"swap_used_bytes,omitempty"`
+	SwapTotalBytes uint64 `json:"swap_total_bytes,omitempty"`
+	SwapReported   bool   `json:"swap_reported,omitempty"`
 }
 
 type FirewallInfo struct {
