@@ -286,6 +286,14 @@ func remoteErrorCode(err error) string {
 const (
 	errCodeUnsupportedAction = "unsupported_action"
 	errCodeTargetIsDirectory = "target_is_directory"
+	errCodeTransferBusy      = "transfer_busy"
+)
+
+// transferBusyWait bounds how long an upload waits for a still-running
+// finalize of the same transfer (see errCodeTransferBusy).
+const (
+	transferBusyWait = 2 * time.Minute
+	transferBusyPoll = 250 * time.Millisecond
 )
 
 // ---- chunked / parallel / resumable transfers ----
@@ -736,12 +744,19 @@ func (u *upload) chunked(target string) (proto.FileFinalizeResult, error) {
 		defer hashJob.CancelAndWait()
 	}
 
-	ow, err := decodeResult[proto.FileOpenWriteResult](u.conn.callRetry(0, proto.Envelope{Action: proto.ActionFileOpenWrite, Payload: proto.FileOpenWritePayload{
+	openReq := proto.Envelope{Action: proto.ActionFileOpenWrite, Payload: proto.FileOpenWritePayload{
 		Path:       target,
 		TotalSize:  totalSize,
 		Mode:       uint32(u.info.Mode().Perm()),
 		TransferID: transferID,
-	}}))
+	}}
+	ow, err := decodeResult[proto.FileOpenWriteResult](u.conn.callRetry(0, openReq))
+	// A previous attempt's finalize may still be running on the agent (its
+	// reply was lost with the connection); wait for it rather than fail.
+	for deadline := time.Now().Add(transferBusyWait); remoteErrorCode(err) == errCodeTransferBusy && time.Now().Before(deadline); {
+		time.Sleep(transferBusyPoll)
+		ow, err = decodeResult[proto.FileOpenWriteResult](u.conn.callRetry(0, openReq))
+	}
 	if err != nil {
 		if remoteErrorCode(err) == errCodeTargetIsDirectory {
 			return proto.FileFinalizeResult{}, err

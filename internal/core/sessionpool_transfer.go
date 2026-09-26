@@ -23,10 +23,11 @@ import (
 // from the daemon — runs with fewer streams instead of failing to open one.
 const transferChannelBudget = transport.MaxChannelsPerConn / 2
 
-// channelBudget is a counting semaphore of transfer channels for one server.
+// channelBudget counts the transfer channels still available for one server.
+// free goes negative when transfers beyond the budget each take their single
+// guaranteed channel.
 type channelBudget struct {
 	mu   sync.Mutex
-	cond *sync.Cond
 	free int
 }
 
@@ -47,22 +48,19 @@ func (a *App) transferBudget(serverName string) *channelBudget {
 	b, ok := transferBudgets[key]
 	if !ok {
 		b = &channelBudget{free: transferChannelBudget}
-		b.cond = sync.NewCond(&b.mu)
 		transferBudgets[key] = b
 	}
 	return b
 }
 
-// acquire takes between 1 and want channel slots, waiting only while none at
-// all are free.
+// acquire takes up to want channel slots and never fewer than one. It never
+// waits: a transfer that finds the budget exhausted still gets its single
+// channel (running one stream), so transfers holding channels on two servers
+// — a relay copy — can never deadlock against each other.
 func (b *channelBudget) acquire(want int) int {
-	want = max(want, 1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for b.free == 0 {
-		b.cond.Wait()
-	}
-	got := min(want, b.free)
+	got := max(1, min(want, b.free))
 	b.free -= got
 	return got
 }
@@ -71,7 +69,7 @@ func (b *channelBudget) acquire(want int) int {
 func (b *channelBudget) tryAcquire(want int) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	got := min(max(want, 0), b.free)
+	got := max(0, min(want, b.free))
 	b.free -= got
 	return got
 }
@@ -83,7 +81,6 @@ func (b *channelBudget) release(n int) {
 	b.mu.Lock()
 	b.free += n
 	b.mu.Unlock()
-	b.cond.Broadcast()
 }
 
 // transferChannels is a set of fleet-rpc channels leased from the session pool
@@ -320,9 +317,19 @@ func (tc *transferChannels) close() {
 	tc.leases, tc.owned, tc.tokens = nil, nil, 0
 	tc.mu.Unlock()
 	for _, l := range leases {
-		if l != nil {
-			l.release()
+		if l == nil {
+			continue
 		}
+		if l.pool != nil && !l.pool.isCurrentConn(l.name, l.session().Client) {
+			// The pool has moved on to another connection (this one was
+			// evicted or replaced mid-transfer); never hand it a channel of the
+			// old one.
+			if ch := l.session().Channel; ch != nil {
+				_ = ch.Close()
+			}
+			continue
+		}
+		l.release()
 	}
 	for _, c := range owned {
 		_ = c.Close()
@@ -346,6 +353,18 @@ func (sp *sessionPool) touchConn(serverName string, client *ssh.Client) {
 		entry.lastUsed = time.Now()
 	}
 	sp.mu.Unlock()
+}
+
+// isCurrentConn reports whether serverName's pooled connection is backed by
+// client.
+func (sp *sessionPool) isCurrentConn(serverName string, client *ssh.Client) bool {
+	if sp == nil || client == nil {
+		return false
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	entry, ok := sp.entries[serverName]
+	return ok && entry.root != nil && entry.root.Client == client
 }
 
 // evictConn drops serverName's pooled connection only if it is still backed by

@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -471,22 +470,30 @@ func TestTransferChunkSizeFitsTheChannelWindow(t *testing.T) {
 func TestChannelBudget(t *testing.T) {
 	t.Parallel()
 	b := &channelBudget{free: 3}
-	b.cond = sync.NewCond(&b.mu)
 	if got := b.acquire(8); got != 3 {
 		t.Fatalf("acquire(8) = %d, want 3", got)
 	}
 	if got := b.tryAcquire(1); got != 0 {
 		t.Fatalf("tryAcquire on an empty budget = %d", got)
 	}
-	done := make(chan int)
+	// An exhausted budget still hands out one channel, without waiting, so no
+	// transfer can deadlock on it.
+	done := make(chan int, 1)
 	go func() { done <- b.acquire(2) }()
 	select {
-	case <-done:
-		t.Fatal("acquire did not wait for a free slot")
-	case <-time.After(20 * time.Millisecond):
+	case got := <-done:
+		if got != 1 {
+			t.Fatalf("acquire on an exhausted budget = %d, want 1", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("acquire blocked on an exhausted budget")
 	}
+	if got := b.tryAcquire(4); got != 0 {
+		t.Fatalf("tryAcquire while over budget = %d", got)
+	}
+	b.release(3)
 	b.release(1)
-	if got := <-done; got != 1 {
-		t.Fatalf("acquire after release = %d, want 1", got)
+	if got := b.tryAcquire(8); got != 3 {
+		t.Fatalf("tryAcquire after release = %d, want 3", got)
 	}
 }
