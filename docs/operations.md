@@ -490,7 +490,7 @@ fleet job run web-01 "./long-import.sh" --name nightly-import   # optional --nam
 fleet jobs                                     # list tracked jobs (ID, NAME, server, status…)
 fleet job status <id>                          # detects completion + exit code
 fleet job logs   <id> --follow                 # stream captured output
-fleet job wait   <id> --timeout 30m            # block until it finishes
+fleet job wait   <id> --timeout 30m            # block until it finishes; exits 1 if the job failed
 ```
 
 The optional `--name` label is shown in the `NAME` column of `fleet jobs` so a long-running
