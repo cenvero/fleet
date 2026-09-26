@@ -24,6 +24,7 @@ import (
 	"github.com/cenvero/fleet/pkg/proto"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	"github.com/muesli/termenv"
 )
 
@@ -938,6 +939,40 @@ func drainBatch(cmd tea.Cmd) []tea.Msg {
 		return out
 	}
 	return []tea.Msg{msg}
+}
+
+// Rectangular zones cover every cell of their area, not just one line.
+func TestMouseZonesCoverWholePanels(t *testing.T) {
+	m := newTestDash(t, 12, 160, 45)
+	m = press(m, "4")
+	_ = m.View()
+	var z = waitZone(t, dashViewerID())
+	if z.EndY-z.StartY < 10 {
+		t.Fatalf("viewer zone spans rows %d..%d, want the whole pane", z.StartY, z.EndY)
+	}
+	mid := tea.MouseMsg{X: (z.StartX + z.EndX) / 2, Y: (z.StartY + z.EndY) / 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	if !m.handleMouse(mid) || !m.viewerFocus {
+		t.Fatalf("a click in the middle of the log viewer should focus it")
+	}
+	m = press(m, "esc", "1")
+	_ = m.View()
+	z = waitZone(t, dashOverviewBoxID(1))
+	inside := tea.MouseMsg{X: z.StartX + 3, Y: z.StartY + 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
+	if !m.handleMouse(inside) || m.activeTab != tabAlerts {
+		t.Fatalf("a click inside the Alerts KPI box should open the Alerts tab")
+	}
+}
+
+func waitZone(t *testing.T, id string) *zone.ZoneInfo {
+	t.Helper()
+	for range 250 {
+		if z := zone.Get(id); !z.IsZero() {
+			return z
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("zone %q not registered", id)
+	return nil
 }
 
 // Keys that arrive together in one read come as one multi-rune message.

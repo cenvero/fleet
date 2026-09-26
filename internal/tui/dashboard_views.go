@@ -24,10 +24,12 @@ const (
 
 type drect struct{ x, y, w, h int }
 
-// dzone is a clickable screen region registered with bubblezone.
+// dashZone is a clickable screen rectangle registered with bubblezone
+// (inclusive cell coordinates).
 type dashZone struct {
-	id        string
-	x0, x1, y int
+	id     string
+	x0, x1 int
+	y0, y1 int
 }
 
 // rctx carries per-frame rendering state.
@@ -38,8 +40,12 @@ type drctx struct {
 }
 
 func (r *drctx) zone(id string, x0, x1, y int) {
-	if x1 >= x0 {
-		r.zones = append(r.zones, dashZone{id: id, x0: x0, x1: x1, y: y})
+	r.zoneRect(id, x0, x1, y, y)
+}
+
+func (r *drctx) zoneRect(id string, x0, x1, y0, y1 int) {
+	if x1 >= x0 && y1 >= y0 {
+		r.zones = append(r.zones, dashZone{id: id, x0: x0, x1: x1, y0: y0, y1: y1})
 	}
 }
 
@@ -183,29 +189,49 @@ func (m *model) registerZones(r *drctx) {
 	if zone.DefaultManager == nil {
 		return
 	}
-	sort.SliceStable(r.zones, func(i, j int) bool {
-		if r.zones[i].y != r.zones[j].y {
-			return r.zones[i].y < r.zones[j].y
+	// Each zone becomes a start marker at (x0, y0) and an end marker just
+	// after (x1, y1); bubblezone turns the pair into the rectangle
+	// [x0..x1] x [y0..y1]. Markers are zero-width, so the synthetic frame is
+	// blank cells with markers at the recorded coordinates.
+	type marker struct {
+		x, y int
+		end  bool
+		gid  string
+	}
+	marks := make([]marker, 0, 2*len(r.zones))
+	for _, z := range r.zones {
+		wrapped := zone.Mark(z.id, "\x00")
+		gid := wrapped[:max(strings.IndexByte(wrapped, 0), 0)]
+		if gid == "" {
+			continue
 		}
-		return r.zones[i].x0 < r.zones[j].x0
+		marks = append(marks, marker{x: z.x0, y: z.y0, gid: gid}, marker{x: z.x1 + 1, y: z.y1, end: true, gid: gid})
+	}
+	sort.SliceStable(marks, func(i, j int) bool {
+		if marks[i].y != marks[j].y {
+			return marks[i].y < marks[j].y
+		}
+		if marks[i].x != marks[j].x {
+			return marks[i].x < marks[j].x
+		}
+		return marks[i].end && !marks[j].end
 	})
 	var buf []byte
 	if m.rt != nil {
 		buf = m.rt.scanBuf[:0]
 	}
 	y, x := 0, 0
-	for _, z := range r.zones {
-		if z.y < y || (z.y == y && z.x0 < x) {
-			continue // overlapping; first one wins
-		}
-		for y < z.y {
+	for _, mk := range marks {
+		for y < mk.y {
 			buf = append(buf, '\n')
 			y++
 			x = 0
 		}
-		buf = append(buf, dashRunSpace.n(z.x0-x)...)
-		buf = append(buf, zone.Mark(z.id, dashRunSpace.n(z.x1-z.x0+1))...)
-		x = z.x1 + 1
+		if mk.x > x {
+			buf = append(buf, dashRunSpace.n(mk.x-x)...)
+			x = mk.x
+		}
+		buf = append(buf, mk.gid...)
 	}
 	synthetic := string(buf)
 	if m.rt != nil {
@@ -979,16 +1005,16 @@ func (m *model) renderOverview(r *drctx, body drect) []string {
 			dplaced{drect{w1, 0, w2, kpiH}, m.alertsKPIBox(r, w2, kpiH)},
 			dplaced{drect{w1 + w2, 0, w3, kpiH}, m.resourcesBox(r, w3, kpiH)},
 		)
-		r.zone(dashOverviewBoxID(0), body.x, body.x+w1-1, body.y)
-		r.zone(dashOverviewBoxID(1), body.x+w1, body.x+w1+w2-1, body.y)
+		r.zoneRect(dashOverviewBoxID(0), body.x, body.x+w1-1, body.y, body.y+kpiH-1)
+		r.zoneRect(dashOverviewBoxID(1), body.x+w1, body.x+w1+w2-1, body.y, body.y+kpiH-1)
 	} else {
 		w1 := W / 2
 		parts = append(parts,
 			dplaced{drect{0, 0, w1, kpiH}, m.fleetBox(r, w1, kpiH)},
 			dplaced{drect{w1, 0, W - w1, kpiH}, m.alertsKPIBox(r, W-w1, kpiH)},
 		)
-		r.zone(dashOverviewBoxID(0), body.x, body.x+w1-1, body.y)
-		r.zone(dashOverviewBoxID(1), body.x+w1, body.x+W-1, body.y)
+		r.zoneRect(dashOverviewBoxID(0), body.x, body.x+w1-1, body.y, body.y+kpiH-1)
+		r.zoneRect(dashOverviewBoxID(1), body.x+w1, body.x+W-1, body.y, body.y+kpiH-1)
 	}
 
 	// Hot spots (or, for an empty fleet, how to get started).
@@ -2098,10 +2124,7 @@ func (m *model) logViewerBox(r *drctx, body, at drect) []string {
 	lp := m.selectedLog()
 	b := &dbox{p: r.p, w: at.w, h: at.h, title: "Log", focus: m.viewerFocus}
 	iw, ih := b.inner()
-	r.zone(dashViewerID(), body.x+at.x, body.x+at.x+at.w-1, body.y+at.y)
-	for y := 1; y < at.h; y++ {
-		r.zone(dashViewerID(), body.x+at.x, body.x+at.x+at.w-1, body.y+at.y+y)
-	}
+	r.zoneRect(dashViewerID(), body.x+at.x, body.x+at.x+at.w-1, body.y+at.y, body.y+at.y+at.h-1)
 	if lp == nil {
 		b.lines = dashEmptyBody(r, iw, ih, "Select a cached log on the left.", sMuted)
 		return b.render()
@@ -2656,6 +2679,6 @@ func (m *model) renderHelp(r *drctx, body drect) []string {
 	lines := box.render()
 	x := max((body.w-w)/2, 0)
 	y := max((body.h-h)/2, 0)
-	r.zone(dashHelpID(), body.x+x, body.x+x+w-1, body.y+y)
+	r.zoneRect(dashHelpID(), body.x+x, body.x+x+w-1, body.y+y, body.y+y+h-1)
 	return dplace(drect{0, 0, body.w, body.h}, dplaced{drect{x, y, w, h}, lines})
 }
