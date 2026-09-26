@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -400,7 +401,7 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 	if server == "" {
 		destDir := filepath.Dir(archivePath)
 		if err := validateArchiveNamespaceForLocal(archivePath, destDir); err != nil {
-			return err
+			return describeNotArchive(archivePath, err)
 		}
 		if err := a.extractLocal(archivePath, destDir); err != nil {
 			return err
@@ -428,6 +429,9 @@ func (a *App) ExtractArchive(server, archivePath string) error {
 		}
 		extracted := filepath.Join(stageDir, "members")
 		if err := validateArchiveNamespaceForLocal(localArchive, extracted, style); err != nil {
+			if described := describeNotArchive(server+":"+archivePath, err); described != err {
+				return described
+			}
 			return fmt.Errorf("archive namespace is not representable: %w", err)
 		}
 		if err := os.Mkdir(extracted, 0o700); err != nil {
@@ -481,6 +485,52 @@ func validateArchiveNamespace(archivePath string, styles ...TargetPathStyle) err
 	return nil
 }
 
+// notArchiveError reports a file that could not be read as the archive format
+// its name implies (a text file named .zip, a truncated download, ...).
+type notArchiveError struct {
+	format string // "" when the name carries no archive extension
+	err    error
+}
+
+func (e *notArchiveError) Error() string {
+	if e.format == "" {
+		return "not a recognised archive: " + e.err.Error()
+	}
+	return "not a valid " + e.format + " archive: " + e.err.Error()
+}
+
+func (e *notArchiveError) Unwrap() error { return e.err }
+
+func notArchive(archivePath string, err error) error {
+	return &notArchiveError{format: archiveFormatName(archivePath), err: err}
+}
+
+// archiveFormatName is the format an archive's extension names, or "" when it
+// has none of the extensions fleet extracts.
+func archiveFormatName(name string) string {
+	low := strings.ToLower(name)
+	for _, ext := range []string{".zip", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar"} {
+		if strings.HasSuffix(low, ext) {
+			return FormatFromName(low)
+		}
+	}
+	return ""
+}
+
+// describeNotArchive turns a notArchiveError into an operator-facing message
+// naming the path the operator gave (not a staging copy); other errors pass
+// through unchanged.
+func describeNotArchive(displayPath string, err error) error {
+	var na *notArchiveError
+	if !errors.As(err, &na) {
+		return err
+	}
+	if na.format == "" {
+		return fmt.Errorf("%s is not an archive fleet can extract (use .zip, .tar, .tar.gz/.tgz, .tar.bz2 or .tar.xz): %v", displayPath, na.err)
+	}
+	return fmt.Errorf("%s is not a valid %s archive: %v", displayPath, na.format, na.err)
+}
+
 func validateArchiveNamespaceForLocal(archivePath, destination string, targetStyles ...TargetPathStyle) error {
 	entries, err := archiveNamespaceEntries(archivePath)
 	if err != nil {
@@ -503,7 +553,7 @@ func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
 	if strings.HasSuffix(low, ".zip") {
 		zr, err := zip.OpenReader(archivePath)
 		if err != nil {
-			return nil, fmt.Errorf("open zip manifest: %w", err)
+			return nil, notArchive(archivePath, err)
 		}
 		defer zr.Close()
 		for _, member := range zr.File {
@@ -523,11 +573,15 @@ func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
 
 	if strings.HasSuffix(low, ".tar.xz") {
 		if err := validateTarXZMembers(archivePath); err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				return nil, notArchive(archivePath, err) // tar could not list it
+			}
 			return nil, err
 		}
 		out, err := exec.Command("tar", "-tf", archivePath).Output() // #nosec G204 -- constant tool and operator-selected local archive
 		if err != nil {
-			return nil, fmt.Errorf("list archive members: %w", err)
+			return nil, notArchive(archivePath, fmt.Errorf("list archive members: %w", err))
 		}
 		for _, name := range splitMemberLines(string(out)) {
 			kind := fileKindRegular
@@ -551,7 +605,7 @@ func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
 	case strings.HasSuffix(low, ".tar.gz"), strings.HasSuffix(low, ".tgz"):
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			return nil, fmt.Errorf("open gzip manifest: %w", err)
+			return nil, notArchive(archivePath, err)
 		}
 		defer gz.Close()
 		src = gz
@@ -565,7 +619,7 @@ func archiveNamespaceEntries(archivePath string) (map[string]fileMeta, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read archive manifest: %w", err)
+			return nil, notArchive(archivePath, err)
 		}
 		var kind fileKind
 		switch hdr.Typeflag {

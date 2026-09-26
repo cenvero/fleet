@@ -160,10 +160,11 @@ Add it to the fleet:
 
 ### 4. Reverse mode: agent dials out
 
-Start the controller daemon:
+Start the controller daemon in the background (`./fleet stop` stops it; `./fleet daemon` runs
+it in the foreground, e.g. under systemd):
 
 ```bash
-./fleet daemon
+./fleet start
 ```
 
 Register the server on the controller:
@@ -190,9 +191,10 @@ Controller lifecycle:
 
 - `fleet init`
 - `fleet adjust-init`
-- `fleet status`
+- `fleet status` — controller status, including whether the daemon is running (and its pid)
 - `fleet dashboard`
-- `fleet daemon`
+- `fleet start` / `fleet stop` — run the controller daemon in the background / stop it
+- `fleet daemon` — run the controller daemon in the foreground
 
 Server management:
 

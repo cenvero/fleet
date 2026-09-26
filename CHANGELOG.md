@@ -37,6 +37,11 @@ Omit sections that have no entries for that release.
 ### Added
 
 - `fleet version` (with `--json`) prints the controller version, OS and architecture.
+- `fleet start` runs the daemon in the background (output in `logs/daemon.log`) and
+  `fleet stop` stops it; `fleet status` reports whether it is running. `fleet daemon`
+  records its pid, refuses to start twice for one config dir, and prints "listening"
+  only once its listeners are bound.
+- `fleet-agent --version`.
 - WinGet-ready `Cenvero.Fleet` ZIP/portable manifests for Windows x64 and ARM64,
   generated and validated against immutable GitHub release assets.
 - Generalized self-managed, Homebrew, and WinGet controller ownership detection,
@@ -169,6 +174,20 @@ Omit sections that have no entries for that release.
   controller down) retried silently forever; it now logs the reason, rate-limited.
 - Stopping the daemon could leave server-record and audit writes running after
   shutdown.
+- `fleet start` / `fleet stop` only recorded a timestamp and never started or stopped
+  anything.
+- Transfer progress was written to stdout, mixed into the output scripts parse; it
+  now goes to stderr (a live bar on a terminal, otherwise JSON lines as documented).
+  Server-to-server copies no longer report twice the file size.
+- `fleet job wait` exits non-zero when the job failed; `fleet health --group` that
+  matches no server is an error instead of "no servers to check"; `fleet cron`
+  reports a server without `crontab` instead of "no managed jobs".
+- `fleet doctor` no longer warns about the agent port on reverse-mode servers.
+- Development-build agents show as `dev` in `server list`, inventory and the
+  dashboard (they showed `-` or "version unknown").
+- `fleet file extract` on a file that isn't a valid archive says so plainly.
+- With the daemon stopped, reverse-mode commands say it is not running and how to
+  start it; `fleet-agent serve` warns when its authorized keys file is missing or empty.
 
 ### Security
 

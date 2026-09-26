@@ -810,15 +810,49 @@ func newStatusCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			daemon := core.DaemonStatus(app.ConfigDir, app.Config.Runtime.ControlAddress)
+			status.Daemon = &daemon
 			return writeJSON(cmd, status)
 		},
 	}
 }
 
+// lifecycleHelp is the Long help of `fleet start`, `fleet stop` and `fleet daemon`.
+var lifecycleHelp = map[string]string{
+	"start": "Start the controller daemon in the background, detached from the terminal.\n\n" +
+		"Runs `fleet --config-dir <dir> daemon` with its output appended to\n" +
+		"<config-dir>/logs/daemon.log and its pid recorded in <config-dir>/data/daemon.pid,\n" +
+		"then waits until it accepts connections on runtime.control_address. If a daemon\n" +
+		"for this config dir is already running this says so and exits 0. Your --token /\n" +
+		"FLEET_TOKEN is not passed on to the daemon.",
+	"stop": "Stop the controller daemon for this config dir.\n\n" +
+		"Sends SIGTERM (Windows: terminates the process) to the daemon named in\n" +
+		"<config-dir>/data/daemon.pid — only if that process still holds the config dir's\n" +
+		"daemon lock — and waits up to 15s for it to exit. Exits 0 with \"fleet daemon is\n" +
+		"not running\" when there is nothing to stop, removing a stale pid file.",
+	"daemon": "Run the controller daemon in the foreground: it accepts reverse-mode agents on\n" +
+		"runtime.listen_address, serves local control requests on runtime.control_address,\n" +
+		"polls metrics, and checks for updates. It records its pid in\n" +
+		"<config-dir>/data/daemon.pid, refuses to start while another daemon runs for the\n" +
+		"same config dir, and exits cleanly on SIGINT or SIGTERM. Use `fleet start` to run\n" +
+		"it in the background, or a service manager (systemd, launchd) to supervise it.",
+}
+
 func newLifecycleCommand(action string, configDir *string) *cobra.Command {
+	short := titleAction(action) + " the controller runtime"
+	switch action {
+	case "start":
+		short = "Start the controller daemon in the background"
+	case "stop":
+		short = "Stop the background controller daemon"
+	case "daemon":
+		short = "Run the controller daemon in the foreground"
+	}
 	return &cobra.Command{
 		Use:   action,
-		Short: titleAction(action) + " the controller runtime",
+		Short: short,
+		Long:  lifecycleHelp[action],
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -828,24 +862,76 @@ func newLifecycleCommand(action string, configDir *string) *cobra.Command {
 			if action == "daemon" {
 				ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 				defer stop()
-				fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet daemon listening for reverse agents on %s\n", app.Config.Runtime.ListenAddress)
-				fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet local control listening on %s\n", app.Config.Runtime.ControlAddress)
-				if strings.TrimSpace(app.Config.Runtime.MetricsPollInterval) != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet metrics polling every %s\n", app.Config.Runtime.MetricsPollInterval)
+				instance, err := core.ClaimDaemon(app.ConfigDir)
+				if err != nil {
+					return err
 				}
-				if app.Config.Runtime.DesktopNotifications {
-					fmt.Fprintln(cmd.OutOrStdout(), "Cenvero Fleet desktop notifications enabled")
-				}
+				defer instance.Release()
+				// Announce the listeners only once they are bound, so a
+				// daemon that cannot bind never claims to be listening.
+				ctx = core.WithDaemonReady(ctx, func() { printDaemonBanner(cmd, app) })
 				return app.RunDaemon(ctx)
 			}
-			now := time.Now().UTC().Format(time.RFC3339)
-			if err := app.StateDB.PutState("controller."+action, now); err != nil {
+			switch action {
+			case "start":
+				err = startDaemon(cmd, app)
+			case "stop":
+				err = stopDaemon(cmd, app)
+			}
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "controller %s state recorded at %s\n", action, now)
-			return nil
+			// Kept for compatibility: the state DB has always recorded when
+			// the controller was last started / stopped.
+			return app.StateDB.PutState("controller."+action, time.Now().UTC().Format(time.RFC3339))
 		},
 	}
+}
+
+func printDaemonBanner(cmd *cobra.Command, app *core.App) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Cenvero Fleet daemon listening for reverse agents on %s\n", app.Config.Runtime.ListenAddress)
+	fmt.Fprintf(out, "Cenvero Fleet local control listening on %s\n", app.Config.Runtime.ControlAddress)
+	if strings.TrimSpace(app.Config.Runtime.MetricsPollInterval) != "" {
+		fmt.Fprintf(out, "Cenvero Fleet metrics polling every %s\n", app.Config.Runtime.MetricsPollInterval)
+	}
+	if app.Config.Runtime.DesktopNotifications {
+		fmt.Fprintln(out, "Cenvero Fleet desktop notifications enabled")
+	}
+}
+
+// daemonStartOptions lets tests run a helper process instead of this binary.
+var daemonStartOptions = func(app *core.App) core.DaemonStartOptions {
+	return core.DaemonStartOptions{ConfigDir: app.ConfigDir, ControlAddress: app.Config.Runtime.ControlAddress}
+}
+
+func startDaemon(cmd *cobra.Command, app *core.App) error {
+	res, err := core.StartDaemon(daemonStartOptions(app))
+	if err != nil {
+		return err
+	}
+	if res.AlreadyRunning {
+		fmt.Fprintln(cmd.OutOrStdout(), res.State.Describe())
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "fleet daemon started (pid %d); logs: %s\n", res.PID, res.LogPath)
+	return nil
+}
+
+func stopDaemon(cmd *cobra.Command, app *core.App) error {
+	res, err := core.StopDaemon(app.ConfigDir, app.Config.Runtime.ControlAddress, core.DaemonStopTimeout)
+	if res.RemovedStalePIDFile {
+		fmt.Fprintf(cmd.ErrOrStderr(), "removed stale pid file %s\n", core.DaemonPIDPath(app.ConfigDir))
+	}
+	if err != nil {
+		return err
+	}
+	if !res.WasRunning {
+		fmt.Fprintln(cmd.OutOrStdout(), "fleet daemon is not running")
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "fleet daemon stopped (pid %d)\n", res.PID)
+	return nil
 }
 
 func newDashboardCommand(configDir *string) *cobra.Command {
@@ -2793,7 +2879,8 @@ func classifyAgentError(err error) string {
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "dial"), strings.Contains(s, "refused"), strings.Contains(s, "no route"),
-		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"):
+		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"),
+		strings.Contains(s, "daemon is not running"):
 		return "unreachable"
 	case strings.Contains(s, "auth"), strings.Contains(s, "unauthorized"), strings.Contains(s, "permission"),
 		strings.Contains(s, "host key"), strings.Contains(s, "handshake"):

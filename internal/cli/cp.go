@@ -54,7 +54,8 @@ func newCpCommand(configDir *string) *cobra.Command {
 			"itself; across servers the bytes stream through the controller chunk by chunk\n" +
 			"(no temp copy), so it works for every server mode and reuses the resumable,\n" +
 			"checksummed transfer engine. Agents older than this release are copied the\n" +
-			"previous way (download, then upload).\n\n" +
+			"previous way (download, then upload). Progress for a single file goes to stderr\n" +
+			"(a live bar on a terminal, JSON lines otherwise).\n\n" +
 			"Examples:\n" +
 			"  fleet cp web-01:/etc/hosts db-01:/tmp/hosts\n" +
 			"  fleet cp web-01:/srv/app   db-01:/srv/app -r",

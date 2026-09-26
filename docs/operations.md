@@ -2,6 +2,38 @@
 
 This guide covers the main day-to-day operator workflows in Cenvero Fleet.
 
+## Controller Daemon
+
+The controller daemon accepts reverse-mode agents, serves the loopback control socket that
+one-shot CLI commands use to reach them (and to reuse warm direct-mode connections), polls
+metrics and keeps the update check warm. Run it in the background or in the foreground:
+
+```bash
+fleet start     # launch it detached; waits until it is listening, then prints its pid
+fleet status    # "daemon": {"running": true, "pid": 12345, ...}
+fleet stop      # SIGTERM (Windows: terminate), wait up to 15s for it to exit
+fleet daemon    # run it in the foreground (for systemd, launchd, a container, or debugging)
+```
+
+- `fleet start` runs `fleet --config-dir <dir> daemon` in its own session with no terminal,
+  appends its output to `<config-dir>/logs/daemon.log` (`0600`), and waits up to 10 seconds for
+  it to accept connections on `runtime.control_address`. If the daemon exits during start-up
+  (for example because its port is taken) the command fails and prints the last lines of the
+  log. When a daemon is already running for the config dir it says so and exits 0. Your
+  `--token` / `FLEET_TOKEN` is not passed on to the daemon.
+- Every daemon, however it was started, records its pid in `<config-dir>/data/daemon.pid` and
+  holds a lock on `<config-dir>/data/daemon.lock` while it runs, so a second `fleet daemon` for
+  the same config dir is refused with a clear error, and a daemon started by a service manager
+  is visible to `fleet status` and stoppable with `fleet stop`.
+- `fleet stop` only signals the process that still holds the config dir's daemon lock (on Linux
+  it also checks `/proc/<pid>/cmdline`), so a stale pid file never leads to killing an unrelated
+  process; a stale pid file is removed and the command reports `fleet daemon is not running`.
+- The daemon exits cleanly on SIGINT (Ctrl-C) and SIGTERM, removing its pid file and
+  `data/control.token`. It prints its "listening on ..." lines only once its listeners are bound.
+- A daemon started by a release older than this one records no pid file: `fleet status` still
+  reports it as running when its control address answers, but `fleet stop` asks you to stop it
+  yourself.
+
 ## Servers
 
 Add, inspect, reconnect, or remove servers:
@@ -458,7 +490,7 @@ fleet job run web-01 "./long-import.sh" --name nightly-import   # optional --nam
 fleet jobs                                     # list tracked jobs (ID, NAME, server, status…)
 fleet job status <id>                          # detects completion + exit code
 fleet job logs   <id> --follow                 # stream captured output
-fleet job wait   <id> --timeout 30m            # block until it finishes
+fleet job wait   <id> --timeout 30m            # block until it finishes; exits 1 if the job failed
 ```
 
 The optional `--name` label is shown in the `NAME` column of `fleet jobs` so a long-running

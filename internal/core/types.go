@@ -108,6 +108,8 @@ type Status struct {
 	Policy          update.Policy     `json:"policy"`
 	DatabaseBackend store.Backend     `json:"database_backend"`
 	Fingerprints    map[string]string `json:"fingerprints"`
+	// Daemon is filled in by `fleet status` only.
+	Daemon *DaemonState `json:"daemon,omitempty"`
 }
 
 type DashboardSummary struct {

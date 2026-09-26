@@ -56,6 +56,8 @@ Each server is probed once and evaluated for:
   • clock-skew      the remote clock differs from the controller (>5s)
   • high-load       1-minute loadavg per CPU exceeds --load (default 1.0)
 
+A --group that matches no server is an error (exit 1), as with exec --group.
+
 Examples:
   fleet health
   fleet health --json
@@ -76,6 +78,11 @@ Examples:
 			servers, err := selectHealthServers(app, *configDir, group)
 			if err != nil {
 				return err
+			}
+			if len(servers) == 0 && strings.TrimSpace(group) != "" {
+				// Like `exec --group`: a filter that selects nothing is almost
+				// always a typo, and must not read as "all healthy" to a script.
+				return fmt.Errorf("no servers match --group %q", group)
 			}
 			if len(servers) == 0 {
 				if asJSON {

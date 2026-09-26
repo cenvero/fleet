@@ -176,15 +176,31 @@ func newCronRemoveCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
+// readCrontabCommand exits 127 when there is no crontab binary at all — which
+// `crontab -l ... || true` alone would mask as an empty crontab.
+const readCrontabCommand = "command -v crontab >/dev/null 2>&1 || exit 127; crontab -l 2>/dev/null || true"
+
 // readCrontab returns the server's current user crontab. A missing crontab
 // ("no crontab for <user>") is reported by `crontab -l` with a non-zero exit;
-// we treat that as an empty crontab rather than an error.
+// we treat that as an empty crontab rather than an error. A server without
+// the crontab command is an error: there is nothing fleet could manage.
 func readCrontab(app *core.App, server string) (string, error) {
-	result, err := app.ExecCommand(server, "crontab -l 2>/dev/null || true")
+	result, err := app.ExecCommand(server, readCrontabCommand)
 	if err != nil {
 		return "", err
 	}
-	return result.Stdout, nil
+	switch result.ExitCode {
+	case 0:
+		return result.Stdout, nil
+	case 127:
+		return "", fmt.Errorf("crontab is not installed on %s (install cron, e.g. the cron or cronie package)", server)
+	default:
+		msg := strings.TrimSpace(result.Stderr)
+		if msg == "" {
+			msg = strings.TrimSpace(result.Stdout)
+		}
+		return "", fmt.Errorf("read crontab on %s failed (exit %d): %s", server, result.ExitCode, msg)
+	}
 }
 
 // writeCrontab replaces the server's user crontab with content. An empty

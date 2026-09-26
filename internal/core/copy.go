@@ -111,7 +111,7 @@ func (a *App) copyOnServer(server ServerRecord, srcPath, dstPath string, progres
 		return res, true, fmt.Errorf("copy integrity check failed: agent returned no digest for %s", target)
 	}
 	if progress != nil {
-		total := max(res.Size*2, 1)
+		total := max(res.Size, 1)
 		progress(ProgressUpdate{BytesDone: total, TotalBytes: total, Done: true})
 	}
 	_ = a.AuditLog.Append(logs.AuditEntry{
@@ -158,10 +158,10 @@ func (a *App) relayCopy(src ServerRecord, srcPath string, dst ServerRecord, dstP
 	defer dstConn.closeFn()
 	srcConn.grow(streams)
 
-	total := size * 2
-	if total == 0 {
-		total = 1
-	}
+	// Progress counts each byte once, when it has been read from the source
+	// AND written to the destination, so a copy reports the file's own size
+	// (not the read plus the write).
+	total := max(size, 1)
 	r := &relay{
 		srcConn: srcConn, dstConn: dstConn, srcPath: srcPath, chunks: chunks, first: first, size: size,
 		mode: os.FileMode(stat.Entry.Mode).Perm(), progress: newProgressTracker(progress, total),
@@ -223,6 +223,10 @@ type relay struct {
 // run relays the file to target and returns the destination's finalize result
 // and the SHA-256 of the bytes relayed.
 func (r *relay) run(target string) (proto.FileFinalizeResult, string, error) {
+	// A retry into a directory starts the count over.
+	r.progress.mu.Lock()
+	r.progress.bytesDone = 0
+	r.progress.mu.Unlock()
 	if len(r.chunks) <= 1 && r.dstConn.supports(proto.CapabilityFilePut) {
 		res, sum, err := r.put(target)
 		if remoteErrorCode(err) != errCodeUnsupportedAction {
@@ -267,7 +271,6 @@ func (r *relay) put(target string) (proto.FileFinalizeResult, string, error) {
 		}
 		data, sum = res.Data, res.SHA256
 	}
-	r.progress.add(r.size)
 	env := proto.Envelope{Action: proto.ActionFilePut, Payload: &proto.FilePutPayload{
 		Path: target, Mode: uint32(r.mode), Data: data, SHA256: sum,
 	}}
@@ -278,6 +281,7 @@ func (r *relay) put(target string) (proto.FileFinalizeResult, string, error) {
 	if err != nil {
 		return proto.FileFinalizeResult{}, "", err
 	}
+	r.progress.add(r.size)
 	return res, sum, nil
 }
 
@@ -329,7 +333,7 @@ func (r *relay) chunked(target string) (proto.FileFinalizeResult, string, error)
 					return
 				}
 				digests[idx] = sum
-				r.progress.add(2 * r.chunks[idx].length)
+				r.progress.add(r.chunks[idx].length)
 				r.progress.emit(false, nil)
 				// Hash the relayed bytes in file order for the end-to-end
 				// check; a chunk waits here only for the chunks before it.

@@ -51,7 +51,7 @@ Typical registration and startup:
 
 ```bash
 fleet server add edge-01 unknown --mode reverse
-fleet daemon
+fleet start        # the controller daemon, in the background (or `fleet daemon` in the foreground)
 fleet-agent reverse --controller controller.example.net:9443 --server-name edge-01 --enroll-token <token>
 ```
 

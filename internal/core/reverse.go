@@ -969,6 +969,7 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	go a.runMetricsPoller(ctx)
 	go a.runUpdateChecker(ctx)
 	go a.runJobLogPruner(ctx)
+	notifyDaemonReady(ctx) // listeners are bound: see WithDaemonReady
 
 	select {
 	case <-ctx.Done():

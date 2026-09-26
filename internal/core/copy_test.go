@@ -4,9 +4,12 @@
 package core
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cenvero/fleet/internal/transport"
@@ -184,4 +187,94 @@ func TestCopyFileValidatesDestinationBeforeRelay(t *testing.T) {
 	if len(after) != len(before) {
 		t.Fatalf("relay files changed before destination validation: before=%v after=%v", before, after)
 	}
+}
+
+// progressLog records every progress update of one transfer.
+type progressLog struct {
+	mu      sync.Mutex
+	updates []ProgressUpdate
+}
+
+func (p *progressLog) add(u ProgressUpdate) {
+	p.mu.Lock()
+	p.updates = append(p.updates, u)
+	p.mu.Unlock()
+}
+
+// check fails unless every update is bounded by want and the last one is a
+// completed want/want.
+func (p *progressLog) check(t *testing.T, what string, want int64) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.updates) == 0 {
+		t.Fatalf("%s: no progress reported", what)
+	}
+	for _, u := range p.updates {
+		if u.TotalBytes != want || u.BytesDone > want {
+			t.Fatalf("%s: progress %d/%d; want at most %d/%d", what, u.BytesDone, u.TotalBytes, want, want)
+		}
+	}
+	if last := p.updates[len(p.updates)-1]; !last.Done || last.BytesDone != want {
+		t.Fatalf("%s: final progress %+v; want done at %d", what, last, want)
+	}
+}
+
+// TestCopyProgressReportsFileSizeOnce is the regression for server-to-server
+// copies reporting twice the file size (read + write) as their progress, so
+// a 95.4 MiB copy showed "190.7 MiB/190.7 MiB" and a doubled rate.
+func TestCopyProgressReportsFileSizeOnce(t *testing.T) {
+	t.Parallel()
+	rig := newTransferRig(t)
+	go func() {
+		for range rig.errCh {
+		}
+	}()
+	if err := rig.app.AddServer(ServerRecord{
+		Name: "loopback2", Address: "127.0.0.1", Port: 2222, Mode: transport.ModeDirect, User: "cenvero-agent",
+	}); err != nil {
+		t.Fatalf("AddServer loopback2: %v", err)
+	}
+	base := t.TempDir()
+	big := filepath.Join(base, "big.bin")
+	const bigSize = 300 << 10 // several 64 KiB chunks: the chunked relay
+	if err := os.WriteFile(big, bytes.Repeat([]byte("x"), bigSize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	small := filepath.Join(base, "small.txt")
+	if err := os.WriteFile(small, []byte("one chunk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := FileTransferOptions{ChunkSize: 64 << 10, Parallel: 3}
+
+	for _, tc := range []struct {
+		what, src, dstServer string
+		size                 int64
+	}{
+		{"chunked relay", big, "loopback2", bigSize},
+		{"single-request relay", small, "loopback2", int64(len("one chunk"))},
+		{"same-server copy", big, "loopback", bigSize},
+	} {
+		var log progressLog
+		dst := filepath.Join(base, strings.ReplaceAll(tc.what, " ", "-"))
+		if _, err := rig.app.CopyFile("loopback", tc.src, tc.dstServer, dst, opts, log.add); err != nil {
+			t.Fatalf("%s: %v", tc.what, err)
+		}
+		log.check(t, tc.what, tc.size)
+	}
+
+	tree := filepath.Join(base, "tree")
+	if err := os.MkdirAll(tree, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := os.WriteFile(filepath.Join(tree, fmt.Sprintf("f%d", i)), bytes.Repeat([]byte("y"), 100<<10), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var log progressLog
+	if _, err := rig.app.CopyDir("loopback", tree, "loopback2", filepath.Join(base, "tree-copy"), opts, log.add); err != nil {
+		t.Fatal(err)
+	}
+	log.check(t, "directory copy", 3*(100<<10))
 }
