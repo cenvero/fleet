@@ -34,7 +34,12 @@ func TestUpdateBatchRunsServersConcurrentlyInOrder(t *testing.T) {
 	}
 	defer app.Close()
 
-	var inflight, maxInflight atomic.Int32
+	var inflight, maxInflight, started atomic.Int32
+	// Rendezvous instead of a wall-clock bound: every call waits until a
+	// second one has started, so a sequential batch can never reach 2 in
+	// flight (it would wait out the timeout and fail the check below), while
+	// a concurrent one passes regardless of machine load.
+	secondStarted := make(chan struct{})
 	app.ReverseRPCContext = func(ctx context.Context, server string, env proto.Envelope) (proto.Envelope, error) {
 		cur := inflight.Add(1)
 		defer inflight.Add(-1)
@@ -43,6 +48,13 @@ func TestUpdateBatchRunsServersConcurrentlyInOrder(t *testing.T) {
 			if cur <= prev || maxInflight.CompareAndSwap(prev, cur) {
 				break
 			}
+		}
+		if started.Add(1) == 2 {
+			close(secondStarted)
+		}
+		select {
+		case <-secondStarted:
+		case <-time.After(10 * time.Second):
 		}
 		// Later servers finish first.
 		n := int(server[len(server)-1] - '0')
@@ -57,9 +69,7 @@ func TestUpdateBatchRunsServersConcurrentlyInOrder(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
-	start := time.Now()
 	_, err = updateBatch(cmd, app, servers)
-	elapsed := time.Since(start)
 	if err == nil || err.Error() != "1 server(s) failed: agent-4" {
 		t.Fatalf("updateBatch error = %v", err)
 	}
@@ -77,9 +87,5 @@ func TestUpdateBatchRunsServersConcurrentlyInOrder(t *testing.T) {
 	}
 	if got := maxInflight.Load(); got < 2 || got > agentUpdateParallelism {
 		t.Fatalf("max in flight = %d, want 2..%d", got, agentUpdateParallelism)
-	}
-	// Sequential would be 30*(6+5+4+3+2+1) = 630ms.
-	if elapsed > 450*time.Millisecond {
-		t.Fatalf("batch took %s", elapsed)
 	}
 }
