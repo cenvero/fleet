@@ -200,18 +200,28 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 		}
 		_ = pts.Close()
 
-		// Reap the process once it exits (keeps the PTY output loop from leaking).
-		go func() {
-			_ = cmd.Wait()
-		}()
-
-		return &persistentSession{
+		s := &persistentSession{
 			ptm:    ptm,
 			cmd:    cmd,
 			replay: &replayBuffer{},
 			done:   make(chan struct{}),
+			exited: make(chan struct{}),
 			grace:  grace,
-		}, nil
+		}
+		// Reap the process once it exits (keeps the PTY output loop from
+		// leaking) and keep its exit code for the exit-status reply.
+		go func() {
+			code := 0
+			if err := cmd.Wait(); err != nil {
+				code = -1
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					code = exitErr.ExitCode()
+				}
+			}
+			s.exitCode = code
+			close(s.exited)
+		}()
+		return s, nil
 	})
 	if err != nil {
 		sendExitStatus(channel, 1)
@@ -249,8 +259,8 @@ func runPersistentShell(channel ssh.Channel, requests <-chan *ssh.Request, shell
 	// Block until the shell exits or the channel disconnects.
 	select {
 	case <-session.done:
-		// Shell exited cleanly (user typed exit / process died).
-		sendExitStatus(channel, 0)
+		// Shell exited (user typed exit / process died): report its status.
+		sendExitStatus(channel, session.exitStatus(shellExitStatusWait))
 		_ = channel.CloseWrite()
 	case <-detached:
 		// Channel closed — network drop or deliberate disconnect.
