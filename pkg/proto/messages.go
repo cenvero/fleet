@@ -206,6 +206,20 @@ type MetricsPayload struct {
 type MetricsReplayResult struct {
 	BatchID   string            `json:"batch_id,omitempty"`
 	Snapshots []MetricsSnapshot `json:"snapshots"`
+	// More reports that the queue holds further snapshots after this batch.
+	// Only an agent that honoured MetricsPeekPayload.MaxSnapshots sets it; an
+	// older agent returns its whole queue and leaves it false.
+	More bool `json:"more,omitempty"`
+}
+
+// MetricsPeekPayload is the metrics.peek_queue request. MaxSnapshots asks the
+// agent for at most that many queued snapshots per batch so a long offline
+// backlog replays in pages, each persisted and acknowledged on its own. It is
+// a superset of MetricsPayload: an older agent ignores the field and answers
+// with its whole queue, which the controller still accepts.
+type MetricsPeekPayload struct {
+	Server       string `json:"server"`
+	MaxSnapshots int    `json:"max_snapshots,omitempty"`
 }
 
 type MetricsReplayAck struct {

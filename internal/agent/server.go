@@ -606,7 +606,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload:         snapshot,
 			})
 		case proto.ActionMetricsPeekQueue:
-			batch, err := s.metricsQueue().Peek()
+			batch, err := s.peekMetricsQueue(request.Payload)
 			if err != nil {
 				_ = encode(errorEnvelope(request, err))
 				continue
@@ -619,6 +619,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload: proto.MetricsReplayResult{
 					BatchID:   batch.ID,
 					Snapshots: batch.Snapshots,
+					More:      batch.More,
 				},
 			})
 		case proto.ActionMetricsAckQueue:
@@ -1021,13 +1022,20 @@ func handleFileRPC[T any, R any](encode func(proto.Envelope) error, request prot
 	_ = encode(response)
 }
 
+// controllerIDFromPayload extracts the controller_id a hello request carries.
+//
+// Payloads off the wire arrive as json.RawMessage (Envelope.UnmarshalJSON keeps
+// them raw), so a plain map[string]any assertion never matched and the echoed
+// ControllerID was always empty. DecodePayload handles the raw bytes as well as
+// an in-process map or struct.
 func controllerIDFromPayload(payload any) string {
-	payloadMap, ok := payload.(map[string]any)
-	if !ok {
+	decoded, err := proto.DecodePayload[struct {
+		ControllerID string `json:"controller_id"`
+	}](payload)
+	if err != nil {
 		return ""
 	}
-	controllerID, _ := payloadMap["controller_id"].(string)
-	return controllerID
+	return decoded.ControllerID
 }
 
 func loadAuthorizedKeys(path string) (map[string]struct{}, error) {

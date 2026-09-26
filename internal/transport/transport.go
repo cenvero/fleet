@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/cpu"
@@ -230,4 +231,41 @@ func (s *Session) OpenChannelSession() (*Session, error) {
 	}
 	child.SetCapabilities(s.capabilitiesSnapshot())
 	return child, nil
+}
+
+// OpenChannelSessionContext is OpenChannelSession with a bound: it gives up
+// after timeout (DefaultChannelOpenTimeout when zero) or when ctx ends. A
+// timeout (ErrChannelOpenTimeout) means the connection could not answer a
+// channel open and should be retired by its owner; ChannelOpenRejected(err)
+// means the peer answered and refused, so the connection itself is fine.
+func (s *Session) OpenChannelSessionContext(ctx context.Context, timeout time.Duration) (*Session, error) {
+	if s == nil || s.Client == nil {
+		return nil, fmt.Errorf("transport session has no ssh client")
+	}
+	channel, requests, err := OpenChannelTimeout(ctx, s.Client, RPCChannelType, nil, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("open extra %s channel: %w", RPCChannelType, err)
+	}
+	go ssh.DiscardRequests(requests)
+	child := &Session{
+		Mode:               s.Mode,
+		LocalAddr:          s.LocalAddr,
+		RemoteAddr:         s.RemoteAddr,
+		HostKeyFingerprint: s.HostKeyFingerprint,
+		Client:             s.Client,
+		Channel:            channel,
+		childOfClient:      true,
+	}
+	child.SetCapabilities(s.capabilitiesSnapshot())
+	return child, nil
+}
+
+// StartKeepalive probes the connection this session owns (see the package
+// function StartKeepalive). Child sessions share their parent's connection and
+// have nothing of their own to probe, so for them this is a no-op.
+func (s *Session) StartKeepalive(interval time.Duration, maxMissed int, onDead func()) (stop func()) {
+	if s == nil || s.Client == nil || s.childOfClient {
+		return func() {}
+	}
+	return StartKeepalive(s.Client, interval, maxMissed, onDead)
 }

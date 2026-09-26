@@ -355,3 +355,25 @@ func BenchmarkOpenExistingStore(b *testing.B) {
 		_ = st.Close()
 	}
 }
+
+// TestAppendMetricSnapshotsOnLazyStore: the reverse-mode replay batch insert
+// must connect a lazily opened store on first use instead of dereferencing a
+// not-yet-opened handle (it was written against eagerly opened stores).
+func TestAppendMetricSnapshotsOnLazyStore(t *testing.T) {
+	st, err := OpenLazy(DefaultDatabaseConfig(t.TempDir()), WorkloadMetrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	n, err := st.AppendMetricSnapshots("rev-01", []MetricSnapshotEntry{
+		{Timestamp: now.Add(-time.Minute), Payload: `{"a":1}`},
+		{Timestamp: now, Payload: `{"a":2}`},
+	}, `{"a":2}`)
+	if err != nil || n != 2 {
+		t.Fatalf("AppendMetricSnapshots on a fresh lazy store = %d, %v; want 2, nil", n, err)
+	}
+	if got, err := st.GetState("latest.rev-01"); err != nil || got != `{"a":2}` {
+		t.Fatalf("latest state = %q, %v", got, err)
+	}
+}
