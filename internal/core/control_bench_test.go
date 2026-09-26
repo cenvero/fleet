@@ -73,6 +73,9 @@ func fakeEchoAgent(ch *pipeChannel, readChunk []byte) {
 	}
 }
 
+// benchControlToken is shaped like a current daemon's token (mutual-auth prefix).
+const benchControlToken = controlTokenMutualAuthPrefix + "bench-control-token"
+
 // controlBenchFleet runs a ReverseHub with a live control socket and one
 // registered reverse "agent" answered by fakeEchoAgent.
 func controlBenchFleet(tb testing.TB, readChunk []byte) (*App, *ReverseHub) {
@@ -81,7 +84,7 @@ func controlBenchFleet(tb testing.TB, readChunk []byte) (*App, *ReverseHub) {
 	if err := os.MkdirAll(filepath.Join(configDir, "data"), 0o700); err != nil {
 		tb.Fatal(err)
 	}
-	const token = "bench-control-token"
+	const token = benchControlToken
 	if err := os.WriteFile(filepath.Join(configDir, "data", "control.token"), []byte(token), 0o600); err != nil {
 		tb.Fatal(err)
 	}

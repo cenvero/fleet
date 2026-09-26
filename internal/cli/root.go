@@ -3592,8 +3592,15 @@ func newSSHCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer app.Close()
-			return app.RunSSHSession(args[0], cmd.OutOrStdout())
+			err = app.RunSSHSession(args[0], cmd.OutOrStdout())
+			_ = app.Close()
+			// Exit with the remote shell's status, as ssh(1) does.
+			var exitErr *core.RemoteExitError
+			if errors.As(err, &exitErr) {
+				exitProcess(exitErr.Code)
+				return nil
+			}
+			return err
 		},
 	}
 }

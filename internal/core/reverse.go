@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
@@ -233,6 +235,16 @@ type ReverseHub struct {
 	controlWaiters chan struct{}
 	// controlCalls bounds authenticated control calls in progress.
 	controlCalls chan struct{}
+
+	// bg tracks the goroutines a registered session leaves behind (clearing
+	// it when its connection ends, replaying its metrics backlog). They write
+	// the server record and the audit log, so Close waits for them: before,
+	// they could still be writing after the hub and the App were closed and
+	// the config directory was gone. bgClosed, under bgMu, stops new ones
+	// from starting once Close has begun.
+	bgMu     sync.Mutex
+	bgClosed bool
+	bg       sync.WaitGroup
 }
 
 // reverseControlRequest is the JSON wrapper a CLI process sends over the local
@@ -246,15 +258,20 @@ type ReverseHub struct {
 // transfer against a binary-frame-capable agent ships chunks with no bytes.
 //
 // That field is base64 inside JSON, which costs ~30 ms and ~17 MB of garbage
-// per 2 MiB chunk on each side. A daemon that advertises controlCapBinaryFrame
-// (in reply to a "hello") also accepts the "call.framed" request type, where
-// BinaryLength announces that the attachment follows the JSON line as raw
-// bytes; and a caller that lists controlCapBinaryFrame in Accept gets the
-// response's attachment the same way. Older daemons ignore Accept and reject
-// the unknown type before doing anything, so both directions fall back to the
-// original encoding.
+// per 2 MiB chunk on each side. On a mutually authenticated connection, a
+// daemon that advertises controlCapBinaryFrame in its auth challenge also
+// accepts the "call.framed" request type, where BinaryLength announces that
+// the attachment follows the JSON line as raw bytes; and a caller that lists
+// controlCapBinaryFrame in Accept gets the response's attachment the same way.
+// Legacy (raw-token) requests keep the original base64 encoding both ways.
 type reverseControlRequest struct {
-	Token          string         `json:"token"`
+	// ClientProof replaces Token on a mutually authenticated connection (see
+	// reverse_control.go). It is the first member so the daemon can check it
+	// before reading the rest of the request.
+	ClientProof string `json:"client_proof,omitempty"`
+	// Token is the legacy credential: a caller from before mutual
+	// authentication sends it as the first member.
+	Token          string         `json:"token,omitempty"`
 	Type           string         `json:"type"`
 	Server         string         `json:"server"`
 	Envelope       proto.Envelope `json:"envelope,omitempty"`
@@ -506,13 +523,19 @@ func (h *ReverseHub) serveConnAfterAuth(rawConn net.Conn, authenticated func()) 
 		// (power loss, a NAT dropping state) is cleared within about a minute.
 		// Closing the connection ends Wait below, which clears the session.
 		stopKeepalive := transport.StartKeepalive(conn, reverseKeepaliveInterval, reverseKeepaliveMaxMissed, nil)
-		go func(name string, session *transport.Session, sshConn *ssh.ServerConn) {
+		name, sshConn, capabilities := serverName, conn, hello.Capabilities
+		if !h.goTracked(func() {
 			_ = sshConn.Wait()
 			stopKeepalive()
 			h.clearSession(name, "", session)
-		}(serverName, session, conn)
-
-		go h.replayAfterConnect(serverName, session, hello.Capabilities)
+		}) {
+			// The hub closed while this connection was being set up: drop it
+			// here rather than leave a session nobody will clean up.
+			stopKeepalive()
+			h.clearSession(name, "hub closed", session)
+			return nil
+		}
+		h.goTracked(func() { h.replayAfterConnect(name, session, capabilities) })
 	}
 	return nil
 }
@@ -637,9 +660,14 @@ func (h *ReverseHub) Disconnect(server string) error {
 	return current.session.Close()
 }
 
+// Close disconnects every agent and returns once the goroutines those
+// sessions started have finished, so nothing writes to the App afterwards.
 func (h *ReverseHub) Close() {
+	h.bgMu.Lock()
+	h.bgClosed = true
+	h.bgMu.Unlock()
+
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	for name, session := range h.sessions {
 		session.closeExtraChannels()
 		if session.session != nil {
@@ -647,6 +675,26 @@ func (h *ReverseHub) Close() {
 		}
 		delete(h.sessions, name)
 	}
+	h.mu.Unlock()
+	// Closing each connection ends its Wait, so this does not block on a
+	// live agent; it waits only for writes already under way.
+	h.bg.Wait()
+}
+
+// goTracked runs fn on its own goroutine and makes Close wait for it. Once
+// Close has begun it runs nothing and reports false.
+func (h *ReverseHub) goTracked(fn func()) bool {
+	h.bgMu.Lock()
+	defer h.bgMu.Unlock()
+	if h.bgClosed {
+		return false
+	}
+	h.bg.Add(1)
+	go func() {
+		defer h.bg.Done()
+		fn()
+	}()
+	return true
 }
 
 func (h *ReverseHub) authorizeAgent(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
@@ -845,7 +893,11 @@ func (a *App) generateControlToken() (string, error) {
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate control token: %w", err)
 	}
-	token := hex.EncodeToString(raw)
+	// The prefix tells callers that this daemon performs mutual
+	// authentication, so they never fall back to presenting the token in the
+	// clear to whatever answers on the control address. Callers from before
+	// that treat the whole string as an opaque token, as they always have.
+	token := controlTokenMutualAuthPrefix + hex.EncodeToString(raw)
 	tokenPath := a.controlTokenPath()
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o750); err != nil {
 		return "", fmt.Errorf("create data dir for control token: %w", err)
@@ -893,10 +945,19 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	}
 	defer controlListener.Close()
 
+	// Shut down cleanly on SIGTERM (service managers) as well as the
+	// caller's own cancellation, so the token file below is removed.
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGTERM)
+	defer stopSignals()
+
 	controlToken, err := a.generateControlToken()
 	if err != nil {
 		return err
 	}
+	// Remove the token when the daemon stops. A token left behind is what a
+	// process later listening on the control address would be handed by
+	// callers that still speak the legacy protocol.
+	defer a.removeControlTokenIfOwned(controlToken)
 
 	hub := NewReverseHub(a, controlToken)
 	a.useHubInProcess(hub)
