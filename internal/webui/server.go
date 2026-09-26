@@ -24,7 +24,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -42,8 +41,13 @@ type Server struct {
 	app   *core.App
 	token string
 	hub   *progressHub
+	// files is the remote read surface used for streaming downloads and
+	// previews (the App itself outside tests).
+	files remoteFiles
 	// localGuard keeps the Local source out of the controller's config dir.
 	localGuard localGuard
+	// operator is the audit attribution for actions the UI records itself.
+	operator string
 }
 
 // New builds a web UI server with a fresh random session token.
@@ -54,6 +58,7 @@ func New(app *core.App) (*Server, error) {
 	}
 	s := &Server{app: app, token: token, hub: newProgressHub()}
 	if app != nil {
+		s.files = app
 		s.localGuard = newLocalGuard(app.ConfigDir)
 	}
 	return s, nil
@@ -61,6 +66,10 @@ func New(app *core.App) (*Server, error) {
 
 // Token returns the per-process access token.
 func (s *Server) Token() string { return s.token }
+
+// SetOperator sets the audit-log operator label (e.g. "token:<name>") used for
+// entries the web UI writes itself.
+func (s *Server) SetOperator(op string) { s.operator = strings.TrimSpace(op) }
 
 // ListenAndServe binds addr (must be loopback) and serves until ctx is done.
 // It prints the access URL (with token) once. If addr is empty, DefaultAddr.
@@ -115,7 +124,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/formats", s.guard(s.handleFormats))
 	mux.HandleFunc("/api/list", s.guard(s.handleList))
 	mux.HandleFunc("/api/upload", s.guard(s.handleUpload))
-	mux.HandleFunc("/api/download", s.guard(s.handleDownload))
+	mux.HandleFunc("/api/download", s.guard(getOnly(s.handleDownload)))
 	mux.HandleFunc("/api/read", s.guard(s.handleRead))
 	mux.HandleFunc("/api/checksum", s.guard(s.handleChecksum))
 	mux.HandleFunc("/api/progress", s.guard(s.handleProgress))
@@ -881,66 +890,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		s.hub.finish(id, err)
 	}()
 	writeJSON(w, map[string]string{"id": id, "remote_path": remotePath})
-}
-
-func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	server := r.URL.Query().Get("server")
-	remotePath := r.URL.Query().Get("path")
-	if remotePath == "" {
-		http.Error(w, "path is required", http.StatusBadRequest)
-		return
-	}
-	if server == "" { // Local: stream the controller's file directly.
-		clean, err := s.cleanLocal(remotePath)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		info, err := os.Stat(clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if info.IsDir() {
-			writeError(w, fmt.Errorf("cannot download a directory"))
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(clean)))
-		http.ServeFile(w, r, clean) // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
-		return
-	}
-	style, err := s.targetPathStyle(server)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	tmp, err := os.CreateTemp("", "fleet-webui-download-*")
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := s.app.DownloadFile(server, remotePath, tmpPath, core.FileTransferOptions{}, nil); err != nil {
-		writeError(w, err)
-		return
-	}
-	f, err := os.Open(tmpPath) // #nosec G304 -- temporary path was returned by os.CreateTemp and is controller-owned
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer f.Close()
-	info, _ := f.Stat()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", style.Base(remotePath)))
-	if info != nil {
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	}
-	_, _ = io.Copy(w, f)
 }
 
 // looksBinary reports whether b appears to be binary (and thus not safe to show
