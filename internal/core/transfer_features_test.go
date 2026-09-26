@@ -401,6 +401,22 @@ func TestControllerRejectsDotDotPathsBeforeConnecting(t *testing.T) {
 			_, err := rig.app.CopyFile("loopback", src, "loopback", escape+"/f", FileTransferOptions{}, nil)
 			return err
 		},
+		"move dir source": func() error {
+			_, err := rig.app.MoveDir("loopback", escape, "loopback", filepath.Join(base, "moved"), FileTransferOptions{}, nil)
+			return err
+		},
+		"move file source": func() error {
+			return rig.app.MoveFile("loopback", escape+"/keep.txt", "loopback", filepath.Join(base, "m.txt"), FileTransferOptions{}, nil)
+		},
+		// A sync mirror deletes replica extras: a ".." remote dir must be refused
+		// before anything is scanned, copied or deleted (QA B1: it mirrored into
+		// and pruned the parent directory).
+		"sync push": func() error {
+			return rig.app.SyncDir(context.Background(), "loopback", filepath.Join(base, "a"), escape, SyncOptions{}, nil)
+		},
+		"sync pull": func() error {
+			return rig.app.SyncDir(context.Background(), "loopback", filepath.Join(base, "pull"), escape, SyncOptions{From: SyncFromRemote}, nil)
+		},
 	} {
 		if err := run(); err == nil || !strings.Contains(err.Error(), `".." components`) {
 			t.Fatalf("%s with a .. path: err = %v", name, err)

@@ -122,6 +122,12 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 		return err
 	}
 	style := TargetPathStyleForServer(server)
+	// Refuse "." and ".." BEFORE cleaning: a mirror deletes replica extras, so
+	// `…/files/x/..` must be an error, never a quiet mirror of the parent. (The
+	// agent refuses such paths too, but only sees the cleaned path from here.)
+	if err := rejectDotComponents(style, remoteDir); err != nil {
+		return err
+	}
 	localDir = filepath.Clean(localDir)
 	remoteDir = style.Clean(remoteDir)
 	interval := opts.Interval

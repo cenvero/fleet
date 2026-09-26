@@ -504,6 +504,9 @@ func (a *App) CopyDir(srcServer, srcPath, dstServer, dstPath string, opts FileTr
 // MoveFile moves a file between servers. Within one server it is an efficient
 // rename; across servers it is copy-then-delete-source.
 func (a *App) MoveFile(srcServer, srcPath, dstServer, dstPath string, opts FileTransferOptions, progress ProgressFunc) error {
+	if err := a.rejectRemoteDotPath(srcServer, srcPath); err != nil {
+		return err
+	}
 	if srcServer == dstServer {
 		return a.RemoteRename(srcServer, srcPath, dstPath)
 	}
@@ -520,6 +523,11 @@ func (a *App) MoveFile(srcServer, srcPath, dstServer, dstPath string, opts FileT
 // MoveDir moves a directory tree between servers (rename within one server,
 // otherwise copy-then-recursive-delete). Returns files moved (0 for a rename).
 func (a *App) MoveDir(srcServer, srcPath, dstServer, dstPath string, opts FileTransferOptions, progress ProgressFunc) (int, error) {
+	// Check the source before copying anything: its removal is refused by the
+	// agent anyway, but only after the whole resolved tree was copied.
+	if err := a.rejectRemoteDotPath(srcServer, srcPath); err != nil {
+		return 0, err
+	}
 	if srcServer == dstServer {
 		return 0, a.RemoteRename(srcServer, srcPath, dstPath)
 	}
@@ -532,6 +540,15 @@ func (a *App) MoveDir(srcServer, srcPath, dstServer, dstPath string, opts FileTr
 	}
 	a.auditMove(srcServer, srcPath, dstServer, dstPath)
 	return n, nil
+}
+
+// rejectRemoteDotPath applies rejectDotComponents with serverName's path style.
+func (a *App) rejectRemoteDotPath(serverName, p string) error {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return err
+	}
+	return rejectDotComponents(TargetPathStyleForServer(server), p)
 }
 
 func (a *App) auditMove(srcServer, srcPath, dstServer, dstPath string) {
