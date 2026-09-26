@@ -24,6 +24,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/store"
@@ -88,6 +89,10 @@ func NewRootCommand() *cobra.Command {
 			return cmd.Help()
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Flags and arguments have been validated by now, so any error from
+			// here on is a runtime failure (a server that doesn't exist, a
+			// refused connection): report it without dumping the usage block.
+			cmd.SilenceUsage = true
 			configDir = core.ResolveConfigDir(configDir)
 			// Commands that are always allowed before init
 			switch cmd.Name() {
@@ -138,7 +143,7 @@ func NewRootCommand() *cobra.Command {
 				os.Exit(1)
 			}
 			// Check for pending config migrations and show a one-line hint.
-			if cfg, err := core.LoadConfig(core.ConfigPath(configDir)); err == nil {
+			if cfg, err := core.LoadConfigShared(core.ConfigPath(configDir)); err == nil {
 				if hint := core.AdjustInitHint(cfg); hint != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
 				}
@@ -165,6 +170,11 @@ func NewRootCommand() *cobra.Command {
 			// scoped token can resolve servers/groups), if a token is presented,
 			// load it and authorize this invocation against its scope.
 			return enforceToken(cmd, configDir, tokenID)
+		},
+		// Runs only after a command's RunE succeeded (cobra skips it on error).
+		PersistentPostRunE: func(cmd *cobra.Command, _ []string) error {
+			notifyDestructiveOperation(cmd, configDir)
+			return nil
 		},
 	}
 
@@ -203,6 +213,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newAdjustInitCommand(&configDir))
 	root.AddCommand(newSelfUninstallCommand(&configDir))
 	root.AddCommand(newReportCommand())
+	root.AddCommand(newVersionCommand())
 	root.AddCommand(newContextCommand())
 	root.AddCommand(newAutomationCommand(&configDir))
 	root.AddCommand(newShellInitCommand())
@@ -237,7 +248,57 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newApproveCommand(&configDir))
 	root.AddCommand(newAICommand())
 	root.AddCommand(newSkillCommand())
+	installUnknownSubcommandCheck(root)
 	return root
+}
+
+// installUnknownSubcommandCheck makes a mistyped subcommand of a command group
+// (`fleet server lst`, `fleet key lsit`) an error with suggestions and exit 1.
+// Cobra shows the group's help for it and exits 0 — the same as a successful
+// command — because a group without a Run of its own only ever returns help, so
+// a typo in a script or an AI agent's call silently "succeeded".
+func installUnknownSubcommandCheck(root *cobra.Command) {
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if c.HasSubCommands() && !c.Runnable() {
+			if extra := c.Flags().Args(); len(extra) > 0 {
+				writeUnknownSubcommand(c, extra[0])
+				exitProcess(1)
+				return
+			}
+		}
+		defaultHelp(c, args)
+	})
+}
+
+// writeUnknownSubcommand prints cobra's own unknown-command wording, with
+// suggestions, to stderr.
+func writeUnknownSubcommand(c *cobra.Command, name string) {
+	fmt.Fprintf(c.ErrOrStderr(), "Error: %s\n", unknownSubcommandMessage(c, name))
+}
+
+// unknownSubcommandMessage words an unknown subcommand the way cobra does for
+// the root command: the error, any close matches, and where to find usage.
+func unknownSubcommandMessage(c *cobra.Command, name string) string {
+	if c.SuggestionsMinimumDistance <= 0 {
+		c.SuggestionsMinimumDistance = 2
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", name, c.CommandPath())
+	if suggestions := c.SuggestionsFor(name); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return msg + fmt.Sprintf("\n\nRun '%s --help' for usage.", c.CommandPath())
+}
+
+// noUnknownSubcommand is the Args validator for a command group that also runs
+// on its own and takes no arguments (`fleet approvals`, `fleet alerts`): a stray
+// word is a mistyped subcommand, so it fails (exit 1) instead of being ignored.
+func noUnknownSubcommand(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	cmd.SilenceUsage = true
+	return errors.New(unknownSubcommandMessage(cmd, args[0]))
 }
 
 // resolveTokenID returns the presented RBAC token id, mirroring enforceToken:
@@ -372,6 +433,15 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		case top == "cmd-policy" && sub == "set":
 			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'cmd-policy set'")
 			AuditDeniedHardExit(configDir, token.Name, "cmd-policy set (scoped token may not change cmd-policy)")
+			os.Exit(1)
+		case top == "approve":
+			// The approval queue is a human sign-off gate: a constrained credential
+			// (typically an AI agent) that staged a command must not be able to
+			// approve — and thereby run — it itself. (The RBAC v1 backstop below
+			// denies it too; this states the rule explicitly and survives any
+			// future widening of scopedLocalCommands.)
+			fmt.Fprintln(cmd.ErrOrStderr(), "denied: a scoped token cannot run 'approve' (approvals need an operator)")
+			AuditDeniedHardExit(configDir, token.Name, "approve (scoped token may not approve staged commands)")
 			os.Exit(1)
 		case top == "token":
 			// Any token mutation beyond create/revoke (already handled above).
@@ -740,15 +810,49 @@ func newStatusCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			daemon := core.DaemonStatus(app.ConfigDir, app.Config.Runtime.ControlAddress)
+			status.Daemon = &daemon
 			return writeJSON(cmd, status)
 		},
 	}
 }
 
+// lifecycleHelp is the Long help of `fleet start`, `fleet stop` and `fleet daemon`.
+var lifecycleHelp = map[string]string{
+	"start": "Start the controller daemon in the background, detached from the terminal.\n\n" +
+		"Runs `fleet --config-dir <dir> daemon` with its output appended to\n" +
+		"<config-dir>/logs/daemon.log and its pid recorded in <config-dir>/data/daemon.pid,\n" +
+		"then waits until it accepts connections on runtime.control_address. If a daemon\n" +
+		"for this config dir is already running this says so and exits 0. Your --token /\n" +
+		"FLEET_TOKEN is not passed on to the daemon.",
+	"stop": "Stop the controller daemon for this config dir.\n\n" +
+		"Sends SIGTERM (Windows: terminates the process) to the daemon named in\n" +
+		"<config-dir>/data/daemon.pid — only if that process still holds the config dir's\n" +
+		"daemon lock — and waits up to 15s for it to exit. Exits 0 with \"fleet daemon is\n" +
+		"not running\" when there is nothing to stop, removing a stale pid file.",
+	"daemon": "Run the controller daemon in the foreground: it accepts reverse-mode agents on\n" +
+		"runtime.listen_address, serves local control requests on runtime.control_address,\n" +
+		"polls metrics, and checks for updates. It records its pid in\n" +
+		"<config-dir>/data/daemon.pid, refuses to start while another daemon runs for the\n" +
+		"same config dir, and exits cleanly on SIGINT or SIGTERM. Use `fleet start` to run\n" +
+		"it in the background, or a service manager (systemd, launchd) to supervise it.",
+}
+
 func newLifecycleCommand(action string, configDir *string) *cobra.Command {
+	short := titleAction(action) + " the controller runtime"
+	switch action {
+	case "start":
+		short = "Start the controller daemon in the background"
+	case "stop":
+		short = "Stop the background controller daemon"
+	case "daemon":
+		short = "Run the controller daemon in the foreground"
+	}
 	return &cobra.Command{
 		Use:   action,
-		Short: titleAction(action) + " the controller runtime",
+		Short: short,
+		Long:  lifecycleHelp[action],
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -758,24 +862,76 @@ func newLifecycleCommand(action string, configDir *string) *cobra.Command {
 			if action == "daemon" {
 				ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 				defer stop()
-				fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet daemon listening for reverse agents on %s\n", app.Config.Runtime.ListenAddress)
-				fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet local control listening on %s\n", app.Config.Runtime.ControlAddress)
-				if strings.TrimSpace(app.Config.Runtime.MetricsPollInterval) != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet metrics polling every %s\n", app.Config.Runtime.MetricsPollInterval)
+				instance, err := core.ClaimDaemon(app.ConfigDir)
+				if err != nil {
+					return err
 				}
-				if app.Config.Runtime.DesktopNotifications {
-					fmt.Fprintln(cmd.OutOrStdout(), "Cenvero Fleet desktop notifications enabled")
-				}
+				defer instance.Release()
+				// Announce the listeners only once they are bound, so a
+				// daemon that cannot bind never claims to be listening.
+				ctx = core.WithDaemonReady(ctx, func() { printDaemonBanner(cmd, app) })
 				return app.RunDaemon(ctx)
 			}
-			now := time.Now().UTC().Format(time.RFC3339)
-			if err := app.StateDB.PutState("controller."+action, now); err != nil {
+			switch action {
+			case "start":
+				err = startDaemon(cmd, app)
+			case "stop":
+				err = stopDaemon(cmd, app)
+			}
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "controller %s state recorded at %s\n", action, now)
-			return nil
+			// Kept for compatibility: the state DB has always recorded when
+			// the controller was last started / stopped.
+			return app.StateDB.PutState("controller."+action, time.Now().UTC().Format(time.RFC3339))
 		},
 	}
+}
+
+func printDaemonBanner(cmd *cobra.Command, app *core.App) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Cenvero Fleet daemon listening for reverse agents on %s\n", app.Config.Runtime.ListenAddress)
+	fmt.Fprintf(out, "Cenvero Fleet local control listening on %s\n", app.Config.Runtime.ControlAddress)
+	if strings.TrimSpace(app.Config.Runtime.MetricsPollInterval) != "" {
+		fmt.Fprintf(out, "Cenvero Fleet metrics polling every %s\n", app.Config.Runtime.MetricsPollInterval)
+	}
+	if app.Config.Runtime.DesktopNotifications {
+		fmt.Fprintln(out, "Cenvero Fleet desktop notifications enabled")
+	}
+}
+
+// daemonStartOptions lets tests run a helper process instead of this binary.
+var daemonStartOptions = func(app *core.App) core.DaemonStartOptions {
+	return core.DaemonStartOptions{ConfigDir: app.ConfigDir, ControlAddress: app.Config.Runtime.ControlAddress}
+}
+
+func startDaemon(cmd *cobra.Command, app *core.App) error {
+	res, err := core.StartDaemon(daemonStartOptions(app))
+	if err != nil {
+		return err
+	}
+	if res.AlreadyRunning {
+		fmt.Fprintln(cmd.OutOrStdout(), res.State.Describe())
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "fleet daemon started (pid %d); logs: %s\n", res.PID, res.LogPath)
+	return nil
+}
+
+func stopDaemon(cmd *cobra.Command, app *core.App) error {
+	res, err := core.StopDaemon(app.ConfigDir, app.Config.Runtime.ControlAddress, core.DaemonStopTimeout)
+	if res.RemovedStalePIDFile {
+		fmt.Fprintf(cmd.ErrOrStderr(), "removed stale pid file %s\n", core.DaemonPIDPath(app.ConfigDir))
+	}
+	if err != nil {
+		return err
+	}
+	if !res.WasRunning {
+		fmt.Fprintln(cmd.OutOrStdout(), "fleet daemon is not running")
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "fleet daemon stopped (pid %d)\n", res.PID)
+	return nil
 }
 
 func newDashboardCommand(configDir *string) *cobra.Command {
@@ -783,7 +939,8 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 		Use:   "dashboard",
 		Short: "Launch the terminal dashboard",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return tui.RunDashboard(*configDir)
+			// Dashboard actions re-run this binary; hand them the verified token.
+			return tui.RunDashboardWithOptions(tui.DashboardOptions{ConfigDir: *configDir, Token: resolveTokenID(cmd)})
 		},
 	}
 }
@@ -796,7 +953,7 @@ func newFilesCommand(configDir *string) *cobra.Command {
 			"pane has a source: the local filesystem (\"Local\") or a managed server, so you\n" +
 			"can browse and transfer local↔server AND server↔server.\n\n" +
 			"  fleet files          Local on the left, the first server on the right\n" +
-			"  fleet files a        server 'a' on the left, Local on the right\n" +
+			"  fleet files a        Local on the left, server 'a' on the right\n" +
 			"  fleet files a b      server 'a' on the left, server 'b' on the right\n\n" +
 			"Single-click selects, double-click / Enter / → opens a folder, ← goes up.\n" +
 			"Drag between panes to copy or move (Finder-style menu), right-click for a\n" +
@@ -852,6 +1009,17 @@ func newUICommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The UI acts with the authority of this invocation. When it was
+			// launched under an RBAC token (already vetted for `file ui` by the
+			// pre-run gate), the extra read-only views it offers — the Fleet
+			// overview's server list, alerts and tags — are held to the same
+			// token, exactly as `server list` / `alerts` / `tag` would be.
+			if actingOperator != "" {
+				srv.SetOperator(actingOperator)
+			}
+			if authz := uiCommandAuthorizer(cmd, *configDir); authz != nil {
+				srv.SetCommandAuthorizer(authz)
+			}
 			// Decide whether to open the browser BEFORE installing the signal
 			// handler, so Ctrl-C during the prompt still quits normally.
 			shouldOpen := decideOpenBrowser(cmd, open)
@@ -874,6 +1042,49 @@ func newUICommand(configDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&addr, "addr", webui.DefaultAddr, "loopback bind address for the web UI")
 	cmd.Flags().StringVar(&open, "open", "auto", "open the web UI in a browser: auto (prompt when interactive), yes, or no")
 	return cmd
+}
+
+// uiCommandAuthorizer returns an RBAC check bound to the --token / FLEET_TOKEN
+// the web UI was launched with, or nil for an unscoped invocation. A token
+// that can no longer be loaded denies everything (fail closed).
+func uiCommandAuthorizer(cmd *cobra.Command, configDir string) func(command string) error {
+	tokenID := ""
+	if f := cmd.Flags().Lookup("token"); f != nil {
+		tokenID = strings.TrimSpace(f.Value.String())
+	}
+	if tokenID == "" {
+		tokenID = strings.TrimSpace(os.Getenv("FLEET_TOKEN"))
+	}
+	if tokenID == "" {
+		return nil
+	}
+	return func(command string) error {
+		token, err := core.NewTokenStore(configDir).Get(tokenID)
+		if err != nil {
+			return fmt.Errorf("denied: unknown or revoked token")
+		}
+		// Every read the web UI authorizes here is fleet-wide (the overview
+		// lists every server, alert and tag). core.Authorize only enforces a
+		// server scope when a target server is named, so a server-scoped token
+		// is refused outright, as the CLI refuses it an untargeted `server
+		// list` or a fleet-wide `top`/`health`. (Such a token cannot start the
+		// UI today; this keeps the overview closed if that ever changes.)
+		if len(token.Servers) > 0 || len(token.Groups) > 0 {
+			return fmt.Errorf("denied: a server-scoped token cannot read the fleet-wide %q view", command)
+		}
+		var names []string
+		if len(token.Groups) > 0 {
+			if app, aerr := openApp(configDir); aerr == nil {
+				if servers, serr := app.ListServers(); serr == nil {
+					for _, s := range servers {
+						names = append(names, s.Name)
+					}
+				}
+				_ = app.Close()
+			}
+		}
+		return core.Authorize(token, command, "", false, names, core.NewTagStore(configDir))
+	}
 }
 
 // decideOpenBrowser resolves the --open flag: "yes"/"no" are explicit; "auto"
@@ -1751,17 +1962,21 @@ func newAlertsCommand(configDir *string) *cobra.Command {
 	alertsCmd := &cobra.Command{
 		Use:   "alerts",
 		Short: "List alerts",
+		Args:  noUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
 			}
 			defer app.Close()
-			alerts, err := app.ListAlerts(server, severity)
+			list, err := app.ListAlerts(server, severity)
 			if err != nil {
 				return err
 			}
-			return writeJSON(cmd, alerts)
+			if list == nil {
+				list = []alerts.Alert{} // `[]`, not `null`, when there are none
+			}
+			return writeJSON(cmd, list)
 		},
 	}
 	alertsCmd.Flags().StringVar(&severity, "severity", "", "filter by severity")
@@ -1865,9 +2080,10 @@ func newConfigCommand(configDir *string) *cobra.Command {
 	})
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "edit",
-		Short: "Open the configuration in $EDITOR",
+		Short: "Open the configuration in $EDITOR (saved only if it is valid)",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return openInEditor(cmd, *configDir, core.ConfigPath(*configDir))
+			return runConfigEdit(cmd, *configDir)
 		},
 	})
 	configCmd.AddCommand(&cobra.Command{
@@ -2294,7 +2510,11 @@ func newUpdateCommand(configDir *string) *cobra.Command {
 				}
 				return fmt.Errorf("update channel not configurable for %s installs", manager.DisplayName())
 			}
-			return app.UpdateChannel(args[0])
+			if err := app.UpdateChannel(args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "update channel set to %s\n", app.Config.Updates.Channel)
+			return nil
 		},
 	})
 	return updateCmd
@@ -2483,6 +2703,30 @@ Run 'fleet server remove <name>' first if you want to tear those down.`,
 	return cmd
 }
 
+// newVersionCommand is `fleet version`, the spelled-out form of `fleet --version`
+// that scripts, bug reports and AI agents reach for first.
+func newVersionCommand() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the fleet controller version",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if asJSON {
+				return writeJSON(cmd, map[string]string{
+					"version": version.Version,
+					"os":      runtime.GOOS,
+					"arch":    runtime.GOARCH,
+				})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet %s (%s)\n", version.Version, goRuntimeInfo())
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the version as JSON")
+	return cmd
+}
+
 func newReportCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "report",
@@ -2495,10 +2739,10 @@ func newReportCommand() *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), "  Docs           https://fleet.cenvero.org/docs")
 			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "When reporting, please include:")
-			fmt.Fprintf(cmd.OutOrStdout(), "  • Fleet version  fleet version\n")
+			fmt.Fprintf(cmd.OutOrStdout(), "  • Fleet version  %s\n", version.Version)
 			fmt.Fprintf(cmd.OutOrStdout(), "  • OS and arch    %s\n", goRuntimeInfo())
 			fmt.Fprintln(cmd.OutOrStdout(), "  • Steps to reproduce the issue")
-			fmt.Fprintln(cmd.OutOrStdout(), "  • Relevant logs  fleet logs audit")
+			fmt.Fprintln(cmd.OutOrStdout(), "  • Relevant logs  fleet logs (audit log), fleet logs --server <name> --service <svc>")
 			return nil
 		},
 	}
@@ -2517,8 +2761,15 @@ func openApp(configDir string) (*core.App, error) {
 	if app != nil && actingOperator != "" {
 		app.SetActingOperator(actingOperator)
 	}
+	if app != nil && openAppHook != nil {
+		openAppHook(app)
+	}
 	return app, err
 }
+
+// openAppHook, when non-nil, adjusts every App the CLI opens. Tests use it to
+// install in-process RPC fakes; it is never set in production.
+var openAppHook func(*core.App)
 
 func writeJSON(cmd *cobra.Command, payload any) error {
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -2614,6 +2865,13 @@ type execJSON struct {
 	DurationMs int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out"`
 	AgentError string `json:"agent_error,omitempty"`
+
+	// Additive fields. Status is set only for targets where the command did NOT
+	// run (see execStatus*); a result that ran keeps exactly the shape above.
+	Status     string `json:"status,omitempty"`
+	Error      string `json:"error,omitempty"`       // why it was blocked (policy/guard/confirm, or its on-fail)
+	ApprovalID string `json:"approval_id,omitempty"` // --require-approval: the staged approval
+	Command    string `json:"command,omitempty"`     // --dry-run: what would run (secret refs only, never values)
 }
 
 // classifyAgentError labels a transport/agent failure: unreachable | auth | agent-error.
@@ -2621,7 +2879,8 @@ func classifyAgentError(err error) string {
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "dial"), strings.Contains(s, "refused"), strings.Contains(s, "no route"),
-		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"):
+		strings.Contains(s, "unreachable"), strings.Contains(s, "timeout"), strings.Contains(s, "i/o"),
+		strings.Contains(s, "daemon is not running"):
 		return "unreachable"
 	case strings.Contains(s, "auth"), strings.Contains(s, "unauthorized"), strings.Contains(s, "permission"),
 		strings.Contains(s, "host key"), strings.Contains(s, "handshake"):
@@ -2719,7 +2978,7 @@ func flagValue(cmd *cobra.Command, name string) string {
 func newExecCommand(configDir *string) *cobra.Command {
 	var all, asJSON, propagateExit bool
 	var timeout, backoff time.Duration
-	var retries int
+	var retries, parallel int
 	// Exec-time enforcement flags (FL-003/007/008/010/012/013/027/032).
 	var (
 		dryRun         bool
@@ -2744,6 +3003,17 @@ Flags:
   --retry N         retry ONLY transport failures (never re-runs a command that ran)
   --backoff 2s      delay between transport retries
   --propagate-exit  exit the fleet process with the remote command's exit code
+  --parallel N      with --all/--group, run on up to N servers at once (default 16;
+                    1 = one server at a time). Output order never changes: each
+                    server's block is printed in target order.
+
+Exit status with --all/--group (the single-server rules, applied to every target):
+  non-zero when any server failed: blocked by policy, unreachable, timed out, or a
+  non-zero remote exit. With --json the array lists EVERY target (targets that did
+  not run carry "status": blocked|staged|dry-run|cached, plus "error" when
+  blocked); only a policy block makes the exit status non-zero there. With
+  --propagate-exit the first non-zero remote exit code in target order becomes
+  the exit status.
 
 Enforcement flags:
   --dry-run             print 'would run: <cmd>' for the target(s) and exit without running
@@ -2751,7 +3021,9 @@ Enforcement flags:
   --guard               block the command if it could lock out the controller
   --guard-warn          downgrade --guard to a warning (run anyway)
   --confirm             confirm a command that the cmd-policy marks confirm-required
-  --require-approval    stage the command for approval instead of running it
+  --require-approval    stage the command (with these options) for approval instead of
+                        running it; 'fleet approve <id>' then runs it (secrets must be
+                        VAR=@name references)
   --idempotency-key KEY return the cached result for KEY instead of re-running
   --on-fail '<cmd>'     run this command on the same server if the command fails
 
@@ -2818,6 +3090,19 @@ Examples:
 				}
 			}
 
+			// --require-approval persists the request so `fleet approve` can run it
+			// later. Only secret-store references (VAR=@name) can be persisted; a
+			// literal value would be written to approvals.json, so refuse it.
+			var stagedExec *core.ApprovalExec
+			if requireApprove {
+				for _, spec := range secretSpecs {
+					if _, rhs, _ := strings.Cut(spec, "="); !strings.HasPrefix(rhs, "@") {
+						return fmt.Errorf("--require-approval only supports stored secrets (--secret VAR=@name): a literal value would be persisted in the approval queue")
+					}
+				}
+				stagedExec = stagedApprovalExec(cmd, timeout, retries, backoff, guard, guardWarn, confirm, onFail, idempotencyKey, secretSpecs)
+			}
+
 			// redact applies configured output redaction and then scrubs every
 			// resolved secret value. Even one-byte values are redacted: preserving
 			// readability must never take precedence over confidentiality.
@@ -2828,23 +3113,33 @@ Examples:
 				return redactSecretValues(s, secrets)
 			}
 
-			// secretEnvPrefix builds the environment assignment prefix prepended to
-			// the remote command for actual execution: `VAR1=<quoted v1> ... `. The
-			// values are shell-quoted with the package shellQuote so arbitrary bytes
-			// are safe. This string contains secret VALUES and must NEVER be printed,
-			// echoed, or logged — only handed to app.ExecCommand.
-			secretEnvPrefix := func() string {
+			// secretEnv maps each --secret VAR to its resolved value for actual
+			// execution. It contains secret VALUES and must NEVER be printed,
+			// echoed, or logged — only handed to app.ExecCommandEnvContext, which
+			// makes the variables visible to the WHOLE remote command (a
+			// `VAR='v' cmd` prefix only reached the first simple command).
+			secretEnv := func() map[string]string {
 				if len(secrets) == 0 {
-					return ""
+					return nil
 				}
-				var b strings.Builder
+				env := make(map[string]string, len(secrets))
 				for _, sec := range secrets {
-					b.WriteString(sec.name)
-					b.WriteString("=")
-					b.WriteString(shellQuote(sec.value))
-					b.WriteString(" ")
+					env[sec.name] = sec.value
 				}
-				return b.String()
+				return env
+			}
+			execRemote := func(ctx context.Context, server, command string) (proto.ExecResult, error) {
+				if len(secrets) == 0 {
+					return app.ExecCommandContext(ctx, server, command)
+				}
+				r, err := app.ExecCommandEnvContext(ctx, server, command, secretEnv())
+				if err != nil {
+					// Defence in depth: never let a value slip out via an error.
+					if msg := redactSecretValues(err.Error(), secrets); msg != err.Error() {
+						err = redactedError{msg: msg, err: err}
+					}
+				}
+				return r, err
 			}
 
 			// secretDisplayPrefix builds the SAFE assignment prefix for echo/dry-run:
@@ -2880,17 +3175,25 @@ Examples:
 
 			// runOnce applies a deadline that is carried in the RPC envelope. The
 			// transport closes the timed-out channel and the agent independently uses
-			// the same deadline to kill the complete remote process group.
+			// the same deadline to kill the complete remote process group. Whichever
+			// side notices first, the result is reported as a timeout (see
+			// execTimedOut): the agent's own kill used to race the controller's
+			// deadline and surface as a bare exit -1 or a transport error.
 			runOnce := func(server, command string) (proto.ExecResult, bool, error) {
-				command = secretEnvPrefix() + command
 				if timeout <= 0 {
-					r, e := app.ExecCommandContext(commandCtx, server, command)
+					start := time.Now()
+					r, e := execRemote(commandCtx, server, command)
+					if e == nil && agentDefaultLimitHit(r, time.Since(start)) {
+						return proto.ExecResult{}, true,
+							fmt.Errorf("timed out after %s (the agent's default command limit): %w", agentDefaultExecTimeout, context.DeadlineExceeded)
+					}
 					return r, false, e
 				}
 				execCtx, cancel := context.WithTimeout(commandCtx, timeout)
 				defer cancel()
-				r, e := app.ExecCommandContext(execCtx, server, command)
-				if errors.Is(e, context.DeadlineExceeded) || errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+				deadline, _ := execCtx.Deadline()
+				r, e := execRemote(execCtx, server, command)
+				if execTimedOut(execCtx, commandCtx, timeout, deadline, time.Now(), r, e) {
 					return proto.ExecResult{}, true, fmt.Errorf("timed out after %s: %w", timeout, context.DeadlineExceeded)
 				}
 				return r, false, e
@@ -2905,7 +3208,11 @@ Examples:
 					if agentErr == nil || timedOut || attempt >= retries {
 						return
 					}
-					time.Sleep(backoff)
+					select {
+					case <-time.After(backoff):
+					case <-commandCtx.Done():
+						return
+					}
 				}
 			}
 			toJSON := func(server string, r proto.ExecResult, timedOut bool, agentErr error, dur time.Duration) execJSON {
@@ -2924,49 +3231,60 @@ Examples:
 			// preflight runs the policy/safety checks that must pass before a command
 			// executes on a server, in the fixed order:
 			//   deny-list -> guard -> confirm-required -> require-approval.
-			// It returns (blocked=true, err) to refuse the command, or
-			// (false, nil) to proceed. A non-nil err on block carries the reason.
-			preflight := func(server, command string) (bool, error) {
+			// It returns (blocked=true, "", err) to refuse the command,
+			// (true, approvalID, nil) when the command was staged for approval, or
+			// (false, "", nil) to proceed. A non-nil err on block carries the reason.
+			// Human notes go to w (per server, so concurrent targets never interleave).
+			preflight := func(w execWriters, server, command string) (bool, string, error) {
 				// 1. deny-list (always on).
 				if cmdPolicy != nil {
 					if denied, pat := cmdPolicy.MatchDeny(command); denied {
-						return true, fmt.Errorf("command blocked by cmd-policy deny pattern %q", pat)
+						return true, "", fmt.Errorf("command blocked by cmd-policy deny pattern %q", pat)
 					}
 				}
 				// 2. guard — detect self-lockout risk.
 				if guard || guardWarn {
 					if warnings := core.AnalyzeCommandSafety(command, agentPortFor(server)); len(warnings) > 0 {
-						for _, w := range warnings {
-							fmt.Fprintf(cmd.ErrOrStderr(), "guard [%s]: %s\n", server, w)
+						for _, warning := range warnings {
+							fmt.Fprintf(w.err, "guard [%s]: %s\n", server, warning)
 						}
 						if !guardWarn {
-							return true, fmt.Errorf("command blocked by --guard on %s (pass --guard-warn to run anyway)", server)
+							return true, "", fmt.Errorf("command blocked by --guard on %s (pass --guard-warn to run anyway)", server)
 						}
 					}
 				}
 				// 3. confirm-required.
 				if cmdPolicy != nil {
 					if needs, pat := cmdPolicy.MatchConfirm(command); needs && !confirm {
-						return true, fmt.Errorf("command matches cmd-policy confirm pattern %q — pass --confirm to run it", pat)
+						return true, "", fmt.Errorf("command matches cmd-policy confirm pattern %q — pass --confirm to run it", pat)
 					}
 				}
-				// 4. require-approval — stage and refuse.
-				if requireApprove {
-					id, serr := approvals.Stage(server, command, core.DefaultApprovalTTL)
+				// 4. require-approval — stage (with the exec options `fleet approve`
+				// must run it with) and refuse. A --dry-run never stages anything:
+				// it falls through to the dry-run preview below.
+				if requireApprove && !dryRun {
+					// Only a real, registered server can be staged: the name is
+					// later passed to `fleet exec` by `fleet approve`.
+					if _, gerr := app.GetServer(server); gerr != nil {
+						return true, "", fmt.Errorf("stage approval: %w", gerr)
+					}
+					id, serr := approvals.StageExec(server, command, core.DefaultApprovalTTL, stagedExec, app.Operator())
 					if serr != nil {
-						return true, fmt.Errorf("stage approval: %w", serr)
+						return true, "", fmt.Errorf("stage approval: %w", serr)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "staged approval %s for %s — run: fleet approve %s\n", id, server, id)
-					return true, nil
+					_ = app.Audit("approval.stage", server, fmt.Sprintf("id=%s command=%q", id, redact(secretDisplayPrefix()+command)))
+					fmt.Fprintf(w.note, "staged approval %s for %s — run: fleet approve %s\n", id, server, id)
+					return true, id, nil
 				}
-				return false, nil
+				return false, "", nil
 			}
 
 			// execOne runs the full per-server pipeline for one target and prints the
 			// result in human mode (used by single-server and --all/--group human
-			// paths). It returns the execJSON it produced (for --json aggregation),
-			// a skip flag (preflight short-circuited: approval staged, dry-run, or
-			// idempotency hit), and a fatal error (deny/guard/confirm block).
+			// paths). It returns the execJSON it produced (for --json aggregation;
+			// targets that did not run carry a Status), a skip flag (preflight
+			// short-circuited: blocked, approval staged, dry-run, or idempotency hit),
+			// and a fatal error (deny/guard/confirm block).
 			// idemKey derives the per-(server,command) cache key from the bare
 			// --idempotency-key. CRITICAL: keying on the bare flag alone collides
 			// across servers (under --all/--group every server would return the
@@ -2979,34 +3297,41 @@ Examples:
 				return hex.EncodeToString(sum[:])
 			}
 
-			execOne := func(server, command string, printHeader, human bool) (execJSON, bool, error) {
-				if blocked, berr := preflight(server, command); blocked {
-					return execJSON{}, true, berr
+			execOne := func(w execWriters, server, command string, printHeader, human bool) (execJSON, bool, error) {
+				if blocked, approvalID, berr := preflight(w, server, command); blocked {
+					if berr != nil {
+						return execJSON{Server: server, Status: execStatusBlocked, Error: redact(berr.Error())}, true, berr
+					}
+					return execJSON{Server: server, Status: execStatusStaged, ApprovalID: approvalID}, true, nil
 				}
 				// idempotency-hit: return the cached result instead of running.
 				if idempotencyKey != "" {
 					if cached, ok := idemStore.Get(idemKey(server, command)); ok {
 						if human {
-							fmt.Fprintf(cmd.OutOrStdout(), "idempotency-key %s: cached result\n%s\n", idempotencyKey, redact(cached))
+							fmt.Fprintf(w.out, "idempotency-key %s: cached result\n%s\n", idempotencyKey, redact(cached))
 						}
 						var cj execJSON
 						if uerr := json.Unmarshal([]byte(cached), &cj); uerr == nil {
 							cj.Stdout = redact(cj.Stdout)
 							cj.Stderr = redact(cj.Stderr)
+							cj.Status = execStatusCached
 							return cj, true, nil
 						}
-						return execJSON{Server: server, Stdout: redact(cached)}, true, nil
+						return execJSON{Server: server, Stdout: redact(cached), Status: execStatusCached}, true, nil
 					}
 				}
 				// dry-run: print the resolved command and skip execution. The secret
 				// DISPLAY prefix (VAR=@name) is shown, NEVER the resolved value.
 				if dryRun {
-					fmt.Fprintf(cmd.OutOrStdout(), "would run: %s%s [%s]\n", secretDisplayPrefix(), command, server)
-					return execJSON{Server: server}, true, nil
+					fmt.Fprintf(w.note, "would run: %s%s [%s]\n", secretDisplayPrefix(), command, server)
+					return execJSON{Server: server, Status: execStatusDryRun, Command: secretDisplayPrefix() + command}, true, nil
 				}
 				// run, then redact, then handle on-fail.
 				r, timedOut, dur, agentErr := run(server, command)
 				j := toJSON(server, r, timedOut, agentErr, dur)
+				// Audit what ran: the displayed command (secret references, never
+				// values), redacted, with its exit code / timeout / error.
+				_ = app.Audit("exec.run", server, execAuditDetails(redact(secretDisplayPrefix()+command), j))
 				if idempotencyKey != "" {
 					if data, merr := json.Marshal(j); merr == nil {
 						_ = idemStore.Put(idemKey(server, command), string(data), time.Hour)
@@ -3018,26 +3343,30 @@ Examples:
 					// The on-fail command is a full remote command and MUST pass the
 					// same preflight gate as the main one (deny-list, guard, confirm,
 					// require-approval). Without this it was a complete gate bypass.
-					if blocked, berr := preflight(server, onFail); blocked {
+					if blocked, _, berr := preflight(w, server, onFail); blocked {
 						if human {
-							printExecHuman(cmd, j, printHeader)
+							printExecHuman(w.out, w.err, j, printHeader)
 							if berr != nil {
-								fmt.Fprintf(cmd.ErrOrStderr(), "--- on-fail blocked: %v ---\n", berr)
+								fmt.Fprintf(w.err, "--- on-fail blocked: %v ---\n", berr)
 							}
+						}
+						if berr != nil {
+							j.Error = redact("on-fail blocked: " + berr.Error())
 						}
 						return j, false, berr
 					}
 					or, oTimedOut, oDur, oAgentErr := run(server, onFail)
 					oj := toJSON(server, or, oTimedOut, oAgentErr, oDur)
+					_ = app.Audit("exec.run", server, execAuditDetails(redact(secretDisplayPrefix()+onFail), oj)+" on_fail=true")
 					if human {
-						printExecHuman(cmd, j, printHeader)
-						fmt.Fprintf(cmd.OutOrStdout(), "--- on-fail: %s ---\n", onFail)
-						printExecHuman(cmd, oj, false)
+						printExecHuman(w.out, w.err, j, printHeader)
+						fmt.Fprintf(w.out, "--- on-fail: %s ---\n", onFail)
+						printExecHuman(w.out, w.err, oj, false)
 					}
 					return j, false, nil
 				}
 				if human {
-					printExecHuman(cmd, j, printHeader)
+					printExecHuman(w.out, w.err, j, printHeader)
 				}
 				return j, false, nil
 			}
@@ -3066,28 +3395,48 @@ Examples:
 				return nil, false, nil
 			}
 
+			if parallel < 1 {
+				return fmt.Errorf("--parallel must be at least 1")
+			}
 			targets, multi, err := resolveTargets()
 			if err != nil {
 				return err
 			}
 
+			// In --json mode stdout carries only JSON: human notes (staged
+			// approvals, dry-run lines) go to stderr instead.
+			noteStream := cmd.OutOrStdout()
+			if asJSON {
+				noteStream = cmd.ErrOrStderr()
+			}
+
 			if multi {
-				command := strings.Join(args, " ")
-				out := make([]execJSON, len(targets))
-				skipped := make([]bool, len(targets))
-				errs := make([]error, len(targets))
-				for i, name := range targets {
-					j, skip, eerr := execOne(name, command, true, !asJSON)
-					out[i], skipped[i], errs[i] = j, skip, eerr
+				if len(targets) == 0 && group != "" {
+					return fmt.Errorf("no servers match --group %q", group)
 				}
+				command := strings.Join(args, " ")
+				n := len(targets)
+				out := make([]execJSON, n)
+				skipped := make([]bool, n)
+				errs := make([]error, n)
+				// Servers run concurrently (bounded by --parallel), but each one's
+				// output is captured and replayed in target order as soon as every
+				// earlier target has finished, so the printed result is identical
+				// to running them one after another.
+				captures := make([]execCapture, n)
+				flusher := core.NewOrderedFlusher(n, func(i int) {
+					captures[i].replay(cmd.OutOrStdout(), cmd.ErrOrStderr())
+					captures[i] = execCapture{}
+				})
+				core.ForEachLimit(n, parallel, func(i int) {
+					w := captures[i].writers(asJSON)
+					out[i], skipped[i], errs[i] = execOne(w, targets[i], command, true, !asJSON)
+					flusher.Done(i)
+				})
 				if asJSON {
-					emitted := out[:0]
-					for i := range out {
-						if !skipped[i] && errs[i] == nil {
-							emitted = append(emitted, out[i])
-						}
-					}
-					if encErr := json.NewEncoder(cmd.OutOrStdout()).Encode(emitted); encErr != nil {
+					// Every target is listed, in target order; targets that did not
+					// run carry a status (and the block reason in "error").
+					if encErr := json.NewEncoder(cmd.OutOrStdout()).Encode(out); encErr != nil {
 						return encErr
 					}
 				}
@@ -3097,7 +3446,13 @@ Examples:
 						fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", targets[i], errs[i])
 					}
 				}
-				return nil
+				code, failure := fanoutExitStatus(out, skipped, errs, asJSON, propagateExit)
+				if code != 0 {
+					_ = app.Close()
+					exitProcess(code)
+					return nil
+				}
+				return failure
 			}
 
 			if len(args) < 2 {
@@ -3106,7 +3461,8 @@ Examples:
 			serverName := args[0]
 			command := strings.Join(args[1:], " ")
 
-			j, skip, eerr := execOne(serverName, command, false, !asJSON)
+			direct := execWriters{out: cmd.OutOrStdout(), err: cmd.ErrOrStderr(), note: noteStream}
+			j, skip, eerr := execOne(direct, serverName, command, false, !asJSON)
 			if eerr != nil {
 				return eerr
 			}
@@ -3123,7 +3479,7 @@ Examples:
 				}
 				if propagateExit && j.AgentError == "" && !j.TimedOut && j.ExitCode != 0 {
 					_ = app.Close()
-					os.Exit(j.ExitCode)
+					exitProcess(j.ExitCode)
 				}
 				return nil // JSON mode never errors on a remote non-zero exit
 			}
@@ -3139,7 +3495,7 @@ Examples:
 			if j.ExitCode != 0 {
 				if propagateExit {
 					_ = app.Close()
-					os.Exit(j.ExitCode)
+					exitProcess(j.ExitCode)
 				}
 				return fmt.Errorf("exit status %d", j.ExitCode)
 			}
@@ -3147,6 +3503,7 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "run on all servers concurrently")
+	cmd.Flags().IntVar(&parallel, "parallel", execDefaultParallel, "with --all/--group, run on up to N servers at once (1 = one at a time); output stays in target order")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "structured JSON output (stdout/stderr/exit_code/duration/agent_error)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the command after this duration (e.g. 30s)")
 	cmd.Flags().IntVar(&retries, "retry", 0, "retry transport failures up to this many times")
@@ -3246,29 +3603,6 @@ func validateEnvVarName(name string) error {
 	return nil
 }
 
-// printExecHuman renders a single exec result in human mode, mirroring the
-// original --all output format. printHeader adds the "=== server [status] ==="
-// banner (used for multi-server output); single-server output omits it.
-func printExecHuman(cmd *cobra.Command, j execJSON, printHeader bool) {
-	if printHeader {
-		switch {
-		case j.AgentError != "":
-			fmt.Fprintf(cmd.OutOrStdout(), "=== %s [%s] ===\n%s\n", j.Server, classifyAgentErrorStr(j.AgentError), j.AgentError)
-			return
-		case j.TimedOut:
-			fmt.Fprintf(cmd.OutOrStdout(), "=== %s [timed out] ===\n", j.Server)
-		default:
-			fmt.Fprintf(cmd.OutOrStdout(), "=== %s [exit %d] ===\n", j.Server, j.ExitCode)
-		}
-	}
-	if j.Stdout != "" {
-		fmt.Fprint(cmd.OutOrStdout(), j.Stdout)
-	}
-	if j.Stderr != "" {
-		fmt.Fprint(cmd.ErrOrStderr(), j.Stderr)
-	}
-}
-
 // classifyAgentErrorStr is classifyAgentError for an already-stringified error.
 func classifyAgentErrorStr(s string) string { return classifyAgentError(fmt.Errorf("%s", s)) }
 
@@ -3345,8 +3679,15 @@ func newSSHCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer app.Close()
-			return app.RunSSHSession(args[0], cmd.OutOrStdout())
+			err = app.RunSSHSession(args[0], cmd.OutOrStdout())
+			_ = app.Close()
+			// Exit with the remote shell's status, as ssh(1) does.
+			var exitErr *core.RemoteExitError
+			if errors.As(err, &exitErr) {
+				exitProcess(exitErr.Code)
+				return nil
+			}
+			return err
 		},
 	}
 }

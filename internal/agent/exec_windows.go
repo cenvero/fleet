@@ -8,8 +8,10 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenvero/fleet/pkg/proto"
@@ -53,6 +55,13 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	defer cancel()
 
 	cmd := exec.Command("cmd.exe", "/C", payload.Command) // #nosec G204 -- authenticated shell.exec RPC intentionally executes the operator command
+	if len(payload.Env) > 0 {
+		env, err := execEnvironment(payload.Env)
+		if err != nil {
+			return proto.ExecResult{}, err
+		}
+		cmd.Env = env
+	}
 	var stdout, stderr windowsCappedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -61,10 +70,12 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	}
 
 	waitDone := make(chan struct{})
+	var killed atomic.Bool
 	go func() {
 		select {
 		case <-runCtx.Done():
 			if cmd.Process != nil {
+				killed.Store(true)
 				// /T terminates descendants as well as the command shell. Ignore the
 				// helper's output and then kill the root as a final fallback.
 				_ = exec.Command("taskkill", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F").Run() //nolint:gosec
@@ -84,5 +95,8 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 			return proto.ExecResult{}, err
 		}
 	}
-	return proto.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, nil
+	// taskkill /F leaves exit code 1, so a deadline kill is recognised from the
+	// watchdog having fired on an expired deadline rather than from the code.
+	timedOut := killed.Load() && errors.Is(runCtx.Err(), context.DeadlineExceeded)
+	return proto.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode, TimedOut: timedOut}, nil
 }

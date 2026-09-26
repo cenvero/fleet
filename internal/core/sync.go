@@ -10,8 +10,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenvero/fleet/internal/logs"
@@ -120,6 +122,12 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 		return err
 	}
 	style := TargetPathStyleForServer(server)
+	// Refuse "." and ".." BEFORE cleaning: a mirror deletes replica extras, so
+	// `…/files/x/..` must be an error, never a quiet mirror of the parent. (The
+	// agent refuses such paths too, but only sees the cleaned path from here.)
+	if err := rejectDotComponents(style, remoteDir); err != nil {
+		return err
+	}
 	localDir = filepath.Clean(localDir)
 	remoteDir = style.Clean(remoteDir)
 	interval := opts.Interval
@@ -165,10 +173,16 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 	prev := map[string]fileMeta{}
 	pending := newSyncPending()
 	first := true
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	wait := interval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
+		scanStart := time.Now()
 		writer, err := plan.scanWriter()
+		scanDur := time.Since(scanStart)
+		// Anything to do (or retry) keeps the scan at the configured interval;
+		// a quiet tree is re-scanned progressively less often.
+		active := err != nil || first || !sameTree(writer, prev) || pending.outstanding()
 		if err == nil {
 			err = validateTreeForStyleCase(writer, replicaStyle, replicaCaseInsensitive)
 		}
@@ -213,9 +227,47 @@ func (a *App) SyncDir(ctx context.Context, serverName, localDir, remoteDir strin
 				Details:  syncAuditDetails(serverName, localDir, remoteDir, opts),
 			})
 			return ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
+		}
+		wait = nextSyncWait(interval, wait, active || pending.outstanding(), scanDur)
+		timer.Reset(wait)
+	}
+}
+
+// syncIdleCeiling is the longest a quiet sync waits between scans (unless the
+// configured interval is itself longer).
+const syncIdleCeiling = 5 * time.Second
+
+// nextSyncWait picks the delay before the next writer scan. Any change or
+// outstanding retry resets it to the configured interval; each quiet scan
+// doubles it up to eight intervals (at most syncIdleCeiling). It never lets
+// scanning take more than about a third of the time, so a huge tree is not
+// re-walked back to back.
+func nextSyncWait(base, current time.Duration, active bool, scanDur time.Duration) time.Duration {
+	if active {
+		current = base
+	} else {
+		ceiling := max(base, min(8*base, syncIdleCeiling))
+		current = min(max(current, base)*2, ceiling)
+	}
+	return max(current, 2*scanDur)
+}
+
+// sameTree reports whether two writer snapshots are identical.
+func sameTree(a, b map[string]fileMeta) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for rel, meta := range a {
+		if other, ok := b[rel]; !ok || other != meta {
+			return false
 		}
 	}
+	return true
+}
+
+func (p *syncPending) outstanding() bool {
+	return len(p.copies) > 0 || len(p.deletes) > 0
 }
 
 func (a *App) makeSyncPlan(serverName, localDir, remoteDir string, opts SyncOptions, pull bool, style TargetPathStyle) syncPlan {
@@ -345,8 +397,10 @@ func syncReconcile(writer, replica, prev map[string]fileMeta, first bool, opts S
 		events(SyncEvent{Kind: SyncDelete, Path: rel})
 	}
 
-	// Create directories first, then transfer regular files. Type-conflict
-	// removals that failed remain pending and block replacing that exact path.
+	// Create directories first (parents before children), then transfer
+	// regular files. Type-conflict removals that failed remain pending and
+	// block replacing that exact path.
+	var dirs, files []string
 	for _, rel := range sortedMetaKeys(writer, false) {
 		meta := writer[rel]
 		if _, blocked := pending.deletes[rel]; blocked {
@@ -365,21 +419,54 @@ func syncReconcile(writer, replica, prev map[string]fileMeta, first bool, opts S
 		if !needCopy {
 			continue
 		}
-		bytes, err := plan.copy(rel, meta)
+		if meta.isDir() {
+			dirs = append(dirs, rel)
+		} else {
+			files = append(files, rel)
+		}
+	}
+	var mu sync.Mutex // guards pending, complete and event delivery
+	copyOne := func(rel string) {
+		bytes, err := plan.copy(rel, writer[rel])
+		mu.Lock()
+		defer mu.Unlock()
 		if err != nil {
+			complete = false
 			if plan.transientCopyError != nil && plan.transientCopyError(err) {
 				delete(pending.copies, rel)
-				complete = false
-				continue
+				return
 			}
 			pending.copies[rel] = struct{}{}
-			complete = false
 			events(SyncEvent{Kind: SyncError, Path: rel, Err: err})
-			continue
+			return
 		}
 		delete(pending.copies, rel)
 		events(SyncEvent{Kind: SyncCopy, Path: rel, Bytes: bytes})
 	}
+	if len(dirs) == 1 {
+		copyOne(dirs[0])
+	} else {
+		_ = forEachDirLevel(dirs, func(rel string) error { copyOne(rel); return nil })
+	}
+	// Files are independent of each other once their directories exist, so
+	// they move concurrently like a directory transfer (each copy still uses
+	// the parallel chunk engine over the pooled connection).
+	sem := make(chan struct{}, dirTransferConcurrency)
+	var wg sync.WaitGroup
+	for _, rel := range files {
+		if len(files) == 1 {
+			copyOne(rel)
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(rel string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			copyOne(rel)
+		}(rel)
+	}
+	wg.Wait()
 
 	// A source path deleted while its copy was pending should be removed from
 	// the replica, not copied from a path that no longer exists.
@@ -622,6 +709,17 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 		return nil, err
 	}
 	style := TargetPathStyleForServer(server)
+	// Unknown capabilities (a server never reached yet) are worth one try.
+	if len(server.Capabilities) == 0 || slices.Contains(server.Capabilities, proto.CapabilityFileTree) {
+		// One round trip for the whole tree. A tree too large for one reply,
+		// or an agent that turns out not to implement it, falls back to
+		// listing directory by directory below.
+		out, handled, err := a.scanRemoteTree(server, style, root)
+		if handled {
+			return out, err
+		}
+	}
+
 	out := map[string]fileMeta{}
 	rootRes, err := a.ListRemoteDirHidden(serverName, root, true)
 	if err != nil {
@@ -633,47 +731,129 @@ func (a *App) scanRemoteDir(serverName, root string) (map[string]fileMeta, error
 	}
 	resolvedRoot = style.Clean(resolvedRoot)
 
-	var visit func(entries []proto.FileEntry, depth int) error
-	visit = func(entries []proto.FileEntry, depth int) error {
+	// Breadth first, listing every directory of a level concurrently: a deep
+	// tree used to cost one serial round trip per directory on every scan.
+	level := rootRes.Entries
+	for depth := 0; len(level) > 0; depth++ {
 		if depth > maxRemoteScanDepth {
-			return fmt.Errorf("remote directory tree exceeds maximum depth %d", maxRemoteScanDepth)
+			return nil, fmt.Errorf("remote directory tree exceeds maximum depth %d", maxRemoteScanDepth)
 		}
-		for _, e := range entries {
+		var subdirs []string
+		for _, e := range level {
 			if len(out) >= maxRemoteScanFiles {
-				return fmt.Errorf("remote directory tree exceeds maximum of %d entries", maxRemoteScanFiles)
+				return nil, fmt.Errorf("remote directory tree exceeds maximum of %d entries", maxRemoteScanFiles)
 			}
-			rel, err := style.Relative(resolvedRoot, e.Path)
+			isDir, err := addRemoteEntry(out, style, resolvedRoot, e)
 			if err != nil {
-				return fmt.Errorf("remote path %q is outside scan root %q: %w", e.Path, resolvedRoot, err)
+				return nil, err
 			}
-			key, err := cleanRelativeKey(rel)
-			if err != nil {
-				return fmt.Errorf("remote path %q is not safely representable: %w", e.Path, err)
+			if isDir {
+				subdirs = append(subdirs, e.Path)
 			}
-			kind, err := remoteEntryKind(e)
-			if err != nil {
-				return err
-			}
-			if kind == fileKindDirectory {
-				out[key] = fileMeta{kind: fileKindDirectory}
-				sub, err := a.ListRemoteDirHidden(serverName, e.Path, true)
-				if err != nil {
-					return fmt.Errorf("list remote sync directory %s: %w", e.Path, err)
-				}
-				if err := visit(sub.Entries, depth+1); err != nil {
-					return err
-				}
-				continue
-			}
-			out[key] = fileMeta{kind: fileKindRegular, modUnixNano: e.ModTime.UnixNano(), size: e.Size}
 		}
-		return nil
-	}
-	if err := visit(rootRes.Entries, 0); err != nil {
-		return nil, err
+		listings := make([][]proto.FileEntry, len(subdirs))
+		sem := make(chan struct{}, dirTransferConcurrency)
+		var wg sync.WaitGroup
+		var errs firstError
+		for i, dir := range subdirs {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int, dir string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				sub, err := a.ListRemoteDirHidden(serverName, dir, true)
+				if err != nil {
+					errs.set(fmt.Errorf("list remote sync directory %s: %w", dir, err))
+					return
+				}
+				listings[i] = sub.Entries
+			}(i, dir)
+		}
+		wg.Wait()
+		if err := errs.get(); err != nil {
+			return nil, err
+		}
+		level = nil
+		for _, entries := range listings {
+			level = append(level, entries...)
+		}
 	}
 	return out, nil
 }
+
+// addRemoteEntry validates one remote entry and records it under its safe
+// relative key. It reports whether the entry is a directory to descend into.
+func addRemoteEntry(out map[string]fileMeta, style TargetPathStyle, resolvedRoot string, e proto.FileEntry) (bool, error) {
+	rel, err := style.Relative(resolvedRoot, e.Path)
+	if err != nil {
+		return false, fmt.Errorf("remote path %q is outside scan root %q: %w", e.Path, resolvedRoot, err)
+	}
+	key, err := cleanRelativeKey(rel)
+	if err != nil {
+		return false, fmt.Errorf("remote path %q is not safely representable: %w", e.Path, err)
+	}
+	kind, err := remoteEntryKind(e)
+	if err != nil {
+		return false, err
+	}
+	if kind == fileKindDirectory {
+		out[key] = fileMeta{kind: fileKindDirectory}
+		return true, nil
+	}
+	out[key] = fileMeta{kind: fileKindRegular, modUnixNano: e.ModTime.UnixNano(), size: e.Size}
+	return false, nil
+}
+
+// scanRemoteTree scans root with one file.tree call. handled is false when the
+// caller should fall back to per-directory listing (a truncated tree, or an
+// agent that does not implement file.tree after all).
+func (a *App) scanRemoteTree(server ServerRecord, style TargetPathStyle, root string) (map[string]fileMeta, bool, error) {
+	resp, err := a.callRPC(server, proto.Envelope{
+		Action:  proto.ActionFileTree,
+		Payload: proto.FileTreePayload{Path: root, ShowHidden: true, MaxEntries: maxTreeScanEntries, MaxDepth: maxRemoteScanDepth},
+	})
+	if err != nil {
+		return nil, true, fmt.Errorf("list remote sync root %s: %w", root, err)
+	}
+	if resp.Error != nil {
+		if resp.Error.Code == errCodeUnsupportedAction {
+			return nil, false, nil
+		}
+		return nil, true, fmt.Errorf("list remote sync root %s: %w", root, remoteErr(resp.Error))
+	}
+	tree, err := proto.DecodePayload[proto.FileTreeResult](resp.Payload)
+	if err != nil {
+		return nil, true, err
+	}
+	if tree.Truncated {
+		return nil, false, nil
+	}
+	resolvedRoot := tree.Path
+	if resolvedRoot == "" {
+		resolvedRoot = root
+	}
+	resolvedRoot = style.Clean(resolvedRoot)
+	out := make(map[string]fileMeta, len(tree.Entries))
+	for _, e := range tree.Entries {
+		if len(out) >= maxRemoteScanFiles {
+			return nil, true, fmt.Errorf("remote directory tree exceeds maximum of %d entries", maxRemoteScanFiles)
+		}
+		if _, err := addRemoteEntry(out, style, resolvedRoot, e); err != nil {
+			return nil, true, err
+		}
+	}
+	// The agent bounds depth itself; never trust that alone.
+	for key := range out {
+		if strings.Count(key, "/") > maxRemoteScanDepth {
+			return nil, true, fmt.Errorf("remote directory tree exceeds maximum depth %d", maxRemoteScanDepth)
+		}
+	}
+	return out, true, nil
+}
+
+// maxTreeScanEntries is how many entries scanRemoteDir asks file.tree for; a
+// bigger tree is listed per directory instead.
+const maxTreeScanEntries = 50_000
 
 func syncAuditDetails(server, localDir, remoteDir string, opts SyncOptions) string {
 	dir := "local->remote"

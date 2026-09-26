@@ -4,11 +4,13 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/logs"
@@ -19,13 +21,27 @@ func (a *App) CollectMetrics(serverName string) (proto.MetricsSnapshot, error) {
 	return a.collectMetrics(serverName, true)
 }
 
+// SampleMetrics collects, stores and alert-evaluates a live snapshot exactly
+// like CollectMetrics but writes no audit entry. It is for high-frequency live
+// views (`fleet top` refreshes every couple of seconds), which would otherwise
+// append one audit record per server per frame.
+func (a *App) SampleMetrics(serverName string) (proto.MetricsSnapshot, error) {
+	return a.collectMetrics(serverName, false)
+}
+
 func (a *App) collectMetrics(serverName string, recordAudit bool) (proto.MetricsSnapshot, error) {
+	return a.collectMetricsContext(context.Background(), serverName, recordAudit)
+}
+
+func (a *App) collectMetricsContext(ctx context.Context, serverName string, recordAudit bool) (proto.MetricsSnapshot, error) {
 	server, err := a.GetServer(serverName)
 	if err != nil {
 		return proto.MetricsSnapshot{}, err
 	}
 
-	response, err := a.callRPC(server, proto.Envelope{
+	// Raw call: this path saves the record itself below (with LastSeen), so
+	// the generic last-seen refresh would only add a second write.
+	response, err := a.callRPCContextRaw(ctx, server, proto.Envelope{
 		Action:  "metrics.collect",
 		Payload: proto.MetricsPayload{Server: serverName},
 	})
@@ -44,7 +60,16 @@ func (a *App) collectMetrics(serverName string, recordAudit bool) (proto.Metrics
 		return proto.MetricsSnapshot{}, err
 	}
 
+	// Re-read the record: the call may have redialled and recorded a fresh
+	// hello (agent version, capabilities), which saving the copy read before
+	// the call would silently revert. A successful poll is also a sighting.
+	if current, gerr := a.GetServer(serverName); gerr == nil {
+		server = current
+	}
 	server.Metrics = snapshot
+	server.Observed.Reachable = true
+	server.Observed.LastSeen = time.Now().UTC()
+	server.Observed.LastError = ""
 	if err := a.SaveServer(server); err != nil {
 		return proto.MetricsSnapshot{}, err
 	}
@@ -78,10 +103,8 @@ func (a *App) persistMetricsSnapshot(serverName string, snapshot proto.MetricsSn
 	if err != nil {
 		return fmt.Errorf("marshal metrics snapshot: %w", err)
 	}
-	if err := a.MetricsDB.PutState("latest."+serverName, string(data)); err != nil {
-		return err
-	}
-	return a.MetricsDB.AppendMetricSnapshot(serverName, snapshot.Timestamp, string(data))
+	// One transaction for the latest-value row and the history row.
+	return a.MetricsDB.RecordMetricSnapshot("latest."+serverName, serverName, snapshot.Timestamp, string(data))
 }
 
 func (a *App) evaluateMetricAlerts(serverName string, snapshot proto.MetricsSnapshot) error {
@@ -108,7 +131,7 @@ func (a *App) syncThresholdAlert(serverName, metric string, value, warningThresh
 		if err := a.Alerts.Delete(warningID); err != nil {
 			return err
 		}
-		return a.raiseAlert(alerts.Alert{
+		return a.observeAlert(alerts.Alert{
 			ID:       criticalID,
 			Code:     "metrics." + metric + ".critical",
 			Server:   serverName,
@@ -119,7 +142,7 @@ func (a *App) syncThresholdAlert(serverName, metric string, value, warningThresh
 		if err := a.Alerts.Delete(criticalID); err != nil {
 			return err
 		}
-		return a.raiseAlert(alerts.Alert{
+		return a.observeAlert(alerts.Alert{
 			ID:       warningID,
 			Code:     "metrics." + metric + ".warning",
 			Server:   serverName,
@@ -142,7 +165,7 @@ func (a *App) saveCollectionFailureAlert(serverName string, err error) error {
 	if _, getErr := a.Alerts.Get(id); errors.Is(getErr, os.ErrNotExist) {
 		a.fireNotify(NotifyEventOffline, fmt.Sprintf("%s is offline: metrics collection failed (%s)", serverName, err))
 	}
-	return a.raiseAlert(alerts.Alert{
+	return a.observeAlert(alerts.Alert{
 		ID:       id,
 		Code:     "metrics.collect.failed",
 		Server:   serverName,

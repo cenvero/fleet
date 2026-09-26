@@ -64,6 +64,18 @@ func TestSplitRemoteCompressPathsUsesServerStyle(t *testing.T) {
 			}
 		})
 	}
+	// Full paths of entries in the archive's own directory are accepted.
+	if _, _, names, err := splitRemoteCompressPaths(core.TargetPathPOSIX, "/srv/site.tar.gz", []string{"/srv/public", "index.html"}); err != nil || names[0] != "public" || names[1] != "index.html" {
+		t.Fatalf("full path in the archive directory: names=%v err=%v", names, err)
+	}
+	if _, _, names, err := splitRemoteCompressPaths(core.TargetPathWindows, `D:\sites\site.zip`, []string{`D:\sites\public`}); err != nil || names[0] != "public" {
+		t.Fatalf("windows full path in the archive directory: names=%v err=%v", names, err)
+	}
+	for _, item := range []string{"/etc/passwd", "/srv/x/../public", "/srv/./public", "/srv/sub/file", "/srv/.."} {
+		if _, _, _, err := splitRemoteCompressPaths(core.TargetPathPOSIX, "/srv/site.tar.gz", []string{item}); err == nil {
+			t.Errorf("item %q outside the archive directory accepted", item)
+		}
+	}
 	for _, item := range []string{`sub/file`, `sub\file`, ".."} {
 		if _, _, _, err := splitRemoteCompressPaths(core.TargetPathWindows, `C:\out.zip`, []string{item}); err == nil {
 			t.Errorf("unsafe Windows item %q accepted", item)

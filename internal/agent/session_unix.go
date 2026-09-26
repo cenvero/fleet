@@ -83,6 +83,10 @@ type persistentSession struct {
 	cmd    *exec.Cmd
 	replay *replayBuffer
 	done   chan struct{} // closed when the shell process exits
+	// exited is closed once the shell has been reaped; exitCode is valid
+	// after that.
+	exited   chan struct{}
+	exitCode int
 
 	mu         sync.Mutex
 	activeConn ssh.Channel // nil when no client is connected
@@ -165,6 +169,26 @@ func (s *persistentSession) detach(channel ssh.Channel, store *sessionStore, id 
 	s.idleTimer = time.AfterFunc(s.idleGrace(), func() {
 		store.kill(id)
 	})
+}
+
+// shellExitStatusWait bounds how long an exit-status reply waits for the
+// shell to be reaped after its terminal has closed.
+const shellExitStatusWait = 2 * time.Second
+
+// exitStatus returns the shell's exit code, waiting up to wait for it to be
+// reaped. It reports 0, as the agent always used to, when that is unknown.
+func (s *persistentSession) exitStatus(wait time.Duration) int {
+	if s.exited == nil {
+		return 0
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-s.exited:
+		return s.exitCode
+	case <-timer.C:
+		return 0
+	}
 }
 
 // outputLoop runs for the lifetime of the session. It reads PTY output and:

@@ -6,6 +6,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -94,8 +95,8 @@ func newFileUploadCommand(configDir *string) *cobra.Command {
 			"the file lands in the server's default remote directory under its base name.\n" +
 			"The transfer is chunked, run over --parallel concurrent channels, SHA-256\n" +
 			"verified, and resumable: re-running the same command after an interruption\n" +
-			"skips the chunks already on the server. On a terminal it shows a live progress\n" +
-			"bar; otherwise it prints periodic JSON.\n\n" +
+			"skips the chunks already on the server. Progress goes to stderr: a live bar on\n" +
+			"a terminal, otherwise one JSON object per line about once a second.\n\n" +
 			"With -r/--recursive, <local> is a directory and <remote> (required) is the\n" +
 			"destination directory; the whole tree is uploaded, preserving structure.",
 		Args: cobra.RangeArgs(2, 3),
@@ -151,7 +152,8 @@ func newFileDownloadCommand(configDir *string) *cobra.Command {
 		Long: "Download <remote> from <server> into <local> (defaults to the remote base name\n" +
 			"in the current directory; a local directory is allowed and the base name is\n" +
 			"appended). Same engine as upload: chunked, parallel, SHA-256 verified, and\n" +
-			"resumable from a partial local file.\n\n" +
+			"resumable from a partial local file. Progress goes to stderr: a live bar on a\n" +
+			"terminal, otherwise one JSON object per line about once a second.\n\n" +
 			"The source may be given as two arguments (<server> <remote>) or combined as\n" +
 			"<server:remote>, so both of these are equivalent:\n" +
 			"  fleet file download web-01 /root/x.log ./\n" +
@@ -652,8 +654,10 @@ func newFileCopyCommand(configDir *string) *cobra.Command {
 		Use:   "copy <srcServer:path> <dstServer:path>",
 		Short: "Copy a file (or directory with -r) directly between two servers",
 		Long: "Copy a file or, with -r, a whole directory tree from one managed server to\n" +
-			"another. Bytes are relayed through the controller (download then upload), so it\n" +
-			"works for every server mode and reuses the resumable, checksummed engine.\n\n" +
+			"another. Within one server the agent copies the file itself; across servers the\n" +
+			"bytes stream through the controller chunk by chunk (no temp copy), so it works\n" +
+			"for every server mode and reuses the resumable, checksummed engine. Progress\n" +
+			"for a single file goes to stderr (a live bar on a terminal, JSON lines otherwise).\n\n" +
 			"Examples:\n" +
 			"  fleet file copy web-01:/etc/hosts db-01:/tmp/hosts\n" +
 			"  fleet file copy web-01:/srv/app db-01:/srv/app -r",
@@ -709,9 +713,10 @@ func newFileServerMoveCommand(configDir *string) *cobra.Command {
 		Use:   "move <srcServer:path> <dstServer:path>",
 		Short: "Move a file (or directory with -r) between two servers",
 		Long: "Move a file or, with -r, a whole directory tree between managed servers.\n" +
-			"Within one server it's an efficient rename; across servers it copies (relayed\n" +
+			"Within one server it's an efficient rename; across servers it copies (streamed\n" +
 			"through the controller) then deletes the source. ('fleet file mv' renames within\n" +
-			"a single server.)\n\n" +
+			"a single server.) Progress for a single file goes to stderr (a live bar on a\n" +
+			"terminal, JSON lines otherwise).\n\n" +
 			"Examples:\n" +
 			"  fleet file move web-01:/tmp/a db-01:/tmp/a\n" +
 			"  fleet file move web-01:/srv/app db-01:/srv/app -r",
@@ -768,8 +773,12 @@ func splitRemoteCompressPaths(style core.TargetPathStyle, archive string, items 
 	names = make([]string, len(items))
 	for i, item := range items {
 		base := style.Base(item)
-		if item != base || base == ".." || base == "." || strings.ContainsAny(base, `/\`) {
-			return "", "", nil, fmt.Errorf("invalid item %q: items must be plain names in the archive's directory (no path separators or '..')", item)
+		// An item is a plain name in the archive's directory, or that same
+		// entry written as a full path (/srv/public next to /srv/site.tar.gz).
+		// Join cleans, so a path with "." or ".." components never matches.
+		inDir := item == base || item == style.Join(dir, base)
+		if !inDir || base == ".." || base == "." || strings.ContainsAny(base, `/\`) {
+			return "", "", nil, fmt.Errorf("invalid item %q: items must be names (or full paths) of entries in the archive's directory %s", item, dir)
 		}
 		names[i] = base
 	}
@@ -786,10 +795,12 @@ func newFileCompressCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "compress <server> <archive> <item>...",
 		Short: "Compress files/folders into an archive on a server (zip, tar.gz, ...)",
-		Long: "Create <archive> on <server> containing the given items (which live in the same\n" +
-			"directory as <archive>). Format is taken from the archive extension, or --format.\n\n" +
-			"  fleet file compress web-01 /srv/site.tar.gz /srv/public /srv/index.html\n" +
-			"  fleet file compress web-01 /tmp/logs.zip /var/log/app.log --format zip",
+		Long: "Create <archive> on <server> containing the given items, which must live in the\n" +
+			"same directory as <archive>: give their names, or their full paths in that directory.\n" +
+			"Format is taken from the archive extension, or --format.\n\n" +
+			"  fleet file compress web-01 /srv/site.tar.gz public index.html\n" +
+			"  fleet file compress web-01 /srv/site.tar.gz /srv/public /srv/index.html   # same\n" +
+			"  fleet file compress web-01 /var/log/app-logs.zip app.log app.log.1 --format zip",
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
@@ -831,7 +842,11 @@ func newFileExtractCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "extract <server> <archivePath>",
 		Short: "Extract an archive into its directory on a server",
-		Args:  cobra.ExactArgs(2),
+		Long: "Extract <archivePath> (zip, tar, tar.gz/tgz, tar.bz2 or tar.xz) into the directory that\n" +
+			"contains it. Files already there with the same names are overwritten. Archives with\n" +
+			"absolute or \"..\" member paths, links or special files are refused.\n\n" +
+			"  fleet file extract web-01 /srv/releases/site.tar.gz",
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
@@ -960,6 +975,9 @@ func newFileDefaultsCommand(configDir *string) *cobra.Command {
 					return err
 				}
 			}
+			if parallel < 0 {
+				return fmt.Errorf("--parallel must be a positive number of streams (0 restores the built-in default)")
+			}
 
 			if len(args) == 1 {
 				server, err := app.GetServer(args[0])
@@ -980,7 +998,7 @@ func newFileDefaultsCommand(configDir *string) *cobra.Command {
 			return writeJSON(cmd, app.Config.Runtime.FileTransfer)
 		},
 	}
-	setCmd.Flags().IntVar(&parallel, "parallel", 0, "default number of parallel streams")
+	setCmd.Flags().IntVar(&parallel, "parallel", 0, "default number of parallel streams (0 restores the built-in default)")
 	setCmd.Flags().StringVar(&chunkSize, "chunk-size", "", "default chunk size, e.g. 4M, 8M")
 	setCmd.Flags().StringVar(&remoteDir, "remote-dir", "", "default remote directory for uploads")
 	defaultsCmd.AddCommand(setCmd)
@@ -1044,19 +1062,38 @@ func parseSize(s string) (int64, error) {
 // newProgressReporter returns a core.ProgressFunc that renders a live one-line
 // bar on a TTY (throttled), or periodic percentage lines otherwise, plus a
 // finish func that closes the line.
+// newProgressReporter reports transfer progress on stderr, never stdout, which
+// carries the command's result for scripts. On a terminal it redraws a live
+// bar; otherwise it writes one JSON object per line at most once a second
+// (plus the final update), as the upload help documents.
 func newProgressReporter(cmd *cobra.Command, verb string) (core.ProgressFunc, func()) {
-	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	out := cmd.ErrOrStderr()
+	return newProgressWriter(out, verb, writerIsTerminal(out))
+}
+
+// progressLine is one non-terminal progress record: the transfer's
+// ProgressUpdate fields plus the operation and a whole percentage.
+type progressLine struct {
+	Op      string `json:"op"`
+	Percent int    `json:"percent"`
+	core.ProgressUpdate
+}
+
+func newProgressWriter(out io.Writer, verb string, isTTY bool) (core.ProgressFunc, func()) {
 	var (
 		mu       sync.Mutex
 		last     time.Time
 		anything bool
 	)
-	out := cmd.OutOrStdout()
+	interval := time.Second
+	if isTTY {
+		interval = 100 * time.Millisecond
+	}
 	report := func(u core.ProgressUpdate) {
 		mu.Lock()
 		defer mu.Unlock()
 		now := time.Now()
-		if !u.Done && now.Sub(last) < 100*time.Millisecond {
+		if !u.Done && now.Sub(last) < interval {
 			return
 		}
 		last = now
@@ -1069,9 +1106,10 @@ func newProgressReporter(cmd *cobra.Command, verb string) (core.ProgressFunc, fu
 			fmt.Fprintf(out, "\r%s %s  %s  %d streams  %s/%s   ",
 				verb, renderBar(pct, 24), humanizeRate(u.RatePerSec), u.ActiveStreams,
 				humanizeBytes(u.BytesDone), humanizeBytes(u.TotalBytes))
-		} else {
-			fmt.Fprintf(out, "%s %d%% (%s/%s) %s\n", verb, pct,
-				humanizeBytes(u.BytesDone), humanizeBytes(u.TotalBytes), humanizeRate(u.RatePerSec))
+			return
+		}
+		if data, err := json.Marshal(progressLine{Op: verb, Percent: pct, ProgressUpdate: u}); err == nil {
+			fmt.Fprintf(out, "%s\n", data)
 		}
 	}
 	finish := func() {
@@ -1082,6 +1120,12 @@ func newProgressReporter(cmd *cobra.Command, verb string) (core.ProgressFunc, fu
 		}
 	}
 	return report, finish
+}
+
+// writerIsTerminal reports whether w is a terminal (an *os.File on a tty).
+func writerIsTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd())) // #nosec G115 -- a file descriptor fits in int
 }
 
 func renderBar(pct, width int) string {

@@ -2,6 +2,38 @@
 
 This guide covers the main day-to-day operator workflows in Cenvero Fleet.
 
+## Controller Daemon
+
+The controller daemon accepts reverse-mode agents, serves the loopback control socket that
+one-shot CLI commands use to reach them (and to reuse warm direct-mode connections), polls
+metrics and keeps the update check warm. Run it in the background or in the foreground:
+
+```bash
+fleet start     # launch it detached; waits until it is listening, then prints its pid
+fleet status    # "daemon": {"running": true, "pid": 12345, ...}
+fleet stop      # SIGTERM (Windows: terminate), wait up to 15s for it to exit
+fleet daemon    # run it in the foreground (for systemd, launchd, a container, or debugging)
+```
+
+- `fleet start` runs `fleet --config-dir <dir> daemon` in its own session with no terminal,
+  appends its output to `<config-dir>/logs/daemon.log` (`0600`), and waits up to 10 seconds for
+  it to accept connections on `runtime.control_address`. If the daemon exits during start-up
+  (for example because its port is taken) the command fails and prints the last lines of the
+  log. When a daemon is already running for the config dir it says so and exits 0. Your
+  `--token` / `FLEET_TOKEN` is not passed on to the daemon.
+- Every daemon, however it was started, records its pid in `<config-dir>/data/daemon.pid` and
+  holds a lock on `<config-dir>/data/daemon.lock` while it runs, so a second `fleet daemon` for
+  the same config dir is refused with a clear error, and a daemon started by a service manager
+  is visible to `fleet status` and stoppable with `fleet stop`.
+- `fleet stop` only signals the process that still holds the config dir's daemon lock (on Linux
+  it also checks `/proc/<pid>/cmdline`), so a stale pid file never leads to killing an unrelated
+  process; a stale pid file is removed and the command reports `fleet daemon is not running`.
+- The daemon exits cleanly on SIGINT (Ctrl-C) and SIGTERM, removing its pid file and
+  `data/control.token`. It prints its "listening on ..." lines only once its listeners are bound.
+- A daemon started by a release older than this one records no pid file: `fleet status` still
+  reports it as running when its control address answers, but `fleet stop` asks you to stop it
+  yourself.
+
 ## Servers
 
 Add, inspect, reconnect, or remove servers:
@@ -111,11 +143,27 @@ fleet exec web-01 "./deploy.sh" --propagate-exit         # exit with the remote 
 fleet exec web-01 "./deploy.sh" --idempotency-key v3-2026-06-11   # cached result on retry
 ```
 
-`--json` emits a structured result; `--timeout` aborts a hung command; `--retry`/`--backoff`
-retry transport failures; `--dry-run` previews; `--propagate-exit` returns the remote exit
-code; and `--idempotency-key KEY` returns the cached result for `KEY` instead of re-running.
+`--json` emits a structured result; `--timeout` aborts a hung command (reported as `timed_out`,
+whichever side notices the deadline first); `--retry`/`--backoff` retry transport failures;
+`--dry-run` previews; `--propagate-exit` returns the remote exit code; and
+`--idempotency-key KEY` returns the cached result for `KEY` instead of re-running.
 The safety flags (`--secret`, `--guard`, `--confirm`, `--require-approval`) are covered under
 [Operating safely and unattended](#operating-safely-and-unattended).
+
+Fan-out runs (`--all`, `--group EXPR`) execute on up to 16 servers at once; `--parallel N`
+changes that (`--parallel 1` runs one server at a time). Output is still printed per server in
+the same order as a sequential run. A fan-out exits non-zero when any server failed (blocked by
+policy, unreachable, timed out, or a non-zero exit); with `--propagate-exit` the first non-zero
+remote exit code, in target order, becomes the exit status. With `--json` the array lists every
+target: servers where the command did not run carry `"status"` (`blocked`, `staged`, `dry-run`
+or `cached`) and, when blocked, `"error"`; in `--json` mode only a policy block makes the exit
+status non-zero, and informational notes go to stderr so stdout stays valid JSON. A `--group`
+that matches no server is an error.
+
+```bash
+fleet exec --group role=web --parallel 32 -- "systemctl reload nginx"
+fleet exec --all --json -- uptime | jq '.[] | select(.status == null) | .server'
+```
 
 ## Services
 
@@ -148,6 +196,12 @@ Follow a log:
 fleet service logs web-01 nginx.service --follow
 ```
 
+Tailing reads backwards from the end of the file, so it stays fast on multi-gigabyte logs, and
+line numbers are exact. Following resumes each poll from a cursor on the agent, so only newly
+written bytes are read and no line is lost or repeated during bursts; a truncated or rotated
+file is detected and read again from its start. (Agents older than this release are still
+followed the previous way: a fresh tail each poll.)
+
 Read the controller-cached copy:
 
 ```bash
@@ -168,7 +222,10 @@ Collect a live snapshot:
 fleet server metrics web-01
 ```
 
-The daemon also polls metrics on a schedule and feeds alert evaluation.
+The daemon also polls metrics on a schedule (`runtime.metrics_poll_interval`, default `1m`) and
+feeds alert evaluation. Each cycle collects from up to 16 servers at once with a 20-second limit
+per server, so a hung agent can no longer stall the poller. Every sample is kept as history
+(used by the dashboard's sparklines) for 30 days; the daemon prunes older samples hourly.
 
 ## Alerts
 
@@ -239,8 +296,12 @@ A live resource table and a single-server checklist:
 
 ```bash
 fleet top                        # live CPU/mem/swap/disk/load across servers (--once for one frame)
+fleet top --group role=web       # only the servers matching a tag expression
 fleet doctor web-01              # agent/ports/disk/swap/reboot/clock checklist (--json)
 ```
+
+`top` reads swap from the agent's metrics snapshot (agents older than this release fall back to
+`free -b`) and does not write an audit entry per refresh.
 
 A machine-readable snapshot of the fleet (hostname, IPs, OS, resources, ports, services, tags),
 cached under `data/inventory.json`:
@@ -253,11 +314,15 @@ fleet inventory --refresh        # re-probe every server and rewrite the cache
 Structured systemd control and journal access for any unit:
 
 ```bash
-fleet svc web-01 status nginx.service --json
-fleet svc web-01 restart nginx.service
+fleet svc status web-01 nginx.service --json
+fleet svc restart web-01 nginx.service
 fleet journal web-01 --unit nginx.service --since 1h --grep error
 fleet journal web-01 --unit nginx.service --follow
 ```
+
+`journal --follow` resumes from journalctl's cursor on every poll, so bursts are not truncated
+and nothing is printed twice. On systemd 237 or newer (with PCRE2), `--grep` runs on the server
+as a literal, case-insensitive match against the message text; older systems filter locally.
 
 Capture a config baseline and detect drift later:
 
@@ -266,13 +331,23 @@ fleet drift capture web-01 --paths /etc/ssh/sshd_config,/etc/fstab
 fleet drift web-01               # report what changed since the baseline
 ```
 
-Send fleet events (offline, job-failed, drift) to Slack or a webhook:
+Send fleet events (offline, job-failed, drift, destructive) to Slack or a webhook:
 
 ```bash
 fleet notify add slack https://hooks.slack.com/... --on offline,job-failed,drift
 fleet notify list
 fleet notify test --event offline
 ```
+
+The `destructive` event fires after a destructive CLI command succeeds (for example
+`server remove`, `file rm`, firewall changes, `secret` changes, `sync`, `key rotate` or setting
+tags). The message names the command, the target server and the operator, never other
+arguments. `exec`, `ssh` and `job run` do not fire it.
+
+Targets on loopback, private or link-local addresses are refused unless added with
+`--allow-internal` (for a webhook receiver on the controller's own network); the cloud
+metadata address stays blocked either way. Re-adding a target replaces its events and
+this setting.
 
 ## Operating Safely and Unattended
 
@@ -316,9 +391,28 @@ fleet secret rm deploy_key
 fleet exec web-01 "./deploy.sh" --secret DEPLOY_KEY=@deploy_key
 ```
 
-`VAR=@name` resolves a stored secret into `$VAR`; `VAR=literal` injects a literal. Add reusable
+`VAR=@name` resolves a stored secret into `$VAR`; `VAR=literal` injects a literal. The variable
+is set in the environment of the whole remote command (every part of `a; b`, pipelines and
+subshells), and agents with the `exec.env` capability receive it outside the command line, so the
+value never shows up in the remote process list. Older Linux/macOS agents get an
+`export VAR='…';` prefix instead; older Windows agents refuse `--secret` with an error asking for
+an agent update. Add reusable
 redaction patterns with `fleet policy set redact-pattern '<regex>,<regex>'` (toggle the built-in
 defaults with `redact-defaults on|off`).
+
+### Audit trail
+
+Every state-changing action is appended to a hash-chained audit log (`logs/_audit.log`), readable
+with `fleet logs` and shown in the dashboard's **Ops** view. Alongside server, file, key and
+config changes it records:
+
+- `exec.run` — each remote command per server, with its exit code, `timed_out=true` or the error
+  (secret values appear only as `VAR=@name`; `on_fail=true` marks `--on-fail` runs)
+- `approval.stage`, `approval.approve`, `approval.reject` — the approval id and command
+- `cmd-policy.set`, `policy.set` (the redaction pattern count only)
+- `secret.set`, `secret.rotate`, `secret.remove` — the secret's name, never its value
+- `token.create`, `token.revoke` — the token name and its short display id, never the full id
+- `file.delete.failed` (and other `*.failed` file actions) for refused or failed attempts
 
 ### Dead-man's-switch (auto-rollback)
 
@@ -348,8 +442,19 @@ fleet cmd-policy show
 fleet exec web-01 "reboot" --confirm           # required for a confirm-flagged command
 fleet exec web-01 "./deploy.sh" --require-approval   # stage instead of running
 fleet approvals list
-fleet approve <id>                             # or: fleet approvals reject <id>
+fleet approve <id>                             # review, confirm and run it; or: fleet approvals reject <id>
 ```
+
+`--require-approval` stages the command together with its exec options (`--timeout`, `--retry`,
+`--backoff`, `--guard`, `--confirm`, `--on-fail`, `--idempotency-key`, and secrets as
+`VAR=@name` references — a literal `--secret` value is refused, so no secret value is written to
+`approvals.json`), and records who staged it; only a registered server can be staged.
+`fleet approvals list` shows every staged option. `fleet approve <id>` first prints the full
+request — server, command, every option, who staged it and when — and asks for confirmation
+(without a terminal, pass `--yes` after reviewing it). It then runs the command once, through the
+normal `fleet exec` path, so cmd-policy, guard, redaction, audit and RBAC apply again at run
+time. The outcome is recorded on the approval (`executed` or `failed`, with the exit code) and
+shown by `fleet approvals list`. A scoped RBAC token cannot approve.
 
 ## Playbooks
 
@@ -385,7 +490,7 @@ fleet job run web-01 "./long-import.sh" --name nightly-import   # optional --nam
 fleet jobs                                     # list tracked jobs (ID, NAME, server, status…)
 fleet job status <id>                          # detects completion + exit code
 fleet job logs   <id> --follow                 # stream captured output
-fleet job wait   <id> --timeout 30m            # block until it finishes
+fleet job wait   <id> --timeout 30m            # block until it finishes; exits 1 if the job failed
 ```
 
 The optional `--name` label is shown in the `NAME` column of `fleet jobs` so a long-running
@@ -421,8 +526,11 @@ fleet agent version --all                      # report versions, flag mismatche
 fleet agent update --group role=web --canary 1 # update 1, health-check, then the rest
 ```
 
-`--canary N` updates a small batch of `N` servers first and only proceeds to the remainder if
-every canary comes back healthy.
+`--canary N` updates a small batch of `N` servers first and only proceeds to the remainder once
+every canary agent has reconnected, answers, and reports the new version (it retries for up to
+90 seconds while the agent restarts). Host health problems on a canary (no swap, high load, a
+full disk, a pending reboot, clock skew) are printed but do not stop the rollout; add
+`--strict-health` to also require a healthy host.
 
 ## Shell Integration
 
@@ -538,13 +646,24 @@ Launch the TUI:
 fleet dashboard
 ```
 
-Current tabs:
+The dashboard is a live operations console. It refreshes in the background every 5 seconds
+(`+`/`-` change the interval, `p` pauses, `r` refreshes now); the header shows how old the data
+is and keeps the last good snapshot on screen if a refresh fails. It fits any terminal from
+80×24 up, works with the keyboard and the mouse, and stays readable on 256- and 16-colour
+terminals and with `NO_COLOR`.
 
-- Overview
-- Servers
-- Services
-- Logs
-- Alerts
-- Ops
+Tabs:
 
-The dashboard supports both keyboard and mouse navigation.
+- **Overview** — online/degraded/offline counts, alert counts by severity and state, fleet
+  resource averages with p95, top CPU/memory/disk servers, open alerts, recent activity
+- **Servers** — a sortable table (`o`/`O` or click a column header) with an incremental filter
+  (`/`; words are ANDed, `tag=value` works); `enter` opens a detail pane with CPU/memory/disk
+  history sparklines from the metrics history
+- **Services**, **Logs** (a scrollable, searchable log viewer), **Alerts** (`v`/`t` filter by
+  severity/state), **Ops** (the audit trail)
+
+Actions re-run the same `fleet` binary, so RBAC tokens, cmd-policy, host-key pinning and audit
+apply exactly as they do on the command line: `s` opens an SSH shell, `f` the file manager and
+`L` follows a log (the dashboard suspends meanwhile); `c` reconnects a server, `R` restarts a
+service, `m` collects metrics, and on the Alerts tab `a`/`z`/`u` acknowledge, suppress and
+unsuppress (each asks for confirmation first). Press `?` for the full key reference.

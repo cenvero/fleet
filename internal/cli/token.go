@@ -84,6 +84,9 @@ func newTokenCreateCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Name and display id (prefix) only — never the bearer secret.
+			auditLocal(*configDir, "token.create", created.Name,
+				fmt.Sprintf("id=%s scoped=%t destructive=%t", tokenPrefix(created.ID), created.IsScoped(), created.DestructiveAllowed))
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Token %q created.\n\n", created.Name)
 			fmt.Fprintf(out, "  %s\n\n", created.ID)
@@ -136,9 +139,14 @@ func newTokenRevokeCommand(configDir *string) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store := core.NewTokenStore(*configDir)
+			name := ""
+			if t, gerr := store.Get(args[0]); gerr == nil {
+				name = t.Name
+			}
 			if err := store.Revoke(args[0]); err != nil {
 				return err
 			}
+			auditLocal(*configDir, "token.revoke", name, "id="+tokenPrefix(args[0]))
 			fmt.Fprintf(cmd.OutOrStdout(), "revoked token %s\n", tokenPrefix(args[0]))
 			return nil
 		},

@@ -4,6 +4,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -67,6 +68,16 @@ type App struct {
 	// sessions reuses live SSH connections across control RPCs instead of
 	// handshaking per call. See sessionpool.go.
 	sessions *sessionPool
+
+	// alertPending counts poller observations of unchanged, still-firing
+	// alerts that have not been persisted yet (see observeAlert).
+	alertPendingMu sync.Mutex
+	alertPending   map[string]int
+
+	// notifications delivers webhook/Slack notifications asynchronously so a
+	// slow endpoint never stalls the caller (see notify_queue.go).
+	notificationsMu sync.Mutex
+	notifications   *notifyDispatcher
 }
 
 // SetActingOperator records who is acting for audit attribution. The CLI calls
@@ -81,22 +92,28 @@ func (a *App) SetActingOperator(op string) {
 	a.actingOperator = strings.TrimSpace(op)
 }
 
+// Open loads the controller at configDir. The config is decoded once per
+// process and content (see LoadConfigShared), and the state/metrics databases
+// are opened lazily: they connect — and check or migrate their schema — on
+// first use, so commands that never touch them (server list, status, exec, ...)
+// never pay for it. Database errors therefore surface at first use rather than
+// here; only an invalid database configuration fails Open.
 func Open(configDir string) (*App, error) {
 	if configDir == "" {
 		configDir = DefaultConfigDir("")
 	}
-	cfg, err := LoadConfig(ConfigPath(configDir))
+	cfg, err := LoadConfigShared(ConfigPath(configDir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrNotInitialized
 		}
 		return nil, err
 	}
-	stateDB, err := store.Open(cfg.Database, store.WorkloadState)
+	stateDB, err := store.OpenLazy(cfg.Database, store.WorkloadState)
 	if err != nil {
 		return nil, err
 	}
-	metricsDB, err := store.Open(cfg.Database, store.WorkloadMetrics)
+	metricsDB, err := store.OpenLazy(cfg.Database, store.WorkloadMetrics)
 	if err != nil {
 		_ = stateDB.Close()
 		return nil, err
@@ -122,11 +139,52 @@ func Open(configDir string) (*App, error) {
 	return app, nil
 }
 
+// sharedConfig caches the last config this process decoded, keyed by the path
+// and the file's exact bytes, so the CLI's pre-run checks and Open share one
+// TOML decode (~0.3ms) per invocation. Keying on content (not mtime) means any
+// change to the file — including one made by this process — is always seen.
+var sharedConfig struct {
+	sync.Mutex
+	path string
+	data []byte
+	cfg  Config
+}
+
+// LoadConfigShared is LoadConfig, memoized per process on the file's content.
+// Config holds only value fields, so each caller gets an independent copy.
+func LoadConfigShared(path string) (Config, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- the controller's own config path
+	if err != nil {
+		return LoadConfig(path) // same error (and os.IsNotExist behaviour) as before
+	}
+	sharedConfig.Lock()
+	if sharedConfig.path == path && sharedConfig.data != nil && bytes.Equal(sharedConfig.data, data) {
+		cfg := sharedConfig.cfg
+		sharedConfig.Unlock()
+		return cfg, nil
+	}
+	sharedConfig.Unlock()
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		return cfg, err
+	}
+	// Only memoize if the file did not change while LoadConfig was reading it.
+	if again, rerr := os.ReadFile(path); rerr == nil && bytes.Equal(again, data) { // #nosec G304 -- same path as above
+		sharedConfig.Lock()
+		sharedConfig.path, sharedConfig.data, sharedConfig.cfg = path, data, cfg
+		sharedConfig.Unlock()
+	}
+	return cfg, nil
+}
+
 func (a *App) Close() error {
 	if a == nil {
 		return nil
 	}
 	var firstErr error
+	// Deliver notifications fired by this process (a CLI command or a stopping
+	// daemon) before exiting; bounded so a dead endpoint cannot hang us.
+	a.FlushNotifications(notifyFlushTimeout)
 	a.sessions.closeAllServers()
 	if a.StateDB != nil {
 		if err := a.StateDB.Close(); err != nil && firstErr == nil {
@@ -166,6 +224,10 @@ func (a *App) Status() (Status, error) {
 }
 
 func (a *App) UpdateChannel(channel string) error {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if channel != "stable" && channel != "beta" {
+		return fmt.Errorf("unknown update channel %q (want stable or beta)", channel)
+	}
 	a.Config.Updates.Channel = channel
 	if err := SaveConfig(ConfigPath(a.ConfigDir), a.Config); err != nil {
 		return err
@@ -491,6 +553,35 @@ func (a *App) teardownAgentWithPassword(server ServerRecord, password string) er
 	return a.TeardownAgent(server)
 }
 
+// ProbeAgent returns the hello of the agent that is live right now: over a
+// fresh (unpooled) connection in direct mode — which also refreshes the
+// recorded observation — or from the daemon's current session in reverse mode.
+// Unlike the recorded Observed.AgentVersion, which an agent update records as
+// soon as it is applied, this reflects the version actually running. It
+// writes no audit entry, so it is cheap to poll.
+func (a *App) ProbeAgent(ctx context.Context, name string) (proto.HelloPayload, error) {
+	server, err := a.GetServer(name)
+	if err != nil {
+		return proto.HelloPayload{}, err
+	}
+	if server.Mode == transport.ModeReverse {
+		info, err := a.reverseStatus(name)
+		if err != nil {
+			return proto.HelloPayload{}, err
+		}
+		if !info.Connected {
+			return proto.HelloPayload{}, fmt.Errorf("reverse agent %s is not connected", name)
+		}
+		return info.Hello, nil
+	}
+	session, hello, err := a.openDirectSessionContext(ctx, server, false)
+	if err != nil {
+		return proto.HelloPayload{}, err
+	}
+	_ = session.Close()
+	return hello, nil
+}
+
 func (a *App) ReconnectServer(name string, acceptNewHostKey bool) error {
 	server, err := a.GetServer(name)
 	if err != nil {
@@ -715,7 +806,7 @@ func (a *App) readServiceLogs(serverName, serviceName, search string, tailLines 
 		return proto.LogReadResult{}, err
 	}
 	if strings.TrimSpace(search) == "" {
-		if err := a.aggregatedLogs().Append(serverName, serviceName, result.Lines); err != nil {
+		if err := a.aggregatedLogs().AppendFrom(serverName, serviceName, result.Lines, logAppendSource(result)); err != nil {
 			return proto.LogReadResult{}, err
 		}
 	}
@@ -922,9 +1013,80 @@ func (a *App) ExecCommandContext(ctx context.Context, serverName, command string
 	if err != nil {
 		return proto.ExecResult{}, err
 	}
+	return a.execPayloadContext(ctx, server, proto.ExecPayload{Command: command})
+}
+
+// ExecCommandEnvContext runs command with extra environment variables (e.g.
+// resolved --secret values) visible to the WHOLE command, not just its first
+// simple command. Agents advertising proto.CapabilityExecEnv get them in the
+// payload and set them on the process, so the values never appear on a command
+// line. Older POSIX agents get an `export VAR='value'; ` prefix instead. Older
+// Windows agents run commands through cmd.exe, where no quoting carries
+// arbitrary values safely, so the call is refused. Errors name variables only,
+// never values.
+func (a *App) ExecCommandEnvContext(ctx context.Context, serverName, command string, env map[string]string) (proto.ExecResult, error) {
+	server, err := a.GetServer(serverName)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	payload, err := execPayloadWithEnv(server, command, env)
+	if err != nil {
+		return proto.ExecResult{}, err
+	}
+	return a.execPayloadContext(ctx, server, payload)
+}
+
+// execPayloadWithEnv builds the shell.exec payload for command + env, choosing
+// the process-environment field or the POSIX export prefix (see
+// ExecCommandEnvContext).
+func execPayloadWithEnv(server ServerRecord, command string, env map[string]string) (proto.ExecPayload, error) {
+	if len(env) == 0 {
+		return proto.ExecPayload{Command: command}, nil
+	}
+	names := make([]string, 0, len(env))
+	for name := range env {
+		if !validShellEnvName(name) {
+			return proto.ExecPayload{}, fmt.Errorf("invalid environment variable name %q", name)
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	if slices.Contains(server.Capabilities, proto.CapabilityExecEnv) {
+		return proto.ExecPayload{Command: command, Env: env}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(server.Observed.OS), "windows") {
+		return proto.ExecPayload{}, fmt.Errorf("server %s runs an agent without environment support; update its agent to pass %s to a Windows command", server.Name, strings.Join(names, ", "))
+	}
+	var prefix strings.Builder
+	for _, name := range names {
+		prefix.WriteString("export ")
+		prefix.WriteString(name)
+		prefix.WriteString("=")
+		prefix.WriteString(shellQuote(env[name]))
+		prefix.WriteString("; ")
+	}
+	return proto.ExecPayload{Command: prefix.String() + command}, nil
+}
+
+func validShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (a *App) execPayloadContext(ctx context.Context, server ServerRecord, payload proto.ExecPayload) (proto.ExecResult, error) {
 	response, err := a.callRPCContext(ctx, server, proto.Envelope{
 		Action:  "shell.exec",
-		Payload: proto.ExecPayload{Command: command},
+		Payload: payload,
 	})
 	if err != nil {
 		return proto.ExecResult{}, err
@@ -941,16 +1103,13 @@ func (a *App) ExecCommandAll(command string) []ExecServerResult {
 		return []ExecServerResult{{Error: err}}
 	}
 	results := make([]ExecServerResult, len(servers))
-	var wg sync.WaitGroup
-	for i, server := range servers {
-		wg.Add(1)
-		go func(i int, name string) {
-			defer wg.Done()
-			result, err := a.ExecCommand(name, command)
-			results[i] = ExecServerResult{Server: name, Result: result, Error: err}
-		}(i, server.Name)
-	}
-	wg.Wait()
+	// Bounded: in reverse mode every call is one daemon control connection, and
+	// the daemon drops connections beyond its limit (see DefaultFanoutLimit).
+	ForEachLimit(len(servers), DefaultFanoutLimit, func(i int) {
+		name := servers[i].Name
+		result, err := a.ExecCommand(name, command)
+		results[i] = ExecServerResult{Server: name, Result: result, Error: err}
+	})
 	return results
 }
 
@@ -1103,12 +1262,55 @@ func (a *App) callRPC(server ServerRecord, env proto.Envelope) (proto.Envelope, 
 	return a.callRPCContext(context.Background(), server, env)
 }
 
+// lastSeenRefreshAge bounds how often a successful call rewrites a server's
+// record just to refresh Observed.LastSeen: at most once per server per 30s,
+// however busy the server is.
+const lastSeenRefreshAge = 30 * time.Second
+
+// callRPCContext performs one control RPC and, when the agent answered,
+// refreshes the server's "last seen" (see noteServerSeen). Pooled and relayed
+// calls never redial, so without this LastSeen froze at the last dial.
 func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
+	resp, err := a.callRPCContextRaw(ctx, server, env)
+	if err == nil {
+		a.noteServerSeen(server)
+	}
+	return resp, err
+}
+
+// noteServerSeen marks a server reachable and seen now, rewriting its record
+// only when the stored LastSeen is older than lastSeenRefreshAge (or it is
+// marked unreachable). It re-reads the record first so it never reverts fields
+// that changed during the call (e.g. a redial's fresh hello).
+func (a *App) noteServerSeen(server ServerRecord) {
+	fresh := func(s ServerRecord) bool {
+		return s.Observed.Reachable && time.Since(s.Observed.LastSeen) < lastSeenRefreshAge
+	}
+	if fresh(server) {
+		return
+	}
+	current, err := a.GetServer(server.Name)
+	if err != nil || fresh(current) {
+		return
+	}
+	current.Observed.Reachable = true
+	current.Observed.LastSeen = time.Now().UTC()
+	current.Observed.LastError = ""
+	_ = a.SaveServer(current)
+}
+
+func (a *App) callRPCContextRaw(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		env.DeadlineUnixMilli = deadline.UnixMilli()
 	}
 	switch server.Mode {
 	case transport.ModeDirect:
+		// With a daemon running, ride its warm pooled connection instead of
+		// paying a full SSH setup in this process (see direct_relay.go). Every
+		// policy check has already happened by the time a call gets here.
+		if out, handled, err := a.tryDaemonDirectRelay(ctx, server, env); handled {
+			return out, err
+		}
 		return a.callDirectPooledContext(ctx, server, env)
 	case transport.ModeReverse:
 		if a.ReverseRPCContext != nil {
@@ -1127,7 +1329,7 @@ func (a *App) callRPCContext(ctx context.Context, server ServerRecord, env proto
 // dialing only when nothing reusable is cached.
 
 func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
-	if l, ok := a.sessions.acquire(server.Name); ok {
+	if l, ok := a.sessions.acquireContext(ctx, server.Name); ok {
 		resp, err := l.session().Call(ctx, env)
 		if err == nil || transport.SessionUsableAfterError(err) {
 			l.release()
@@ -1158,10 +1360,20 @@ func (a *App) dialPooledContext(ctx context.Context, server ServerRecord) (*leas
 	defer dialMu.Unlock()
 
 	// Re-check: whoever held the lock before us has just published a connection.
-	if l, ok := a.sessions.acquire(server.Name); ok {
+	if l, ok := a.sessions.acquireContext(ctx, server.Name); ok {
 		return l, nil
 	}
-	session, _, err := a.openDirectSessionContext(ctx, server, false)
+	// Connection setup (TCP, SSH handshake, channel open, hello) is bounded even
+	// for a caller without a deadline: the dial lock is held across it, so a
+	// peer that accepts TCP and then goes silent would otherwise stall every
+	// caller queued behind it for this server.
+	dialCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, pooledDialHelloTimeoutCap)
+		defer cancel()
+	}
+	session, _, err := a.openDirectSessionContext(dialCtx, server, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1189,6 +1401,11 @@ func (a *App) dropPooledSession(serverName string) {
 	}
 	a.sessions.evict(serverName)
 }
+
+// Operator is the identity audited actions are attributed to: the verified RBAC
+// token (as "token:<name>") when one is in use, else the configured operator or
+// the local user.
+func (a *App) Operator() string { return a.operator() }
 
 func (a *App) operator() string {
 	// A verified RBAC token sets actingOperator via SetActingOperator (the CLI

@@ -142,3 +142,24 @@ func TestSendPinnedDialReachesAllowedServer(t *testing.T) {
 		t.Fatalf("server received body %q, want it to contain the message", gotBody)
 	}
 }
+
+// Re-adding an existing target replaces its settings, so `fleet notify add ...
+// --allow-internal` on a target that was added without it opts it in (and
+// re-adding without the flag opts it back out).
+func TestNotifyStoreReAddUpdatesAllowInternal(t *testing.T) {
+	store := NewNotifyStore(t.TempDir())
+	target := NotifyTarget{Kind: NotifyKindWebhook, URL: "http://10.0.0.5/hook", Events: []string{NotifyEventOffline}}
+	for _, allow := range []bool{false, true, false} {
+		target.AllowInternal = allow
+		if err := store.Add(target); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].AllowInternal != allow {
+			t.Fatalf("after add with allow-internal=%v: %+v", allow, got)
+		}
+	}
+}

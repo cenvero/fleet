@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -42,7 +43,11 @@ func DetectCapabilities() []string {
 		// Offline metrics remain queued until the controller explicitly acks the
 		// exact batch after durable controller-side persistence.
 		proto.CapabilityMetricsPeekAck,
+		// shell.exec honours ExecPayload.Env (e.g. --secret values reach the
+		// whole command via the process environment, not the command line).
+		proto.CapabilityExecEnv,
 	}
+	caps = append(caps, fileCapabilities()...)
 	switch runtime.GOOS {
 	case "linux":
 		caps = append(caps, "service.manage", "firewall.manage", "port.manage")
@@ -101,13 +106,15 @@ func NewRootCommand() *cobra.Command {
 	var fileRoots []string
 
 	root := &cobra.Command{
-		Use:   "fleet-agent",
-		Short: "Cenvero Fleet agent",
+		Use:     "fleet-agent",
+		Short:   "Cenvero Fleet agent",
+		Version: version.Version,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 			return runAgent(mode)
 		},
 	}
+	root.SetVersionTemplate(version.ProductName + " agent {{.Version}}\n")
 
 	root.PersistentFlags().StringVar(&mode, "mode", "direct", "transport mode to advertise")
 	root.PersistentFlags().StringVar(&listenAddress, "listen", "127.0.0.1:2222", "agent listen address for direct mode")
@@ -165,6 +172,7 @@ func NewRootCommand() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Cenvero Fleet agent listening on %s\n", listener.Addr())
+			warnAuthorizedKeys(cmd.ErrOrStderr(), authorizedKeysPath)
 			server := Server{
 				Mode:               transport.ModeDirect,
 				HostKeyPath:        hostKeyPath,
@@ -209,8 +217,28 @@ func runAgent(mode string) error {
 		return err
 	}
 	hello := Hello(parsedMode)
-	fmt.Printf("%s agent %s ready on %s/%s\n", version.ProductName, version.Version, hello.OS, hello.Arch)
+	fmt.Printf("%s agent %s on %s/%s\n", version.ProductName, version.Version, hello.OS, hello.Arch)
 	fmt.Printf("capabilities: %s\n", strings.Join(hello.Capabilities, ", "))
-	fmt.Println("transport server scaffolding is present; SSH session handling lands in the next transport iteration.")
+	fmt.Println("Run `fleet-agent serve` for direct mode or `fleet-agent reverse` for reverse mode; see `fleet-agent --help`.")
 	return nil
+}
+
+// warnAuthorizedKeys tells the operator, at start-up, when no controller can
+// connect yet. The file is re-read on every connection (so an install may write
+// it after the agent starts), which is why this warns instead of failing.
+func warnAuthorizedKeys(w io.Writer, path string) {
+	if path == "" {
+		return // Serve reports the missing flag itself
+	}
+	keys, err := loadAuthorizedKeys(path)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "warning: %v; every connection will be refused until it is readable\n", err)
+	case len(keys) == 0:
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			fmt.Fprintf(w, "warning: authorized keys file %s does not exist; every connection will be refused until it is written\n", path)
+		} else {
+			fmt.Fprintf(w, "warning: authorized keys file %s holds no valid keys; every connection will be refused\n", path)
+		}
+	}
 }

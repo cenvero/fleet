@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -42,9 +43,10 @@ func newDoctorCommand(configDir *string) *cobra.Command {
 		ValidArgsFunction: serverNameComp(configDir),
 		Short:             "Run a health checklist against a server (agent, ports, disk, swap, reboot, clock)",
 		Long: "Run a fixed set of health checks against a managed server over the agent\n" +
-			"channel and report each as ok/warn/fail:\n\n" +
+			"channel and report each as ok/warn/fail (or skip when it does not apply):\n\n" +
 			"  • agent online        a trivial remote command succeeds\n" +
 			"  • agent port reachable something is listening on the recorded agent port\n" +
+			"                         (skipped for reverse-mode servers, whose agent dials out)\n" +
 			"  • sshd reachable       an sshd listener on port 22\n" +
 			"  • disk usage           warns when the root filesystem is >90% used\n" +
 			"  • swap configured      warns when no swap is present\n" +
@@ -69,11 +71,19 @@ func newDoctorCommand(configDir *string) *cobra.Command {
 			report := core.RunDoctor(core.DoctorProbe{
 				Server:    server.Name,
 				AgentPort: server.Port,
+				Reverse:   server.Mode == transport.ModeReverse,
 				Now:       time.Now(),
 			}, doctorExecAdapter(app, server.Name))
 
 			if asJSON {
-				return writeJSON(cmd, report)
+				if err := writeJSON(cmd, report); err != nil {
+					return err
+				}
+				// Same exit status as the human report: scripts gate on it.
+				if report.Failed() {
+					return fmt.Errorf("doctor: one or more checks failed for %q", report.Server)
+				}
+				return nil
 			}
 			if err := writeDoctorReport(cmd, report); err != nil {
 				return err
@@ -97,6 +107,8 @@ func doctorSymbol(s core.DoctorStatus) string {
 		return "! warn"
 	case core.DoctorFail:
 		return "✘ fail"
+	case core.DoctorSkip:
+		return "- skip"
 	default:
 		return string(s)
 	}

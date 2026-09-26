@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,6 +57,22 @@ type envRequestPayload struct {
 	Value string
 }
 
+// ErrSSHReverseUnsupported is returned for `fleet ssh` to a reverse-mode
+// server. Such a server has no address the controller can dial (its record
+// holds a placeholder), and dialing one anyway would hand the operator's
+// session to whatever listens there.
+var ErrSSHReverseUnsupported = errors.New("interactive ssh to reverse-mode servers is not supported; use fleet exec")
+
+// RemoteExitError reports that the remote shell ended with a non-zero exit
+// status, which the caller should pass on as its own.
+type RemoteExitError struct {
+	Code int
+}
+
+func (e *RemoteExitError) Error() string {
+	return fmt.Sprintf("remote shell exited with status %d", e.Code)
+}
+
 // RunSSHSession opens an interactive shell through the fleet agent's own SSH
 // transport (fleet-shell channel on the agent port — not port 22).
 //
@@ -65,11 +82,20 @@ type envRequestPayload struct {
 //     port scanner will see "SSH-2.0-cenvero-fleet-agent" and be unable to open
 //     any session without both the correct key and the fleet channel type.
 //
-// If the connection drops it automatically retries up to 3 times before giving up.
+// If an established connection drops it retries up to 3 times before giving
+// up; a first connection that fails is reported at once. A non-zero remote
+// exit status comes back as *RemoteExitError.
 func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 	server, err := a.GetServer(serverName)
 	if err != nil {
 		return err
+	}
+	switch server.Mode {
+	case transport.ModeDirect:
+	case transport.ModeReverse:
+		return ErrSSHReverseUnsupported
+	default:
+		return fmt.Errorf("interactive ssh needs a direct-mode server; %s is in %q mode", serverName, server.Mode)
 	}
 
 	// Use the per-server key override if set; fall back to the primary controller key.
@@ -117,42 +143,52 @@ func (a *App) RunSSHSession(serverName string, out io.Writer) error {
 		return err
 	}
 
+	established := false
 	for attempt := 0; attempt <= sshMaxRetries; attempt++ {
 		if attempt > 0 {
 			fmt.Fprintf(out, "\r\nReconnecting... (attempt %d/%d)\r\n", attempt, sshMaxRetries)
-			time.Sleep(sshReconnectDelay)
 		}
 
-		err = a.runSSHOnce(addr, clientConfig, knownHostsPath, promptFn, resumeID, out)
+		connected, err := a.runSSHOnce(addr, clientConfig, knownHostsPath, promptFn, resumeID, out)
 		if err == nil {
 			return nil
 		}
-		if isTerminalSSHError(err) {
+		var exitErr *RemoteExitError
+		if errors.As(err, &exitErr) || isTerminalSSHError(err) {
 			return err
+		}
+		established = established || connected
+		if !established {
+			// Nothing was ever connected, so there is nothing to reconnect to.
+			return fmt.Errorf("connect to %s at %s: %w", serverName, addr, err)
 		}
 
 		if attempt < sshMaxRetries {
 			fmt.Fprintf(out, "\r\nConnection lost. Reconnecting in %ds... (%d/%d)\r\n",
 				int(sshReconnectDelay.Seconds()), attempt+1, sshMaxRetries)
+			time.Sleep(sshReconnectDelay)
 		}
 	}
 
 	return fmt.Errorf("disconnected — could not reconnect after %d attempts", sshMaxRetries)
 }
 
-func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath string, promptFn func(string, string, string) bool, resumeID string, out io.Writer) error {
+// runSSHOnce runs one connection's worth of the shell. established reports
+// whether the shell was actually started, so the caller knows whether there
+// is a session to reconnect to.
+func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath string, promptFn func(string, string, string) bool, resumeID string, out io.Writer) (established bool, err error) {
 	// Fresh callback on every attempt: re-reads known_hosts from disk so a
 	// host pinned in attempt N is visible to attempt N+1 and won't be re-pinned.
 	var state transport.HostKeyState
 	hostKeyCallback, err := transport.NewInteractiveHostKeyCallback(knownHostsPath, promptFn, &state)
 	if err != nil {
-		return fmt.Errorf("known_hosts: %w", err)
+		return false, fmt.Errorf("known_hosts: %w", err)
 	}
 	cfg.HostKeyCallback = hostKeyCallback
 
 	client, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer client.Close()
 
@@ -193,22 +229,27 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 	// to or steal this shell.
 	channel, reqs, err := client.OpenChannel(transport.ShellChannelType, ssh.Marshal(struct{ ResumeID string }{ResumeID: resumeID}))
 	if err != nil {
-		return fmt.Errorf("open fleet-shell channel: %w", err)
+		return false, fmt.Errorf("open fleet-shell channel: %w", err)
 	}
 	defer channel.Close()
 
 	// Track clean exit: agent sends "exit-status" before closing the channel
 	// (SSH protocol ordering). reqsDone is closed when the goroutine has
 	// drained all requests — including exit-status — so we wait for it after
-	// io.Copy returns instead of racing against it.
-	cleanExit := make(chan struct{}, 1)
+	// io.Copy returns instead of racing against it. The status itself is
+	// kept so the caller can exit with it.
+	cleanExit := make(chan uint32, 1)
 	reqsDone := make(chan struct{})
 	go func() {
 		defer close(reqsDone)
 		for req := range reqs {
 			if req.Type == "exit-status" {
+				var status struct{ Status uint32 }
+				if ssh.Unmarshal(req.Payload, &status) != nil {
+					status.Status = 0 // malformed: treat as the clean exit it announces
+				}
 				select {
-				case cleanExit <- struct{}{}:
+				case cleanExit <- status.Status:
 				default:
 				}
 			}
@@ -222,7 +263,7 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 	if term.IsTerminal(fd) {
 		oldState, err := term.MakeRaw(fd)
 		if err != nil {
-			return fmt.Errorf("make raw terminal: %w", err)
+			return false, fmt.Errorf("make raw terminal: %w", err)
 		}
 		defer term.Restore(fd, oldState) //nolint:errcheck
 
@@ -234,10 +275,10 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 		})
 		ok, err := channel.SendRequest("pty-req", true, ptyPayload)
 		if err != nil {
-			return fmt.Errorf("pty-req: %w", err)
+			return false, fmt.Errorf("pty-req: %w", err)
 		}
 		if !ok {
-			return fmt.Errorf("agent rejected pty-req")
+			return false, fmt.Errorf("agent rejected pty-req")
 		}
 
 		go watchWindowResize(channel, fd, done)
@@ -257,10 +298,10 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 
 	ok, err := channel.SendRequest("shell", true, nil)
 	if err != nil {
-		return fmt.Errorf("shell request: %w", err)
+		return false, fmt.Errorf("shell request: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("agent rejected shell request")
+		return false, fmt.Errorf("agent rejected shell request")
 	}
 
 	// Proxy I/O between the local terminal and the remote shell.
@@ -277,16 +318,19 @@ func (a *App) runSSHOnce(addr string, cfg *ssh.ClientConfig, knownHostsPath stri
 
 	// If the agent sent exit-status before closing, it was a clean shell exit — no reconnect.
 	select {
-	case <-cleanExit:
-		return nil
+	case status := <-cleanExit:
+		if status != 0 {
+			return true, &RemoteExitError{Code: int(status)}
+		}
+		return true, nil
 	default:
 	}
 
 	// No exit-status received: connection was dropped.
 	if copyErr == nil || strings.Contains(strings.ToLower(copyErr.Error()), "eof") {
-		return fmt.Errorf("connection dropped")
+		return true, fmt.Errorf("connection dropped")
 	}
-	return copyErr
+	return true, copyErr
 }
 
 // isTerminalSSHError returns true for errors that will never succeed on retry —

@@ -50,7 +50,8 @@ func skipBackupPattern(name string) bool {
 		strings.HasSuffix(base, "-journal"),
 		strings.HasSuffix(base, "-wal"),
 		strings.HasSuffix(base, "-shm"),
-		strings.HasPrefix(base, ".authorized_keys."):
+		strings.HasPrefix(base, ".authorized_keys."),
+		strings.HasPrefix(base, ".config."): // config.toml temp files and `config edit` drafts
 		return true
 	}
 	return false

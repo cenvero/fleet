@@ -55,6 +55,12 @@ func newTagCommand(configDir *string) *cobra.Command {
 			pairs := args[1:]
 			store := core.NewTagStore(*configDir)
 
+			// A typo'd server name must not silently "have no tags" or
+			// collect tags that no server carries. Clearing tags stays
+			// possible for a server that has since been removed.
+			if err := checkTagServer(*configDir, store, server, pairs); err != nil {
+				return err
+			}
 			if len(pairs) == 0 {
 				return runTagShow(cmd, store, server)
 			}
@@ -63,6 +69,30 @@ func newTagCommand(configDir *string) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&list, "list", false, "list all servers and their tags")
 	return cmd
+}
+
+// checkTagServer returns the "server not found" error for a server that isn't
+// in the fleet, unless the command only reads or clears tags it still has.
+func checkTagServer(configDir string, store *core.TagStore, server string, pairs []string) error {
+	app, err := openApp(configDir)
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+	_, err = app.GetServer(server)
+	if err == nil {
+		return nil
+	}
+	onlyClears := true
+	for _, pair := range pairs {
+		if _, v, ok := strings.Cut(pair, "="); !ok || strings.TrimSpace(v) != "" {
+			onlyClears = false
+		}
+	}
+	if onlyClears && len(store.GetTags(server)) > 0 {
+		return nil
+	}
+	return err
 }
 
 // runTagSet parses key=value pairs and stores them for the server.
@@ -77,6 +107,14 @@ func runTagSet(cmd *cobra.Command, store *core.TagStore, server string, pairs []
 		v = strings.TrimSpace(v)
 		if k == "" {
 			return fmt.Errorf("invalid tag %q: empty key", pair)
+		}
+		// Tags are matched by `key=value[,key=value]` filters, so a key can't
+		// hold whitespace or a comma, and a value can't hold a comma.
+		if strings.ContainsAny(k, ", \t\r\n") {
+			return fmt.Errorf("invalid tag %q: keys cannot contain spaces or commas", pair)
+		}
+		if strings.ContainsAny(v, ",\r\n") {
+			return fmt.Errorf("invalid tag %q: values cannot contain commas or newlines", pair)
 		}
 		kv[k] = v
 	}

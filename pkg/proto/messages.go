@@ -206,6 +206,20 @@ type MetricsPayload struct {
 type MetricsReplayResult struct {
 	BatchID   string            `json:"batch_id,omitempty"`
 	Snapshots []MetricsSnapshot `json:"snapshots"`
+	// More reports that the queue holds further snapshots after this batch.
+	// Only an agent that honoured MetricsPeekPayload.MaxSnapshots sets it; an
+	// older agent returns its whole queue and leaves it false.
+	More bool `json:"more,omitempty"`
+}
+
+// MetricsPeekPayload is the metrics.peek_queue request. MaxSnapshots asks the
+// agent for at most that many queued snapshots per batch so a long offline
+// backlog replays in pages, each persisted and acknowledged on its own. It is
+// a superset of MetricsPayload: an older agent ignores the field and answers
+// with its whole queue, which the controller still accepts.
+type MetricsPeekPayload struct {
+	Server       string `json:"server"`
+	MaxSnapshots int    `json:"max_snapshots,omitempty"`
 }
 
 type MetricsReplayAck struct {
@@ -228,6 +242,12 @@ type MetricsSnapshot struct {
 	Load15           float64   `json:"load15,omitempty"`
 	UptimeSeconds    uint64    `json:"uptime_seconds,omitempty"`
 	ProcessCount     uint64    `json:"process_count,omitempty"`
+	// Swap usage. Additive: older agents omit these and older controllers ignore
+	// them. SwapReported tells "the agent reported swap (possibly none
+	// configured, total 0)" apart from "an older agent sent nothing".
+	SwapUsedBytes  uint64 `json:"swap_used_bytes,omitempty"`
+	SwapTotalBytes uint64 `json:"swap_total_bytes,omitempty"`
+	SwapReported   bool   `json:"swap_reported,omitempty"`
 }
 
 type FirewallInfo struct {
@@ -243,6 +263,30 @@ type LogReadPayload struct {
 	Search    string `json:"search,omitempty"`
 	TailLines int    `json:"tail_lines,omitempty"`
 	Follow    bool   `json:"follow,omitempty"`
+	// Cursor, when set, asks for only the lines after that position (the
+	// Cursor of a previous LogReadResult for the same path): follow polling
+	// then reads just the newly appended bytes. If the file was truncated,
+	// replaced or rotated since, the agent starts over on the current file and
+	// sets LogReadResult.Reset. Agents that predate cursors ignore the field
+	// and return a plain tail without a Cursor.
+	Cursor *LogCursor `json:"cursor,omitempty"`
+}
+
+// LogCursor is an opaque resume position in a log file, handed out by the agent
+// in LogReadResult.Cursor and echoed back unchanged in LogReadPayload.Cursor.
+type LogCursor struct {
+	// Offset is the byte offset just past the last complete ('\n'-terminated)
+	// line the agent has seen.
+	Offset int64 `json:"offset"`
+	// Line is the number of complete lines before Offset, so the first line
+	// after the cursor is number Line+1. A returned line numbered above Line
+	// is the file's unterminated last line, which the cursor does not consume.
+	Line int `json:"line"`
+	// FileID identifies the file (device and inode) to detect replacement.
+	FileID string `json:"file_id,omitempty"`
+	// Sum fingerprints the bytes just before Offset to detect truncation
+	// followed by regrowth past Offset.
+	Sum string `json:"sum,omitempty"`
 }
 
 type LogLine struct {
@@ -254,6 +298,18 @@ type LogReadResult struct {
 	Path      string    `json:"path"`
 	Lines     []LogLine `json:"lines"`
 	Truncated bool      `json:"truncated,omitempty"`
+	// Cursor is where a follow-up read should resume (see
+	// LogReadPayload.Cursor). Absent from agents without cursor support.
+	Cursor *LogCursor `json:"cursor,omitempty"`
+	// Reset reports that the request's Cursor no longer matched the file
+	// (truncated, replaced or rotated) and line numbering restarted: Lines
+	// start at the beginning of the current file when it is small (as right
+	// after a rotation, paged like any cursor read), otherwise they are its
+	// tail.
+	Reset bool `json:"reset,omitempty"`
+	// More reports that a cursor read stopped at a size limit before the end
+	// of the file; read again from Cursor straight away for the rest.
+	More bool `json:"more,omitempty"`
 }
 
 type UpdateApplyPayload struct {
@@ -308,14 +364,28 @@ type ControllerKnownHostsResult struct {
 	Fingerprints []string `json:"fingerprints,omitempty"`
 }
 
+// CapabilityExecEnv is advertised by agents that apply ExecPayload.Env to the
+// environment of the process running the command.
+const CapabilityExecEnv = "exec.env"
+
 type ExecPayload struct {
 	Command string `json:"command"`
+	// Env holds extra environment variables (e.g. resolved --secret values) for
+	// the command's process, so they reach the whole command without being
+	// spliced into its command line. Controllers send it only to agents that
+	// advertise CapabilityExecEnv; older agents would silently ignore it.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 type ExecResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
+	// TimedOut is set by agents that killed the command because its deadline
+	// (the request deadline or the agent's own default limit) expired. Additive:
+	// older controllers ignore it, and older agents never set it (controllers
+	// then infer the timeout from a signal exit at the deadline).
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 func DecodeHelloPayload(payload any) (HelloPayload, error) {

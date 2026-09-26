@@ -20,17 +20,17 @@ import (
 // arbitrary unit, parsed directly from `systemctl`/`journalctl` over
 // App.ExecCommand. It does not require the unit to be tracked first.
 //
-//	fleet svc <server> status  <unit> [--json]
-//	fleet svc <server> restart <unit>
-//	fleet svc <server> start   <unit>
-//	fleet svc <server> stop    <unit>
-//	fleet svc <server> enable  <unit>
-//	fleet svc <server> disable <unit>
+//	fleet svc status  <server> <unit> [--json]
+//	fleet svc restart <server> <unit>
+//	fleet svc start   <server> <unit>
+//	fleet svc stop    <server> <unit>
+//	fleet svc enable  <server> <unit>
+//	fleet svc disable <server> <unit>
 //
 // newServiceStatusCommand is exported through this file so root.go can register
 // it with root.AddCommand(newServiceStatusCommand(&configDir)).
 
-// serviceStatus is the structured shape returned by `fleet svc <server> status`.
+// serviceStatus is the structured shape returned by `fleet svc status <server> <unit>`.
 //
 //	Active:  active | inactive | failed | activating | ... (systemd ActiveState)
 //	Enabled: enabled | disabled | static | ...             (systemd UnitFileState)
@@ -80,20 +80,19 @@ func validUnitName(unit string) error {
 
 func newServiceStatusCommand(configDir *string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "svc <server>",
+		Use:   "svc <action> <server> <unit>",
 		Short: "Structured systemd control for an arbitrary unit",
 		Long: `Inspect and control a systemd unit on a server with structured output.
 
 Unlike 'fleet service', this works on any unit without tracking it first; it
 parses systemctl/journalctl directly over the live agent transport.
 
-  fleet svc <server> status  <unit> [--json]
-  fleet svc <server> restart <unit>
-  fleet svc <server> start   <unit>
-  fleet svc <server> stop    <unit>
-  fleet svc <server> enable  <unit>
-  fleet svc <server> disable <unit>`,
-		Args: cobra.MinimumNArgs(1),
+  fleet svc status  <server> <unit> [--json]
+  fleet svc restart <server> <unit>
+  fleet svc start   <server> <unit>
+  fleet svc stop    <server> <unit>
+  fleet svc enable  <server> <unit>
+  fleet svc disable <server> <unit>`,
 	}
 
 	statusJSON := false

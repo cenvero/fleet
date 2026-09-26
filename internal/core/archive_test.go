@@ -661,3 +661,28 @@ func TestArchiveNeutralStagingExtensions(t *testing.T) {
 		}
 	}
 }
+
+// A file that isn't the archive its name claims is reported as such, naming the
+// operator's path, instead of "read archive manifest: archive/tar: invalid tar
+// header".
+func TestExtractNonArchiveReportsFriendlyError(t *testing.T) {
+	app := &App{}
+	dir := t.TempDir()
+	text := strings.Repeat("just some text, not an archive\n", 40)
+	cases := map[string]string{
+		"notes.zip":    "is not a valid zip archive",
+		"notes.tar.gz": "is not a valid tar.gz archive",
+		"notes.tar":    "is not a valid tar archive",
+		"notes.txt":    "is not an archive fleet can extract",
+	}
+	for name, want := range cases {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := app.ExtractArchive("", p)
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), p) {
+			t.Errorf("%s: err = %v, want %q naming the path", name, err, want)
+		}
+	}
+}

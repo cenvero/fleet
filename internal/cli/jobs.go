@@ -165,8 +165,12 @@ func newJobWaitCommand(configDir *string) *cobra.Command {
 	var timeout, poll time.Duration
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:          "wait <id>",
-		Short:        "Block until a job finishes, then report its exit code",
+		Use:   "wait <id>",
+		Short: "Block until a job finishes, then report its exit code",
+		Long: "Block until a background job finishes, then report its exit code.\n\n" +
+			"Exits 0 when the job succeeded and 1 when it exited non-zero (or could not be\n" +
+			"waited for), so `fleet job wait <id> && next-step` gates on the job. --json\n" +
+			"prints the final job record either way.",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -185,9 +189,15 @@ func newJobWaitCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			if asJSON {
-				return writeJSON(cmd, rec)
+				if err := writeJSON(cmd, rec); err != nil {
+					return err
+				}
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "job %d done (exit %d)\n", rec.ID, rec.ExitCode)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "job %d done (exit %d)\n", rec.ID, rec.ExitCode)
+			if rec.ExitCode != 0 {
+				return fmt.Errorf("job %d on %s failed with exit code %d", rec.ID, rec.Server, rec.ExitCode)
+			}
 			return nil
 		},
 	}

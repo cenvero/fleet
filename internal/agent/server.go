@@ -606,7 +606,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload:         snapshot,
 			})
 		case proto.ActionMetricsPeekQueue:
-			batch, err := s.metricsQueue().Peek()
+			batch, err := s.peekMetricsQueue(request.Payload)
 			if err != nil {
 				_ = encode(errorEnvelope(request, err))
 				continue
@@ -619,6 +619,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload: proto.MetricsReplayResult{
 					BatchID:   batch.ID,
 					Snapshots: batch.Snapshots,
+					More:      batch.More,
 				},
 			})
 		case proto.ActionMetricsAckQueue:
@@ -876,7 +877,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		case proto.ActionFileStat:
 			handleFileRPC(encode, request, s.fileManager().Stat)
 		case proto.ActionFileRead:
-			handleFileRPC(encode, request, s.fileManager().Read)
+			handleFileRead(encode, request, s.fileManager())
 		case proto.ActionFileOpenWrite:
 			handleFileRPC(encode, request, s.fileManager().OpenWrite)
 		case proto.ActionFileWrite:
@@ -891,6 +892,12 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			handleFileRPC(encode, request, s.fileManager().Delete)
 		case proto.ActionFileRename:
 			handleFileRPC(encode, request, s.fileManager().Rename)
+		case proto.ActionFilePut:
+			handleFileRPC(encode, request, s.fileManager().Put)
+		case proto.ActionFileCopy:
+			handleFileRPC(encode, request, s.fileManager().Copy)
+		case proto.ActionFileTree:
+			handleFileRPC(encode, request, s.fileManager().Tree)
 		default:
 			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
@@ -1021,13 +1028,20 @@ func handleFileRPC[T any, R any](encode func(proto.Envelope) error, request prot
 	_ = encode(response)
 }
 
+// controllerIDFromPayload extracts the controller_id a hello request carries.
+//
+// Payloads off the wire arrive as json.RawMessage (Envelope.UnmarshalJSON keeps
+// them raw), so a plain map[string]any assertion never matched and the echoed
+// ControllerID was always empty. DecodePayload handles the raw bytes as well as
+// an in-process map or struct.
 func controllerIDFromPayload(payload any) string {
-	payloadMap, ok := payload.(map[string]any)
-	if !ok {
+	decoded, err := proto.DecodePayload[struct {
+		ControllerID string `json:"controller_id"`
+	}](payload)
+	if err != nil {
 		return ""
 	}
-	controllerID, _ := payloadMap["controller_id"].(string)
-	return controllerID
+	return decoded.ControllerID
 }
 
 func loadAuthorizedKeys(path string) (map[string]struct{}, error) {

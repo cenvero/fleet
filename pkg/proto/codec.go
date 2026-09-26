@@ -4,10 +4,12 @@
 package proto
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -34,6 +36,23 @@ const binaryFrameFlag uint32 = 1 << 31
 // ceiling so a hostile length can't drive an unbounded allocation.
 const MaxBinaryFrameBytes = 16 * 1024 * 1024
 
+// maxPooledCodecBuffer caps the buffers the codec keeps for reuse. Control
+// messages are a few hundred bytes to a few KiB; the rare multi-megabyte
+// envelope (a legacy base64 chunk, a big listing) is allocated and dropped
+// rather than pinned in the pool.
+const maxPooledCodecBuffer = 1 << 20
+
+var encodeBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// Encode writes env to w.
+//
+// The length prefix, the JSON body and — for a framed message — the attachment
+// length are assembled in one pooled buffer and handed to w in a single Write;
+// only the attachment itself is written separately, straight from the caller's
+// slice. On an SSH channel every Write becomes its own channel-data packet
+// (its own encryption and usually its own syscall), so the previous 2 writes per
+// message (4 with an attachment) cost measurably more than 1 (or 2). The bytes
+// on the wire are identical to what the unbuffered encoder produced.
 func Encode(w io.Writer, env Envelope) error {
 	if env.ProtocolVersion == 0 {
 		env.ProtocolVersion = CurrentProtocolVersion
@@ -47,29 +66,46 @@ func Encode(w io.Writer, env Envelope) error {
 		return fmt.Errorf("binary attachment of %d bytes exceeds maximum of %d", len(blob), MaxBinaryFrameBytes)
 	}
 
-	body, err := json.Marshal(env)
-	if err != nil {
+	buf, _ := encodeBufPool.Get().(*bytes.Buffer)
+	if buf == nil {
+		buf = new(bytes.Buffer)
+	}
+	defer func() {
+		if buf.Cap() <= maxPooledCodecBuffer {
+			encodeBufPool.Put(buf)
+		}
+	}()
+	buf.Reset()
+	buf.Write([]byte{0, 0, 0, 0}) // length prefix, patched below
+
+	// json.Encoder produces exactly json.Marshal's bytes (including HTML
+	// escaping) plus a trailing newline, which is trimmed off.
+	if err := json.NewEncoder(buf).Encode(env); err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
-	if len(body) > MaxEnvelopeSize {
-		return fmt.Errorf("envelope of %d bytes exceeds maximum of %d", len(body), MaxEnvelopeSize)
+	buf.Truncate(buf.Len() - 1)
+	bodyLen := buf.Len() - 4
+	if bodyLen > MaxEnvelopeSize {
+		return fmt.Errorf("envelope of %d bytes exceeds maximum of %d", bodyLen, MaxEnvelopeSize)
 	}
 
-	header := uint32(len(body)) // #nosec G115 -- bounded by MaxEnvelopeSize above
+	header := uint32(bodyLen) // #nosec G115 -- bounded by MaxEnvelopeSize above
 	if blob != nil {
 		header |= binaryFrameFlag
+		var blobLen [4]byte
+		binary.BigEndian.PutUint32(blobLen[:], uint32(len(blob))) // #nosec G115 -- bounded above
+		buf.Write(blobLen[:])
 	}
-	if err := binary.Write(w, binary.BigEndian, header); err != nil {
-		return fmt.Errorf("write envelope length: %w", err)
-	}
-	if _, err := w.Write(body); err != nil {
+	frame := buf.Bytes()
+	binary.BigEndian.PutUint32(frame[:4], header)
+	if _, err := w.Write(frame); err != nil {
+		if blob != nil {
+			return fmt.Errorf("write envelope: %w", err)
+		}
 		return fmt.Errorf("write envelope body: %w", err)
 	}
 	if blob == nil {
 		return nil
-	}
-	if err := binary.Write(w, binary.BigEndian, uint32(len(blob))); err != nil { // #nosec G115 -- bounded above
-		return fmt.Errorf("write binary frame length: %w", err)
 	}
 	if _, err := w.Write(blob); err != nil {
 		return fmt.Errorf("write binary frame: %w", err)
@@ -82,11 +118,33 @@ func Encode(w io.Writer, env Envelope) error {
 // cause the receiver to allocate 4 GiB of memory.
 const MaxEnvelopeSize = 16 * 1024 * 1024 // 16 MiB
 
+// decodeBufPool holds scratch buffers for the length prefixes and the JSON
+// body. Reusing the body buffer is safe because nothing in a decoded Envelope
+// aliases it: encoding/json copies strings, and Envelope.UnmarshalJSON keeps
+// the payload as a json.RawMessage, whose UnmarshalJSON copies its bytes. The
+// binary attachment, which IS handed to the caller, is always a fresh slice.
+var decodeBufPool = sync.Pool{New: func() any {
+	b := make([]byte, 0, 4096)
+	return &b
+}}
+
 func Decode(r io.Reader) (Envelope, error) {
-	var header uint32
-	if err := binary.Read(r, binary.BigEndian, &header); err != nil {
+	scratch, _ := decodeBufPool.Get().(*[]byte)
+	if scratch == nil {
+		b := make([]byte, 0, 4096)
+		scratch = &b
+	}
+	defer func() {
+		if cap(*scratch) <= maxPooledCodecBuffer {
+			decodeBufPool.Put(scratch)
+		}
+	}()
+	buf := (*scratch)[:4]
+
+	if _, err := io.ReadFull(r, buf); err != nil {
 		return Envelope{}, fmt.Errorf("read envelope length: %w", err)
 	}
+	header := binary.BigEndian.Uint32(buf)
 	framed := header&binaryFrameFlag != 0
 	size := header &^ binaryFrameFlag
 	if size == 0 {
@@ -96,7 +154,10 @@ func Decode(r io.Reader) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("envelope length %d exceeds maximum allowed size of %d bytes", size, MaxEnvelopeSize)
 	}
 
-	body := make([]byte, size)
+	if int(size) > cap(*scratch) {
+		*scratch = make([]byte, 0, size)
+	}
+	body := (*scratch)[:size]
 	if _, err := io.ReadFull(r, body); err != nil {
 		return Envelope{}, fmt.Errorf("read envelope body: %w", err)
 	}
@@ -106,10 +167,11 @@ func Decode(r io.Reader) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("unmarshal envelope: %w", err)
 	}
 	if framed {
-		var blobLen uint32
-		if err := binary.Read(r, binary.BigEndian, &blobLen); err != nil {
+		lenBuf := (*scratch)[:4]
+		if _, err := io.ReadFull(r, lenBuf); err != nil {
 			return Envelope{}, fmt.Errorf("read binary frame length: %w", err)
 		}
+		blobLen := binary.BigEndian.Uint32(lenBuf)
 		if blobLen > MaxBinaryFrameBytes {
 			return Envelope{}, fmt.Errorf("binary frame length %d exceeds maximum allowed size of %d bytes", blobLen, MaxBinaryFrameBytes)
 		}

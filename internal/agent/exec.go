@@ -7,7 +7,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -111,6 +113,14 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	// can signal the whole tree at once on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	if len(payload.Env) > 0 {
+		env, err := execEnvironment(payload.Env)
+		if err != nil {
+			return proto.ExecResult{}, err
+		}
+		cmd.Env = env
+	}
+
 	stdout := &cappedBuffer{max: maxExecOutputBytes}
 	stderr := &cappedBuffer{max: maxExecOutputBytes}
 	cmd.Stdout = stdout
@@ -124,10 +134,12 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	// SIGKILL to -pgid reaches every descendant, defeating attempts to survive by
 	// double-forking. waitDone stops the watchdog once the command exits normally.
 	waitDone := make(chan struct{})
+	var killed atomic.Bool
 	go func() {
 		select {
 		case <-runCtx.Done():
 			if cmd.Process != nil {
+				killed.Store(true)
 				// Negative pid => signal the entire process group.
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			}
@@ -150,5 +162,13 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 		ExitCode: exitCode,
+		TimedOut: execKilledByDeadline(runCtx, killed.Load(), exitCode),
 	}, nil
+}
+
+// execKilledByDeadline reports whether the watchdog killed the command because
+// its deadline (the request's, or defaultExecTimeout) expired — as opposed to a
+// caller cancellation, or a command that exited on its own as the timer fired.
+func execKilledByDeadline(runCtx context.Context, killed bool, exitCode int) bool {
+	return killed && exitCode == -1 && errors.Is(runCtx.Err(), context.DeadlineExceeded)
 }

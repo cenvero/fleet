@@ -49,10 +49,20 @@ func NormalizeSemVer(raw string) (string, bool) {
 	return value, true
 }
 
-// DisplaySemVer returns a consistent release version for human-facing output.
+// DisplaySemVer returns a consistent release version for human-facing output:
+// the v-prefixed semver of a release, "dev" for a development build (which
+// reports exactly that), and "-" when the version is genuinely unknown.
 func DisplaySemVer(raw string) string {
 	if normalized, ok := NormalizeSemVer(raw); ok {
 		return normalized
 	}
+	if IsDevBuild(raw) {
+		return "dev"
+	}
 	return "-"
+}
+
+// IsDevBuild reports whether raw is the version a development build reports.
+func IsDevBuild(raw string) bool {
+	return strings.EqualFold(strings.TrimSpace(raw), "dev")
 }

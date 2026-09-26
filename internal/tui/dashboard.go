@@ -6,77 +6,43 @@ package tui
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	fleetalerts "github.com/cenvero/fleet/internal/alerts"
 	"github.com/cenvero/fleet/internal/core"
-	"github.com/cenvero/fleet/internal/logs"
-	"github.com/cenvero/fleet/internal/version"
+	"github.com/cenvero/fleet/pkg/proto"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
 )
 
-func dashTabID(i int) string      { return fmt.Sprintf("dash-tab-%d", i) }
-func dashRowID(tab, i int) string { return fmt.Sprintf("dash-row-%d-%d", tab, i) }
-
-var (
-	pageStyle = lipgloss.NewStyle().
-			Padding(1, 2).
-			Foreground(lipgloss.Color("#e7ecef")).
-			Background(lipgloss.Color("#0a0e14"))
-
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#00d4aa"))
-
-	subtleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8fa7b3"))
-
-	mutedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#5f7480"))
-
-	panelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#1c2b36")).
-			Background(lipgloss.Color("#0d131b")).
-			Padding(1, 2)
-
-	tabStyle = lipgloss.NewStyle().
-			Padding(0, 1).
-			Foreground(lipgloss.Color("#8fa7b3")).
-			Background(lipgloss.Color("#101822"))
-
-	activeTabStyle = lipgloss.NewStyle().
-			Padding(0, 1).
-			Bold(true).
-			Foreground(lipgloss.Color("#0a0e14")).
-			Background(lipgloss.Color("#00d4aa"))
-
-	selectedRowStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0a0e14")).
-				Background(lipgloss.Color("#c4fff2")).
-				Bold(true)
-
-	panelTitleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#e7ecef"))
-
-	panelMetaStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9ab3bf"))
-
-	criticalStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff6b6b")).Bold(true)
-	warningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd166")).Bold(true)
-	infoStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#74c0fc")).Bold(true)
-	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#00d4aa")).Bold(true)
-)
-
-type dashboardLoadedMsg struct {
-	snapshot core.DashboardSnapshot
-	err      error
+func dashTabID(i int) string { return "dash-tab-" + strconv.Itoa(i) }
+func dashRowID(tab, i int) string {
+	return "dash-row-" + strconv.Itoa(tab) + "-" + strconv.Itoa(i)
 }
+func dashColID(i int) string { return "dash-col-" + strconv.Itoa(i) }
+func dashHotID(metric, i int) string {
+	return "dash-hot-" + strconv.Itoa(metric) + "-" + strconv.Itoa(i)
+}
+func dashChipID(kind int) string       { return "dash-chip-" + strconv.Itoa(kind) }
+func dashAlertRowID(i int) string      { return "dash-ovalert-" + strconv.Itoa(i) }
+func dashViewerID() string             { return "dash-viewer" }
+func dashHelpID() string               { return "dash-help" }
+func dashPromptID(choice int) string   { return "dash-prompt-" + strconv.Itoa(choice) }
+func dashRefreshToggleID() string      { return "dash-refresh-toggle" }
+func dashOverviewBoxID(box int) string { return "dash-ovbox-" + strconv.Itoa(box) }
+
+// pageStyle is shared with the file manager views. Its colours are chosen to
+// survive termenv's 256-colour quantisation: the previous #e7ecef text became
+// index 232 (near-black) on 256-colour terminals.
+var pageStyle = lipgloss.NewStyle().
+	Padding(1, 2).
+	Foreground(lipgloss.Color("#dadada")).
+	Background(lipgloss.Color("#0a0e14"))
 
 type dashboardTab int
 
@@ -87,15 +53,94 @@ const (
 	tabLogs
 	tabAlerts
 	tabOps
+	dashNumTabs
 )
 
 var dashboardTabs = []string{"Overview", "Servers", "Services", "Logs", "Alerts", "Ops"}
 
-type serviceRow struct {
-	Server    core.ServerRecord
-	Service   core.ServiceRecord
-	Reachable bool
+// Refresh interval steps for +/-.
+var dashIntervals = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute}
+
+const (
+	dashDefaultInterval = 5 * time.Second
+	dashHistoryPoints   = 120
+	dashLogTailLines    = 400
+	dashFlashFor        = 6 * time.Second
+	dashDebounce        = 120 * time.Millisecond
+	// dashFullEvery is how often an automatic refresh also re-reads every
+	// cached log preview (manual refreshes always do).
+	dashFullEvery = 2 * time.Minute
+	// dashTailEvery throttles re-reading the log on screen.
+	dashTailEvery = 10 * time.Second
+)
+
+// DashboardOptions configures RunDashboardWithOptions.
+type DashboardOptions struct {
+	// ConfigDir is the controller configuration directory.
+	ConfigDir string
+	// Token is the RBAC token id the dashboard was launched with (--token or
+	// FLEET_TOKEN). Every action the dashboard takes runs as a child `fleet`
+	// process that receives this token (via FLEET_TOKEN), so RBAC, cmd-policy
+	// and audit attribution apply exactly as they do on the command line.
+	Token string
+	// Interval is the initial auto-refresh period (default 5s).
+	Interval time.Duration
 }
+
+// dashRuntime is the dashboard's shared, pointer-held state: the data loader,
+// action launcher settings, per-server caches and the rendered-frame cache. The
+// model itself stays a value type as Bubble Tea expects.
+type dashRuntime struct {
+	loader    *dashLoader
+	dark      bool
+	exe       string
+	token     string
+	configDir string
+	environ   func() []string
+	// execProcess hands the terminal to an interactive child (tea.ExecProcess;
+	// replaceable in tests).
+	execProcess func(*exec.Cmd, tea.ExecCallback) tea.Cmd
+
+	// Frame cache: View returns the previous frame untouched while the model
+	// revision and terminal size are unchanged (idle ticks, mouse motion).
+	frame    string
+	frameRev uint64
+	frameW   int
+	frameH   int
+	frameOK  bool
+
+	hist     map[string]dashHist
+	histWant string
+	histBusy map[string]bool
+
+	logTail  map[string]dashLogTail
+	logWant  string
+	logBusy  map[string]bool
+	scanBuf  []byte
+	lastScan string
+}
+
+type dashHist struct {
+	stamp          time.Time // Metrics.Timestamp the history was read for
+	cpu, mem, disk []float64
+	first, last    time.Time
+	err            error
+}
+
+type dashLogTail struct {
+	stamp   string // identity of the preview the tail was read for
+	gen     uint64 // data generation it was read in
+	at      time.Time
+	preview core.CachedLogPreview
+	err     error
+}
+
+type dashOverlay int
+
+const (
+	dashOverlayNone dashOverlay = iota
+	dashOverlayHelp
+)
 
 type model struct {
 	configDir    string
@@ -110,150 +155,1086 @@ type model struct {
 	logIndex     int
 	alertIndex   int
 	auditIndex   int
+
+	// Live data beyond the classic snapshot.
+	alertsAll  []fleetalerts.Alert
+	alertStats *core.AlertStats
+	tags       map[string]map[string]string
+
+	// Refresh state.
+	gen        uint64
+	loadedAt   time.Time
+	loadTook   time.Duration
+	lastErr    error
+	lastErrAt  time.Time
+	inflight   bool
+	refreshSeq uint64
+	lastStart  time.Time
+	lastFull   time.Time
+	forceFull  bool
+	interval   time.Duration
+	paused     bool
+	now        time.Time
+
+	// Derived data (immutable; rebuilt on load / filter / sort changes).
+	base  *dashBase
+	views *dashViews
+
+	// View state.
+	offsets     [dashNumTabs]int
+	filters     [dashNumTabs]string
+	selKeys     [dashNumTabs]string
+	sortCol     serverSortCol
+	sortDesc    bool
+	alertSev    int
+	alertState  int
+	filtering   bool
+	viewerFocus bool
+	logScroll   int
+	logFollow   bool
+	logSearch   string
+	zoom        bool
+	overlay     dashOverlay
+	helpScroll  int
+	prompt      *dashPrompt
+	flash       string
+	flashErr    bool
+	flashAt     time.Time
+	busy        string
+
+	rt  *dashRuntime
+	rev uint64
 }
 
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+// RunDashboard launches the live terminal dashboard for configDir.
 func RunDashboard(configDir string) error {
-	// bubblezone records clickable zones marked during View and answers
-	// InBounds queries on mouse events — robust hit-testing without manual
-	// coordinate math.
-	zone.NewGlobal()
-	m := model{
-		configDir: configDir,
-		width:     120,
-		height:    36,
-		loading:   true,
-		activeTab: tabOverview,
+	return RunDashboardWithOptions(DashboardOptions{ConfigDir: configDir})
+}
+
+// RunDashboardWithOptions launches the live terminal dashboard.
+func RunDashboardWithOptions(opts DashboardOptions) error {
+	// Open the App before taking over the terminal: "not initialized" and any
+	// start-up warnings print normally, and the same App then serves every
+	// background refresh.
+	app, err := core.Open(opts.ConfigDir)
+	if err != nil {
+		if errors.Is(err, core.ErrNotInitialized) {
+			return fmt.Errorf("%w; run `fleet init` first", err)
+		}
+		return err
 	}
-	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion()).Run()
+	loader := newDashLoader(opts.ConfigDir, app)
+	defer loader.Close()
+
+	// bubblezone answers "which row/tab is under the mouse"; zones are
+	// registered once per rendered frame.
+	zone.NewGlobal()
+	// Query the terminal background once, before Bubble Tea owns stdin.
+	dark := lipgloss.HasDarkBackground()
+	exe, _ := os.Executable()
+
+	rt := newDashRuntime(loader, dark, exe, opts.Token, app.ConfigDir)
+	m := newDashboardModel(rt, opts.Interval)
+	m.lastStart = time.Now() // the initial load (Init) counts as the first refresh
+	// Cell-motion mouse mode: clicks, wheel and drags only — plain pointer
+	// movement does not generate an event (and a frame) per cell.
+	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
 }
 
-func (m model) Init() tea.Cmd {
-	return loadDashboardCmd(m.configDir)
+func newDashRuntime(loader *dashLoader, dark bool, exe, token, configDir string) *dashRuntime {
+	return &dashRuntime{
+		loader:      loader,
+		dark:        dark,
+		exe:         exe,
+		token:       strings.TrimSpace(token),
+		configDir:   configDir,
+		environ:     os.Environ,
+		execProcess: tea.ExecProcess,
+		hist:        map[string]dashHist{},
+		histBusy:    map[string]bool{},
+		logTail:     map[string]dashLogTail{},
+		logBusy:     map[string]bool{},
+	}
 }
+
+func newDashboardModel(rt *dashRuntime, interval time.Duration) model {
+	if interval <= 0 {
+		interval = dashDefaultInterval
+	}
+	m := model{
+		width:     120,
+		height:    36,
+		loading:   true,
+		inflight:  true,
+		activeTab: tabOverview,
+		interval:  interval,
+		sortCol:   ssName,
+		rt:        rt,
+	}
+	if rt != nil {
+		m.configDir = rt.configDir
+	}
+	return m
+}
+
+// ---------------------------------------------------------------------------
+// Messages and commands
+// ---------------------------------------------------------------------------
+
+type dashboardLoadedMsg struct {
+	data core.DashboardData
+	err  error
+	seq  uint64
+	took time.Duration
+	// full is set when log previews were read (see dashLoader.load).
+	full bool
+}
+
+type dashClockMsg time.Time
+
+type dashHistDueMsg struct{ server string }
+
+type dashHistMsg struct {
+	server string
+	stamp  time.Time
+	points []core.MetricPoint
+	err    error
+}
+
+type dashLogDueMsg struct{ key string }
+
+type dashLogMsg struct {
+	key     string
+	stamp   string
+	gen     uint64
+	preview core.CachedLogPreview
+	err     error
+}
+
+func (m model) Init() tea.Cmd {
+	return tea.Batch(m.loadCmd(m.refreshSeq, true), dashClockCmd())
+}
+
+func dashClockCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return dashClockMsg(t) })
+}
+
+func (m model) loadCmd(seq uint64, full bool) tea.Cmd {
+	if m.rt == nil || m.rt.loader == nil {
+		return nil
+	}
+	loader := m.rt.loader
+	return func() tea.Msg {
+		start := time.Now()
+		data, err := loader.load(full)
+		return dashboardLoadedMsg{data: data, err: err, seq: seq, took: time.Since(start), full: full}
+	}
+}
+
+// startRefresh begins a background refresh unless one is already running.
+func (m *model) startRefresh() tea.Cmd {
+	if m.inflight || m.rt == nil {
+		return nil
+	}
+	now := m.clock()
+	full := m.forceFull || m.lastFull.IsZero() || now.Sub(m.lastFull) >= dashFullEvery
+	m.forceFull = false
+	m.inflight = true
+	m.refreshSeq++
+	m.lastStart = now
+	return m.loadCmd(m.refreshSeq, full)
+}
+
+func (m *model) clock() time.Time {
+	if m.now.IsZero() {
+		return time.Now()
+	}
+	return m.now
+}
+
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	cmd, changed := m.update(msg)
+	if changed {
+		m.rev++
+	}
+	return m, cmd
+}
+
+func (m *model) update(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
-	case dashboardLoadedMsg:
-		m.snapshot = msg.snapshot
-		m.err = msg.err
-		m.loading = false
+		m.width, m.height = msg.Width, msg.Height
 		m.clampSelections()
-		return m, nil
+		return nil, true
+	case dashboardLoadedMsg:
+		return m.applyLoad(msg), true
+	case dashClockMsg:
+		return m.onClock(time.Time(msg)), true
+	case dashHistDueMsg:
+		return m.fetchHistory(msg.server), false
+	case dashHistMsg:
+		return nil, m.applyHistory(msg)
+	case dashLogDueMsg:
+		return m.fetchLogTail(msg.key), false
+	case dashLogMsg:
+		return nil, m.applyLogTail(msg)
+	case dashActionMsg:
+		if !m.now.IsZero() {
+			// Ticks stop while an interactive child owns the terminal.
+			m.now = time.Now()
+		}
+		return m.applyAction(msg), true
 	case tea.MouseMsg:
-		if m.handleMouse(msg) {
-			return m, nil
+		if msg.Action == tea.MouseActionMotion || msg.Action == tea.MouseActionRelease {
+			return nil, false
 		}
+		if !m.handleMouse(msg) {
+			return nil, false
+		}
+		return m.afterMove(), true
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "r":
-			m.loading = true
-			return m, loadDashboardCmd(m.configDir)
-		case "tab", "right", "l":
-			m.activeTab = dashboardTab((int(m.activeTab) + 1) % len(dashboardTabs))
-			m.clampSelections()
-			return m, nil
-		case "shift+tab", "left", "h":
-			m.activeTab = dashboardTab((int(m.activeTab) - 1 + len(dashboardTabs)) % len(dashboardTabs))
-			m.clampSelections()
-			return m, nil
-		case "1", "2", "3", "4", "5", "6":
-			m.activeTab = dashboardTab(msg.String()[0] - '1')
-			m.clampSelections()
-			return m, nil
-		case "up", "k":
-			m.moveSelection(-1)
-			return m, nil
-		case "down", "j":
-			m.moveSelection(1)
-			return m, nil
-		}
-	}
-	return m, nil
-}
-
-func (m model) View() string {
-	if m.loading && m.snapshot.GeneratedAt.IsZero() {
-		return zone.Scan(pageStyle.Render(panelStyle.Width(max(60, m.width-8)).Render("Fetching fleet status...")))
-	}
-	if m.err != nil && m.snapshot.GeneratedAt.IsZero() {
-		return zone.Scan(pageStyle.Render(panelStyle.Width(max(60, m.width-8)).Render("Dashboard error: " + m.err.Error())))
-	}
-
-	sections := []string{
-		renderHeader(m.snapshot, loadingStateLine(m.loading, m.err)),
-		renderTabs(m.activeTab, m.width),
-		renderActiveTab(m),
-		subtleStyle.Render("1-6 switch tabs  tab/shift+tab move tabs  j/k or mouse wheel move selection  click tabs/items  r refresh  q quit"),
-	}
-	// zone.Scan records marked zones and strips markers; called once at root.
-	return zone.Scan(pageStyle.Width(max(80, m.width)).Render(strings.Join(sections, "\n\n")))
-}
-
-func loadDashboardCmd(configDir string) tea.Cmd {
-	return func() tea.Msg {
-		app, err := core.Open(configDir)
-		if err != nil {
-			if errors.Is(err, core.ErrNotInitialized) {
-				err = fmt.Errorf("%w; run `fleet init` first", err)
+		// Several keys that arrive in one read (fast typing, key repeat on a
+		// busy machine, tmux send-keys) come as a single multi-rune message;
+		// outside text entry each rune is its own key press.
+		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste && !m.filtering && m.prompt == nil {
+			var cmds []tea.Cmd
+			changed := false
+			for _, r := range msg.Runes {
+				cmd, ch := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+				cmds = append(cmds, cmd)
+				changed = changed || ch
+				if m.filtering || m.prompt != nil {
+					break // the rest would be text for a prompt the operator has not seen
+				}
 			}
-			return dashboardLoadedMsg{err: err}
+			return tea.Batch(cmds...), changed
 		}
-		defer app.Close()
+		return m.handleKey(msg)
+	}
+	return nil, false
+}
 
-		snapshot, err := app.DashboardSnapshot()
-		return dashboardLoadedMsg{
-			snapshot: snapshot,
-			err:      err,
+func (m *model) applyLoad(msg dashboardLoadedMsg) tea.Cmd {
+	m.inflight = false
+	now := m.clock()
+	if msg.err != nil {
+		m.lastErr, m.lastErrAt = msg.err, now
+		if m.snapshot.GeneratedAt.IsZero() {
+			m.err = msg.err
+			m.loading = false
+		}
+		return nil
+	}
+	previous := m.snapshot.CachedLogs
+	m.snapshot = msg.data.DashboardSnapshot
+	if msg.full {
+		m.lastFull = now
+	} else {
+		m.snapshot.CachedLogs = mergeLogPreviews(previous, msg.data.LogSources)
+	}
+	m.alertsAll = msg.data.Alerts
+	stats := msg.data.AlertStats
+	m.alertStats = &stats
+	m.tags = msg.data.Tags
+	m.err, m.lastErr = nil, nil
+	m.loading = false
+	m.gen++
+	m.loadedAt = now
+	m.loadTook = msg.took
+	m.rebuild(true)
+	return m.afterMove()
+}
+
+// mergeLogPreviews lists the current log sources, carrying over the previews a
+// previous full load read (sources not read yet have an empty Path).
+func mergeLogPreviews(previous []core.CachedLogPreview, sources []core.DashboardLogSource) []core.CachedLogPreview {
+	byKey := make(map[string]*core.CachedLogPreview, len(previous))
+	for i := range previous {
+		byKey[previous[i].Server+"\x00"+previous[i].Service] = &previous[i]
+	}
+	out := make([]core.CachedLogPreview, 0, len(sources))
+	for _, src := range sources {
+		if p, ok := byKey[src.Server+"\x00"+src.Service]; ok {
+			out = append(out, *p)
+			continue
+		}
+		out = append(out, core.CachedLogPreview{Server: src.Server, Service: src.Service})
+	}
+	return out
+}
+
+func (m *model) onClock(t time.Time) tea.Cmd {
+	m.now = t
+	if m.flash != "" && t.Sub(m.flashAt) > dashFlashFor {
+		m.flash = ""
+	}
+	cmds := []tea.Cmd{dashClockCmd()}
+	due := m.lastStart.IsZero() || t.Sub(m.lastStart) >= m.interval
+	if !m.paused && !m.inflight && due && m.rt != nil {
+		cmds = append(cmds, m.startRefresh())
+	}
+	return tea.Batch(cmds...)
+}
+
+// rebuild recomputes derived data. base=true also rebuilds the per-dataset
+// aggregates (after a load); otherwise only filter/sort orders are rebuilt.
+func (m *model) rebuild(base bool) {
+	if base || m.base == nil {
+		m.base = dashBuildBase(&m.snapshot, m.alertsAll, m.alertStats, m.tags, m.clock())
+	}
+	m.views = dashBuildViews(m, m.base)
+	m.restoreSelections()
+}
+
+// ensureDerived builds derived data for models constructed without a load
+// (tests) or after the snapshot was replaced directly.
+func (m *model) ensureDerived() {
+	if m.base == nil || m.views == nil {
+		m.rebuild(true)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Selection
+// ---------------------------------------------------------------------------
+
+func (m *model) cursorPtr(tab dashboardTab) *int {
+	switch tab {
+	case tabServers:
+		return &m.serverIndex
+	case tabServices:
+		return &m.serviceIndex
+	case tabLogs:
+		return &m.logIndex
+	case tabAlerts:
+		return &m.alertIndex
+	case tabOps:
+		return &m.auditIndex
+	}
+	return nil
+}
+
+func (m *model) listLen(tab dashboardTab) int {
+	m.ensureDerived()
+	switch tab {
+	case tabServers:
+		return len(m.views.servers)
+	case tabServices:
+		return len(m.views.services)
+	case tabLogs:
+		return len(m.views.logs)
+	case tabAlerts:
+		return len(m.views.alerts)
+	case tabOps:
+		return len(m.views.audit)
+	}
+	return 0
+}
+
+// keyAt returns the persistent identity of row i of a tab's list.
+func (m *model) keyAt(tab dashboardTab, i int) string {
+	v := m.views
+	switch tab {
+	case tabServers:
+		if i >= 0 && i < len(v.servers) {
+			return m.snapshot.Servers[m.base.rows[v.servers[i]].idx].Name
+		}
+	case tabServices:
+		if i >= 0 && i < len(v.services) {
+			r := &m.base.services[v.services[i]]
+			return r.Server.Name + "\x00" + r.Service.Name
+		}
+	case tabLogs:
+		if i >= 0 && i < len(v.logs) {
+			lp := &m.snapshot.CachedLogs[v.logs[i]]
+			return lp.Server + "\x00" + lp.Service
+		}
+	case tabAlerts:
+		if i >= 0 && i < len(v.alerts) {
+			return m.base.alerts[v.alerts[i]].ID
+		}
+	case tabOps:
+		if i >= 0 && i < len(v.audit) {
+			return dashAuditKey(m.snapshot.RecentAudit[v.audit[i]])
 		}
 	}
+	return ""
+}
+
+// restoreSelections re-finds each tab's selected item by identity after the
+// data, filter or sort order changed, so the selection follows the item
+// rather than its row number. An item that disappeared keeps the cursor
+// position (clamped) and remembers its key for when it returns.
+func (m *model) restoreSelections() {
+	for tab := tabServers; tab < dashNumTabs; tab++ {
+		cur := m.cursorPtr(tab)
+		n := m.listLen(tab)
+		key := m.selKeys[tab]
+		if tab == tabOps && *cur == 0 {
+			// The audit trail is newest-first: an operator watching the
+			// newest entry keeps watching the newest entry.
+			key = ""
+		}
+		found := -1
+		if key != "" {
+			for i := 0; i < n; i++ {
+				if m.keyAt(tab, i) == key {
+					found = i
+					break
+				}
+			}
+		}
+		if found >= 0 {
+			*cur = found
+		} else {
+			*cur = clamp(*cur, 0, max(n-1, 0))
+			if key == "" {
+				m.selKeys[tab] = m.keyAt(tab, *cur)
+			}
+		}
+		m.ensureVisible(tab)
+	}
+}
+
+func (m *model) setCursor(tab dashboardTab, i int) {
+	cur := m.cursorPtr(tab)
+	if cur == nil {
+		return
+	}
+	n := m.listLen(tab)
+	*cur = clamp(i, 0, max(n-1, 0))
+	m.selKeys[tab] = m.keyAt(tab, *cur)
+	if tab == tabLogs {
+		m.logScroll, m.logFollow = 0, true
+	}
+	m.ensureVisible(tab)
 }
 
 func (m *model) moveSelection(delta int) {
-	switch m.activeTab {
-	case tabServers:
-		m.serverIndex = clamp(m.serverIndex+delta, 0, max(len(m.snapshot.Servers)-1, 0))
-	case tabServices:
-		rows := aggregateServices(m.snapshot.Servers)
-		m.serviceIndex = clamp(m.serviceIndex+delta, 0, max(len(rows)-1, 0))
-	case tabLogs:
-		m.logIndex = clamp(m.logIndex+delta, 0, max(len(m.snapshot.CachedLogs)-1, 0))
-	case tabAlerts:
-		m.alertIndex = clamp(m.alertIndex+delta, 0, max(len(m.snapshot.RecentAlerts)-1, 0))
-	case tabOps:
-		m.auditIndex = clamp(m.auditIndex+delta, 0, max(len(m.snapshot.RecentAudit)-1, 0))
+	if m.activeTab == tabLogs && m.viewerFocus {
+		m.scrollViewer(delta)
+		return
+	}
+	cur := m.cursorPtr(m.activeTab)
+	if cur == nil {
+		return
+	}
+	m.setCursor(m.activeTab, *cur+delta)
+}
+
+// ensureVisible scrolls a tab's window so its cursor row is on screen.
+func (m *model) ensureVisible(tab dashboardTab) {
+	cur := m.cursorPtr(tab)
+	if cur == nil {
+		return
+	}
+	rows := m.visibleRows(tab)
+	n := m.listLen(tab)
+	off := m.offsets[tab]
+	if rows <= 0 {
+		m.offsets[tab] = clamp(*cur, 0, max(n-1, 0))
+		return
+	}
+	if *cur < off {
+		off = *cur
+	}
+	if *cur >= off+rows {
+		off = *cur - rows + 1
+	}
+	off = clamp(off, 0, max(n-rows, 0))
+	m.offsets[tab] = off
+}
+
+func (m *model) clampSelections() {
+	for tab := tabServers; tab < dashNumTabs; tab++ {
+		cur := m.cursorPtr(tab)
+		*cur = clamp(*cur, 0, max(m.listLen(tab)-1, 0))
+		m.ensureVisible(tab)
 	}
 }
 
+func (m *model) selectedServer() (*core.ServerRecord, *dashSrvRow) {
+	m.ensureDerived()
+	if m.serverIndex < 0 || m.serverIndex >= len(m.views.servers) {
+		return nil, nil
+	}
+	r := &m.base.rows[m.views.servers[m.serverIndex]]
+	return &m.snapshot.Servers[r.idx], r
+}
+
+func (m *model) selectedService() *serviceRow {
+	m.ensureDerived()
+	if m.serviceIndex < 0 || m.serviceIndex >= len(m.views.services) {
+		return nil
+	}
+	return &m.base.services[m.views.services[m.serviceIndex]]
+}
+
+func (m *model) selectedLog() *core.CachedLogPreview {
+	m.ensureDerived()
+	if m.logIndex < 0 || m.logIndex >= len(m.views.logs) {
+		return nil
+	}
+	return &m.snapshot.CachedLogs[m.views.logs[m.logIndex]]
+}
+
+func (m *model) selectedAlert() *fleetalerts.Alert {
+	m.ensureDerived()
+	if m.alertIndex < 0 || m.alertIndex >= len(m.views.alerts) {
+		return nil
+	}
+	return &m.base.alerts[m.views.alerts[m.alertIndex]]
+}
+
+// jumpToServer selects a server by name on the Servers tab, clearing a filter
+// that would hide it.
+func (m *model) jumpToServer(name string) {
+	m.ensureDerived()
+	m.activeTab = tabServers
+	m.zoom = false
+	if _, ok := m.base.byName[name]; ok {
+		found := false
+		for i := range m.views.servers {
+			if m.keyAt(tabServers, i) == name {
+				found = true
+				break
+			}
+		}
+		if !found && m.filters[tabServers] != "" {
+			m.filters[tabServers] = ""
+			m.views = dashBuildViews(m, m.base)
+		}
+	}
+	m.selKeys[tabServers] = name
+	m.restoreSelections()
+}
+
+// afterMove schedules the (debounced) on-demand reads the current selection
+// needs: metric history for the selected server, the cached log tail for the
+// selected log.
+func (m *model) afterMove() tea.Cmd {
+	if m.rt == nil || m.rt.loader == nil {
+		return nil
+	}
+	var cmds []tea.Cmd
+	if m.activeTab == tabServers {
+		if s, _ := m.selectedServer(); s != nil {
+			if e, ok := m.rt.hist[s.Name]; !ok || !e.stamp.Equal(s.Metrics.Timestamp) {
+				m.rt.histWant = s.Name
+				name := s.Name
+				cmds = append(cmds, tea.Tick(dashDebounce, func(time.Time) tea.Msg { return dashHistDueMsg{server: name} }))
+			}
+		}
+	}
+	if m.activeTab == tabLogs {
+		if lp := m.selectedLog(); lp != nil {
+			key := lp.Server + "\x00" + lp.Service
+			e, ok := m.rt.logTail[key]
+			stale := ok && e.gen != m.gen && m.clock().Sub(e.at) >= dashTailEvery
+			if !ok || e.stamp != dashLogStamp(lp) || stale {
+				m.rt.logWant = key
+				cmds = append(cmds, tea.Tick(dashDebounce, func(time.Time) tea.Msg { return dashLogDueMsg{key: key} }))
+			}
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+func dashLogStamp(lp *core.CachedLogPreview) string {
+	if len(lp.Lines) == 0 {
+		return "empty"
+	}
+	last := lp.Lines[len(lp.Lines)-1]
+	return strconv.Itoa(last.Number) + "\x00" + last.Text
+}
+
+func (m *model) fetchHistory(server string) tea.Cmd {
+	if m.rt == nil || m.rt.histWant != server || m.rt.histBusy[server] {
+		return nil
+	}
+	s, _ := m.selectedServer()
+	if s == nil || s.Name != server {
+		return nil
+	}
+	stamp := s.Metrics.Timestamp
+	m.rt.histBusy[server] = true
+	loader := m.rt.loader
+	return func() tea.Msg {
+		var points []core.MetricPoint
+		err := loader.with(func(app *core.App) error {
+			var err error
+			points, err = app.RecentMetricHistory(server, dashHistoryPoints)
+			return err
+		})
+		return dashHistMsg{server: server, stamp: stamp, points: points, err: err}
+	}
+}
+
+func (m *model) applyHistory(msg dashHistMsg) bool {
+	if m.rt == nil {
+		return false
+	}
+	delete(m.rt.histBusy, msg.server)
+	if len(m.rt.hist) > 256 {
+		clear(m.rt.hist)
+	}
+	e := dashHist{stamp: msg.stamp, err: msg.err}
+	for _, p := range msg.points {
+		e.cpu = append(e.cpu, p.CPU)
+		e.mem = append(e.mem, p.Memory)
+		e.disk = append(e.disk, p.Disk)
+	}
+	if len(msg.points) > 0 {
+		e.first, e.last = msg.points[0].Timestamp, msg.points[len(msg.points)-1].Timestamp
+	}
+	m.rt.hist[msg.server] = e
+	s, _ := m.selectedServer()
+	return s != nil && s.Name == msg.server
+}
+
+func (m *model) fetchLogTail(key string) tea.Cmd {
+	if m.rt == nil || m.rt.logWant != key || m.rt.logBusy[key] {
+		return nil
+	}
+	lp := m.selectedLog()
+	if lp == nil || lp.Server+"\x00"+lp.Service != key {
+		return nil
+	}
+	server, service, stamp, gen := lp.Server, lp.Service, dashLogStamp(lp), m.gen
+	m.rt.logBusy[key] = true
+	loader := m.rt.loader
+	return func() tea.Msg {
+		var preview core.CachedLogPreview
+		err := loader.with(func(app *core.App) error {
+			var err error
+			preview, err = app.DashboardLogTail(server, service, dashLogTailLines)
+			return err
+		})
+		return dashLogMsg{key: key, stamp: stamp, gen: gen, preview: preview, err: err}
+	}
+}
+
+func (m *model) applyLogTail(msg dashLogMsg) bool {
+	if m.rt == nil {
+		return false
+	}
+	delete(m.rt.logBusy, msg.key)
+	if len(m.rt.logTail) > 64 {
+		clear(m.rt.logTail)
+	}
+	m.rt.logTail[msg.key] = dashLogTail{stamp: msg.stamp, gen: msg.gen, at: m.clock(), preview: msg.preview, err: msg.err}
+	lp := m.selectedLog()
+	return lp != nil && lp.Server+"\x00"+lp.Service == msg.key
+}
+
+// logLines returns the lines the log viewer shows for the selected source: the
+// on-demand tail when loaded, else the snapshot preview.
+func (m *model) logLines(lp *core.CachedLogPreview) ([]string, []int, bool) {
+	src := lp.Lines
+	full := false
+	if m.rt != nil {
+		if e, ok := m.rt.logTail[lp.Server+"\x00"+lp.Service]; ok && e.err == nil {
+			src = e.preview.Lines
+			full = true
+		}
+	}
+	return filterLogLines(src, m.logSearch, full)
+}
+
+// logTailErr is the error of the last on-demand read of lp, if any.
+func (m *model) logTailErr(lp *core.CachedLogPreview) error {
+	if m.rt == nil {
+		return nil
+	}
+	if e, ok := m.rt.logTail[lp.Server+"\x00"+lp.Service]; ok {
+		return e.err
+	}
+	return nil
+}
+
+func filterLogLines(src []proto.LogLine, search string, full bool) ([]string, []int, bool) {
+	terms := dashTerms(search)
+	texts := make([]string, 0, len(src))
+	nums := make([]int, 0, len(src))
+	for _, line := range src {
+		if len(terms) > 0 && !dashMatchAll(strings.ToLower(line.Text), terms) {
+			continue
+		}
+		texts = append(texts, line.Text)
+		nums = append(nums, line.Number)
+	}
+	return texts, nums, full
+}
+
+func (m *model) scrollViewer(delta int) {
+	lp := m.selectedLog()
+	if lp == nil {
+		return
+	}
+	texts, _, _ := m.logLines(lp)
+	rows := m.viewerRows()
+	maxTop := max(len(texts)-rows, 0)
+	top := maxTop - m.logScroll
+	if m.logFollow {
+		top = maxTop
+	}
+	top = clamp(top+delta, 0, maxTop)
+	m.logScroll = maxTop - top
+	m.logFollow = m.logScroll == 0
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard
+// ---------------------------------------------------------------------------
+
+func (m *model) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	key := msg.String()
+	if key == "ctrl+c" {
+		return tea.Quit, false
+	}
+	if m.prompt != nil {
+		return m.handlePromptKey(key), true
+	}
+	if m.filtering {
+		return m.handleFilterKey(msg)
+	}
+	if m.overlay == dashOverlayHelp {
+		switch key {
+		case "?", "esc", "q", "enter", "h", "f1":
+			m.overlay = dashOverlayNone
+			m.helpScroll = 0
+			return nil, true
+		case "j", "down", "pgdown", "ctrl+d":
+			m.helpScroll = min(m.helpScroll+1, 64)
+			return nil, true
+		case "k", "up", "pgup", "ctrl+u":
+			m.helpScroll = max(m.helpScroll-1, 0)
+			return nil, true
+		}
+		return nil, false
+	}
+	m.ensureDerived()
+	switch key {
+	case "q":
+		return tea.Quit, false
+	case "?", "f1":
+		m.overlay = dashOverlayHelp
+		return nil, true
+	case "r", "ctrl+r":
+		if m.inflight {
+			m.setFlash("refresh already in progress", false)
+			return nil, true
+		}
+		m.setFlash("refreshing…", false)
+		m.forceFull = true
+		return m.startRefresh(), true
+	case "p":
+		m.paused = !m.paused
+		if m.paused {
+			m.setFlash("auto-refresh paused (p to resume)", false)
+		} else {
+			m.setFlash("auto-refresh resumed", false)
+		}
+		return nil, true
+	case "+", "=":
+		m.stepInterval(1)
+		return nil, true
+	case "-", "_":
+		m.stepInterval(-1)
+		return nil, true
+	case "tab", "right", "l":
+		m.switchTab(dashboardTab((int(m.activeTab) + 1) % len(dashboardTabs)))
+		return m.afterMove(), true
+	case "shift+tab", "left", "h":
+		m.switchTab(dashboardTab((int(m.activeTab) - 1 + len(dashboardTabs)) % len(dashboardTabs)))
+		return m.afterMove(), true
+	case "1", "2", "3", "4", "5", "6":
+		m.switchTab(dashboardTab(key[0] - '1'))
+		return m.afterMove(), true
+	case "up", "k":
+		m.moveSelection(-1)
+		return m.afterMove(), true
+	case "down", "j":
+		m.moveSelection(1)
+		return m.afterMove(), true
+	case "pgup", "ctrl+u", "ctrl+b":
+		m.moveSelection(-max(m.pageSize(), 1))
+		return m.afterMove(), true
+	case "pgdown", "ctrl+d", "ctrl+f":
+		m.moveSelection(max(m.pageSize(), 1))
+		return m.afterMove(), true
+	case "home", "g":
+		m.moveSelection(-1 << 30)
+		return m.afterMove(), true
+	case "end", "G":
+		m.moveSelection(1 << 30)
+		return m.afterMove(), true
+	case "/":
+		if m.activeTab == tabOverview {
+			return nil, false
+		}
+		m.filtering = true
+		return nil, true
+	case "esc":
+		switch {
+		case m.zoom:
+			m.zoom = false
+		case m.viewerFocus:
+			m.viewerFocus = false
+		case m.activeTab == tabLogs && m.logSearch != "":
+			m.logSearch = ""
+		case m.filters[m.activeTab] != "":
+			m.filters[m.activeTab] = ""
+			m.rebuild(false)
+		default:
+			return nil, false
+		}
+		return m.afterMove(), true
+	case "enter":
+		return m.handleEnter(), true
+	case "o":
+		if m.activeTab == tabServers {
+			m.sortCol = (m.sortCol + 1) % ssCount
+			m.sortDesc = dashDefaultDesc(m.sortCol)
+			m.rebuild(false)
+			return m.afterMove(), true
+		}
+	case "O":
+		if m.activeTab == tabServers {
+			m.sortDesc = !m.sortDesc
+			m.rebuild(false)
+			return m.afterMove(), true
+		}
+	case "v":
+		if m.activeTab == tabAlerts {
+			m.alertSev = (m.alertSev + 1) % len(alertSevFilters)
+			m.rebuild(false)
+			return nil, true
+		}
+	case "t":
+		if m.activeTab == tabAlerts {
+			m.alertState = (m.alertState + 1) % len(alertStateFilters)
+			m.rebuild(false)
+			return nil, true
+		}
+	}
+	if cmd, ok := m.actionKey(key); ok {
+		return cmd, true
+	}
+	return nil, false
+}
+
+func (m *model) handleEnter() tea.Cmd {
+	switch m.activeTab {
+	case tabOverview:
+		if len(m.base.fleet.topCPU) > 0 {
+			m.jumpToServer(m.snapshot.Servers[m.base.rows[m.base.fleet.topCPU[0]].idx].Name)
+		} else {
+			m.switchTab(tabServers)
+		}
+		return m.afterMove()
+	case tabLogs:
+		g := m.geom(tabLogs)
+		if g.hidden {
+			m.zoom = !m.zoom
+			m.viewerFocus = m.zoom
+		} else {
+			m.viewerFocus = !m.viewerFocus
+		}
+		return nil
+	case tabOps:
+		if g := m.geom(tabOps); g.hidden || g.aside.w == 0 {
+			m.zoom = !m.zoom
+		}
+	default:
+		if m.geom(m.activeTab).hidden {
+			m.zoom = !m.zoom
+		}
+	}
+	return nil
+}
+
+func (m *model) switchTab(tab dashboardTab) {
+	if tab == m.activeTab {
+		return
+	}
+	m.activeTab = tab
+	m.zoom = false
+	m.viewerFocus = false
+	m.clampSelections()
+}
+
+func (m *model) stepInterval(dir int) {
+	idx := 0
+	for i, d := range dashIntervals {
+		if d <= m.interval {
+			idx = i
+		}
+	}
+	idx = clamp(idx+dir, 0, len(dashIntervals)-1)
+	m.interval = dashIntervals[idx]
+	m.setFlash("auto-refresh every "+dashFmtInterval(m.interval), false)
+}
+
+func dashFmtInterval(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return strconv.Itoa(int(d/time.Minute)) + "m"
+	}
+	return strconv.Itoa(int(d/time.Second)) + "s"
+}
+
+func (m *model) pageSize() int {
+	if m.activeTab == tabLogs && m.viewerFocus {
+		return m.viewerRows() - 1
+	}
+	return m.visibleRows(m.activeTab) - 1
+}
+
+func (m *model) setFlash(text string, isErr bool) {
+	m.flash = text
+	m.flashErr = isErr
+	// Wall clock, like the ticks that expire it: m.now can be seconds stale
+	// after an interactive child held the terminal.
+	m.flashAt = time.Now()
+}
+
+func (m *model) handleFilterKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	key := msg.String()
+	target := &m.filters[m.activeTab]
+	logSearch := m.activeTab == tabLogs && m.viewerFocus
+	if logSearch {
+		target = &m.logSearch
+	}
+	switch key {
+	case "enter":
+		m.filtering = false
+		return nil, true
+	case "esc":
+		m.filtering = false
+		*target = ""
+	case "backspace", "ctrl+h":
+		if r := []rune(*target); len(r) > 0 {
+			*target = string(r[:len(r)-1])
+		}
+	case "ctrl+u":
+		*target = ""
+	case "up", "down":
+		if key == "up" {
+			m.moveSelection(-1)
+		} else {
+			m.moveSelection(1)
+		}
+		return m.afterMove(), true
+	default:
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+			if len(*target) < 128 {
+				*target += dashClean(string(msg.Runes))
+			}
+		} else {
+			return nil, false
+		}
+	}
+	if logSearch {
+		m.logScroll, m.logFollow = 0, true
+		return nil, true
+	}
+	m.rebuild(false)
+	return m.afterMove(), true
+}
+
+// ---------------------------------------------------------------------------
+// Mouse
+// ---------------------------------------------------------------------------
+
 func (m *model) handleMouse(msg tea.MouseMsg) bool {
+	if msg.Action == tea.MouseActionMotion {
+		return false
+	}
+	m.ensureDerived()
 	switch {
 	case msg.Button == tea.MouseButtonWheelUp && msg.Action == tea.MouseActionPress:
+		if m.activeTab == tabLogs && zone.Get(dashViewerID()).InBounds(msg) {
+			m.scrollViewer(-3)
+			return true
+		}
 		m.moveSelection(-1)
 		return true
 	case msg.Button == tea.MouseButtonWheelDown && msg.Action == tea.MouseActionPress:
+		if m.activeTab == tabLogs && zone.Get(dashViewerID()).InBounds(msg) {
+			m.scrollViewer(3)
+			return true
+		}
 		m.moveSelection(1)
 		return true
 	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
-		// Tabs (zones marked in renderTabs).
+		if m.overlay == dashOverlayHelp {
+			m.overlay = dashOverlayNone
+			return true
+		}
 		for i := range dashboardTabs {
 			if zone.Get(dashTabID(i)).InBounds(msg) {
-				m.activeTab = dashboardTab(i)
-				m.clampSelections()
+				m.switchTab(dashboardTab(i))
 				return true
 			}
 		}
-		// Rows of the active tab (zones marked in each tab renderer). Only the
-		// active tab's rows are marked each frame, so this never cross-hits.
-		if n, set := m.activeListSetter(); set != nil {
-			for i := range n {
+		if m.prompt != nil {
+			return false
+		}
+		if zone.Get(dashRefreshToggleID()).InBounds(msg) {
+			m.paused = !m.paused
+			return true
+		}
+		switch m.activeTab {
+		case tabOverview:
+			return m.clickOverview(msg)
+		case tabServers:
+			for c := range ssCount {
+				if zone.Get(dashColID(int(c))).InBounds(msg) {
+					if m.sortCol == c {
+						m.sortDesc = !m.sortDesc
+					} else {
+						m.sortCol, m.sortDesc = c, dashDefaultDesc(c)
+					}
+					m.rebuild(false)
+					return true
+				}
+			}
+		case tabAlerts:
+			if zone.Get(dashChipID(0)).InBounds(msg) {
+				m.alertSev = (m.alertSev + 1) % len(alertSevFilters)
+				m.rebuild(false)
+				return true
+			}
+			if zone.Get(dashChipID(1)).InBounds(msg) {
+				m.alertState = (m.alertState + 1) % len(alertStateFilters)
+				m.rebuild(false)
+				return true
+			}
+		case tabLogs:
+			if zone.Get(dashViewerID()).InBounds(msg) {
+				m.viewerFocus = true
+				return true
+			}
+		}
+		// Rows of the active tab: only the visible window is marked.
+		if cur := m.cursorPtr(m.activeTab); cur != nil {
+			start := m.offsets[m.activeTab]
+			end := min(start+max(m.visibleRows(m.activeTab), 1), m.listLen(m.activeTab))
+			for i := start; i < end; i++ {
 				if zone.Get(dashRowID(int(m.activeTab), i)).InBounds(msg) {
-					set(i)
+					m.setCursor(m.activeTab, i)
+					if m.activeTab == tabLogs {
+						m.viewerFocus = false
+					}
 					return true
 				}
 			}
@@ -262,611 +1243,56 @@ func (m *model) handleMouse(msg tea.MouseMsg) bool {
 	return false
 }
 
-// activeListSetter returns the active tab's row count and a setter for its
-// selection index, or (0, nil) if the active tab has no selectable list.
-func (m *model) activeListSetter() (int, func(int)) {
-	switch m.activeTab {
-	case tabServers:
-		return len(m.snapshot.Servers), func(i int) { m.serverIndex = i }
-	case tabServices:
-		return len(aggregateServices(m.snapshot.Servers)), func(i int) { m.serviceIndex = i }
-	case tabLogs:
-		return len(m.snapshot.CachedLogs), func(i int) { m.logIndex = i }
-	case tabAlerts:
-		return len(m.snapshot.RecentAlerts), func(i int) { m.alertIndex = i }
-	case tabOps:
-		return len(m.snapshot.RecentAudit), func(i int) { m.auditIndex = i }
-	}
-	return 0, nil
-}
-
-func (m *model) clampSelections() {
-	m.serverIndex = clamp(m.serverIndex, 0, max(len(m.snapshot.Servers)-1, 0))
-	rows := aggregateServices(m.snapshot.Servers)
-	m.serviceIndex = clamp(m.serviceIndex, 0, max(len(rows)-1, 0))
-	m.logIndex = clamp(m.logIndex, 0, max(len(m.snapshot.CachedLogs)-1, 0))
-	m.alertIndex = clamp(m.alertIndex, 0, max(len(m.snapshot.RecentAlerts)-1, 0))
-	m.auditIndex = clamp(m.auditIndex, 0, max(len(m.snapshot.RecentAudit)-1, 0))
-}
-
-func renderHeader(snapshot core.DashboardSnapshot, loading string) string {
-	headerChrome := panelStyle.
-		BorderForeground(lipgloss.Color("#00d4aa")).
-		Background(lipgloss.Color("#0b1416"))
-
-	brand := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#0a0e14")).Background(lipgloss.Color("#00d4aa")).Padding(0, 1).Bold(true).Render("CENVERO"),
-		" ",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#d8fff6")).Background(lipgloss.Color("#123137")).Padding(0, 1).Bold(true).Render("FLEET CONSOLE"),
-	)
-	meta := []string{
-		statusBadge("v"+snapshot.Status.Version, "#1b2836", "#74c0fc"),
-		statusBadge("alias "+snapshot.Status.Alias, "#16232c", "#8fa7b3"),
-		statusBadge("mode "+string(snapshot.Status.DefaultMode), "#122a28", "#00d4aa"),
-		statusBadge("db "+fmt.Sprint(snapshot.Status.DatabaseBackend), "#211d14", "#ffd166"),
-		statusBadge("channel "+snapshot.Status.Channel, "#2a1a1a", "#ff8787"),
-	}
-	if !snapshot.GeneratedAt.IsZero() {
-		meta = append(meta, "snapshot "+snapshot.GeneratedAt.Local().Format("2006-01-02 15:04:05"))
-	}
-	metaLine := lipgloss.JoinHorizontal(lipgloss.Center, meta...)
-	body := brand + "\n" +
-		titleStyle.Render("Command your fleet.") + "\n" +
-		subtleStyle.Render("Operator-owned control plane for services, transport, alerts, and updates.") + "\n\n" +
-		metaLine
-	if loading != "" {
-		body += "\n" + loading
-	}
-	return headerChrome.Render(body)
-}
-
-func loadingStateLine(loading bool, loadErr error) string {
-	if loadErr != nil {
-		return criticalStyle.Render("Refresh error: " + loadErr.Error())
-	}
-	if loading {
-		return subtleStyle.Render("Refreshing dashboard...")
-	}
-	return ""
-}
-
-func renderTabs(active dashboardTab, width int) string {
-	items := make([]string, 0, len(dashboardTabs))
-	for i, label := range dashboardTabs {
-		token := fmt.Sprintf("%d %s", i+1, label)
-		styled := tabStyle.Render(token)
-		if dashboardTab(i) == active {
-			styled = activeTabStyle.Render(token)
-		}
-		items = append(items, zone.Mark(dashTabID(i), styled))
-	}
-	return panelStyle.Width(max(70, width-8)).Render(strings.Join(items, " "))
-}
-
-func renderActiveTab(m model) string {
-	switch m.activeTab {
-	case tabOverview:
-		return renderOverviewTab(m.snapshot, m.width)
-	case tabServers:
-		return renderServersTab(m.snapshot, m.width, m.serverIndex)
-	case tabServices:
-		return renderServicesTab(m.snapshot, m.width, m.serviceIndex)
-	case tabLogs:
-		return renderLogsTab(m.snapshot, m.width, m.logIndex)
-	case tabAlerts:
-		return renderAlertsTab(m.snapshot, m.width, m.alertIndex)
-	case tabOps:
-		return renderOpsTab(m.snapshot, m.width, m.auditIndex)
-	default:
-		return renderOverviewTab(m.snapshot, m.width)
-	}
-}
-
-func renderOverviewTab(snapshot core.DashboardSnapshot, width int) string {
-	leftWidth := panelWidth(width, 0.42)
-	rightWidth := max(36, width-leftWidth-12)
-
-	summaryCard := renderPanel("Fleet Summary", "Live estate health and inventory", renderSummary(snapshot), "#00d4aa", leftWidth)
-	alertCard := renderPanel("Alert Feed", "Most recent operational events", renderCompactAlerts(snapshot.RecentAlerts), "#ff6b6b", rightWidth)
-	activityCard := renderPanel("Recent Activity", "Controller audit trail", renderCompactAudit(snapshot.RecentAudit), "#74c0fc", rightWidth)
-	fleetCard := renderPanel("Fleet Profile", "Update, key, and platform posture", renderOverviewDetails(snapshot), "#ffd166", leftWidth)
-
-	if width >= 120 {
-		top := lipgloss.JoinHorizontal(lipgloss.Top, summaryCard, "  ", alertCard)
-		bottom := lipgloss.JoinHorizontal(lipgloss.Top, fleetCard, "  ", activityCard)
-		return strings.Join([]string{top, bottom}, "\n\n")
-	}
-	return strings.Join([]string{summaryCard, alertCard, fleetCard, activityCard}, "\n\n")
-}
-
-func renderSummary(snapshot core.DashboardSnapshot) string {
-	summary := snapshot.Summary
-	lines := []string{
-		metricLine(okStyle.Render("ONLINE"), summary.OnlineServers),
-		metricLine(subtleStyle.Render("OFFLINE"), summary.OfflineServers),
-		metricLine(criticalStyle.Render("CRITICAL"), summary.CriticalAlerts),
-		metricLine(warningStyle.Render("WARNING"), summary.WarningAlerts),
-		metricLine(infoStyle.Render("INFO"), summary.InfoAlerts),
-		"",
-		metricLine(subtleStyle.Render("SERVERS"), len(snapshot.Servers)),
-		metricLine(subtleStyle.Render("TRACKED SERVICES"), countTrackedServices(snapshot.Servers)),
-		metricLine(subtleStyle.Render("TEMPLATES"), len(snapshot.Templates)),
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderOverviewDetails(snapshot core.DashboardSnapshot) string {
-	lines := []string{
-		keyValueLine("Update channel", snapshot.Status.Channel),
-		keyValueLine("Update policy", fmt.Sprint(snapshot.Status.Policy)),
-		keyValueLine("Rollback ready", yesNo(snapshot.RollbackAvailable)),
-		keyValueLine("Fingerprints", fmt.Sprintf("%d keys", len(snapshot.Status.Fingerprints))),
-	}
-	if len(snapshot.Servers) > 0 {
-		server := snapshot.Servers[0]
-		lines = append(lines,
-			"",
-			mutedStyle.Render("Featured server"),
-			fmt.Sprintf("%s  %s", panelTitleStyle.Render(server.Name), subtleStyle.Render(string(server.Mode))),
-			subtleStyle.Render(server.Address),
-		)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderCompactAlerts(recent []fleetalerts.Alert) string {
-	lines := []string{}
-	if len(recent) == 0 {
-		lines = append(lines, subtleStyle.Render("No active alerts right now."))
-		return strings.Join(lines, "\n")
-	}
-	for _, alert := range recent {
-		state := "open"
-		if alert.AcknowledgedAt != nil {
-			state = "acked"
-		}
-		lines = append(lines,
-			fmt.Sprintf("%-10s %-6s %s", styleSeverity(alert.Severity), statusBadge(strings.ToUpper(state), "#17212b", "#8fa7b3"), truncate(alert.Message, 48)),
-			subtleStyle.Render("  "+dashIfEmpty(alert.Server)+"  ·  "+relativeTime(alert.CreatedAt)),
-		)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderCompactAudit(entries []logs.AuditEntry) string {
-	lines := []string{}
-	if len(entries) == 0 {
-		lines = append(lines, subtleStyle.Render("No audit activity yet."))
-		return strings.Join(lines, "\n")
-	}
-	for _, entry := range entries {
-		lines = append(lines,
-			fmt.Sprintf("%s  %s", statusBadge(entry.Timestamp.Local().Format("15:04"), "#16232c", "#8fa7b3"), truncate(entry.Action, 24)),
-			subtleStyle.Render("  "+truncate(entry.Target, 48)),
-		)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderServersTab(snapshot core.DashboardSnapshot, width, selected int) string {
-	lines := []string{"Servers"}
-	if len(snapshot.Servers) == 0 {
-		lines = append(lines, "", subtleStyle.Render("No servers added yet. Use `fleet server add` to grow the fleet."))
-		return renderPanel("Servers", "Connected fleet inventory", strings.Join(lines, "\n"), "#00d4aa", max(70, width-8))
-	}
-
-	leftWidth := panelWidth(width, 0.42)
-	rightWidth := max(40, width-leftWidth-12)
-
-	server := snapshot.Servers[selected]
-	listLines := []string{"Fleet Servers", ""}
-	for i, item := range snapshot.Servers {
-		row := fmt.Sprintf("%-16s %-8s %-8s %s", item.Name, shortStatus(item.Observed.Reachable), statusBadge(string(item.Mode), "#17212b", "#8fa7b3"), dashIfEmpty(item.Observed.NodeName))
-		if i == selected {
-			row = selectedRowStyle.Render(row)
-		}
-		listLines = append(listLines, zone.Mark(dashRowID(int(tabServers), i), row))
-	}
-
-	detailLines := []string{
-		server.Name,
-		"",
-		fmt.Sprintf("Address: %s:%d", server.Address, server.Port),
-		fmt.Sprintf("User: %s", server.User),
-		fmt.Sprintf("Mode: %s", server.Mode),
-		fmt.Sprintf("Reachable: %s", yesNo(server.Observed.Reachable)),
-		fmt.Sprintf("Transport: %s", dashIfEmpty(server.Observed.Transport)),
-		fmt.Sprintf("Node: %s", dashIfEmpty(server.Observed.NodeName)),
-		fmt.Sprintf("Agent version: %s", version.DisplaySemVer(server.Observed.AgentVersion)),
-		fmt.Sprintf("OS/arch: %s", dashIfEmpty(strings.Trim(strings.Join([]string{server.Observed.OS, server.Observed.Arch}, "/"), "/"))),
-		fmt.Sprintf("Last seen: %s", dashIfEmpty(relativeTime(server.Observed.LastSeen))),
-		fmt.Sprintf("Host key: %s", truncate(dashIfEmpty(server.Observed.HostKeyFingerprint), 52)),
-		fmt.Sprintf("CPU: %.1f%%   Memory: %.1f%%   Disk: %.1f%%", server.Metrics.CPUPercent, server.Metrics.MemoryPercent, server.Metrics.DiskPercent),
-		fmt.Sprintf("Open ports: %s", formatPorts(server.OpenPorts)),
-		fmt.Sprintf("Firewall: %s", firewallSummary(server.Firewall)),
-		fmt.Sprintf("Template: %s", dashIfEmpty(server.LastTemplate)),
-	}
-	if server.Observed.LastError != "" {
-		detailLines = append(detailLines, criticalStyle.Render("Last error: "+server.Observed.LastError))
-	}
-	detailLines = append(detailLines, "", subtleStyle.Render("Tracked services"))
-	if len(server.Services) == 0 {
-		detailLines = append(detailLines, subtleStyle.Render("No tracked services yet."))
-	} else {
-		for _, service := range server.Services {
-			detailLines = append(detailLines, formatServiceLine(service))
-		}
-	}
-
-	left := renderPanel("Servers", "Connected fleet inventory", strings.Join(listLines, "\n"), "#00d4aa", leftWidth)
-	right := renderPanel("Server Detail", "Runtime posture and tracked services", strings.Join(detailLines, "\n"), "#74c0fc", rightWidth)
-	if width >= 120 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	}
-	return strings.Join([]string{left, right}, "\n\n")
-}
-
-func renderServicesTab(snapshot core.DashboardSnapshot, width, selected int) string {
-	rows := aggregateServices(snapshot.Servers)
-	if len(rows) == 0 {
-		return renderPanel("Services", "Tracked service catalog", "No tracked services yet.", "#ffd166", max(70, width-8))
-	}
-
-	leftWidth := panelWidth(width, 0.48)
-	rightWidth := max(36, width-leftWidth-12)
-	row := rows[selected]
-
-	listLines := []string{"Tracked Services", ""}
-	for i, item := range rows {
-		entry := fmt.Sprintf("%-14s %-20s %-10s", item.Server.Name, item.Service.Name, serviceStateChip(item.Service))
-		if i == selected {
-			entry = selectedRowStyle.Render(entry)
-		}
-		listLines = append(listLines, zone.Mark(dashRowID(int(tabServices), i), entry))
-	}
-
-	detailLines := []string{
-		fmt.Sprintf("%s / %s", row.Server.Name, row.Service.Name),
-		"",
-		fmt.Sprintf("Reachable server: %s", yesNo(row.Reachable)),
-		fmt.Sprintf("Critical: %s", yesNo(row.Service.Critical)),
-		fmt.Sprintf("State: %s", serviceState(row.Service)),
-		fmt.Sprintf("Load state: %s", dashIfEmpty(row.Service.LoadState)),
-		fmt.Sprintf("Sub state: %s", dashIfEmpty(row.Service.SubState)),
-		fmt.Sprintf("Last action: %s", dashIfEmpty(row.Service.LastAction)),
-		fmt.Sprintf("Log path: %s", dashIfEmpty(row.Service.LogPath)),
-	}
-	if row.Service.Description != "" {
-		detailLines = append(detailLines, fmt.Sprintf("Description: %s", row.Service.Description))
-	}
-
-	left := renderPanel("Services", "Tracked service catalog", strings.Join(listLines, "\n"), "#ffd166", leftWidth)
-	right := renderPanel("Service Detail", "Operational state and logging", strings.Join(detailLines, "\n"), "#00d4aa", rightWidth)
-	if width >= 120 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	}
-	return strings.Join([]string{left, right}, "\n\n")
-}
-
-func renderLogsTab(snapshot core.DashboardSnapshot, width, selected int) string {
-	logs := snapshot.CachedLogs
-	if len(logs) == 0 {
-		return renderPanel("Logs", "Controller-cached service log tails", "No cached logs yet. Read or follow a tracked service log first to populate the local fleet cache.", "#f4a261", max(70, width-8))
-	}
-
-	leftWidth := panelWidth(width, 0.48)
-	rightWidth := max(36, width-leftWidth-12)
-	entry := logs[selected]
-
-	listLines := []string{"Cached Logs", ""}
-	for i, item := range logs {
-		state := statusBadge("EMPTY", "#17212b", "#8fa7b3")
-		if item.Available {
-			state = statusBadge(fmt.Sprintf("%d lines", len(item.Lines)), "#16232c", "#74c0fc")
-		}
-		lastLine := "no cached lines yet"
-		if item.Available && len(item.Lines) > 0 {
-			lastLine = truncate(item.Lines[len(item.Lines)-1].Text, 26)
-		}
-		row := fmt.Sprintf("%-12s %-18s %s %s", item.Server, item.Service, state, subtleStyle.Render(lastLine))
-		if i == selected {
-			row = selectedRowStyle.Render(row)
-		}
-		listLines = append(listLines, zone.Mark(dashRowID(int(tabLogs), i), row))
-	}
-
-	detailLines := []string{
-		fmt.Sprintf("%s / %s", entry.Server, entry.Service),
-		"",
-		fmt.Sprintf("Cached path: %s", dashIfEmpty(entry.Path)),
-		fmt.Sprintf("Available: %s", yesNo(entry.Available)),
-		fmt.Sprintf("Tail lines: %d", len(entry.Lines)),
-		fmt.Sprintf("Truncated: %s", yesNo(entry.Truncated)),
-		"",
-		subtleStyle.Render("Recent cached output"),
-	}
-	if !entry.Available {
-		detailLines = append(detailLines, subtleStyle.Render("No cached lines yet. Use live log reads or follow mode to warm the controller cache."))
-	} else {
-		for _, line := range entry.Lines {
-			detailLines = append(detailLines, fmt.Sprintf("%5d  %s", line.Number, line.Text))
-		}
-	}
-
-	left := renderPanel("Logs", "Controller-cached service log tails", strings.Join(listLines, "\n"), "#f4a261", leftWidth)
-	right := renderPanel("Log Detail", "Recent cached lines for the selected service", strings.Join(detailLines, "\n"), "#74c0fc", rightWidth)
-	if width >= 120 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	}
-	return strings.Join([]string{left, right}, "\n\n")
-}
-
-func renderAlertsTab(snapshot core.DashboardSnapshot, width, selected int) string {
-	alerts := snapshot.RecentAlerts
-	if len(alerts) == 0 {
-		return renderPanel("Alerts", "Severity and acknowledgement view", "No alerts. The fleet is quiet right now.", "#ff6b6b", max(70, width-8))
-	}
-
-	leftWidth := panelWidth(width, 0.48)
-	rightWidth := max(36, width-leftWidth-12)
-	alert := alerts[selected]
-
-	listLines := []string{"Alerts", ""}
-	for i, item := range alerts {
-		entry := fmt.Sprintf("%-10s %-14s %s", styleSeverity(item.Severity), dashIfEmpty(item.Server), truncate(item.Message, 36))
-		if item.AcknowledgedAt != nil {
-			entry += "  " + statusBadge("ACKED", "#17212b", "#8fa7b3")
-		}
-		if i == selected {
-			entry = selectedRowStyle.Render(entry)
-		}
-		listLines = append(listLines, zone.Mark(dashRowID(int(tabAlerts), i), entry))
-	}
-
-	detailLines := []string{
-		styleSeverity(alert.Severity),
-		"",
-		fmt.Sprintf("Server: %s", dashIfEmpty(alert.Server)),
-		fmt.Sprintf("Created: %s", alert.CreatedAt.Local().Format("2006-01-02 15:04:05")),
-		fmt.Sprintf("Age: %s", relativeTime(alert.CreatedAt)),
-		fmt.Sprintf("Code: %s", dashIfEmpty(alert.Code)),
-		fmt.Sprintf("Acknowledged: %s", ackState(alert)),
-		"",
-		alert.Message,
-	}
-
-	left := renderPanel("Alerts", "Severity and acknowledgement view", strings.Join(listLines, "\n"), "#ff6b6b", leftWidth)
-	right := renderPanel("Alert Detail", "Escalation context", strings.Join(detailLines, "\n"), "#74c0fc", rightWidth)
-	if width >= 120 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	}
-	return strings.Join([]string{left, right}, "\n\n")
-}
-
-func renderOpsTab(snapshot core.DashboardSnapshot, width, selected int) string {
-	leftWidth := panelWidth(width, 0.42)
-	rightWidth := max(36, width-leftWidth-12)
-	audit := snapshot.RecentAudit
-
-	summaryLines := []string{
-		"Ops State",
-		"",
-		fmt.Sprintf("Channel: %s", snapshot.Status.Channel),
-		fmt.Sprintf("Policy: %s", snapshot.Status.Policy),
-		fmt.Sprintf("Rollback ready: %s", yesNo(snapshot.RollbackAvailable)),
-		fmt.Sprintf("Templates: %d", len(snapshot.Templates)),
-	}
-	if len(snapshot.Templates) > 0 {
-		summaryLines = append(summaryLines, "", subtleStyle.Render("Available templates"))
-		for _, name := range snapshot.Templates {
-			summaryLines = append(summaryLines, "• "+name)
-		}
-	}
-	keys := sortedFingerprints(snapshot.Status.Fingerprints)
-	summaryLines = append(summaryLines, "", subtleStyle.Render("Controller keys"))
-	summaryLines = append(summaryLines, keys...)
-
-	auditLines := []string{"Audit Trail", ""}
-	if len(audit) == 0 {
-		auditLines = append(auditLines, subtleStyle.Render("No audit activity yet."))
-	} else {
-		selected = clamp(selected, 0, len(audit)-1)
-		for i, entry := range audit {
-			row := fmt.Sprintf("%s  %-18s %s", entry.Timestamp.Local().Format("15:04"), entry.Action, truncate(entry.Target, 24))
-			if i == selected {
-				row = selectedRowStyle.Render(row)
+func (m *model) clickOverview(msg tea.MouseMsg) bool {
+	f := &m.base.fleet
+	for metric, list := range [][]int{f.topCPU, f.topMem, f.topDisk} {
+		for i := range list {
+			if zone.Get(dashHotID(metric, i)).InBounds(msg) {
+				m.jumpToServer(m.snapshot.Servers[m.base.rows[list[i]].idx].Name)
+				return true
 			}
-			auditLines = append(auditLines, zone.Mark(dashRowID(int(tabOps), i), row))
-		}
-		auditLines = append(auditLines, "", subtleStyle.Render("Selected entry"))
-		entry := audit[selected]
-		auditLines = append(auditLines,
-			fmt.Sprintf("Operator: %s", dashIfEmpty(entry.Operator)),
-			fmt.Sprintf("Target: %s", dashIfEmpty(entry.Target)),
-		)
-		if entry.Details != "" {
-			auditLines = append(auditLines, fmt.Sprintf("Details: %s", entry.Details))
 		}
 	}
-
-	left := renderPanel("Ops", "Update, key, and release posture", strings.Join(summaryLines, "\n"), "#74c0fc", leftWidth)
-	right := renderPanel("Audit Trail", "Recent operator actions", strings.Join(auditLines, "\n"), "#00d4aa", rightWidth)
-	if width >= 120 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	}
-	return strings.Join([]string{left, right}, "\n\n")
-}
-
-func aggregateServices(servers []core.ServerRecord) []serviceRow {
-	rows := make([]serviceRow, 0)
-	for _, server := range servers {
-		for _, service := range server.Services {
-			rows = append(rows, serviceRow{
-				Server:    server,
-				Service:   service,
-				Reachable: server.Observed.Reachable,
-			})
+	open := m.openAlertOrder()
+	for i := range open {
+		if zone.Get(dashAlertRowID(i)).InBounds(msg) {
+			m.jumpToAlert(m.base.alerts[open[i]].ID)
+			return true
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Service.Critical != rows[j].Service.Critical {
-			return rows[i].Service.Critical
+	for box, tab := range []dashboardTab{tabServers, tabAlerts} {
+		if zone.Get(dashOverviewBoxID(box)).InBounds(msg) {
+			m.switchTab(tab)
+			return true
 		}
-		if serviceState(rows[i].Service) != serviceState(rows[j].Service) {
-			return serviceState(rows[i].Service) < serviceState(rows[j].Service)
-		}
-		if rows[i].Server.Name != rows[j].Server.Name {
-			return rows[i].Server.Name < rows[j].Server.Name
-		}
-		return rows[i].Service.Name < rows[j].Service.Name
-	})
-	return rows
-}
-
-func countTrackedServices(servers []core.ServerRecord) int {
-	total := 0
-	for _, server := range servers {
-		total += len(server.Services)
 	}
-	return total
+	return false
 }
 
-func renderPanel(title, subtitle, body, accent string, width int) string {
-	chrome := panelStyle.
-		Width(width).
-		BorderForeground(lipgloss.Color(accent))
-	banner := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#0a0e14")).
-		Background(lipgloss.Color(accent)).
-		Padding(0, 1).
-		Bold(true).
-		Render(title)
-
-	header := banner
-	if strings.TrimSpace(subtitle) != "" {
-		header += "\n" + panelMetaStyle.Render(subtitle)
-	}
-	return chrome.Render(header + "\n\n" + body)
+// jumpToAlert selects an alert by id on the Alerts tab, resetting filters that
+// would hide it.
+func (m *model) jumpToAlert(id string) {
+	m.switchTab(tabAlerts)
+	m.alertSev, m.alertState = 0, 0
+	m.filters[tabAlerts] = ""
+	m.rebuild(false)
+	m.selKeys[tabAlerts] = id
+	m.restoreSelections()
 }
 
-func statusBadge(label, bg, fg string) string {
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color(fg)).
-		Background(lipgloss.Color(bg)).
-		Padding(0, 1).
-		Bold(true).
-		Render(label)
-}
-
-func metricLine(label string, value int) string {
-	return fmt.Sprintf("%-18s %s", label, statusBadge(fmt.Sprintf("%d", value), "#15232c", "#d8fff6"))
-}
-
-func keyValueLine(label, value string) string {
-	return fmt.Sprintf("%-18s %s", subtleStyle.Render(label), value)
-}
-
-func formatServiceLine(service core.ServiceRecord) string {
-	line := fmt.Sprintf("%-18s %s", service.Name, serviceStateChip(service))
-	if service.Critical {
-		line += "  " + criticalStyle.Render("critical")
-	}
-	return line
-}
-
-func shortStatus(reachable bool) string {
-	if reachable {
-		return okStyle.Render("online")
-	}
-	return criticalStyle.Render("offline")
-}
-
-func firewallSummary(state core.FirewallState) string {
-	value := "disabled"
-	if state.Enabled {
-		value = "enabled"
-	}
-	if len(state.Rules) == 0 {
-		return value
-	}
-	return fmt.Sprintf("%s (%d rules)", value, len(state.Rules))
-}
-
-func formatPorts(ports []int) string {
-	if len(ports) == 0 {
-		return "-"
-	}
-	parts := make([]string, 0, len(ports))
-	for _, port := range ports {
-		parts = append(parts, fmt.Sprintf("%d", port))
-	}
-	return strings.Join(parts, ", ")
-}
+// ---------------------------------------------------------------------------
+// Helpers shared with other views
+// ---------------------------------------------------------------------------
 
 func serviceState(service core.ServiceRecord) string {
-	state := dashIfEmpty(service.ActiveState)
+	state := service.ActiveState
+	if strings.TrimSpace(state) == "" {
+		state = "unknown"
+	}
 	if service.SubState != "" {
 		state += "/" + service.SubState
 	}
 	return state
-}
-
-func serviceStateChip(service core.ServiceRecord) string {
-	state := strings.ToUpper(serviceState(service))
-	bg := "#17212b"
-	fg := "#8fa7b3"
-	switch {
-	case strings.Contains(strings.ToLower(service.ActiveState), "active"):
-		bg, fg = "#11322c", "#00d4aa"
-	case strings.Contains(strings.ToLower(service.ActiveState), "failed"):
-		bg, fg = "#34191b", "#ff6b6b"
-	case strings.Contains(strings.ToLower(service.ActiveState), "activating"):
-		bg, fg = "#332611", "#ffd166"
-	}
-	return statusBadge(state, bg, fg)
-}
-
-func ackState(alert fleetalerts.Alert) string {
-	if alert.AcknowledgedAt == nil {
-		return "no"
-	}
-	return alert.AcknowledgedAt.Local().Format("2006-01-02 15:04:05")
-}
-
-func sortedFingerprints(values map[string]string) []string {
-	if len(values) == 0 {
-		return []string{subtleStyle.Render("No key fingerprints available.")}
-	}
-	keys := make([]string, 0, len(values))
-	for name := range values {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
-	lines := make([]string, 0, len(keys))
-	for _, name := range keys {
-		lines = append(lines, fmt.Sprintf("%s  %s", name, truncate(values[name], 40)))
-	}
-	return lines
-}
-
-func styleSeverity(severity any) string {
-	label := fmt.Sprint(severity)
-	switch label {
-	case "critical":
-		return criticalStyle.Render(strings.ToUpper(label))
-	case "warning":
-		return warningStyle.Render(strings.ToUpper(label))
-	default:
-		return infoStyle.Render(strings.ToUpper(label))
-	}
-}
-
-func truncate(input string, width int) string {
-	if width < 4 || len(input) <= width {
-		return input
-	}
-	return input[:width-3] + "..."
 }
 
 func dashIfEmpty(value string) string {
@@ -874,34 +1300,6 @@ func dashIfEmpty(value string) string {
 		return "-"
 	}
 	return value
-}
-
-func relativeTime(ts time.Time) string {
-	if ts.IsZero() {
-		return ""
-	}
-	delta := time.Since(ts)
-	switch {
-	case delta < time.Minute:
-		return "just now"
-	case delta < time.Hour:
-		return fmt.Sprintf("%dm ago", int(delta.Minutes()))
-	case delta < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(delta.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(delta.Hours()/24))
-	}
-}
-
-func panelWidth(total int, ratio float64) int {
-	return max(34, int(float64(max(total-10, 70))*ratio))
-}
-
-func yesNo(value bool) string {
-	if value {
-		return okStyle.Render("yes")
-	}
-	return subtleStyle.Render("no")
 }
 
 func clamp(value, low, high int) int {

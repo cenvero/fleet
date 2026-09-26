@@ -36,10 +36,46 @@ Omit sections that have no entries for that release.
 
 ### Added
 
+- `fleet version` (with `--json`) prints the controller version, OS and architecture.
+- `fleet start` runs the daemon in the background (output in `logs/daemon.log`) and
+  `fleet stop` stops it; `fleet status` reports whether it is running. `fleet daemon`
+  records its pid, refuses to start twice for one config dir, and prints "listening"
+  only once its listeners are bound.
+- `fleet-agent --version`.
 - WinGet-ready `Cenvero.Fleet` ZIP/portable manifests for Windows x64 and ARM64,
   generated and validated against immutable GitHub release assets.
 - Generalized self-managed, Homebrew, and WinGet controller ownership detection,
   including Homebrew symlinks and custom WinGet portable locations.
+- `fleet dashboard` is now a live operations console: background auto-refresh with a
+  staleness indicator, a sortable/filterable server table, per-server CPU/memory/disk
+  history sparklines, alert filters with confirmed acknowledge/suppress, and actions
+  (ssh, file manager, reconnect, restart, follow log) that re-run the `fleet` binary so
+  RBAC and cmd-policy apply exactly as on the CLI. Fits 80×24 and up.
+- Terminal file manager: a transfer queue with speed/ETA/retry, a copy/move
+  confirmation with collision handling, a preview pane, go-to path with completion,
+  fuzzy jump, back/forward history, bookmarks and recent folders, range selection,
+  and a full `?` key reference; the toolbar adapts to any width.
+- Redesigned web file manager (`fleet file ui`): light/dark themes, a phone layout,
+  full keyboard control with a command palette, context menus, confirm dialogs with
+  undo, a transfers panel with cancel/retry, text and image previews, streaming
+  downloads, virtualized lists for very large folders, and a read-only **Fleet
+  overview** of every server's status, resources, tags and alerts.
+- `fleet exec --parallel N` bounds how many servers `--all`/`--group` run on at once
+  (default 16).
+- `fleet top --group EXPR`; swap is read from the agent's metrics snapshot.
+- Metrics history is kept for 30 days and pruned hourly by the daemon.
+- New agent file operations negotiated per agent: single-request small-file uploads,
+  agent-side same-server copies, whole-tree listings for `fleet sync`, and
+  chunk-digest finalize.
+- `FLEET_NO_DAEMON_RELAY=1` disables relaying direct-mode calls through a running
+  daemon.
+
+- The `destructive` notification event now fires after destructive CLI commands
+  (it was advertised but never sent).
+- The audit log records remote commands (`exec.run`), approval decisions, cmd-policy
+  and redaction policy changes, secret and token changes, and failed file operations.
+- `fleet agent update --strict-health` also requires canary hosts to pass host health
+  checks.
 
 ### Changed
 
@@ -47,12 +83,126 @@ Omit sections that have no entries for that release.
   managed agents remain Fleet-owned through `fleet sync-agent`.
 - WinGet uses catalog SHA-256 validation and Microsoft scanning. Direct installs
   and Fleet-managed updates retain fail-closed minisign verification.
+- Much faster at scale and over latency:
+  - fleet-wide `exec`, the metrics poller, `top`, `health`, `inventory` and agent
+    update batches run servers concurrently (bounded), with output kept in order;
+  - direct-mode CLI calls reuse a running daemon's warm connection (~550 → ~90 ms per
+    command at 50 ms latency);
+  - file transfers share the pooled connection, open channels concurrently, use
+    window-sized 1920 KiB chunks and hash each byte fewer times (4 KiB upload at 40 ms
+    latency: 753 → 43 ms; 64 MiB at 100 ms latency: ~3 s → ~0.9 s);
+  - reverse-mode transfers no longer base64 their chunks on the daemon's control
+    socket (~8× less CPU per chunk);
+  - `fleet sync` copies in parallel and scans remote trees in one request
+    (40 files at 40 ms latency: ~30 s → ~0.4 s);
+  - audit log appends are constant-time instead of re-reading the whole log;
+  - log tails read backwards from the end of the file and `--follow` resumes from a
+    cursor (256 MB log: 265 ms → 47 ms per tail, ~0 ms per idle follow poll);
+  - CLI start-up no longer builds syntax lexers or opens databases it does not need
+    (`fleet version` ~20 → ~13 ms);
+  - the dashboard and file manager render only visible rows (Servers tab at 500
+    servers: 35.5 ms → 0.17 ms per frame).
+- `fleet exec --all/--group` exits non-zero when any server failed, `--propagate-exit`
+  returns the first non-zero remote exit code, and `--json` lists every target (servers
+  that did not run carry a `status`). A `--group` matching no server is an error.
+- `fleet approve <id>` now shows the full staged request (server, command, every
+  option, who staged it), asks for confirmation (`--yes` without a terminal), then runs
+  the command with the options it was staged with and records the outcome.
+  `--require-approval` refuses literal secret values and unregistered server names.
+- The update check never blocks a command for more than 1.5 s and records failures, so
+  an offline controller retries at most every 10 minutes.
+- The daemon's control socket queues bursts of connections instead of dropping them,
+  so large reverse-mode fan-outs no longer show servers as offline.
+- `fleet journal --follow` uses journalctl cursors (nothing lost or repeated during
+  bursts) and filters on the server where journalctl supports `--grep`.
+- Pooled SSH connections send keepalives; reverse agents reconnect promptly with
+  jitter; the reverse-mode offline metrics queue is capped and replayed in idempotent
+  pages.
 
 ### Fixed
 
 - Unattended managed-agent activation is Linux-only. Windows delivery reports
   pending activation and preserves the observed live version until restart and
   reconnect.
+- Directory transfers of 8 or more files failed in direct mode (they exceeded the
+  agent's per-key connection limit).
+- `fleet file rm --recursive` (and other mutating file operations) accepted paths with
+  `..` components, so `/a/b/../..` could delete a parent directory; such paths are now
+  refused on both the controller and the agent.
+- Uploading onto an existing directory failed and left a `.part` file; the file now
+  lands inside the directory.
+- `fleet exec --timeout` sometimes reported a timed-out command as a bare exit `-1`.
+- `fleet exec --json --dry-run` printed non-JSON text on stdout.
+- Dashboard alert totals only counted the 8 most recent alerts.
+- The agent's ControllerID was always empty in hello payloads.
+- A hung agent could stall the metrics poller indefinitely.
+- Following a log that was truncated reprinted its whole tail on every poll.
+- The controller's cached service log (`--cached`, dashboard) dropped the first lines
+  of a rotated or truncated remote log once the new file had grown past the old one.
+- The file manager could move the selection to other files when re-sorting, only
+  transferred the first of several selected folders, and could render file names and
+  contents containing terminal escape sequences.
+- A mistyped subcommand (`fleet server lst`, `fleet approvals bogus`) printed the
+  group's help and exited 0; it is now an error with suggestions and exit 1.
+  Runtime errors no longer dump the command's usage block, and `fleet alerts`
+  prints `[]` instead of `null` when there are no alerts.
+- `fleet doctor --json` exited 0 when checks failed; it now exits 1 like the text
+  report.
+- `fleet exec --secret VAR=@name` set the variable only for the first simple command
+  (`a; b` or `echo $VAR` saw nothing) and put the value on the remote command line; it
+  now reaches the whole command through the process environment.
+- `fleet agent update --canary` aborted the rollout on healthy agents whose hosts had
+  no swap, high load or a pending reboot; the canary gate now checks that the updated
+  agent is back and reports the new version.
+- A server's "last seen" only moved when it reconnected, so the dashboard and web UI
+  showed healthy, polled servers as last seen long ago.
+- `fleet tag <server>` no longer reports "no tags" (or stores tags) for a server that
+  isn't in the fleet; `fleet update channel` accepts only `stable` or `beta`;
+  `fleet file defaults set --parallel` rejects negative values.
+- `fleet config edit` saves the edited file only if it parses and validates (a broken
+  `config.toml` made every command fail); otherwise it offers to re-open the editor.
+- `fleet file compress` accepts items as full paths in the archive's directory, as its
+  help showed; the `fleet svc` help and docs show the real `svc <action> <server> <unit>`
+  form; `fleet report` prints the running version.
+- The notification SSRF guard pointed at an "allow-internal" setting that could not
+  be set: `fleet notify add` now takes `--allow-internal`, re-adding a target
+  updates it, and `fleet notify list` shows it.
+- `fleet ssh` to a reverse-mode server dialed the placeholder address and looped on
+  "Reconnecting"; it is now refused with a pointer to `fleet exec`. A failed first
+  connection no longer retries, and `fleet ssh` exits with the remote shell's status.
+- A reverse agent that could not connect (wrong fingerprint, rejected enrollment,
+  controller down) retried silently forever; it now logs the reason, rate-limited.
+- Stopping the daemon could leave server-record and audit writes running after
+  shutdown.
+- `fleet start` / `fleet stop` only recorded a timestamp and never started or stopped
+  anything.
+- Transfer progress was written to stdout, mixed into the output scripts parse; it
+  now goes to stderr (a live bar on a terminal, otherwise JSON lines as documented).
+  Server-to-server copies no longer report twice the file size.
+- `fleet job wait` exits non-zero when the job failed; `fleet health --group` that
+  matches no server is an error instead of "no servers to check"; `fleet cron`
+  reports a server without `crontab` instead of "no managed jobs".
+- `fleet doctor` no longer warns about the agent port on reverse-mode servers.
+- Development-build agents show as `dev` in `server list`, inventory and the
+  dashboard (they showed `-` or "version unknown").
+- `fleet file extract` on a file that isn't a valid archive says so plainly.
+- With the daemon stopped, reverse-mode commands say it is not running and how to
+  start it; `fleet-agent serve` warns when its authorized keys file is missing or empty.
+
+### Security
+
+- The daemon's local control socket is mutually authenticated: callers no longer send
+  the control token (or, with the direct-mode relay, commands and file data) to
+  whatever listens on the control address before the daemon has proved it holds the
+  token. The daemon removes `data/control.token` when it stops and handles `SIGTERM`.
+- Remote text (file names, log lines, alert messages) is stripped of terminal escape
+  sequences in the dashboard and file manager.
+- A scoped RBAC token is explicitly denied `fleet approve`, a staged server name can
+  never be interpreted as a flag, and the approver's token reaches the child `fleet
+  exec` through the environment rather than its command line.
+- The web UI requires same-origin `POST`s for every mutation, sends additional
+  isolation headers, refuses the controller's config directory in its Local source,
+  and never renders previewed SVG/HTML.
 
 ## [v2.4.3] — 2026-09-11 (stable)
 

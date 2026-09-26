@@ -177,8 +177,9 @@ func octalModeString(mode uint32) string {
 	return s
 }
 
-// runChmod applies an octal mode to the prompt's item via core.ChmodPath, then
-// reloads the pane. It is called from submitPrompt for promptChmod.
+// runChmod applies an octal mode to the prompt's item via core.ChmodPath (off
+// the UI thread), then reloads the pane. It is called from submitPrompt for
+// promptChmod.
 func (m filesModel) runChmod(side int, name, mode string) (tea.Model, tea.Cmd) {
 	if _, err := strconv.ParseUint(mode, 8, 32); err != nil {
 		m.status = "invalid octal mode: " + mode
@@ -186,12 +187,13 @@ func (m filesModel) runChmod(side int, name, mode string) (tea.Model, tea.Cmd) {
 	}
 	pane := m.paneRefConst(side)
 	full := joinPath(pane.cwd, name, pane.pathStyle)
-	if err := m.app.ChmodPath(pane.source, full, mode); err != nil {
-		m.status = "chmod failed: " + err.Error()
-		return m, nil
+	app := m.app
+	source := pane.source
+	m.status = fmt.Sprintf("setting %s on %s…", mode, name)
+	return m, func() tea.Msg {
+		err := app.ChmodPath(source, full, mode)
+		return fileOpDoneMsg{side: side, verb: "set " + mode + " on", what: name, err: err}
 	}
-	m.status = fmt.Sprintf("set %s on %s", mode, name)
-	return m, m.reload(side)
 }
 
 // ============================================================================
@@ -272,6 +274,7 @@ func (m filesModel) duplicateFocused(side int) (tea.Model, tea.Cmd) {
 	source := pane.source
 	isDir := it.isDir
 	m.status = "duplicating " + it.name + "…"
+	m.paneRef(side).focusName = dupName
 	return m, func() tea.Msg {
 		var err error
 		if source == "" {
@@ -341,13 +344,32 @@ func copyLocalFile(src, dst string) error {
 // Shared completion handler
 // ============================================================================
 
-// onFileOpDone reports a finished compress/extract/duplicate op and refreshes
-// the owning pane so the new file shows immediately.
+// onFileOpDone reports a finished single-item operation (compress, extract,
+// duplicate, mkdir, rename, chmod, …) and refreshes the owning pane so the
+// change shows immediately.
 func (m filesModel) onFileOpDone(msg fileOpDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		m.status = msg.verb + " failed: " + msg.err.Error()
+		switch msg.verb {
+		case "created folder", "created file", "renamed to":
+			m.setStatus(levelError, fmt.Sprintf("could not %s %s: %v", failVerb(msg.verb), msg.what, msg.err))
+		default:
+			m.setStatus(levelError, msg.verb+" failed: "+msg.err.Error())
+		}
+		m.paneRef(msg.side).focusName = ""
 		return m, nil
 	}
-	m.status = msg.verb + " " + msg.what
+	m.setStatus(levelOK, msg.verb+" "+msg.what)
 	return m, m.reload(msg.side)
+}
+
+func failVerb(verb string) string {
+	switch verb {
+	case "created folder":
+		return "create folder"
+	case "created file":
+		return "create file"
+	case "renamed to":
+		return "rename to"
+	}
+	return verb
 }

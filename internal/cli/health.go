@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"text/tabwriter"
 	"time"
@@ -57,6 +56,8 @@ Each server is probed once and evaluated for:
   • clock-skew      the remote clock differs from the controller (>5s)
   • high-load       1-minute loadavg per CPU exceeds --load (default 1.0)
 
+A --group that matches no server is an error (exit 1), as with exec --group.
+
 Examples:
   fleet health
   fleet health --json
@@ -77,6 +78,11 @@ Examples:
 			servers, err := selectHealthServers(app, *configDir, group)
 			if err != nil {
 				return err
+			}
+			if len(servers) == 0 && strings.TrimSpace(group) != "" {
+				// Like `exec --group`: a filter that selects nothing is almost
+				// always a typo, and must not read as "all healthy" to a script.
+				return fmt.Errorf("no servers match --group %q", group)
 			}
 			if len(servers) == 0 {
 				if asJSON {
@@ -146,36 +152,36 @@ func collectHealthReport(ctx context.Context, app *core.App, servers []string, t
 	now := time.Now().UTC()
 	results := make([]core.HealthResult, len(servers))
 	finished := make([]atomic.Bool, len(servers))
-	var wg sync.WaitGroup
-	for i, name := range servers {
-		wg.Add(1)
-		go func(i int, name string) {
-			defer wg.Done()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Bounded fan-out: in reverse mode every probe is one daemon control
+		// connection, and the daemon drops connections beyond its limit.
+		core.ForEachLimit(len(servers), core.DefaultFanoutLimit, func(i int) {
+			if ctx.Err() != nil {
+				return // cancelled before this probe started; reported below
+			}
 			// Capture the skew reference per server, immediately before this
 			// server's own probe, rather than reusing the single pre-launch
 			// 'now' for every probe. With many concurrent (or slow) probes that
 			// shared timestamp goes stale, inflating measured clock skew; the
 			// core then adds half the round trip to land on the probe midpoint.
 			probeStart := time.Now().UTC()
-			one := core.EvaluateHealth(app.ExecCommand, []string{name}, th, probeStart)
+			one := core.EvaluateHealth(app.ExecCommand, []string{servers[i]}, th, probeStart)
 			results[i] = one.Results[0]
 			finished[i].Store(true)
-		}(i, name)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
+		})
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		// Cancelled before every probe returned: substitute a complete result
-		// set so the report is well-formed, and return without blocking on the
-		// outstanding (slow / unreachable) probes' exec timeout. We do not touch
-		// results[i] for in-flight probes — their goroutines still own those
-		// slots — so we build a fresh slice instead.
+	}
+	if ctx.Err() != nil {
+		// Cancelled before every probe returned (or started): substitute a
+		// complete result set so the report is well-formed, and return without
+		// blocking on the outstanding (slow / unreachable) probes' exec timeout.
+		// We do not touch results[i] for in-flight probes — their goroutines
+		// still own those slots — so we build a fresh slice instead.
 		out := make([]core.HealthResult, len(servers))
 		for i := range servers {
 			if finished[i].Load() {

@@ -43,6 +43,13 @@ func (systemMetricsCollector) Collect(ctx context.Context) (proto.MetricsSnapsho
 		snapshot.MemoryUsedBytes = vm.Used
 		snapshot.MemoryTotalBytes = vm.Total
 	}
+	// Swap lets `fleet top` show swap without a separate `free` exec per
+	// server per frame.
+	if swap, err := mem.SwapMemoryWithContext(ctx); err == nil && swap != nil {
+		snapshot.SwapUsedBytes = swap.Used
+		snapshot.SwapTotalBytes = swap.Total
+		snapshot.SwapReported = true
+	}
 	if usage, path, err := diskUsageWithPath(ctx); err == nil {
 		snapshot.DiskPath = path
 		snapshot.DiskPercent = usage.UsedPercent

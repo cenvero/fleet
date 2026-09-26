@@ -17,12 +17,18 @@ import (
 )
 
 // Approval status values. A staged request is pending until an operator
-// approves or rejects it, or until its TTL elapses (expired).
+// approves or rejects it, or until its TTL elapses (expired). `fleet approve`
+// then runs the approved command and records its outcome: executed (exit 0) or
+// failed (non-zero exit, blocked, or not runnable). An approval left in
+// approved status was approved but its run never recorded an outcome (e.g. the
+// approving process was killed).
 const (
 	ApprovalPending  = "pending"
 	ApprovalApproved = "approved"
 	ApprovalRejected = "rejected"
 	ApprovalExpired  = "expired"
+	ApprovalExecuted = "executed"
+	ApprovalFailed   = "failed"
 )
 
 // DefaultApprovalTTL is used by Stage when the caller passes a non-positive ttl.
@@ -37,6 +43,32 @@ type Approval struct {
 	Status    string    `json:"status"`
 	Requested time.Time `json:"requested"`
 	Expires   time.Time `json:"expires"`
+
+	// Additive fields (older binaries ignore them). Exec holds the exec options
+	// the command was staged with; the rest record who asked, the decision and
+	// the run.
+	RequestedBy string        `json:"requested_by,omitempty"`
+	Exec        *ApprovalExec `json:"exec,omitempty"`
+	ApprovedAt  *time.Time    `json:"approved_at,omitempty"`
+	ExecutedAt  *time.Time    `json:"executed_at,omitempty"`
+	ExitCode    *int          `json:"exit_code,omitempty"`
+	Error       string        `json:"error,omitempty"`
+}
+
+// ApprovalExec records the `fleet exec` options a command was staged with, so
+// `fleet approve` runs it exactly as it was requested. Secrets are stored only
+// as VAR=@name references to the secret store — a literal secret value is never
+// written to approvals.json (exec refuses --require-approval with one).
+type ApprovalExec struct {
+	Timeout        string   `json:"timeout,omitempty"`
+	Retry          int      `json:"retry,omitempty"`
+	Backoff        string   `json:"backoff,omitempty"`
+	Guard          bool     `json:"guard,omitempty"`
+	GuardWarn      bool     `json:"guard_warn,omitempty"`
+	Confirm        bool     `json:"confirm,omitempty"`
+	OnFail         string   `json:"on_fail,omitempty"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	Secrets        []string `json:"secrets,omitempty"`
 }
 
 // Expired reports whether a still-pending approval has passed its expiry at the
@@ -71,6 +103,16 @@ func NewApprovalStore(configDir string) *ApprovalStore {
 	return &ApprovalStore{path: path, now: time.Now, entropy: rand.Reader}
 }
 
+// ValidateApprovalServer reports whether server is a plain server name that is
+// safe to stage and to pass on to `fleet exec` (letters, digits, '.', '_', '-';
+// never starting with '-').
+func ValidateApprovalServer(server string) error {
+	if err := validateSafeName(server); err != nil {
+		return fmt.Errorf("invalid server name for an approval: %w", err)
+	}
+	return nil
+}
+
 // ApprovalsPath returns the on-disk location of the approvals document.
 func ApprovalsPath(configDir string) string {
 	return filepath.Join(configDir, "approvals.json")
@@ -98,7 +140,70 @@ func (s *ApprovalStore) read() ([]Approval, error) {
 	if err := json.Unmarshal(data, &approvals); err != nil {
 		return nil, fmt.Errorf("decode approvals: %w", err)
 	}
+	s.mergeExtras(approvals)
 	return approvals, nil
+}
+
+// approvalExtras is the part of an Approval that fleet versions before the
+// approval-run feature do not know. Those binaries rewrite approvals.json from
+// their own struct (e.g. `approvals reject`) and silently drop unknown fields,
+// which would make a later `fleet approve` run the command without its staged
+// --timeout/--on-fail/secrets. The extras are therefore also kept in a sidecar
+// (approvals-extra.json, which older binaries never touch) keyed by approval
+// id, and merged back into any approval that lost them.
+type approvalExtras struct {
+	RequestedBy string        `json:"requested_by,omitempty"`
+	Exec        *ApprovalExec `json:"exec,omitempty"`
+	ApprovedAt  *time.Time    `json:"approved_at,omitempty"`
+	ExecutedAt  *time.Time    `json:"executed_at,omitempty"`
+	ExitCode    *int          `json:"exit_code,omitempty"`
+	Error       string        `json:"error,omitempty"`
+}
+
+func (e approvalExtras) empty() bool {
+	return e.RequestedBy == "" && e.Exec == nil && e.ApprovedAt == nil && e.ExecutedAt == nil && e.ExitCode == nil && e.Error == ""
+}
+
+func (s *ApprovalStore) extrasPath() string {
+	return strings.TrimSuffix(s.path, ".json") + "-extra.json"
+}
+
+// mergeExtras restores extras an older binary dropped. A missing or unreadable
+// sidecar only means there is nothing to restore.
+func (s *ApprovalStore) mergeExtras(approvals []Approval) {
+	data, err := os.ReadFile(s.extrasPath())
+	if err != nil || len(data) == 0 {
+		return
+	}
+	var extras map[string]approvalExtras
+	if json.Unmarshal(data, &extras) != nil {
+		return
+	}
+	for i := range approvals {
+		e, ok := extras[approvals[i].ID]
+		if !ok {
+			continue
+		}
+		a := &approvals[i]
+		if a.RequestedBy == "" {
+			a.RequestedBy = e.RequestedBy
+		}
+		if a.Exec == nil {
+			a.Exec = e.Exec
+		}
+		if a.ApprovedAt == nil {
+			a.ApprovedAt = e.ApprovedAt
+		}
+		if a.ExecutedAt == nil {
+			a.ExecutedAt = e.ExecutedAt
+		}
+		if a.ExitCode == nil {
+			a.ExitCode = e.ExitCode
+		}
+		if a.Error == "" {
+			a.Error = e.Error
+		}
+	}
 }
 
 func (s *ApprovalStore) write(approvals []Approval) error {
@@ -108,13 +213,35 @@ func (s *ApprovalStore) write(approvals []Approval) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
+	extras := make(map[string]approvalExtras)
+	for _, a := range approvals {
+		e := approvalExtras{RequestedBy: a.RequestedBy, Exec: a.Exec, ApprovedAt: a.ApprovedAt,
+			ExecutedAt: a.ExecutedAt, ExitCode: a.ExitCode, Error: a.Error}
+		if !e.empty() {
+			extras[a.ID] = e
+		}
+	}
+	extraData, err := json.MarshalIndent(extras, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode approvals: %w", err)
+	}
+	// The sidecar first: the main file never references extras that were not
+	// persisted.
+	if err := writeFileAtomic(s.extrasPath(), ".approvals-extra-*.json", extraData); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(approvals, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode approvals: %w", err)
 	}
-	// Atomic write: temp file in the same dir -> chmod 0600 -> rename.
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".approvals-*.json")
+	return writeFileAtomic(s.path, ".approvals-*.json", data)
+}
+
+// writeFileAtomic replaces path with data: temp file in the same dir -> chmod
+// 0600 -> fsync -> rename.
+func writeFileAtomic(path, pattern string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return fmt.Errorf("write approvals: %w", err)
 	}
@@ -138,7 +265,7 @@ func (s *ApprovalStore) write(approvals []Approval) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("write approvals: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write approvals: %w", err)
 	}
 	return nil
@@ -173,8 +300,19 @@ func newApprovalID(entropy io.Reader) (string, error) {
 // after ttl, and returns its generated id. A non-positive ttl uses
 // DefaultApprovalTTL. Expired approvals are pruned to expired-status on the way.
 func (s *ApprovalStore) Stage(server, command string, ttl time.Duration) (string, error) {
+	return s.StageExec(server, command, ttl, nil, "")
+}
+
+// StageExec is Stage that also records the exec options (exec may be nil) the
+// command must run with once approved, and who requested it.
+func (s *ApprovalStore) StageExec(server, command string, ttl time.Duration, exec *ApprovalExec, requestedBy string) (string, error) {
 	if strings.TrimSpace(server) == "" {
 		return "", fmt.Errorf("server name is required")
+	}
+	// The server is later handed to `fleet exec` as an argument; a value that
+	// is not a plain server name (e.g. "--all") must never be staged.
+	if err := ValidateApprovalServer(server); err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("command is required")
@@ -195,12 +333,14 @@ func (s *ApprovalStore) Stage(server, command string, ttl time.Duration) (string
 		now := s.clock()
 		markExpired(approvals, now)
 		approval := Approval{
-			ID:        id,
-			Server:    server,
-			Command:   command,
-			Status:    ApprovalPending,
-			Requested: now.UTC(),
-			Expires:   now.UTC().Add(ttl),
+			ID:          id,
+			Server:      server,
+			Command:     command,
+			Status:      ApprovalPending,
+			Requested:   now.UTC(),
+			Expires:     now.UTC().Add(ttl),
+			RequestedBy: strings.TrimSpace(requestedBy),
+			Exec:        exec,
 		}
 		approvals = append(approvals, approval)
 		if err := s.write(approvals); err != nil {
@@ -248,6 +388,54 @@ func (s *ApprovalStore) decide(id, status string) (Approval, error) {
 			return persistOnError(fmt.Errorf("approval %q is %s, not pending", id, approvals[idx].Status))
 		}
 		approvals[idx].Status = status
+		if status == ApprovalApproved {
+			at := now.UTC()
+			approvals[idx].ApprovedAt = &at
+		}
+		if err := s.write(approvals); err != nil {
+			return err
+		}
+		result = approvals[idx]
+		return nil
+	})
+	return result, err
+}
+
+// RecordResult stores the outcome of running an approved command: executed for
+// a clean exit 0, failed otherwise (runErr set, or a non-zero exitCode). Only an
+// approval in approved status can take a result, so each approval runs — and is
+// recorded — at most once.
+func (s *ApprovalStore) RecordResult(id string, exitCode int, runErr error) (Approval, error) {
+	var result Approval
+	err := s.withWriteLock(func() error {
+		approvals, err := s.read()
+		if err != nil {
+			return err
+		}
+		idx := -1
+		for i := range approvals {
+			if approvals[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("approval %q not found", id)
+		}
+		if approvals[idx].Status != ApprovalApproved {
+			return fmt.Errorf("approval %q is %s, not approved", id, approvals[idx].Status)
+		}
+		at := s.clock().UTC()
+		code := exitCode
+		approvals[idx].ExecutedAt = &at
+		approvals[idx].ExitCode = &code
+		approvals[idx].Status = ApprovalExecuted
+		if runErr != nil || exitCode != 0 {
+			approvals[idx].Status = ApprovalFailed
+		}
+		if runErr != nil {
+			approvals[idx].Error = runErr.Error()
+		}
 		if err := s.write(approvals); err != nil {
 			return err
 		}
