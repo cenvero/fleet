@@ -8,11 +8,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cenvero/fleet/pkg/proto"
 )
@@ -622,4 +626,121 @@ func TestPooledReadServesIndependentBuffers(t *testing.T) {
 	}
 	relA()
 	relB()
+}
+
+// assertRecordsMatchDisk checks every recorded chunk checksum against the bytes
+// actually in the upload's temp file.
+func assertRecordsMatchDisk(t *testing.T, au *activeUpload) {
+	t.Helper()
+	for _, rc := range au.sortedRecords(-1) {
+		sum, err := hashRange(au.f, rc.Offset, rc.Length)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hex.EncodeToString(sum[:]) != rc.SHA256 {
+			t.Fatalf("record at %d+%d claims %s but the file holds other bytes", rc.Offset, rc.Length, rc.SHA256)
+		}
+	}
+}
+
+// TestOverlappingWritesKeepRecordsConsistent is the regression test for two
+// concurrent writes to the same bytes leaving a record that describes the bytes
+// the other write then put on disk: overlapping writes are now serialised, so
+// the second waits until the first has written and recorded.
+// Not parallel: it installs testHookAfterWriteAt.
+func TestOverlappingWritesKeepRecordsConsistent(t *testing.T) {
+	ctx := context.Background()
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	const id = "tid-overlap"
+	m := NewFileManager().(*fileManager)
+	if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: 12, TransferID: id}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	au := m.active[id]
+	m.mu.Unlock()
+
+	aWrote := make(chan struct{})
+	releaseA := make(chan struct{})
+	var first atomic.Bool
+	testHookAfterWriteAt = func(int64) {
+		if first.CompareAndSwap(false, true) { // only the first write (A) pauses
+			close(aWrote)
+			<-releaseA
+		}
+	}
+	defer func() { testHookAfterWriteAt = nil }()
+
+	aDone := make(chan error, 1)
+	go func() { aDone <- writeChunk(t, m, id, dest, 0, []byte("AAAAAAAA")) }()
+	<-aWrote
+	bDone := make(chan error, 1)
+	go func() { bDone <- writeChunk(t, m, id, dest, 4, []byte("BBBBBBBB")) }() // overlaps A at 4..8
+	select {
+	case err := <-bDone:
+		close(releaseA)
+		<-aDone
+		t.Fatalf("overlapping write ran while another was between its write and its record (err=%v)", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseA)
+	if err := <-aDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-bDone; err != nil {
+		t.Fatal(err)
+	}
+	assertRecordsMatchDisk(t, au)
+}
+
+// TestConcurrentOverlappingWritesStress hammers one range from many writers and
+// checks the records still describe the bytes on disk.
+func TestConcurrentOverlappingWritesStress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for iter := range 50 {
+		dest := filepath.Join(t.TempDir(), "out.bin")
+		id := fmt.Sprintf("tid-stress-%d", iter)
+		m := NewFileManager().(*fileManager)
+		if _, err := m.OpenWrite(ctx, proto.FileOpenWritePayload{Path: dest, TotalSize: 96 << 10, TransferID: id}); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		for w := range 8 {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				data := bytes.Repeat([]byte{byte('a' + w)}, 64<<10)
+				off := int64(w%3) * (16 << 10)
+				if err := writeChunk(t, m, id, dest, off, data); err != nil {
+					t.Error(err)
+				}
+			}(w)
+		}
+		wg.Wait()
+		m.mu.Lock()
+		au := m.active[id]
+		m.mu.Unlock()
+		assertRecordsMatchDisk(t, au)
+	}
+}
+
+// TestRecordOverlapWhenFirstRecordIsUnaligned is the regression test for the
+// fast overlap check trusting a grid whose very first record was not aligned
+// to it, which let a stale record survive a write over half its bytes.
+func TestRecordOverlapWhenFirstRecordIsUnaligned(t *testing.T) {
+	t.Parallel()
+	au := &activeUpload{}
+	var sum [sha256.Size]byte
+	au.record(32<<10, 64<<10, sum)
+	au.forget(0, 64<<10) // overlaps [32K, 64K) of the first record
+	if got := au.sortedRecords(-1); len(got) != 0 {
+		t.Fatalf("stale record survived an overlapping write: %+v", got)
+	}
+	au.record(0, 64<<10, sum)
+	au.record(64<<10, 64<<10, sum)
+	au.forget(96<<10, 8)
+	if got := au.sortedRecords(-1); len(got) != 1 || got[0].Offset != 0 {
+		t.Fatalf("records after an overlapping write = %+v", got)
+	}
 }

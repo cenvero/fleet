@@ -8,8 +8,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,7 +105,59 @@ type activeUpload struct {
 	// record can only live at the same offset, so the overlap check is O(1).
 	grid    int64
 	aligned bool
+
+	// Writes whose byte ranges overlap are serialised (lockRange), so the
+	// forget → WriteAt → record sequence of one can never interleave with
+	// another's over the same bytes: a record always describes what the last
+	// write to its range left on disk. Disjoint writes — every write a
+	// well-behaved controller sends — still run in parallel.
+	wmu      sync.Mutex
+	wcond    *sync.Cond
+	inflight []byteRange
 }
+
+type byteRange struct{ off, end int64 }
+
+// lockRange waits until no other write to an overlapping range is in flight,
+// then claims [off, off+n).
+func (au *activeUpload) lockRange(off, n int64) {
+	end := off + n
+	au.wmu.Lock()
+	defer au.wmu.Unlock()
+	if au.wcond == nil {
+		au.wcond = sync.NewCond(&au.wmu)
+	}
+	for au.overlapsInflightLocked(off, end) {
+		au.wcond.Wait()
+	}
+	au.inflight = append(au.inflight, byteRange{off: off, end: end})
+}
+
+func (au *activeUpload) overlapsInflightLocked(off, end int64) bool {
+	for _, r := range au.inflight {
+		if off < r.end && r.off < end {
+			return true
+		}
+	}
+	return false
+}
+
+func (au *activeUpload) unlockRange(off, n int64) {
+	end := off + n
+	au.wmu.Lock()
+	for i, r := range au.inflight {
+		if r.off == off && r.end == end {
+			au.inflight = append(au.inflight[:i], au.inflight[i+1:]...)
+			break
+		}
+	}
+	au.wmu.Unlock()
+	au.wcond.Broadcast()
+}
+
+// testHookAfterWriteAt, when set by a test, runs between a chunk's WriteAt and
+// the recording of its checksum.
+var testHookAfterWriteAt func(offset int64)
 
 func (au *activeUpload) dropOverlapsLocked(offset, length int64) {
 	if len(au.records) == 0 {
@@ -131,7 +185,9 @@ func (au *activeUpload) record(offset, length int64, sum [sha256.Size]byte) {
 		au.records = make(map[int64]chunkRecord)
 	}
 	if len(au.records) == 0 {
-		au.grid, au.aligned = length, true
+		// The fast overlap check is only sound while every record starts on
+		// a multiple of the grid, the first one included.
+		au.grid, au.aligned = length, offset%length == 0
 	} else if au.aligned && (au.grid <= 0 || offset%au.grid != 0 || length > au.grid) {
 		au.aligned = false
 	}
@@ -154,6 +210,21 @@ func (au *activeUpload) lookup(offset, length int64) (string, bool) {
 		return "", false
 	}
 	return hex.EncodeToString(rec.sum[:]), true
+}
+
+// intact reports whether the upload's temp file is still exactly what the agent
+// created or vetted: owned by it, with a single link, and still reachable under
+// its name. Returns the descriptor's current metadata.
+func (au *activeUpload) intact() (os.FileInfo, bool) {
+	info, err := au.f.Stat()
+	if err != nil || !exclusivelyOwned(info) {
+		return nil, false
+	}
+	cur, err := au.root.Lstat(au.tempRel)
+	if err != nil || !sameInode(cur, info) {
+		return nil, false
+	}
+	return info, true
 }
 
 // maxReportedChunks bounds FileOpenWriteResult.Chunks so the reply always fits
@@ -932,6 +1003,94 @@ func targetIsDirectory(root *os.Root, rel string) *RPCError {
 	return nil
 }
 
+// openUploadSidecar opens the temp file an upload is assembled in.
+//
+// Its name, <dest>.fleet-<transfer id>.part, is predictable — the id is derived
+// from the destination and the source's size and mtime — so that an upload can
+// resume after an agent restart. In a directory other local users can write to
+// (/tmp, shared upload directories) anyone could pre-create a file of that
+// name, or a hard link to one, and then own the installed file or change its
+// bytes after a resume probe checked them. So an existing file is resumed only
+// when the open descriptor proves it is ours alone (privateToAgent). Anything
+// else is left untouched and the upload starts in a new temp file created
+// exclusively under an unpredictable name.
+func openUploadSidecar(root *os.Root, finalRel, tempRel string) (*os.File, string, os.FileInfo, *RPCError) {
+	f, err := root.OpenFile(tempRel, os.O_RDWR|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+	if err == nil {
+		return statSidecar(f, tempRel)
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		return nil, "", nil, &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	if named, err := root.Lstat(tempRel); err == nil && privateToAgent(named) {
+		if f, err := root.OpenFile(tempRel, os.O_RDWR|oNoFollow|oNonBlock, 0); err == nil {
+			// Decide on what was opened, not on the name looked up before.
+			if info, err := f.Stat(); err == nil && privateToAgent(info) && sameInode(named, info) {
+				return f, tempRel, info, nil
+			}
+			_ = f.Close()
+		}
+	}
+	id, err := randomTempID()
+	if err != nil {
+		return nil, "", nil, &RPCError{Code: "internal_error", Message: err.Error()}
+	}
+	fresh := finalRel + ".fleet-" + id + ".part"
+	if filepath.Dir(fresh) != filepath.Dir(finalRel) {
+		return nil, "", nil, invalidTransferID()
+	}
+	f, err = root.OpenFile(fresh, os.O_RDWR|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+	if err != nil {
+		return nil, "", nil, &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	return statSidecar(f, fresh)
+}
+
+func statSidecar(f *os.File, rel string) (*os.File, string, os.FileInfo, *RPCError) {
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = f.Close()
+		if err == nil {
+			err = fmt.Errorf("upload sidecar is not a regular file")
+		}
+		return nil, "", nil, &RPCError{Code: "stat_failed", Message: err.Error()}
+	}
+	return f, rel, info, nil
+}
+
+// removeIfSame removes rel only while it still names the file described by
+// info, so cleaning up after a failure can never delete a file another local
+// user put in its place.
+func removeIfSame(root *os.Root, rel string, info os.FileInfo) {
+	if cur, err := root.Lstat(rel); err == nil && sameInode(cur, info) {
+		_ = root.Remove(rel)
+	}
+}
+
+// installTemp renames a finished temp file over the destination. info is the
+// fstat of the temp file taken while it was still open. The name must still
+// refer to that very file — in a directory other users can write to, the name
+// could have been swapped for theirs — and after the rename the destination
+// must be it; otherwise nothing of theirs is left installed and the upload
+// fails.
+func installTemp(root *os.Root, tempRel, finalRel string, info os.FileInfo) *RPCError {
+	cur, err := root.Lstat(tempRel)
+	if err != nil || !sameInode(cur, info) {
+		return &RPCError{Code: "temp_replaced", Message: "upload temp file was replaced before it could be installed"}
+	}
+	if err := root.Rename(tempRel, finalRel); err != nil {
+		removeIfSame(root, tempRel, info)
+		return &RPCError{Code: "rename_failed", Message: err.Error()}
+	}
+	if got, err := root.Lstat(finalRel); err != nil || !sameInode(got, info) {
+		if err == nil {
+			_ = root.Remove(finalRel)
+		}
+		return &RPCError{Code: "temp_replaced", Message: "upload temp file was replaced while it was being installed"}
+	}
+	return nil
+}
+
 func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload) (proto.FileOpenWriteResult, error) {
 	if !validTransferID(p.TransferID) {
 		return proto.FileOpenWriteResult{}, invalidTransferID()
@@ -953,11 +1112,18 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		if existing.finalPath != real || existing.totalSize != p.TotalSize {
 			return proto.FileOpenWriteResult{}, &RPCError{Code: "transfer_conflict", Message: "transfer_id is already bound to a different destination or size"}
 		}
-		var size int64
-		if info, err := existing.f.Stat(); err == nil {
-			size = info.Size()
+		if info, ok := existing.intact(); ok {
+			return proto.FileOpenWriteResult{TempPath: existing.tempPath, ResumeOffset: info.Size(), Chunks: existing.sortedRecords(maxReportedChunks)}, nil
 		}
-		return proto.FileOpenWriteResult{TempPath: existing.tempPath, ResumeOffset: size, Chunks: existing.sortedRecords(maxReportedChunks)}, nil
+		// The temp file was unlinked, replaced or linked elsewhere since the
+		// last attempt; it could never be installed. Forget it (without
+		// touching whatever now has its name) and start afresh.
+		existing.mu.Lock()
+		existing.done = true
+		_ = existing.f.Close()
+		_ = existing.root.Close()
+		existing.mu.Unlock()
+		delete(m.active, p.TransferID)
 	}
 
 	root, finalRel, rerr := openTransferRoot(real)
@@ -973,35 +1139,17 @@ func (m *fileManager) OpenWrite(_ context.Context, p proto.FileOpenWritePayload)
 		_ = root.Close()
 		return proto.FileOpenWriteResult{}, rerr
 	}
-	temp := filepath.Join(root.Name(), tempRel)
-	if err := checkBlockedTransferPath(temp); err != nil {
+	if err := checkBlockedTransferPath(filepath.Join(root.Name(), tempRel)); err != nil {
 		_ = root.Close()
 		return proto.FileOpenWriteResult{}, err
 	}
 	maybeReapStalePartsRoot(root, filepath.Dir(finalRel), filepath.Base(tempRel), time.Now())
-	if info, err := root.Lstat(tempRel); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			_ = root.Close()
-			return proto.FileOpenWriteResult{}, &RPCError{Code: "invalid_path", Message: "upload sidecar is not a regular file"}
-		}
-	} else if !os.IsNotExist(err) {
+	f, tempRel, info, rerr := openUploadSidecar(root, finalRel, tempRel)
+	if rerr != nil {
 		_ = root.Close()
-		return proto.FileOpenWriteResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
+		return proto.FileOpenWriteResult{}, rerr
 	}
-	f, err := root.OpenFile(tempRel, os.O_RDWR|os.O_CREATE|oNoFollow, 0o600)
-	if err != nil {
-		_ = root.Close()
-		return proto.FileOpenWriteResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
-	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		_ = f.Close()
-		_ = root.Close()
-		if err == nil {
-			err = fmt.Errorf("upload sidecar is not a regular file")
-		}
-		return proto.FileOpenWriteResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
-	}
+	temp := filepath.Join(root.Name(), tempRel)
 	mode := p.Mode
 	if mode == 0 {
 		mode = 0o644
@@ -1075,12 +1223,17 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 	if au.done {
 		return proto.FileWriteResult{}, &RPCError{Code: "upload_finalized", Message: "upload has already been finalized"}
 	}
+	au.lockRange(p.Offset, dataLen)
+	defer au.unlockRange(p.Offset, dataLen)
 	// Forget the old checksum of these bytes before changing them, so a
 	// concurrent reader of the records can never see a stale claim.
 	au.forget(p.Offset, dataLen)
 	n, err := au.f.WriteAt(p.Data, p.Offset)
 	if err != nil {
 		return proto.FileWriteResult{}, &RPCError{Code: "write_failed", Message: err.Error()}
+	}
+	if testHookAfterWriteAt != nil {
+		testHookAfterWriteAt(p.Offset)
 	}
 	if verified && dataLen > 0 {
 		au.record(p.Offset, dataLen, sum)
@@ -1092,8 +1245,10 @@ func (m *fileManager) Write(_ context.Context, p proto.FileWritePayload) (proto.
 // held for writing and the upload already removed from the active map.
 func discardUpload(au *activeUpload) {
 	au.done = true
+	if info, err := au.f.Stat(); err == nil {
+		removeIfSame(au.root, au.tempRel, info)
+	}
 	_ = au.f.Close()
-	_ = au.root.Remove(au.tempRel)
 }
 
 func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (proto.FileFinalizeResult, error) {
@@ -1195,18 +1350,25 @@ func (m *fileManager) Finalize(_ context.Context, p proto.FileFinalizePayload) (
 		}
 	}
 
+	// Whatever vouched for the bytes above, the file must still be ours
+	// alone when it is installed: owned by the agent and with no second name
+	// through which another local user could reach it (a hard link made while
+	// the upload was in progress).
+	if !exclusivelyOwned(info) {
+		return fail("temp_not_private", "upload temp file is no longer private to the agent (owner or link count changed)")
+	}
+
 	mode := au.mode
 	if p.Mode != 0 {
 		mode = p.Mode
 	}
 	_ = au.f.Chmod(os.FileMode(mode)) // best effort; some filesystems disallow
 	if err := au.f.Close(); err != nil {
-		_ = au.root.Remove(au.tempRel)
+		removeIfSame(au.root, au.tempRel, info)
 		return proto.FileFinalizeResult{}, &RPCError{Code: "close_failed", Message: err.Error()}
 	}
-	if err := au.root.Rename(au.tempRel, au.finalRel); err != nil {
-		_ = au.root.Remove(au.tempRel)
-		return proto.FileFinalizeResult{}, &RPCError{Code: "rename_failed", Message: err.Error()}
+	if rerr := installTemp(au.root, au.tempRel, au.finalRel, info); rerr != nil {
+		return proto.FileFinalizeResult{}, rerr
 	}
 	return proto.FileFinalizeResult{Path: au.finalPath, Size: info.Size(), SHA256: sum, ChunkDigest: chunkDigest}, nil
 }
@@ -1223,8 +1385,11 @@ func (m *fileManager) abortInactive(real, transferID string) (proto.FileFinalize
 	if filepath.Dir(tempRel) != filepath.Dir(finalRel) {
 		return proto.FileFinalizeResult{}, invalidTransferID()
 	}
-	if info, err := root.Lstat(tempRel); err == nil && info.Mode().IsRegular() {
-		_ = root.Remove(tempRel)
+	// Only ever remove a file that is provably the agent's own: the name is
+	// predictable, and a controller must not be able to delete another local
+	// user's file through it.
+	if info, err := root.Lstat(tempRel); err == nil && privateToAgent(info) {
+		removeIfSame(root, tempRel, info)
 	}
 	return proto.FileFinalizeResult{Path: real}, nil
 }
@@ -1242,31 +1407,56 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 		return proto.FileProbeResult{}, rerr
 	}
 	defer root.Close()
-	probeRel := rel
 	var au *activeUpload
 	if p.TransferID != "" {
 		tempRel := rel + ".fleet-" + p.TransferID + ".part"
 		if filepath.Dir(tempRel) != filepath.Dir(rel) {
 			return proto.FileProbeResult{}, invalidTransferID()
 		}
-		if info, err := root.Lstat(tempRel); err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-			probeRel = tempRel
-			m.mu.Lock()
-			if candidate, ok := m.active[p.TransferID]; ok && candidate.finalPath == real && candidate.tempRel == tempRel {
-				au = candidate
+		m.mu.Lock()
+		if candidate, ok := m.active[p.TransferID]; ok && candidate.finalPath == real {
+			au = candidate
+		}
+		m.mu.Unlock()
+		if au == nil {
+			// Without an open upload there is nothing to resume into; only
+			// report whether a temp file exists.
+			if info, err := root.Lstat(tempRel); err == nil && info.Mode().IsRegular() {
+				return proto.FileProbeResult{Exists: true, CurrentSize: info.Size()}, nil
+			} else if err != nil && !os.IsNotExist(err) {
+				return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
 			}
-			m.mu.Unlock()
-		} else if err != nil && !os.IsNotExist(err) {
-			return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+			return proto.FileProbeResult{Exists: false}, nil
 		}
 	}
 
-	info, err := root.Stat(probeRel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return proto.FileProbeResult{Exists: false}, nil
+	var file io.ReaderAt
+	var info os.FileInfo
+	if au != nil {
+		// Hash the upload's own descriptor — never whatever its name refers
+		// to now, which another local user may have swapped — and hold off
+		// writers so each digest recorded describes bytes no concurrent write
+		// is changing. Probes run for a resume, before those ranges are
+		// rewritten.
+		au.mu.Lock()
+		defer au.mu.Unlock()
+		if au.done {
+			return proto.FileProbeResult{}, &RPCError{Code: "upload_finalized", Message: "upload has already been finalized"}
 		}
-		return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+		st, err := au.f.Stat()
+		if err != nil {
+			return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+		}
+		file, info = au.f, st
+	} else {
+		st, err := root.Stat(rel)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return proto.FileProbeResult{Exists: false}, nil
+			}
+			return proto.FileProbeResult{}, &RPCError{Code: "stat_failed", Message: err.Error()}
+		}
+		info = st
 	}
 	result := proto.FileProbeResult{Exists: true, CurrentSize: info.Size()}
 	if len(p.Ranges) == 0 {
@@ -1277,20 +1467,13 @@ func (m *fileManager) Probe(_ context.Context, p proto.FileProbePayload) (proto.
 	if len(ranges) > maxProbeRanges {
 		ranges = ranges[:maxProbeRanges]
 	}
-	file, err := root.Open(probeRel)
-	if err != nil {
-		return proto.FileProbeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
-	}
-	defer file.Close()
-	if au != nil {
-		// Hold off writers while hashing so each digest we record describes
-		// bytes no concurrent write can be changing. Probes only run for a
-		// resume, before the ranges they cover are rewritten.
-		au.mu.Lock()
-		defer au.mu.Unlock()
-		if au.done {
-			au = nil
+	if file == nil {
+		opened, err := root.Open(rel)
+		if err != nil {
+			return proto.FileProbeResult{}, &RPCError{Code: "open_failed", Message: err.Error()}
 		}
+		defer opened.Close()
+		file = opened
 	}
 
 	sums := make([]string, len(ranges))
@@ -1407,34 +1590,40 @@ func writeAtomically(root *os.Root, finalRel string, mode os.FileMode, fill func
 	if err != nil {
 		return 0, &RPCError{Code: "open_failed", Message: err.Error()}
 	}
-	cleanup := func(code string, err error) (int64, *RPCError) {
+	created, err := f.Stat()
+	if err != nil {
 		_ = f.Close()
-		_ = root.Remove(tempRel)
-		return 0, &RPCError{Code: code, Message: err.Error()}
+		return 0, &RPCError{Code: "stat_failed", Message: err.Error()}
+	}
+	cleanup := func(rerr *RPCError) (int64, *RPCError) {
+		_ = f.Close()
+		removeIfSame(root, tempRel, created)
+		return 0, rerr
 	}
 	n, err := fill(f)
 	if err != nil {
-		var rerr *RPCError
 		if e, ok := err.(*RPCError); ok {
-			rerr = e
-		} else {
-			rerr = &RPCError{Code: "write_failed", Message: err.Error()}
+			return cleanup(e)
 		}
-		_ = f.Close()
-		_ = root.Remove(tempRel)
-		return 0, rerr
+		return cleanup(&RPCError{Code: "write_failed", Message: err.Error()})
 	}
 	if err := f.Sync(); err != nil {
-		return cleanup("sync_failed", err)
+		return cleanup(&RPCError{Code: "sync_failed", Message: err.Error()})
 	}
 	_ = f.Chmod(mode) // best effort; some filesystems disallow
+	info, err := f.Stat()
+	if err != nil {
+		return cleanup(&RPCError{Code: "stat_failed", Message: err.Error()})
+	}
+	if !exclusivelyOwned(info) {
+		return cleanup(&RPCError{Code: "temp_not_private", Message: "temp file is no longer private to the agent (owner or link count changed)"})
+	}
 	if err := f.Close(); err != nil {
-		_ = root.Remove(tempRel)
+		removeIfSame(root, tempRel, info)
 		return 0, &RPCError{Code: "close_failed", Message: err.Error()}
 	}
-	if err := root.Rename(tempRel, finalRel); err != nil {
-		_ = root.Remove(tempRel)
-		return 0, &RPCError{Code: "rename_failed", Message: err.Error()}
+	if rerr := installTemp(root, tempRel, finalRel, info); rerr != nil {
+		return 0, rerr
 	}
 	return n, nil
 }
