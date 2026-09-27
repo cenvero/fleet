@@ -34,6 +34,8 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+## [v2.5.0] — 2026-09-27 (stable)
+
 ### Added
 
 - `fleet file edit` edits a file in place on the server, and `fleet file view` shows

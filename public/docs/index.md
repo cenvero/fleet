@@ -59,7 +59,7 @@ Scoped tokens, named secrets, approvals, command policy and a dead-man's switch 
    fleet dashboard
    ```
 
-> These docs follow the **main branch**. The latest stable release is **v2.4.3**; a few commands described here — `fleet start` and `fleet stop` for a background daemon, `fleet version`, and `fleet approve` running the approved command — ship in the next release after it. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
+> These docs cover **v2.5.0**, the latest stable release. Some commands described here are new in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
 
 ### Conventions and global flags
 
@@ -241,9 +241,9 @@ fleet server enroll-token edge-01
 
 ```text
 NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.4.3
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.4.3
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.4.3
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.5.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.5.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.5.0
 ```
 
 `reconnect` connects again and refreshes what the controller knows; add `--accept-new-host-key` after you have verified a changed host key. `enroll-token` mints a fresh one-time token for a reverse agent, for example after it lost its key.
@@ -626,7 +626,7 @@ fleet-agent serve --listen 0.0.0.0:2222 --authorized-keys ~/fleet-controller.pub
 
 > `--file-root` bounds listing, reading, writing, creating, deleting and renaming. Archive, permission and checksum operations run through the agent's shell and are **not** confined by it — restrict the agent's user if you need a hard boundary.
 
-## Edit files in place (Next release)
+## Edit files in place (New in v2.5.0)
 
 `fleet file edit` changes a file **on the server** without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.
 
@@ -1180,7 +1180,7 @@ FLEET_TOKEN=08f253baa4f39be3a2ac27d6c0c294fe fleet exec web-01 uptime
 - A server-scoped token may run only in-scope server commands and a small set of safe local ones. Controller management (`config`, `key`, `backup` …), fan-out reads and cross-server transfers it cannot fully check are denied.
 - A scoped token can never create or change tokens, and cannot [approve](https://fleet.cenvero.org/docs/#approvals) staged commands.
 - Token IDs are stored hashed in `tokens.json`; `token list` shows a short prefix only. Denied attempts are written to the audit log.
-- A scoped token cannot use the controller's own files — config directory, keys, `known_hosts`, token and secret stores, data, logs — as the local side of `file upload`/`download`, `sync`, `service logs --export` or `file edit --content` (Next release)
+- A scoped token cannot use the controller's own files — config directory, keys, `known_hosts`, token and secret stores, data, logs — as the local side of `file upload`/`download`, `sync`, `service logs --export` or `file edit --content` (New in v2.5.0)
 
 > Tokens limit what an automation can do *through `fleet`*; they are not an operating-system boundary. A process running as the same OS user as the controller can read its key files directly. To contain an agent you don't fully trust, run it as a separate user that cannot read the controller's config directory.
 
@@ -1321,7 +1321,7 @@ fleet daemon      # or run it in the foreground
 - `fleet stop` sends SIGTERM (on Windows it terminates the process) and waits up to 15 seconds. It only signals the process that holds the config directory's daemon lock, so a stale pid file never hits an unrelated process.
 - `fleet daemon` runs in the foreground — use it under systemd, launchd or a container. However it was started, a daemon records its pid in `data/daemon.pid`, holds `data/daemon.lock` so a second one for the same config directory is refused, and exits cleanly on Ctrl-C or SIGTERM.
 
-> `fleet start` and `fleet stop` manage a background daemon since the next release after v2.4.3. On v2.4.3, run `fleet daemon` under a service manager instead.
+> `fleet start` and `fleet stop` manage a background daemon since v2.5.0. On earlier versions, run `fleet daemon` under a service manager instead.
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -1474,7 +1474,7 @@ fleet agent update --canary 1
 fleet agent update --group role=web --canary 2 --strict-health
 ```
 
-- `agent version` shows each agent's version in one form (`v2.4.3`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
+- `agent version` shows each agent's version in one form (`v2.5.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
 - `agent update` updates a first batch of `--canary N` servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. `--canary 0` updates everything at once.
 - Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass `--strict-health`.
 
