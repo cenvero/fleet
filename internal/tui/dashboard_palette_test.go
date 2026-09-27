@@ -166,3 +166,35 @@ func TestNoColorKeepsCursorAndFocusVisible(t *testing.T) {
 		t.Fatalf("filter caret missing: %q", footer)
 	}
 }
+
+func TestDashTerminalIsDarkHonoursFleetTheme(t *testing.T) {
+	t.Parallel()
+	env := func(v string) func(string) string {
+		return func(k string) string {
+			if k == "FLEET_THEME" {
+				return v
+			}
+			return ""
+		}
+	}
+	detectDark := func() bool { return true }
+	detectLight := func() bool { return false }
+	cases := []struct {
+		theme  string
+		detect func() bool
+		want   bool
+	}{
+		{"", detectDark, true},
+		{"", detectLight, false},
+		{"auto", detectLight, false},
+		{"light", detectDark, false},
+		{" Light ", detectDark, false},
+		{"dark", detectLight, true},
+		{"bogus", detectLight, false},
+	}
+	for _, c := range cases {
+		if got := dashTerminalIsDark(env(c.theme), c.detect); got != c.want {
+			t.Errorf("FLEET_THEME=%q: dark = %v, want %v", c.theme, got, c.want)
+		}
+	}
+}

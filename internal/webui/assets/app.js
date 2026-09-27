@@ -751,6 +751,8 @@ function promptDialog({ title, message = "", value = "", okLabel = "OK", validat
   const inputId = "dlg-in-" + ++dialogSeq;
   const errId = inputId + "-err";
   const input = h("input", { id: inputId, class: "text-input" + (mono ? " mono" : ""), type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", "aria-describedby": errId, value });
+  // Without a visible label the field is named after the dialog.
+  if (!label) input.setAttribute("aria-label", title);
   const err = h("div", { id: errId, class: "field-error", "aria-live": "polite" });
   const fieldKids = [];
   if (label) fieldKids.push(h("label", { for: inputId, class: "mf-label", text: label }));
@@ -1397,6 +1399,8 @@ function crumbRoom(p) {
 
 function renderCrumbs(p) {
   if (!p.el) return;
+  // One "Path" landmark per pane: name them apart for screen readers.
+  p.el.crumbs.setAttribute("aria-label", "Path, pane " + paneNumber(p));
   const list = p.el.crumbList;
   list.replaceChildren();
   const path = p.path || p.initialRoot;
@@ -1529,8 +1533,10 @@ function renderSort(p) {
   const names = { name: "Name", size: "Size", mod: "Modified" };
   for (const col of $$(".col", p.el.head)) {
     const active = col.dataset.sort === p.sort.key;
-    if (active) col.setAttribute("aria-sort", p.sort.dir > 0 ? "ascending" : "descending");
-    else col.removeAttribute("aria-sort");
+    // (Not aria-sort: that belongs on a columnheader, and these are buttons
+    // whose label already says the order.)
+    if (active) col.dataset.sortDir = p.sort.dir > 0 ? "ascending" : "descending";
+    else delete col.dataset.sortDir;
     const dir = active ? (p.sort.dir > 0 ? "ascending" : "descending") : "";
     col.setAttribute("aria-label", "Sort by " + names[col.dataset.sort] + (dir ? " (currently " + dir + ")" : ""));
   }

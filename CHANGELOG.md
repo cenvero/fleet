@@ -144,6 +144,16 @@ Omit sections that have no entries for that release.
 
 ### Fixed
 
+- On a light terminal, the terminal file manager's help screen, dialogs, menus and editor
+  showed light-grey text on white and white gaps. Text styled with only a foreground colour
+  fell back to the terminal's own background. Every cell now keeps the file manager's dark
+  background.
+- Inside tmux or screen the dashboard can't detect a light terminal and used its
+  dark-background colours. `FLEET_THEME=light` (or `dark`) now picks the palette.
+- In the web file manager, the "Discard unsaved changes?" and save-conflict dialogs opened
+  behind the editor, so the editor seemed frozen. They now open on top of it. Also fixed:
+  sort buttons carried `aria-sort` (valid only on column headers), both panes' path bars had
+  the same accessible name, and unlabelled dialog fields had no accessible name.
 - Unattended managed-agent activation is Linux-only. Windows delivery reports
   pending activation and preserves the observed live version until restart and
   reconnect.

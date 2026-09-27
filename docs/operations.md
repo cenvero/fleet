@@ -669,6 +669,12 @@ is and keeps the last good snapshot on screen if a refresh fails. It fits any te
 80×24 up, works with the keyboard and the mouse, and stays readable on 256- and 16-colour
 terminals and with `NO_COLOR`.
 
+The dashboard picks a palette for a light or a dark terminal background by asking the terminal.
+Inside tmux or screen the terminal can't be asked, so the dashboard assumes a dark background
+unless `COLORFGBG` says otherwise. On a light terminal there, set `FLEET_THEME=light` (or
+`FLEET_THEME=dark` to force the dark palette). The file manager (`fleet files`) always draws its
+own dark background, so it looks the same on light and dark terminals.
+
 Tabs:
 
 - **Overview** — online/degraded/offline counts, alert counts by severity and state, fleet

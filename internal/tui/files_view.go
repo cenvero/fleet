@@ -2150,12 +2150,14 @@ func (m filesModel) renderEditor() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(fmAccent).
+		BorderBackground(fmPageBg).
 		Background(fmPanelBg).
 		Padding(0, 1).
 		Width(bw + 2) // lipgloss widths include padding; content is bw
 	inner := header + "\n" + fmRule.Render(strings.Repeat("─", bw)) + "\n" + body + "\n" +
 		fmRule.Render(strings.Repeat("─", bw)) + "\n" + footer
-	return pageStyle.Render(box.Render(inner))
+	// The content is mostly foreground-only styles (see fillBackground).
+	return pageStyle.Render(box.Render(fillBackground(inner, fmPal().panelBg)))
 }
 
 // renderEditorViewer renders the highlighted read-only content windowed to the
@@ -2257,7 +2259,9 @@ func overlayCenter(base string, w, h int, box string) string {
 // but lipgloss styling on the box paints its own background).
 func overlayAt(base string, x, y int, box string) string {
 	baseLines := strings.Split(base, "\n")
-	boxLines := strings.Split(box, "\n")
+	// Popups draw on their panel colour: borders and foreground-only text
+	// would otherwise show the terminal's own background.
+	boxLines := strings.Split(fillBackground(box, fmPal().panelBg), "\n")
 	boxW := lipgloss.Width(box)
 
 	if y < 0 {
