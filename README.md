@@ -119,7 +119,7 @@ fleet server add web-01 192.0.2.10 \
 The auto-install:
 - Detects the server arch via `uname -m` over the host-key-pinned SSH connection
 - Downloads only the matching `fleet-agent` archive, signature, and manifest **from the target server** using `wget` with `curl` fallback and bounded retries
-- Streams the downloaded payloads through SSH so the controller can fail-closed verify the exact release URL/target, minisign signature, trusted comment, size, and SHA-256 before installation; the controller does not fetch agent archives from GitHub itself
+- Keeps the archive on the server: the server reports its size and BLAKE2b-512 and SHA-256 digests, the controller fail-closed verifies the exact release URL/target, minisign signature (which signs the BLAKE2b-512 digest), trusted comment, size, and SHA-256, and only then does the server re-check the digests and unpack the agent. Neither the archive nor the binary passes through the controller, which does not fetch agent archives from GitHub itself. A server with no `b2sum`, `openssl` or `python3`, or no `tar`, sends the archive back through SSH to be verified and unpacked on the controller instead
 - Installs it to `/opt/cenvero-fleet/fleet-agent`
 - Creates, enables, and starts `cenvero-fleet-agent.service` via systemd
 

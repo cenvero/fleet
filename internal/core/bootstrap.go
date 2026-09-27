@@ -22,6 +22,7 @@ import (
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 	"github.com/cenvero/fleet/internal/logs"
 	"github.com/cenvero/fleet/internal/transport"
+	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/internal/version"
 	"golang.org/x/crypto/ssh"
 )
@@ -46,7 +47,9 @@ type BootstrapExecutor interface {
 
 // BootstrapAgentRelease asks the SSH executor to have the target download the
 // exact release matching Version, verify it on the controller, and stage the
-// extracted binary at DestinationPath before RunCommand executes.
+// extracted binary at DestinationPath before RunCommand executes. With a
+// StagingDir the archive stays on the target and the controller verifies its
+// digests against the release signature (see acquireVerifiedAgentRelease).
 type BootstrapAgentRelease struct {
 	Version         string
 	DestinationPath string
@@ -571,6 +574,9 @@ func buildBootstrapScript(server ServerRecord, cfg resolvedBootstrapConfig, incl
 
 type sshBootstrapExecutor struct {
 	networkDialContext func(context.Context, string, string) (net.Conn, error)
+	// releasePublicKey verifies agent releases in place of the embedded
+	// release signing key when set (in tests).
+	releasePublicKey string
 }
 
 func (e sshBootstrapExecutor) connect(ctx context.Context, req BootstrapRequest, authMethods []ssh.AuthMethod) (*ssh.Client, error) {
@@ -703,15 +709,21 @@ func (e sshBootstrapExecutor) Bootstrap(ctx context.Context, req BootstrapReques
 			return fmt.Errorf("agent release destination path is required")
 		}
 		for _, upload := range req.Uploads {
-			if upload.Path == destination {
-				return fmt.Errorf("agent release destination %q collides with a bootstrap upload", destination)
+			if upload.Path == destination || (req.StagingDir != "" && upload.Path == agentReleaseArchivePath(req.StagingDir)) {
+				return fmt.Errorf("bootstrap upload %q collides with the agent release files", upload.Path)
 			}
 		}
-		binary, err := fetchVerifiedAgentRelease(ctx, sshRemoteOutputRunner{client: client}, *req.AgentRelease)
+		publicKey := e.releasePublicKey
+		if publicKey == "" {
+			publicKey = update.SigningPublicKey()
+		}
+		binary, staged, err := acquireVerifiedAgentRelease(ctx, sshRemoteOutputRunner{client: client}, *req.AgentRelease, req.StagingDir, publicKey)
 		if err != nil {
 			return fmt.Errorf("target agent release acquisition: %w", err)
 		}
-		releaseUpload = &BootstrapUpload{Path: destination, Mode: 0o700, Content: binary}
+		if !staged {
+			releaseUpload = &BootstrapUpload{Path: destination, Mode: 0o700, Content: binary}
+		}
 	}
 
 	for _, upload := range req.Uploads {
