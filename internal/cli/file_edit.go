@@ -209,12 +209,13 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 			"write with its own permissions are refused and left unchanged.\n\n" +
 			"Some files cannot be replaced by a new file: one bind-mounted into a container\n" +
 			"(a mount point), one in a folder the agent may not write, or one whose owner\n" +
-			"the agent cannot give a new file. Those edits fail with nothing changed and a\n" +
-			"hint to use --in-place, which writes the new content into the file itself. The\n" +
-			"file keeps its owner, mode and labels, but the write is not atomic, so before\n" +
-			"writing Fleet saves the current version on the controller. If the write fails,\n" +
-			"the agent writes the original back. If that fails too, or the connection drops\n" +
-			"mid-write, restore the saved version with --undo --force.\n\n" +
+			"the agent cannot give a new file. Those edits fail with error cannot_replace\n" +
+			"and nothing changed; repeat them with --in-place, which writes the new content\n" +
+			"into the file itself. The file keeps its owner, mode and labels, but the write\n" +
+			"is not atomic, so before writing Fleet saves the current version on the\n" +
+			"controller. If the write fails, the agent writes the original back. If that\n" +
+			"fails too (error write_incomplete), or the connection drops mid-write, restore\n" +
+			"the saved version with --undo --force.\n\n" +
 			"Say what to change with exactly one of:\n" +
 			"  --old TEXT --new TEXT [--all]   replace TEXT; it must match the file exactly\n" +
 			"                                  (whitespace, indentation, line breaks) and\n" +
