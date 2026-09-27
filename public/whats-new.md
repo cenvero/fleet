@@ -2,15 +2,15 @@
 
 > Markdown version of <https://fleet.cenvero.org/whats-new.html>. The complete reference in one file is at <https://fleet.cenvero.org/llms-full.txt>.
 
-Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.4.3, released on 11 September 2026. Every release is signed; upgrade with `fleet update apply` or `brew upgrade cenvero-fleet`. The complete, line-by-line history lives in the changelog.
+Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.5.0, released on 27 September 2026. Every release is signed; upgrade with `fleet update apply` or `brew upgrade cenvero-fleet`. The complete, line-by-line history lives in the changelog.
 
 [Latest release](https://github.com/cenvero/fleet/releases) · [Full changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)
 
-## Next release
+## v2.5.0
 
-*In development*
+*Latest stable · Released 2026-09-27*
 
-Already on `main` and landing in the release after v2.4.3: a large performance pass, rebuilt terminal and web interfaces, and a round of safety and correctness fixes found by an end-to-end review of every command.
+Safe in-place file editing for people and AI agents, a large performance pass, rebuilt terminal and web interfaces, and a round of safety, security and correctness fixes found by an end-to-end review of every command.
 
 ### Highlights
 
@@ -25,7 +25,7 @@ Already on `main` and landing in the release after v2.4.3: a large performance p
 
 ## v2.4.3
 
-*Latest stable · Released 2026-09-11*
+*Released 2026-09-11*
 
 Restores SSH-first Linux agent onboarding while keeping fail-closed release verification, and fixes onboarding, port, version-display and updater regressions from the v2.4 line.
 

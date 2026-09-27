@@ -9,7 +9,7 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Name:** Cenvero Fleet ("Fleet" for short). Controller binary: `fleet`. Agent binary: `fleet-agent`. Made by Cenvero.
 - **What it is:** a self-hosted server fleet manager — an always-connected control plane for shells, fan-out commands, file transfer, live sync, services, logs, metrics, alerts and automation, driven from a CLI, a terminal dashboard, terminal and web file managers, scripts or AI coding agents.
 - **License and price:** AGPL-3.0-or-later. Free, with no paid tier, no account and no hosted service.
-- **Latest stable release:** v2.4.3, released 2026-09-11. Release notes: https://fleet.cenvero.org/whats-new.html
+- **Latest stable release:** v2.5.0, released 2026-09-27. Release notes: https://fleet.cenvero.org/whats-new.html
 - **Platforms:** the controller runs on Linux, macOS and Windows. Release builds exist for Linux (amd64, arm64, armv7), macOS (amd64, arm64) and Windows (amd64, arm64). Agents are installed automatically on Linux servers with systemd; macOS and Windows agents are set up manually. Service and firewall management are Linux features.
 - **Architecture:** the controller runs on the machine you work from (a laptop, a bastion host or a small VM) and keeps its state in a local config directory — `~/.cenvero-fleet` on Linux — with SQLite by default, or PostgreSQL, MySQL or MariaDB. Every call rides one authenticated `fleet-rpc` SSH channel with typed RPCs rather than shell strings.
 - **Transport:** direct mode (the controller connects to the agent, port 2222 by default) or reverse mode (the agent dials out to the controller daemon, port 9443 by default, enrolling with a one-time token and the controller's fingerprint). One fleet can mix both.
@@ -25,17 +25,17 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Upgrade:** `fleet update apply` (self-managed installs) or `brew upgrade cenvero-fleet` followed by `fleet sync-agent` (Homebrew).
 - **Links:** source https://github.com/cenvero/fleet · releases https://github.com/cenvero/fleet/releases · changelog https://github.com/cenvero/fleet/blob/main/CHANGELOG.md · security policy https://github.com/cenvero/fleet/security/policy (private reports to security@cenvero.org)
 
-## Released vs. in development
+## New in v2.5.0
 
-The documentation in this file follows the `main` branch. The latest stable release is **v2.4.3**. These items are on `main` and ship in the next release after v2.4.3 — they are **not** in v2.4.3:
+This file describes v2.5.0, the latest stable release (2026-09-27). If a server or controller still runs v2.4.3 or older, these items are **not** available there:
 
-- `fleet version` (v2.4.3 prints its version with `fleet --version`).
-- `fleet start` / `fleet stop` running and stopping a background daemon, and `fleet status` reporting whether it runs. On v2.4.3, run `fleet daemon` under a service manager.
+- `fleet version` (v2.4.3 and older print their version with `fleet --version`).
+- `fleet start` / `fleet stop` running and stopping a background daemon, and `fleet status` reporting whether it runs. On older versions, run `fleet daemon` under a service manager.
 - `fleet approve` showing the staged request, asking for confirmation (`--yes`, `--json`) and then running the approved command.
 - `fleet exec --parallel N`, `fleet top --group` filtering, `fleet notify add --allow-internal`, `fleet agent update --strict-health`, and `fleet job wait` exiting 1 when the job failed.
 - Direct-mode commands relaying through a running daemon's warm connection (`FLEET_NO_DAEMON_RELAY=1` turns it off), and the mutually authenticated daemon control socket.
 - `--secret` values reaching the whole remote command through its environment, and the audit log recording remote commands, approval decisions, policy changes and token and secret changes.
-- `fleet file view` and `fleet file edit`: in-place file editing on the server (exact-text replace, insert, whole content, `--expect-sha256`, `--dry-run`, `--undo`) that keeps the file's owner, mode, ACLs and SELinux label and replaces it atomically. It needs updated agents (the `file.edit` RPC). On v2.4.3, `fleet file edit <server:path>` only opens `$EDITOR` and re-uploads the file.
+- `fleet file view` and `fleet file edit`: in-place file editing on the server (exact-text replace, insert, whole content, `--expect-sha256`, `--dry-run`, `--undo`) that keeps the file's owner, mode, ACLs and SELinux label and replaces it atomically, plus `--in-place` for files that cannot be replaced (for example bind-mounted into a container) and `--undo --force`. It needs v2.5.0 agents (the `file.edit` RPC). On v2.4.3, `fleet file edit <server:path>` only opens `$EDITOR` and re-uploads the file.
 - The rebuilt terminal dashboard (a live operations console with sparklines, filters and actions), the terminal file manager's transfer queue, previews, bookmarks and go-to, and the redesigned web UI (light and dark themes, phone layout, command palette, previews and a read-only Fleet overview).
 
 To see what an installed binary supports, run `fleet --version`, `fleet context` or `fleet ai <command>` — both reference commands are generated from the binary itself.
@@ -96,15 +96,15 @@ The same engine drives a live terminal dashboard, a dual-pane terminal file mana
 
 ![The fleet dashboard terminal UI showing four servers with status, transport mode, CPU, memory, disk, load, agent version and tags, and a detail panel for db-01.](https://fleet.cenvero.org/assets/img/dashboard-servers.webp)
 
-**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse. (Next release)
+**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse. (New in v2.5.0)
 
 ![The dual-pane terminal file manager with a local project on the left, the web-01 server on the right and a preview of index.html.](https://fleet.cenvero.org/assets/img/file-manager.webp)
 
-**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop. (Next release)
+**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop. (New in v2.5.0)
 
 ![The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags.](https://fleet.cenvero.org/assets/img/web-fleet.webp)
 
-**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview. (Next release)
+**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview. (New in v2.5.0)
 
 ### Transport: direct and reverse modes
 
@@ -138,7 +138,7 @@ Stage risky commands for a human to review, deny or require confirmation for pat
 
 #### Tamper-evident audit log
 
-A hash-chained log of transfers and key changes — and, from the next release, every remote command, approval, and token or secret change. Never the secret values.
+A hash-chained log of transfers and key changes and, since v2.5.0, every remote command, approval, and token or secret change. Never the secret values.
 
 #### Locked-down surfaces
 
@@ -235,7 +235,7 @@ Scoped tokens, named secrets, approvals, command policy and a dead-man's switch 
    fleet dashboard
    ```
 
-> These docs follow the **main branch**. The latest stable release is **v2.4.3**; a few commands described here — `fleet start` and `fleet stop` for a background daemon, `fleet version`, and `fleet approve` running the approved command — ship in the next release after it. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
+> These docs cover **v2.5.0**, the latest stable release. Some commands described here are new in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
 
 #### Conventions and global flags
 
@@ -417,9 +417,9 @@ fleet server enroll-token edge-01
 
 ```text
 NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.4.3
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.4.3
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.4.3
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.5.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.5.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.5.0
 ```
 
 `reconnect` connects again and refreshes what the controller knows; add `--accept-new-host-key` after you have verified a changed host key. `enroll-token` mints a fresh one-time token for a reverse agent, for example after it lost its key.
@@ -802,7 +802,7 @@ fleet-agent serve --listen 0.0.0.0:2222 --authorized-keys ~/fleet-controller.pub
 
 > `--file-root` bounds listing, reading, writing, creating, deleting and renaming. Archive, permission and checksum operations run through the agent's shell and are **not** confined by it — restrict the agent's user if you need a hard boundary.
 
-### Edit files in place (Next release)
+### Edit files in place (New in v2.5.0)
 
 `fleet file edit` changes a file **on the server** without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.
 
@@ -1356,7 +1356,7 @@ FLEET_TOKEN=08f253baa4f39be3a2ac27d6c0c294fe fleet exec web-01 uptime
 - A server-scoped token may run only in-scope server commands and a small set of safe local ones. Controller management (`config`, `key`, `backup` …), fan-out reads and cross-server transfers it cannot fully check are denied.
 - A scoped token can never create or change tokens, and cannot [approve](https://fleet.cenvero.org/docs/#approvals) staged commands.
 - Token IDs are stored hashed in `tokens.json`; `token list` shows a short prefix only. Denied attempts are written to the audit log.
-- A scoped token cannot use the controller's own files — config directory, keys, `known_hosts`, token and secret stores, data, logs — as the local side of `file upload`/`download`, `sync`, `service logs --export` or `file edit --content` (Next release)
+- A scoped token cannot use the controller's own files — config directory, keys, `known_hosts`, token and secret stores, data, logs — as the local side of `file upload`/`download`, `sync`, `service logs --export` or `file edit --content` (New in v2.5.0)
 
 > Tokens limit what an automation can do *through `fleet`*; they are not an operating-system boundary. A process running as the same OS user as the controller can read its key files directly. To contain an agent you don't fully trust, run it as a separate user that cannot read the controller's config directory.
 
@@ -1497,7 +1497,7 @@ fleet daemon      # or run it in the foreground
 - `fleet stop` sends SIGTERM (on Windows it terminates the process) and waits up to 15 seconds. It only signals the process that holds the config directory's daemon lock, so a stale pid file never hits an unrelated process.
 - `fleet daemon` runs in the foreground — use it under systemd, launchd or a container. However it was started, a daemon records its pid in `data/daemon.pid`, holds `data/daemon.lock` so a second one for the same config directory is refused, and exits cleanly on Ctrl-C or SIGTERM.
 
-> `fleet start` and `fleet stop` manage a background daemon since the next release after v2.4.3. On v2.4.3, run `fleet daemon` under a service manager instead.
+> `fleet start` and `fleet stop` manage a background daemon since v2.5.0. On earlier versions, run `fleet daemon` under a service manager instead.
 
 | Setting | Default | Purpose |
 |---|---|---|
@@ -1650,7 +1650,7 @@ fleet agent update --canary 1
 fleet agent update --group role=web --canary 2 --strict-health
 ```
 
-- `agent version` shows each agent's version in one form (`v2.4.3`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
+- `agent version` shows each agent's version in one form (`v2.5.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
 - `agent update` updates a first batch of `--canary N` servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. `--canary 0` updates everything at once.
 - Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass `--strict-health`.
 
@@ -1978,11 +1978,11 @@ Every rail is enforced by the controller before anything reaches a server — no
 
 #### Secrets, never inlined
 
-Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values are redacted from output and the audit log; from the next release they reach the whole remote command through its environment.
+Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values are redacted from output and the audit log, and since v2.5.0 they reach the whole remote command through its environment.
 
 #### Approvals
 
-`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which — from the next release — shows the request, asks for confirmation, then runs it and records the outcome.
+`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which shows the request, asks for confirmation, then runs it and records the outcome.
 
 #### Dead-man's switch
 
@@ -2027,7 +2027,7 @@ Yes — upload with `fleet file upload`, unpack with `fleet file extract`, run s
 
 #### Can an agent safely edit config files on a server?
 
-Yes (next release). The agent reads the file with `fleet file view`, which shows numbered lines and the file's sha256, and changes it in place with `fleet file edit --old … --new … --expect-sha256 …`. Nothing is downloaded or re-uploaded. The text must match exactly once, and the edit only applies to the version the agent read. The file keeps its owner, mode, ACLs and SELinux label and is replaced atomically, so a dropped connection never leaves half a file. Each edit prints a diff, is audited, and can be reverted with `--undo`. See [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
+Yes, since v2.5.0. The agent reads the file with `fleet file view`, which shows numbered lines and the file's sha256, and changes it in place with `fleet file edit --old … --new … --expect-sha256 …`. Nothing is downloaded or re-uploaded. The text must match exactly once, and the edit only applies to the version the agent read. The file keeps its owner, mode, ACLs and SELinux label and is replaced atomically, so a dropped connection never leaves half a file. Each edit prints a diff, is audited, and can be reverted with `--undo`. See [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
 
 #### Can one agent manage many servers at once?
 
@@ -2057,15 +2057,15 @@ fleet skill claude    # then type /fleet in Claude Code
 
 Source: <https://fleet.cenvero.org/whats-new.html>
 
-Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.4.3, released on 11 September 2026. Every release is signed; upgrade with `fleet update apply` or `brew upgrade cenvero-fleet`. The complete, line-by-line history lives in the changelog.
+Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.5.0, released on 27 September 2026. Every release is signed; upgrade with `fleet update apply` or `brew upgrade cenvero-fleet`. The complete, line-by-line history lives in the changelog.
 
 [Latest release](https://github.com/cenvero/fleet/releases) · [Full changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)
 
-### Next release
+### v2.5.0
 
-*In development*
+*Latest stable · Released 2026-09-27*
 
-Already on `main` and landing in the release after v2.4.3: a large performance pass, rebuilt terminal and web interfaces, and a round of safety and correctness fixes found by an end-to-end review of every command.
+Safe in-place file editing for people and AI agents, a large performance pass, rebuilt terminal and web interfaces, and a round of safety, security and correctness fixes found by an end-to-end review of every command.
 
 #### Highlights
 
@@ -2080,7 +2080,7 @@ Already on `main` and landing in the release after v2.4.3: a large performance p
 
 ### v2.4.3
 
-*Latest stable · Released 2026-09-11*
+*Released 2026-09-11*
 
 Restores SSH-first Linux agent onboarding while keeping fail-closed release verification, and fixes onboarding, port, version-display and updater regressions from the v2.4 line.
 

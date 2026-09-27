@@ -120,11 +120,11 @@ Every rail is enforced by the controller before anything reaches a server — no
 
 ### Secrets, never inlined
 
-Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values are redacted from output and the audit log; from the next release they reach the whole remote command through its environment.
+Store credentials with `fleet secret set` and inject them with `--secret VAR=@name`. Values are redacted from output and the audit log, and since v2.5.0 they reach the whole remote command through its environment.
 
 ### Approvals
 
-`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which — from the next release — shows the request, asks for confirmation, then runs it and records the outcome.
+`--require-approval` stages a command with its options. A human reviews it with `fleet approve`, which shows the request, asks for confirmation, then runs it and records the outcome.
 
 ### Dead-man's switch
 
@@ -169,7 +169,7 @@ Yes — upload with `fleet file upload`, unpack with `fleet file extract`, run s
 
 ### Can an agent safely edit config files on a server?
 
-Yes (next release). The agent reads the file with `fleet file view`, which shows numbered lines and the file's sha256, and changes it in place with `fleet file edit --old … --new … --expect-sha256 …`. Nothing is downloaded or re-uploaded. The text must match exactly once, and the edit only applies to the version the agent read. The file keeps its owner, mode, ACLs and SELinux label and is replaced atomically, so a dropped connection never leaves half a file. Each edit prints a diff, is audited, and can be reverted with `--undo`. See [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
+Yes, since v2.5.0. The agent reads the file with `fleet file view`, which shows numbered lines and the file's sha256, and changes it in place with `fleet file edit --old … --new … --expect-sha256 …`. Nothing is downloaded or re-uploaded. The text must match exactly once, and the edit only applies to the version the agent read. The file keeps its owner, mode, ACLs and SELinux label and is replaced atomically, so a dropped connection never leaves half a file. Each edit prints a diff, is audited, and can be reverted with `--undo`. See [Edit files in place](https://fleet.cenvero.org/docs/#file-edit).
 
 ### Can one agent manage many servers at once?
 

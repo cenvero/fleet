@@ -59,7 +59,7 @@
         "mainEntityOfPage": "https://fleet.cenvero.org/docs/",
         "inLanguage": "en",
         "image": "https://fleet.cenvero.org/assets/og/og-docs.png",
-        "dateModified": "2026-09-26",
+        "dateModified": "2026-09-27",
         "breadcrumb": { "@id": "https://fleet.cenvero.org/docs/#breadcrumb" },
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "author": { "@id": "https://fleet.cenvero.org/#org" },
@@ -334,7 +334,7 @@ fleet dashboard</pre></div>
 
           <div class="callout info">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-info"/></svg>
-            <div><p>These docs follow the <strong>main branch</strong>. The latest stable release is <strong>v2.4.3</strong>; a few commands described here — <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, and <code>fleet approve</code> running the approved command — ship in the next release after it. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
+            <div><p>These docs cover <strong>v2.5.0</strong>, the latest stable release. Some commands described here are new in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
           </div>
 
           <h3>Conventions and global flags</h3>
@@ -493,9 +493,9 @@ fleet server reconnect web-01
 fleet server mode edge-01 reverse
 fleet server enroll-token edge-01</pre></div>
           <div class="code"><pre>NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.4.3
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.4.3
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.4.3</pre></div>
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.5.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.5.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.5.0</pre></div>
           <p><code>reconnect</code> connects again and refreshes what the controller knows; add <code>--accept-new-host-key</code> after you have verified a changed host key. <code>enroll-token</code> mints a fresh one-time token for a reverse agent, for example after it lost its key.</p>
 
           <h3>Remove a server</h3>
@@ -791,7 +791,7 @@ fleet file defaults set web-01 <span class="f">--parallel</span> 2 <span class="
         </section>
 
         <section id="file-edit" class="prose">
-          <h2>Edit files in place <span class="tag tag-violet">Next release</span></h2>
+          <h2>Edit files in place <span class="tag tag-violet">New in v2.5.0</span></h2>
           <p><code>fleet file edit</code> changes a file <strong>on the server</strong> without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.</p>
           <ul>
             <li><strong>Exact edits</strong> — <code>--old</code> must match the file exactly (whitespace, indentation and line breaks included) and exactly once unless you pass <code>--all</code>, so an edit never lands somewhere you did not intend. Add lines with <code>--insert-after N --text</code>, apply several edits all-or-nothing with <code>--edits</code>, or replace the whole file with <code>--content</code>.</li>
@@ -1277,7 +1277,7 @@ FLEET_TOKEN=08f253baa4f39be3a2ac27d6c0c294fe fleet exec web-01 uptime</pre></div
             <li>A server-scoped token may run only in-scope server commands and a small set of safe local ones. Controller management (<code>config</code>, <code>key</code>, <code>backup</code> …), fan-out reads and cross-server transfers it cannot fully check are denied.</li>
             <li>A scoped token can never create or change tokens, and cannot <a href="#approvals">approve</a> staged commands.</li>
             <li>Token IDs are stored hashed in <code>tokens.json</code>; <code>token list</code> shows a short prefix only. Denied attempts are written to the audit log.</li>
-            <li>A scoped token cannot use the controller's own files — config directory, keys, <code>known_hosts</code>, token and secret stores, data, logs — as the local side of <code>file upload</code>/<code>download</code>, <code>sync</code>, <code>service logs --export</code> or <code>file edit --content</code> <span class="tag tag-violet">Next release</span></li>
+            <li>A scoped token cannot use the controller's own files — config directory, keys, <code>known_hosts</code>, token and secret stores, data, logs — as the local side of <code>file upload</code>/<code>download</code>, <code>sync</code>, <code>service logs --export</code> or <code>file edit --content</code> <span class="tag tag-violet">New in v2.5.0</span></li>
           </ul>
           <div class="callout warn">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-triangle-alert"/></svg>
@@ -1382,7 +1382,7 @@ fleet daemon      <span class="c"># or run it in the foreground</span></pre></di
           </ul>
           <div class="callout info">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-info"/></svg>
-            <div><p><code>fleet start</code> and <code>fleet stop</code> manage a background daemon since the next release after v2.4.3. On v2.4.3, run <code>fleet daemon</code> under a service manager instead.</p></div>
+            <div><p><code>fleet start</code> and <code>fleet stop</code> manage a background daemon since v2.5.0. On earlier versions, run <code>fleet daemon</code> under a service manager instead.</p></div>
           </div>
           <div class="table-wrap">
             <table>
@@ -1512,7 +1512,7 @@ fleet agent version web-01
 fleet agent update <span class="f">--canary</span> 1
 fleet agent update <span class="f">--group</span> role=web <span class="f">--canary</span> 2 <span class="f">--strict-health</span></pre></div>
           <ul>
-            <li><code>agent version</code> shows each agent's version in one form (<code>v2.4.3</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
+            <li><code>agent version</code> shows each agent's version in one form (<code>v2.5.0</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
             <li><code>agent update</code> updates a first batch of <code>--canary N</code> servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. <code>--canary 0</code> updates everything at once.</li>
             <li>Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass <code>--strict-health</code>.</li>
           </ul>
