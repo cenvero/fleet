@@ -348,7 +348,7 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 		if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
 			return nil, nil, fmt.Errorf("enable sqlite foreign keys: %w", err)
 		}
-		if err := db.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
+		if err := enableSQLiteWAL(db); err != nil {
 			return nil, nil, fmt.Errorf("enable sqlite WAL mode: %w", err)
 		}
 		// The driver creates the db (and WAL/SHM sidecars) with world-readable
@@ -359,6 +359,23 @@ func openManagedDatabase(cfg DatabaseConfig, workload Workload) (*gorm.DB, *sql.
 	}
 
 	return db, sqlDB, nil
+}
+
+// enableSQLiteWAL switches the database to WAL mode. The switch needs an
+// exclusive lock, and SQLite reports SQLITE_BUSY at once (without its busy
+// handler) while another connection — another fleet process opening the same
+// file, typically — holds the database. The mode is stored in the file, so
+// the first opener's switch lasts; the others retry briefly and then find WAL
+// already set.
+func enableSQLiteWAL(db *gorm.DB) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for delay := 5 * time.Millisecond; ; delay = min(2*delay, 200*time.Millisecond) {
+		err := db.Exec("PRAGMA journal_mode = WAL").Error
+		if err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+	}
 }
 
 // sqliteDSN is the driver DSN for a database file. It asks the driver to run
@@ -556,21 +573,25 @@ func (s *Store) Init() error {
 // AutoMigrate pass — several catalog queries per table on every CLI start — is
 // skipped entirely. Otherwise AutoMigrate runs as it always has (idempotent,
 // additive) and the version is recorded afterwards, so a crash mid-migration
-// just migrates again next time. Two processes may migrate an old database at
-// the same moment; GORM's check-then-create is not atomic, so if the first pass
-// fails and the schema is still not current, one more pass (a no-op for
-// whatever the other process already created) settles it.
+// just migrates again next time. Several processes may migrate an old
+// database at the same moment; GORM's check-then-create is not atomic, so a
+// pass can fail on a table another process has just created. Each pass only
+// adds what is still missing, so passes are retried briefly until one
+// completes or another process has recorded the version.
 func initSchema(db *gorm.DB, workload Workload) error {
 	if schemaCurrent(db, workload) {
 		return nil
 	}
-	if err := migrateSchema(db, workload); err != nil {
+	err := migrateSchema(db, workload)
+	for attempt := 1; err != nil && attempt < 10; attempt++ {
 		if schemaCurrent(db, workload) {
 			return nil
 		}
-		if err := migrateSchema(db, workload); err != nil {
-			return err
-		}
+		time.Sleep(time.Duration(attempt) * 10 * time.Millisecond)
+		err = migrateSchema(db, workload)
+	}
+	if err != nil {
+		return err
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "workload"}},

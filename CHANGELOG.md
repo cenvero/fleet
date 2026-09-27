@@ -153,6 +153,11 @@ Omit sections that have no entries for that release.
 
 ### Fixed
 
+- Several Fleet processes opening an old-format database at the same moment (the daemon
+  and a CLI command right after an upgrade, for example) could fail with "database is
+  locked" or "table already exists". Two races caused it: switching SQLite to WAL mode fails
+  at once while another connection holds the file, and two processes could both create the
+  same new table. The WAL switch and the migration pass are now retried briefly.
 - On a light terminal, the terminal file manager's help screen, dialogs, menus and editor
   showed light-grey text on white and white gaps. Text styled with only a foreground colour
   fell back to the terminal's own background. Every cell now keeps the file manager's dark
