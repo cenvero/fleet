@@ -30,3 +30,11 @@ jobs:
           languages: ${{ matrix.language }}
       - uses: github/codeql-action/autobuild@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
       - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      # Reviewed false positives carry a `// codeql[<rule>] <reason>` marker on
+      # (or directly above) the flagged line; dismiss exactly those alerts on
+      # the default branch. Unmarked alerts stay open.
+      - name: Dismiss alerts marked as reviewed false positives
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/codeql_dismiss_marked.py

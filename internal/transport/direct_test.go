@@ -98,13 +98,23 @@ func TestDirectHelloRoundTrip(t *testing.T) {
 
 	marker := filepath.Join(tempDir, "must-not-be-created")
 	execCtx, cancelExec := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	_, execErr := session.Call(execCtx, proto.Envelope{
+	execResp, execErr := session.Call(execCtx, proto.Envelope{
 		Action:  "shell.exec",
 		Payload: proto.ExecPayload{Command: fmt.Sprintf("sleep 0.5; touch %q", marker)},
 	})
 	cancelExec()
+	// The caller and the agent both hold the deadline, and either may notice
+	// it first: the call then ends with the caller's context error, or with
+	// the agent's reply that it killed the command at the deadline. Both mean
+	// the command timed out; which one wins is scheduling.
 	if !errors.Is(execErr, context.DeadlineExceeded) {
-		t.Fatalf("timed exec error = %v, want context deadline exceeded", execErr)
+		if execErr != nil {
+			t.Fatalf("timed exec error = %v, want context deadline exceeded or a timed-out result", execErr)
+		}
+		res, err := proto.DecodePayload[proto.ExecResult](execResp.Payload)
+		if err != nil || !res.TimedOut {
+			t.Fatalf("timed exec returned %+v (decode err %v), want a timed-out result or context deadline exceeded", res, err)
+		}
 	}
 	time.Sleep(600 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {

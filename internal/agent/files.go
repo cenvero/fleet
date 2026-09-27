@@ -59,6 +59,7 @@ func fileCapabilities() []string {
 		proto.CapabilityFileReadStat,
 		proto.CapabilityFileCopy,
 		proto.CapabilityFileTree,
+		proto.CapabilityFileEdit,
 	}
 }
 

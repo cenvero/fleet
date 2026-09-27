@@ -82,7 +82,7 @@ func newApprovalsCommand(configDir *string) *cobra.Command {
 			}
 			auditLocal(*configDir, "approval.reject", approval.Server,
 				fmt.Sprintf("id=%s command=%q", approval.ID, redactForAudit(*configDir, approval.Command)))
-			fmt.Fprintf(cmd.OutOrStdout(), "rejected approval %s (%s on %s)\n", approval.ID, approval.Command, approval.Server)
+			fmt.Fprintf(cmd.OutOrStdout(), "rejected approval %s (%s on %s)\n", displayExact(approval.ID), displayExact(approval.Command), displayExact(approval.Server))
 			return nil
 		},
 	})
@@ -182,13 +182,24 @@ func describeApproval(w io.Writer, a core.Approval) {
 	if requestedBy == "" {
 		requestedBy = "unknown"
 	}
-	fmt.Fprintf(w, "approval %s — staged by %s at %s\n", a.ID, requestedBy, a.Requested.Local().Format(time.RFC3339))
-	fmt.Fprintf(w, "  server : %s\n", a.Server)
-	fmt.Fprintf(w, "  command: %s\n", a.Command)
+	// Whoever staged the request chose this text. Control and invisible
+	// characters (a carriage return plus "erase line", a bidi override) could
+	// make the terminal show a different command than the one that will run,
+	// so such text is shown escaped and the approver is told why.
+	hidden := hasHiddenRunes(a.ID) || hasHiddenRunes(requestedBy) || hasHiddenRunes(a.Server) || hasHiddenRunes(a.Command)
+	fmt.Fprintf(w, "approval %s — staged by %s at %s\n", displayExact(a.ID), displayExact(requestedBy), a.Requested.Local().Format(time.RFC3339))
+	fmt.Fprintf(w, "  server : %s\n", displayExact(a.Server))
+	fmt.Fprintf(w, "  command: %s\n", displayExact(a.Command))
 	if opts := approvalOptionArgs(a.Exec); len(opts) > 0 {
-		fmt.Fprintf(w, "  options: %s\n", shellJoin(opts))
+		for _, opt := range opts {
+			hidden = hidden || hasHiddenRunes(opt)
+		}
+		fmt.Fprintf(w, "  options: %s\n", displayArgs(opts))
 	} else {
 		fmt.Fprintln(w, "  options: (none)")
+	}
+	if hidden {
+		fmt.Fprintln(w, "  warning: this request contains control or invisible characters; they are shown escaped (Go syntax) above")
 	}
 }
 
@@ -374,9 +385,9 @@ func writeApprovalTable(cmd *cobra.Command, approvals []core.Approval) error {
 		}
 		options := "-"
 		if opts := approvalOptionArgs(a.Exec); len(opts) > 0 {
-			options = shellJoin(opts)
+			options = displayArgs(opts)
 		}
-		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, a.Server, a.Status, expires, options, a.Command); err != nil {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", displayExact(a.ID), displayExact(a.Server), displayExact(string(a.Status)), expires, options, displayExact(a.Command)); err != nil {
 			return err
 		}
 	}

@@ -377,6 +377,20 @@ UIs, fan-out reads, or cross-server transfers it can't fully vet) is denied, it 
 or modify tokens, and it can inject **only** the secrets in its `--allow-secret` list (an
 unscoped admin token is unrestricted). Token IDs are stored hashed at rest.
 
+A scoped token also cannot use the controller's own files as the local side of a command: the
+configuration directory (token store, secrets, policies, server records), private keys,
+`known_hosts`, data, logs and databases are refused as a source or destination for `file
+upload`/`download`, `sync`, `service logs --export` and `file edit --content/--edits`, as is a
+directory tree that contains them. That stops, for example, uploading the controller key to an
+in-scope server or downloading over `tokens.json`. Refusals are audited as `rbac.denied`.
+
+Tokens bound what an automation — an AI agent, a CI job — can do **through `fleet`**. They are
+not an operating-system security boundary: a process running as the same OS user as the
+controller can read its key files directly, drop the token, or point `--config-dir` at a
+directory of its own. To contain an agent you do not fully trust, run it as a separate OS user
+that cannot read the controller's configuration directory, and give it only the `fleet`
+invocations it needs (for example through a wrapper or `sudo` rule that sets the token).
+
 ### Named secrets
 
 Store credentials by name (never echoed) and inject them per-command as environment variables;
@@ -450,7 +464,10 @@ fleet approve <id>                             # review, confirm and run it; or:
 `VAR=@name` references — a literal `--secret` value is refused, so no secret value is written to
 `approvals.json`), and records who staged it; only a registered server can be staged.
 `fleet approvals list` shows every staged option. `fleet approve <id>` first prints the full
-request — server, command, every option, who staged it and when — and asks for confirmation
+request — server, command, every option, who staged it and when — and asks for confirmation.
+Anything in the staged text that would not display as itself (control characters, carriage
+returns, bidi overrides, zero-width characters, invalid UTF-8) is shown escaped, with a warning,
+so a staged command cannot pose as a different one on the approver's terminal
 (without a terminal, pass `--yes` after reviewing it). It then runs the command once, through the
 normal `fleet exec` path, so cmd-policy, guard, redaction, audit and RBAC apply again at run
 time. The outcome is recorded on the approval (`executed` or `failed`, with the exit code) and

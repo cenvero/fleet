@@ -337,7 +337,7 @@ var commandMutationClassifications = map[string]bool{
 	"service stop": true, "service restart": true, "service logs": false,
 
 	"file list": false, "file upload": true, "file download": true,
-	"file stat": false, "file cat": false, "file tail": false, "file edit": true,
+	"file stat": false, "file cat": false, "file tail": false, "file view": false, "file edit": true,
 	"file diff": false, "file copy": true, "file move": true, "file compress": true,
 	"file extract": true, "file mkdir": true, "file rm": true, "file mv": true,
 	"file ui": true, "file defaults show": false, "file defaults set": true,

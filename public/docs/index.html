@@ -16,6 +16,7 @@
   <link rel="icon" href="/assets/img/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
+  <link rel="alternate" type="text/markdown" href="/docs/index.md" title="Cenvero Fleet documentation (Markdown)">
 
   <meta property="og:type" content="article">
   <meta property="og:site_name" content="Cenvero Fleet">
@@ -24,6 +25,7 @@
   <meta property="og:title" content="Cenvero Fleet documentation — install, configure and operate your fleet">
   <meta property="og:description" content="Install the controller, add servers over SSH or reverse mode, run commands across the fleet, move files, watch health and operate safely — the complete Cenvero Fleet guide.">
   <meta property="og:image" content="https://fleet.cenvero.org/assets/og/og-docs.png">
+  <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Cenvero Fleet documentation">
@@ -59,6 +61,8 @@
         "image": "https://fleet.cenvero.org/assets/og/og-docs.png",
         "dateModified": "2026-09-26",
         "breadcrumb": { "@id": "https://fleet.cenvero.org/docs/#breadcrumb" },
+        "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
+        "author": { "@id": "https://fleet.cenvero.org/#org" },
         "about": {
           "@type": "SoftwareApplication",
           "@id": "https://fleet.cenvero.org/#software",
@@ -82,7 +86,7 @@
             "@type": "HowToStep",
             "position": 1,
             "name": "Install the controller",
-            "text": "On macOS run: brew tap cenvero/fleet && brew install cenvero-fleet. On Linux or macOS you can also run: curl -fsSL https://fleet.cenvero.org/install | sh. On Windows, from an elevated PowerShell prompt, run: irm https://fleet.cenvero.org/install.ps1 | iex. Every installer verifies the release signature before installing.",
+            "text": "On macOS run: brew tap cenvero/fleet && brew install cenvero-fleet. On Linux or macOS you can also run: curl -fsSL https://fleet.cenvero.org/install | sh. On Windows, in PowerShell 5.1 or later (no administrator rights needed), run: irm https://fleet.cenvero.org/install.ps1 | iex. Every installer verifies the release signature before installing.",
             "url": "https://fleet.cenvero.org/docs/#install"
           },
           {
@@ -190,6 +194,7 @@
           <h2>Files</h2>
           <ul>
             <li><a href="#files" data-keywords="file upload download copy move cp rm mkdir mv stat cat tail diff edit compress extract zip tar defaults chunk parallel resumable transfer">File commands</a></li>
+            <li><a href="#file-edit" data-keywords="edit view in place replace insert old new sha256 expect conflict undo history atomic permissions owner mode acl selinux symlink ai agent claude codex">Edit files in place</a></li>
             <li><a href="#file-manager" data-keywords="files filemanager fm tui web ui browser dual-pane drag drop fleet overview keyboard shortcuts">File manager</a></li>
             <li><a href="#sync" data-keywords="sync mirror live watch push pull writer replica no-delete deploy">Live sync</a></li>
           </ul>
@@ -271,7 +276,7 @@
           </nav>
           <p><span class="eyebrow">Documentation</span></p>
           <h1>Cenvero Fleet documentation</h1>
-          <p class="hero-lead">How to install the Cenvero Fleet controller, add your servers, and operate them from the command line, the terminal dashboard or the browser. Every example is a complete command you can copy and run.</p>
+          <p class="hero-lead">Cenvero Fleet is a free, open-source, self-hosted fleet manager for Linux, macOS and Windows servers. This guide shows how to install the controller, add your servers, and operate them from the command line, the terminal dashboard or the browser. Every example is a complete command you can copy and run.</p>
           <p><a class="edit-link" href="https://github.com/cenvero/fleet/edit/main/public/docs/index.html"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-github"/></svg>Edit this page on GitHub</a></p>
           <button class="btn btn-secondary btn-sm docs-toggle" type="button" data-docs-toggle aria-controls="docs-sidebar" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-list-checks"/></svg>Browse topics</button>
         </div>
@@ -371,7 +376,7 @@ fleet dashboard</pre></div>
             <div class="tabpanel" role="tabpanel" id="docs-panel-windows" aria-labelledby="docs-tab-windows" hidden>
               <div class="cmd-label">PowerShell</div>
               <div class="cmd ps"><code>irm https://fleet.cenvero.org/install.ps1 | iex</code><button class="copy-btn" type="button" data-copy="irm https://fleet.cenvero.org/install.ps1 | iex"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
-              <p class="install-note">Run from an elevated PowerShell prompt (PowerShell 5.1 or later). It fetches a checksum-pinned <code>minisign</code> verifier if you have none, installs <code>fleet.exe</code> and adds it to <code>PATH</code>.</p>
+              <p class="install-note">Run in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned <code>minisign</code> verifier if you have none, installs <code>fleet.exe</code> to <code>%USERPROFILE%\.local\bin</code> and adds it to your user <code>PATH</code>.</p>
             </div>
           </div>
           <p>The install script needs <code>curl</code> and <code>tar</code>, and offers to install <code>jq</code> and <code>minisign</code> if they are missing — signature verification cannot be skipped.</p>
@@ -761,7 +766,8 @@ fleet file extract web-01 /srv/releases/site.tar.gz</pre></div>
           <p><code>extract</code> unpacks into the archive's directory, overwriting files with the same names, and refuses archives with absolute or <code>..</code> paths, links or special files.</p>
 
           <h3>Edit and compare</h3>
-          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre><span class="c"># Opens $EDITOR (then vi, then nano); uploads atomically only if you changed something</span>
+          <p>To change a file, edit it in place on the server — see <a href="#file-edit">Edit files in place</a>.</p>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre><span class="c"># Interactive: opens $EDITOR (then vi, then nano) and saves back only if you changed something</span>
 fleet file edit web-01:/etc/nginx/nginx.conf
 
 <span class="c"># Unified diff; exit status 1 when the files differ</span>
@@ -781,6 +787,62 @@ fleet file defaults set web-01 <span class="f">--parallel</span> 2 <span class="
           <div class="callout warn">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-triangle-alert"/></svg>
             <div><p><code>--file-root</code> bounds listing, reading, writing, creating, deleting and renaming. Archive, permission and checksum operations run through the agent's shell and are <strong>not</strong> confined by it — restrict the agent's user if you need a hard boundary.</p></div>
+          </div>
+        </section>
+
+        <section id="file-edit" class="prose">
+          <h2>Edit files in place <span class="tag tag-violet">Next release</span></h2>
+          <p><code>fleet file edit</code> changes a file <strong>on the server</strong> without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.</p>
+          <ul>
+            <li><strong>Exact edits</strong> — <code>--old</code> must match the file exactly (whitespace, indentation and line breaks included) and exactly once unless you pass <code>--all</code>, so an edit never lands somewhere you did not intend. Add lines with <code>--insert-after N --text</code>, apply several edits all-or-nothing with <code>--edits</code>, or replace the whole file with <code>--content</code>.</li>
+            <li><strong>Only the version you read</strong> — <code>fleet file view</code> prints the file's sha256; pass it as <code>--expect-sha256</code> and the edit is refused with <code>edit_conflict</code> if the file changed in between, even while the edit is being applied.</li>
+            <li><strong>Permissions kept</strong> — the new content is written to a private temp file beside the original, fsynced, read back and checked against its sha256, and given the original's owner, group, mode (including set-uid/set-gid), POSIX ACLs, SELinux label and other extended attributes before one atomic rename replaces the original. If anything cannot be carried over, nothing changes. Editing through a symlink changes its target and keeps the link.</li>
+            <li><strong>Network drops</strong> — the agent acts only on a request that arrived whole, so a dropped connection changes nothing and nobody ever sees a half-written file. A retry after a lost reply returns the first result instead of editing twice.</li>
+            <li><strong>Undo</strong> — the previous version is kept on the controller; <code>--undo</code> restores it, but only while the file is still exactly what that edit produced.</li>
+          </ul>
+
+          <h3>View, then edit</h3>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre><span class="c"># Numbered lines plus the file's sha256 (add --lines 20:60 or --json)</span>
+fleet file view web-01 /etc/nginx/nginx.conf
+
+<span class="c"># Replace exact text, only if the file is still the version you viewed</span>
+fleet file edit web-01 /etc/nginx/nginx.conf \
+    <span class="f">--old</span> <span class="s">'worker_connections 768;'</span> <span class="f">--new</span> <span class="s">'worker_connections 2048;'</span> \
+    <span class="f">--expect-sha256</span> &lt;sha256&gt;
+
+<span class="c"># Check the change; undo it if the test fails</span>
+fleet exec web-01 <span class="s">"nginx -t &amp;&amp; systemctl reload nginx"</span>
+fleet file edit web-01 /etc/nginx/nginx.conf <span class="f">--undo</span></pre></div>
+
+          <h3>Other kinds of edit</h3>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre><span class="c"># Insert lines after line 2 (0 inserts at the top)</span>
+fleet file edit web-01 /etc/hosts <span class="f">--insert-after</span> 2 <span class="f">--text</span> <span class="s">'10.0.0.5 db-01'</span>
+
+<span class="c"># Several edits from a JSON list, applied in order, all or nothing; preview first</span>
+fleet file edit web-01 /srv/app/.env <span class="f">--edits</span> edits.json <span class="f">--dry-run</span>
+
+<span class="c"># Replace the whole file, or create a new one</span>
+fleet file edit web-01 /srv/app/config.yml <span class="f">--content</span> ./config.yml <span class="f">--expect-sha256</span> &lt;sha256&gt;
+fleet file edit web-01 /etc/motd <span class="f">--content</span> - <span class="f">--create</span> <span class="f">--mode</span> 0644 &lt; motd.txt
+
+<span class="c"># What can be undone</span>
+fleet file edit web-01 /etc/nginx/nginx.conf <span class="f">--history</span></pre></div>
+          <p>An edit list looks like <code>[{"old":"a","new":"b"}, {"old":"x","new":"y","all":true}, {"kind":"insert","line":12,"text":"z"}]</code>. Every edit prints a unified diff, the old and new sha256, the size, mode and owner (<code>--json</code> for a structured result), and is recorded in the audit log. CRLF files keep their line endings. Binary files, hard-linked files and files the agent's user could not write itself are refused. With no flags, <code>fleet file edit</code> opens the file in <code>$EDITOR</code> and saves it back the same safe way; the editors in both file managers do too.</p>
+
+          <h3>Settings</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Command</th><th scope="col">Default</th><th scope="col">What it does</th></tr></thead>
+              <tbody>
+                <tr><td><code>fleet config set edit-backups 20</code></td><td>10</td><td>Versions kept per file for <code>--undo</code>, as plain copies in the controller's owner-only config directory (0 turns the history off — use it if the files you edit hold secrets).</td></tr>
+                <tr><td><code>fleet config set edit-max-size 2M</code></td><td>8M</td><td>Largest file that can be viewed or edited (8 MiB at most).</td></tr>
+                <tr><td><code>fleet config set edit-require-hash on</code></td><td>off</td><td>Every non-interactive edit of an existing file must pass <code>--expect-sha256</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout info">
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-info"/></svg>
+            <div><p>In-place editing needs agents with <code>file.edit</code> support. Update older agents with <code>fleet agent update &lt;server&gt;</code>; until then the interactive editors fall back to the atomic upload, which does not keep the file's owner.</p></div>
           </div>
         </section>
 
@@ -1211,7 +1273,12 @@ FLEET_TOKEN=08f253baa4f39be3a2ac27d6c0c294fe fleet exec web-01 uptime</pre></div
             <li>A server-scoped token may run only in-scope server commands and a small set of safe local ones. Controller management (<code>config</code>, <code>key</code>, <code>backup</code> …), fan-out reads and cross-server transfers it cannot fully check are denied.</li>
             <li>A scoped token can never create or change tokens, and cannot <a href="#approvals">approve</a> staged commands.</li>
             <li>Token IDs are stored hashed in <code>tokens.json</code>; <code>token list</code> shows a short prefix only. Denied attempts are written to the audit log.</li>
+            <li>A scoped token cannot use the controller's own files — config directory, keys, <code>known_hosts</code>, token and secret stores, data, logs — as the local side of <code>file upload</code>/<code>download</code>, <code>sync</code>, <code>service logs --export</code> or <code>file edit --content</code> <span class="tag tag-violet">Next release</span></li>
           </ul>
+          <div class="callout warn">
+            <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-triangle-alert"/></svg>
+            <div><p>Tokens limit what an automation can do <em>through <code>fleet</code></em>; they are not an operating-system boundary. A process running as the same OS user as the controller can read its key files directly. To contain an agent you don't fully trust, run it as a separate user that cannot read the controller's config directory.</p></div>
+          </div>
         </section>
 
         <section id="secrets" class="prose">

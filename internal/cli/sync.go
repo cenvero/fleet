@@ -56,6 +56,9 @@ func newSyncCommand(configDir *string) *cobra.Command {
 			defer app.Close()
 
 			server, localDir, remoteDir := args[0], args[1], args[2]
+			if err := refuseScopedProtectedPath(cmd, *configDir, app, localDir, true); err != nil {
+				return err
+			}
 			out := cmd.OutOrStdout()
 
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

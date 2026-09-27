@@ -1,4 +1,40 @@
+# https://fleet.cenvero.org/robots.txt
+#
+# Everything on this site is public documentation for Cenvero Fleet, a free,
+# open-source, self-hosted server fleet manager. Search engines, AI crawlers
+# and AI assistants are welcome to read, index and cite all of it.
+#
+# LLM-friendly versions of the content:
+#   https://fleet.cenvero.org/llms.txt       index in the llmstxt.org format
+#   https://fleet.cenvero.org/llms-full.txt  the complete reference in one file
+#   Markdown mirrors: /index.md  /docs/index.md  /agentic.md  /whats-new.md
+
 User-agent: *
+Allow: /
+
+# AI crawlers and AI assistant fetchers, allowed explicitly.
+User-agent: GPTBot
+User-agent: OAI-SearchBot
+User-agent: ChatGPT-User
+User-agent: ClaudeBot
+User-agent: Claude-SearchBot
+User-agent: Claude-User
+User-agent: anthropic-ai
+User-agent: PerplexityBot
+User-agent: Perplexity-User
+User-agent: Google-Extended
+User-agent: GoogleOther
+User-agent: Applebot
+User-agent: Applebot-Extended
+User-agent: bingbot
+User-agent: CCBot
+User-agent: Amazonbot
+User-agent: meta-externalagent
+User-agent: meta-externalfetcher
+User-agent: DuckAssistBot
+User-agent: MistralAI-User
+User-agent: cohere-ai
+User-agent: YouBot
 Allow: /
 
 Sitemap: https://fleet.cenvero.org/sitemap.xml

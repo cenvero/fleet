@@ -53,6 +53,7 @@ After loading the context, the agent operates Fleet with ordinary `fleet` comman
 - **Inspect** — `fleet status`, `fleet health --json`, `fleet inventory --json`, `fleet server list/show/metrics`, `fleet service list`, `fleet svc status`, `fleet logs`, `fleet file list`
 - **Run commands programmatically** — `fleet exec <server> <cmd> --json` returns `{stdout, stderr, exit_code, duration}`; add `--timeout`, `--retry`, `--dry-run`, `--group EXPR`
 - **Control any managed server** — start/stop/restart services, manage the firewall and ports, run commands, rotate keys
+- **Edit files in place** — `fleet file view <server> <path>` (numbered lines + sha256), then `fleet file edit <server> <path> --old '<exact text>' --new '<text>' --expect-sha256 <sha256>`; the agent keeps the file's owner, mode, ACLs and SELinux label, replaces it atomically, refuses the edit if the file changed since it was viewed, and `--undo` restores the previous version. Agents are told never to download/re-upload a file or rewrite it with `exec` + sed to change it.
 - **Move files** — `fleet file upload/download` (chunked, parallel, resumable)
 - **Apply multi-step changes** — `fleet run <playbook.yaml>` (idempotent check/apply, `--on-fail rollback`)
 - **Guide you** — explain state, propose next steps, and confirm before anything destructive
@@ -77,4 +78,4 @@ documented in [Operations → Operating Safely and Unattended](operations.md#ope
 - The agent runs the `fleet` CLI **on your machine, with your keys**, against only the servers you added. There is no hosted control plane.
 - Every action rides the same authenticated, host-key-pinned SSH channel as the rest of the controller.
 - The context tells the agent to treat `server remove`, `file rm`, `key rotate`, `update apply`, `self-uninstall`, and `config restore` as destructive and to confirm first.
-- Read-only commands (`status`, `health`, `inventory`, `top`, `doctor`, `drift`, `server list/show/metrics`, `service list`, `svc status`, `journal`, `logs`, `file list`, `config show`, `context`) are safe for the agent to explore freely.
+- Read-only commands (`status`, `health`, `inventory`, `top`, `doctor`, `drift`, `server list/show/metrics`, `service list`, `svc status`, `journal`, `logs`, `file list`, `file view`, `config show`, `context`) are safe for the agent to explore freely.

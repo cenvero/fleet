@@ -29,6 +29,13 @@ const (
 	metricsReplayPageTimeout = 30 * time.Second
 )
 
+// metricsReplayMaxSnapshots bounds what one connection may replay in all. An
+// agent queues at most 10,000 snapshots (an older agent returns them as one
+// batch), so this only stops a hostile peer from writing an unbounded history
+// into the controller's database on every reconnect. A var only so tests can
+// lower it.
+var metricsReplayMaxSnapshots = 20_000
+
 // replayQueuedMetrics drains a reverse agent's offline metrics queue: peek a
 // page, persist it, acknowledge it, repeat while the agent reports more. It
 // returns how many snapshots were replayed.
@@ -52,7 +59,7 @@ func (h *ReverseHub) replayQueuedMetrics(serverName string, session *transport.S
 	var newest proto.MetricsSnapshot
 	lastBatch := ""
 	var replayErr error
-	for page := 0; page < metricsReplayMaxPages; page++ {
+	for page := 0; page < metricsReplayMaxPages && total < metricsReplayMaxSnapshots; page++ {
 		n, batchID, pageNewest, more, err := h.replayMetricsPage(serverName, call, lastBatch)
 		if err != nil {
 			replayErr = err
@@ -103,6 +110,9 @@ func (h *ReverseHub) replayMetricsPage(serverName string, call func(context.Cont
 	}
 	if replay.BatchID == "" {
 		return 0, "", proto.MetricsSnapshot{}, false, fmt.Errorf("peek/ack capable agent returned metrics without a batch id")
+	}
+	if len(replay.Snapshots) > metricsReplayMaxSnapshots {
+		return 0, "", proto.MetricsSnapshot{}, false, fmt.Errorf("agent returned %d queued metrics snapshots in one batch; refusing more than %d", len(replay.Snapshots), metricsReplayMaxSnapshots)
 	}
 	if replay.BatchID == previousBatch {
 		// The agent handed back the batch it just acknowledged; stop rather
@@ -177,6 +187,8 @@ func (a *App) persistReplayedMetrics(serverName string, snapshots []proto.Metric
 	entries := make([]store.MetricSnapshotEntry, 0, len(snapshots))
 	newest := -1
 	for i, snapshot := range snapshots {
+		snapshot = boundSnapshotText(snapshot)
+		snapshots[i] = snapshot
 		data, err := json.Marshal(snapshot)
 		if err != nil {
 			return fmt.Errorf("marshal metrics snapshot: %w", err)

@@ -258,11 +258,19 @@ const contextForAgents = "## How to use this as an agent\n\n" +
 	"- Prefer structured execution for anything you'll parse or gate on: `fleet exec <server> <cmd> --json` returns " +
 	"`{stdout, stderr, exit_code, duration}`. Add `--timeout`, `--retry/--backoff` for flaky transports, " +
 	"`--dry-run` to preview, `--propagate-exit` to surface the remote exit code, and `--group role=web` to fan out by tag.\n" +
+	"- **Edit files on a server in place — never download, edit and re-upload, and never rewrite files with `exec` + sed/echo.** " +
+	"Read with `fleet file view <server> <path>` (numbered lines plus the file's sha256), then change it with " +
+	"`fleet file edit <server> <path> --old '<exact text>' --new '<replacement>' --expect-sha256 <sha256>`. The old text must match " +
+	"exactly once (copy it from the view without the line numbers; add surrounding lines if it is not unique, or pass --all). " +
+	"Use `--insert-after N --text ...` to add lines, `--edits <file|->` for several changes at once (all or nothing), " +
+	"`--dry-run` to preview the diff, `--json` for a structured result, and `--undo` to restore the previous version. " +
+	"The agent keeps the file's owner, group, mode, ACLs and SELinux label, replaces it atomically (a dropped connection never leaves " +
+	"a half-written file), and refuses the edit if the file changed since your view (`edit_conflict` — view it again and redo the edit).\n" +
 	"- If you see \"not initialized\", the controller needs `fleet init` first — confirm with the user before initializing.\n" +
 	"- DESTRUCTIVE or outward-facing actions require explicit user intent — confirm before running: " +
 	"`server remove`, `file rm`, `key rotate`, `update apply`, `self-uninstall`, `config restore`.\n" +
 	"- Read-only/safe to explore freely: `status`, `health`, `inventory`, `top`, `doctor`, `drift`, " +
-	"`server list/show/metrics`, `service list`, `svc status`, `journal`, `logs`, `file list`, `config show`, `context`.\n\n" +
+	"`server list/show/metrics`, `service list`, `svc status`, `journal`, `logs`, `file list`, `file view`, `config show`, `context`.\n\n" +
 	"### Operating unattended (safety primitives)\n\n" +
 	"- **Scope yourself with an RBAC token.** Pass `--token <id>` (or set `FLEET_TOKEN`) to run inside a scope the operator " +
 	"minted with `fleet token create` (`--servers`, `--group`, `--allow`/`--deny` commands, `--destructive`). The controller " +
@@ -287,7 +295,8 @@ const contextConcepts = "## Concepts\n\n" +
 	"- Security: all RPCs ride one authenticated `fleet-rpc` SSH channel — public-key auth only, strong " +
 	"ciphers, no separate unauthenticated port.\n" +
 	"- Files: secure file transfers are chunked, parallel (direct mode), checksummed, and resumable. " +
-	"Surfaces are the `fleet file` CLI (incl. `fleet file copy`/`move` directly between two servers), the `fleet files` dual-pane TUI (alias `fleet filemanager` / `fm`, supports local↔server and server↔server), and the localhost web app `fleet file ui` (alias `fleet filemanager ui`). Both UIs have full operations (new folder, rename, delete, copy, move), a hidden-files toggle, and List/Icons views.\n" +
+	"Surfaces are the `fleet file` CLI (incl. `fleet file copy`/`move` directly between two servers), the `fleet files` dual-pane TUI (alias `fleet filemanager` / `fm`, supports local↔server and server↔server), and the localhost web app `fleet file ui` (alias `fleet filemanager ui`). Both UIs have full operations (new folder, rename, delete, copy, move), a hidden-files toggle, and List/Icons views. " +
+	"Files are edited in place with `fleet file view` + `fleet file edit` (exact-text replace, insert, whole content, undo): the agent applies the change and installs it atomically with the original owner, mode, ACLs and SELinux label, only if the file still has the sha256 you expected; the editors in both file managers save the same way.\n" +
 	"- Storage: config + per-server records live as TOML under the config dir; workload/metrics state in a " +
 	"SQLite/Postgres/MySQL/MariaDB backend. Tokens, secrets, tags, guards, jobs, and policy each live in a small " +
 	"local JSON store under the config dir. Everything is operator-controlled.\n" +
@@ -311,6 +320,11 @@ const contextWorkflows = "## Common workflows\n\n" +
 	"```\nfleet server show web-01\nfleet server metrics web-01\nfleet service list web-01\n```\n\n" +
 	"Move files (chunked, parallel, resumable):\n" +
 	"```\nfleet file upload web-01 ./app.tar.gz /srv/app.tar.gz --parallel 4\nfleet file download web-01 /var/log/syslog ./syslog\n```\n\n" +
+	"Edit a config file in place (view → exact replace → reload), checked against the version you viewed:\n" +
+	"```\nfleet file view web-01 /etc/nginx/nginx.conf            # numbered lines + sha256\n" +
+	"fleet file edit web-01 /etc/nginx/nginx.conf --old 'worker_connections 768;' --new 'worker_connections 2048;' --expect-sha256 <sha256>\n" +
+	"fleet exec web-01 \"nginx -t && systemctl reload nginx\" --json\n" +
+	"fleet file edit web-01 /etc/nginx/nginx.conf --undo      # if the check fails\n```\n\n" +
 	"Open the interactive UIs:\n" +
 	"```\nfleet dashboard            # fleet-wide TUI\nfleet files web-01 db-01   # dual-pane file manager (a.k.a. fleet filemanager)\nfleet file ui              # localhost web file manager (a.k.a. fleet filemanager ui)\nfleet file copy web-01:/a db-01:/a   # server-to-server copy (move: fleet file move)\n```\n\n" +
 	"Run a command for a machine-readable result, with a timeout and retries:\n" +

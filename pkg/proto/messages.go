@@ -422,3 +422,11 @@ func DecodePayload[T any](payload any) (T, error) {
 	}
 	return decoded, nil
 }
+
+// DeadlineMillis encodes a deadline for Envelope.DeadlineUnixMilli, rounded UP
+// to the next millisecond. Truncating would hand the agent a deadline up to a
+// millisecond earlier than the caller's own, so the agent could kill a command
+// before the time the caller granted it.
+func DeadlineMillis(deadline time.Time) int64 {
+	return deadline.Add(time.Millisecond - time.Nanosecond).UnixMilli()
+}

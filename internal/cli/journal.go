@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/pkg/proto"
 	"github.com/spf13/cobra"
 )
@@ -267,7 +268,7 @@ func serverJournalPattern(exec journalExec, grep string) string {
 func printJournalLines(out io.Writer, lines []string, grep string) {
 	for _, line := range lines {
 		if matchGrep(line, grep) {
-			fmt.Fprintln(out, line)
+			fmt.Fprintln(out, safetext.Terminal(line, false))
 		}
 	}
 }

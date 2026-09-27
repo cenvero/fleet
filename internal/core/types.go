@@ -78,6 +78,10 @@ type RuntimeConfig struct {
 	// FileTransfer holds the fleet-wide defaults for file uploads/downloads.
 	// Per-server overrides live on ServerRecord.FileTransfer.
 	FileTransfer FileTransferDefaults `toml:"file_transfer" json:"file_transfer"`
+	// FileEdit configures in-place editing (`fleet file edit`/`view` and the
+	// file managers' editors): undo history, size limit, and whether every
+	// edit must name the file version it expects.
+	FileEdit FileEditSettings `toml:"file_edit,omitempty" json:"file_edit,omitempty"`
 }
 
 // FileTransferDefaults configures chunked/parallel transfers. A zero field

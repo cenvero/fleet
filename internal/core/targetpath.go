@@ -36,9 +36,14 @@ func NativePathStyle() TargetPathStyle { return TargetPathStyleForOS(runtime.GOO
 // LocalPathCaseInsensitive reports whether the filesystem that would contain p
 // aliases names by case. It probes the nearest existing directory with a private
 // temporary file and removes it before returning.
+//
+// Security: p is an operator-chosen controller path (CLI/TUI argument, or a
+// web UI path already vetted by cleanLocal and the protected-path guard). The
+// only write is a randomly named probe file that is removed again.
 func LocalPathCaseInsensitive(p string) (bool, error) {
 	dir := filepath.Clean(p)
 	for {
+		// codeql[go/path-injection] case-sensitivity probe of an operator-chosen directory: stats it and creates/removes a randomly named probe file only
 		info, err := os.Stat(dir)
 		if err == nil {
 			if !info.IsDir() {
@@ -55,6 +60,7 @@ func LocalPathCaseInsensitive(p string) (bool, error) {
 		}
 		dir = parent
 	}
+	// codeql[go/path-injection] case-sensitivity probe of an operator-chosen directory: stats it and creates/removes a randomly named probe file only
 	probe, err := os.CreateTemp(dir, ".fleet-case-probe-a-*")
 	if err != nil {
 		return false, fmt.Errorf("probe local path case sensitivity: %w", err)
@@ -66,6 +72,7 @@ func LocalPathCaseInsensitive(p string) (bool, error) {
 	}
 	defer os.Remove(probePath)
 	alternate := filepath.Join(dir, strings.ToUpper(filepath.Base(probePath)))
+	// codeql[go/path-injection] case-sensitivity probe of an operator-chosen directory: stats it and creates/removes a randomly named probe file only
 	alternateInfo, err := os.Stat(alternate)
 	if os.IsNotExist(err) {
 		return false, nil

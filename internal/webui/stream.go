@@ -532,6 +532,7 @@ func (s *Server) downloadLocal(ctx context.Context, w http.ResponseWriter, r *ht
 		writeError(w, err)
 		return err
 	}
+	// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 	f, err := os.Open(clean) // #nosec G304,G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path (config dir refused by cleanLocal)
 	if err != nil {
 		writeError(w, err)

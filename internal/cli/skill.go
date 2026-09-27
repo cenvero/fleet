@@ -223,6 +223,12 @@ func skillCoreBody() string {
 		"- Add `--config-dir <path>` for a non-default controller location.\n" +
 		"- Confirm before destructive actions: `server remove`, `file rm`, `key rotate`,\n" +
 		"  `update apply`, `self-uninstall`, `config restore`.\n" +
+		"- Edit files on a server in place: `fleet file view <server> <path>` (numbered\n" +
+		"  lines + sha256), then `fleet file edit <server> <path> --old '<exact text>'\n" +
+		"  --new '<text>' --expect-sha256 <sha256>` (or --insert-after N --text, --edits,\n" +
+		"  --dry-run, --undo). Never download/re-upload a file to change it, and never\n" +
+		"  rewrite files with `fleet exec` + sed/echo — `file edit` keeps owner, mode,\n" +
+		"  ACLs and SELinux labels and never leaves a half-written file.\n" +
 		"- Move files with `fleet file upload|download|list`; interactive UIs are\n" +
 		"  `fleet files <server>` (terminal) and `fleet file ui` (browser).\n"
 }

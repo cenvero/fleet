@@ -79,6 +79,16 @@ When editing Go code:
 - Keep transport, crypto, database, and update changes readable and auditable
 - Avoid shell-string RPC behavior; use typed payloads and structured errors
 - Use parameterized or ORM-managed database access rather than string-built SQL
+- Fix what security scanners report. When a finding has been reviewed and is
+  not a vulnerability, say why in the code: `// #nosec G304 -- <reason>` for
+  gosec, and for CodeQL a comment on the flagged line or the line above it,
+  `// codeql[<rule-id>] <reason>` (for example `// codeql[go/path-injection]
+  operator-chosen local path, vetted by cleanLocal`). After each CodeQL run on
+  `main`, `.github/scripts/codeql_dismiss_marked.py` dismisses exactly the alerts
+  that carry such a marker for their rule, with the reason as the dismissal
+  comment. Markers are reviewed like any other code: never mark a real issue.
+  `python3 .github/scripts/codeql_dismiss_marked.py --sarif results.sarif` shows
+  which results of a local CodeQL run would stay open.
 
 When editing the UX:
 

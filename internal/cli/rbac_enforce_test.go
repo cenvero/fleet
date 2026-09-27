@@ -41,6 +41,11 @@ func TestBestEffortTargetServer(t *testing.T) {
 		{"cron list", "cron", []string{"web-01"}, "web-01"},
 		// subcommand commands: server is args[0] because the sub was consumed
 		{"file rm", "file", []string{"web-01", "/tmp/x"}, "web-01"},
+		// combined <server:path> form of file view/edit/download: the scope
+		// check vets the server part, exactly what parseServerPath extracts
+		{"file edit colon", "file", []string{"web-01:/etc/hosts"}, "web-01"},
+		{"file view colon windows path", "file", []string{"win-01:C:\\x.txt"}, "win-01"},
+		{"file leading colon", "file", []string{":/etc/hosts"}, ":/etc/hosts"},
 		{"firewall enable", "firewall", []string{"web-01"}, "web-01"},
 		{"fw enable", "fw", []string{"web-01"}, "web-01"},
 		{"server remove", "server", []string{"web-01"}, "web-01"},

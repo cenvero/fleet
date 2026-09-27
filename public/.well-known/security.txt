@@ -1,0 +1,7 @@
+# Security contact for Cenvero Fleet (https://fleet.cenvero.org), per RFC 9116.
+# Renew "Expires" before it passes (at most a year ahead).
+Contact: mailto:security@cenvero.org
+Expires: 2027-09-26T00:00:00.000Z
+Policy: https://github.com/cenvero/fleet/security/policy
+Preferred-Languages: en
+Canonical: https://fleet.cenvero.org/.well-known/security.txt
