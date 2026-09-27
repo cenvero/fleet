@@ -36,16 +36,20 @@ const (
 // editorState holds everything the full-screen editor overlay needs. It lives on
 // filesModel and is reset each time the editor opens.
 type editorState struct {
-	active   bool
-	side     int    // the pane the file belongs to (for refresh + source)
-	source   string // "" = local, else server name
-	path     string // absolute path of the file being edited
-	name     string // base name (drives the lexer + the header)
-	mode     editorMode
-	area     textarea.Model
-	content  string // last-saved content (for dirty detection)
-	dirty    bool
-	saving   bool
+	active  bool
+	side    int    // the pane the file belongs to (for refresh + source)
+	source  string // "" = local, else server name
+	path    string // absolute path of the file being edited
+	name    string // base name (drives the lexer + the header)
+	mode    editorMode
+	area    textarea.Model
+	content string // last-saved content (for dirty detection)
+	dirty   bool
+	saving  bool
+	// inPlace is set after a save failed because the file cannot be replaced
+	// (a bind-mounted file, a folder the agent may not write…): the next
+	// save writes into the file itself.
+	inPlace  bool
 	status   string // inline message inside the editor footer (errors, hints)
 	viewScrl int    // scroll offset (top line) for the read-only highlighted view
 
@@ -367,8 +371,9 @@ func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
 	source := ed.source
 	path := ed.path
 	base := ed.content
+	inPlace := ed.inPlace
 	return m, func() tea.Msg {
-		err := saveFileFromEdit(app, source, path, []byte(content), []byte(base))
+		err := saveFileFromEdit(app, source, path, []byte(content), []byte(base), inPlace)
 		return editorSavedMsg{err: err, content: content}
 	}
 }
@@ -379,11 +384,13 @@ func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
 // only replaced if it still has the content the editor opened (base) — a
 // change made on the server meanwhile is reported instead of overwritten.
 // Agents too old for that get the checksummed atomic upload instead.
-func saveFileFromEdit(app *core.App, source, full string, content, base []byte) error {
+//
+// inPlace writes the remote file in place instead (see core.EditRequest).
+func saveFileFromEdit(app *core.App, source, full string, content, base []byte, inPlace bool) error {
 	if source == "" {
 		return os.WriteFile(full, content, 0o600)
 	}
-	_, err := app.EditRemoteFile(source, core.EditRequest{Path: full, Replace: true, Content: content, BaseSHA256: sha256Hex(base)})
+	_, err := app.EditRemoteFile(source, core.EditRequest{Path: full, Replace: true, Content: content, BaseSHA256: sha256Hex(base), InPlace: inPlace})
 	if err == nil {
 		return nil
 	}
@@ -429,6 +436,12 @@ func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	ed.saving = false
+	if msg.err != nil && core.EditErrorCode(msg.err) == "cannot_replace" && !ed.inPlace {
+		ed.inPlace = true
+		ed.status = "can't replace this file — ^s again writes it in place"
+		m.status = "not saved: " + msg.err.Error()
+		return m, nil
+	}
 	if msg.err != nil {
 		ed.status = "save failed: " + msg.err.Error()
 		m.status = "save failed: " + msg.err.Error()

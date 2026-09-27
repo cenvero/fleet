@@ -49,6 +49,15 @@ Omit sections that have no entries for that release.
   reverted with `--undo` (settings: `fleet config set edit-backups | edit-max-size |
   edit-require-hash`). `fleet context` and the AI skills teach agents to use it. Needs
   updated agents (new `file.edit` RPC).
+- Some files can't be replaced by a new copy: one bind-mounted into a container, one in a
+  folder the agent may not write, or one whose owner the agent cannot give a new file.
+  Editing one now fails with `cannot_replace`, changes nothing and names the fix:
+  `fleet file edit --in-place` writes into the file itself. The controller first saves the
+  current version. The agent then reserves the disk space (on Linux), writes, fsyncs and
+  reads the result back, and writes the original back if anything fails. `--undo --force` restores
+  the saved version if even that fails or the connection drops mid-write. Hard-linked
+  files stay refused. Both file managers' editors offer the in-place write when a save
+  fails this way.
 - `fleet version` (with `--json`) prints the controller version, OS and architecture.
 - `fleet start` runs the daemon in the background (output in `logs/daemon.log`) and
   `fleet stop` stops it; `fleet status` reports whether it is running. `fleet daemon`

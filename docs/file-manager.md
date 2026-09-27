@@ -50,7 +50,8 @@ fleet file edit <server> <path> --insert-after N --text TEXT
 fleet file edit <server> <path> --edits edits.json            # several edits, all or nothing
 fleet file edit <server> <path> --content FILE --expect-sha256 H   # replace the whole file
 fleet file edit <server> <path> --content FILE --create [--mode 0644]
-fleet file edit <server> <path> --undo | --history
+fleet file edit <server> <path> --undo [--force] | --history
+fleet file edit <server> <path> ... --in-place     # a file that cannot be replaced (see below)
 fleet file edit <server:path>                    # interactive: $EDITOR, fallback vi/nano
 
 # Transfer (chunked, parallel, resumable; -r for whole directories)
@@ -147,10 +148,32 @@ editor does. It is built to be safe to hand to an AI agent:
   so a connection that drops mid-edit changes nothing, and readers never see a
   half-written file. Each edit carries an id: if the reply is lost, the controller
   retries and the agent answers with the first result instead of editing twice.
+- **Files that cannot be replaced.** A few files can't be swapped for a new copy:
+  one bind-mounted into a container (a mount point cannot be renamed over), one in
+  a folder the agent may not write, or one whose owner the agent (not running as
+  root) cannot give a new file. Such an edit fails with `cannot_replace` and
+  changes nothing. Repeat it with `--in-place` to write the new content into the
+  file itself. That keeps the same file, so its owner, mode, ACLs and labels need no
+  copying, but it is **not atomic**, so Fleet makes it as safe as possible:
+  - The controller first saves the file's current version in the undo history
+    (even with `edit-backups 0`, until the write succeeds).
+  - It then sends the write, pinned to exactly the content it saved.
+  - The agent reserves the disk space it needs (on Linux), writes, fsyncs and
+    reads the result back.
+  - If any step fails, the agent writes the original back and nothing has changed.
+  - If even that fails (`write_incomplete`), or the connection drops mid-write and
+    the file can't be read back, the error says so. `fleet file edit <server> <path>
+    --undo --force` then restores the saved version.
+
+  Hard-linked files stay refused: writing one would change it under its other
+  names, which were not checked against the block list or `--file-root`. The editors
+  in both file managers offer the in-place write when a save fails this way, and
+  `--undo` writes an in-place edit back in place.
 - **Undo.** The previous version of every edited file is kept on the controller
   (`data/edit-history`, 10 versions per file by default — `fleet config set
   edit-backups N`, 0 turns it off). `--undo` restores it, but only while the file is
-  still exactly what that edit produced; `--history` lists what is kept. The kept
+  still exactly what that edit produced (`--undo --force` restores it anyway);
+  `--history` lists what is kept. The kept
   versions are plain copies in the controller's owner-only config directory (and so
   in `fleet config backup` archives): if the files you edit hold secrets you do not
   want copied there, set `edit-backups 0`.

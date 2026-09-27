@@ -28,11 +28,16 @@ type ServiceManager interface {
 type RPCError struct {
 	Code    string
 	Message string
+	// cause is the underlying error, when there is one, for callers that
+	// act on its kind (it is not sent to the controller).
+	cause error
 }
 
 func (e *RPCError) Error() string {
 	return e.Message
 }
+
+func (e *RPCError) Unwrap() error { return e.cause }
 
 type commandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)

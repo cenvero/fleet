@@ -1104,6 +1104,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
 	p := r.URL.Query().Get("path")
 	base := strings.ToLower(r.URL.Query().Get("base"))
+	inPlace := r.URL.Query().Get("in_place") == "1"
 	if p == "" {
 		http.Error(w, "path is required", http.StatusBadRequest)
 		return
@@ -1140,7 +1141,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "ok", "sha256": sha256Hex(body)})
 		return
 	}
-	res, err := s.app.EditRemoteFile(server, core.EditRequest{Path: p, Replace: true, Content: body, BaseSHA256: base})
+	res, err := s.app.EditRemoteFile(server, core.EditRequest{Path: p, Replace: true, Content: body, BaseSHA256: base, InPlace: inPlace})
 	switch {
 	case err == nil:
 		writeJSON(w, map[string]string{"status": "ok", "sha256": res.NewSHA256})
@@ -1149,6 +1150,12 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "the file changed on the server since you opened it, so it was not overwritten; copy your changes, then reopen the file"})
+		return
+	case core.EditErrorCode(err) == "cannot_replace":
+		// The editor offers to write the file in place (?in_place=1).
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": strings.TrimPrefix(err.Error(), "cannot_replace: "), "code": "cannot_replace"})
 		return
 	case !errors.Is(err, core.ErrEditUnsupported):
 		writeError(w, err)

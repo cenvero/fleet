@@ -87,6 +87,18 @@ func preserveMetadata(tf, orig *os.File, origInfo os.FileInfo) ([]string, *RPCEr
 	return kept, nil
 }
 
+// replaceBlockedReason explains a failed rename of the finished temp file
+// over the original that writing the file in place would avoid, or returns "".
+func replaceBlockedReason(err error) string {
+	switch {
+	case errors.Is(err, syscall.EBUSY):
+		return "the file is a mount point (for example a file bind-mounted into a container), which cannot be replaced by a new file"
+	case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+		return fmt.Sprintf("the agent may not replace the file (%v); in a sticky folder such as /tmp only the file's owner can", err)
+	}
+	return ""
+}
+
 // installEditedTemp renames the finished temp file over the original.
 func installEditedTemp(root *os.Root, tempRel, finalRel string, tempInfo os.FileInfo) ([]string, *RPCError) {
 	return nil, installTemp(root, tempRel, finalRel, tempInfo)

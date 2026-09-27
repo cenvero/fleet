@@ -84,6 +84,9 @@ func TestFileEditFlagValidation(t *testing.T) {
 		"create without body": {"web-01:/f", "--create"},
 		"mode without create": {"web-01:/f", "--content", "x", "--mode", "0644", "--force"},
 		"undo with dry run":   {"web-01:/f", "--undo", "--dry-run"},
+		"force with old":      {"web-01:/f", "--old", "a", "--new", "b", "--force"},
+		"in-place create":     {"web-01:/f", "--content", "x", "--create", "--in-place"},
+		"in-place history":    {"web-01:/f", "--history", "--in-place"},
 	}
 	for name, args := range cases {
 		cmd := newFileEditCommand(new(string))
@@ -111,5 +114,22 @@ func TestTerminalSafeLines(t *testing.T) {
 	}
 	if got := terminalSafeLines(" plain\ttext\n"); got != " plain\ttext\n" {
 		t.Errorf("clean text changed: %q", got)
+	}
+}
+
+func TestFileEditUndoForceAndInPlacePassValidation(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"web-01:/f", "--undo", "--force"},
+		{"web-01:/f", "--old", "a", "--new", "b", "--in-place"},
+	} {
+		dir := t.TempDir()
+		cmd := newFileEditCommand(&dir)
+		cmd.SetArgs(args)
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+		// The flags are accepted; it then stops loading the (missing) config.
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "config") {
+			t.Errorf("%v: err = %v, want the flags accepted", args, err)
+		}
 	}
 }

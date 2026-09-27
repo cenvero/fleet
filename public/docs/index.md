@@ -634,7 +634,8 @@ fleet-agent serve --listen 0.0.0.0:2222 --authorized-keys ~/fleet-controller.pub
 - **Only the version you read** — `fleet file view` prints the file's sha256; pass it as `--expect-sha256` and the edit is refused with `edit_conflict` if the file changed in between, even while the edit is being applied.
 - **Permissions kept** — the new content is written to a private temp file beside the original, fsynced, read back and checked against its sha256, and given the original's owner, group, mode (including set-uid/set-gid), POSIX ACLs, SELinux label and other extended attributes before one atomic rename replaces the original. If anything cannot be carried over, nothing changes. Editing through a symlink changes its target and keeps the link.
 - **Network drops** — the agent acts only on a request that arrived whole, so a dropped connection changes nothing and nobody ever sees a half-written file. A retry after a lost reply returns the first result instead of editing twice.
-- **Undo** — the previous version is kept on the controller; `--undo` restores it, but only while the file is still exactly what that edit produced.
+- **Undo** — the previous version is kept on the controller; `--undo` restores it, but only while the file is still exactly what that edit produced (`--undo --force` restores it anyway).
+- **Files that cannot be replaced** — a file bind-mounted into a container, one in a folder the agent may not write, or one whose owner the agent cannot give a new file can't be swapped for a new copy. That edit fails with `cannot_replace` and changes nothing; repeat it with `--in-place` to write into the file itself. That write is not atomic, so the controller first saves the current version, the agent reserves the space (on Linux), writes, reads it back and writes the original back if anything fails, and `--undo --force` restores the saved version if even that fails or the connection drops mid-write.
 
 ### View, then edit
 
@@ -664,6 +665,9 @@ fleet file edit web-01 /srv/app/.env --edits edits.json --dry-run
 # Replace the whole file, or create a new one
 fleet file edit web-01 /srv/app/config.yml --content ./config.yml --expect-sha256 <sha256>
 fleet file edit web-01 /etc/motd --content - --create --mode 0644 < motd.txt
+
+# A file bind-mounted into a container: write it in place
+fleet file edit app-01 /etc/app/app.conf --old 'debug: false' --new 'debug: true' --in-place
 
 # What can be undone
 fleet file edit web-01 /etc/nginx/nginx.conf --history

@@ -38,9 +38,10 @@ function api(pathname, params = {}) {
 // ApiError carries the HTTP status and the server's message (the backend
 // answers {"error": "..."} JSON or a plain-text http.Error body).
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, code = "") {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -48,11 +49,13 @@ async function errorFrom(res) {
   let text = "";
   try { text = await res.text(); } catch { /* ignore */ }
   let msg = text.trim();
+  let code = "";
   try {
     const parsed = JSON.parse(text);
     if (parsed && typeof parsed.error === "string") msg = parsed.error;
+    if (parsed && typeof parsed.code === "string") code = parsed.code;
   } catch { /* plain text */ }
-  return new ApiError(msg || res.statusText || "HTTP " + res.status, res.status);
+  return new ApiError(msg || res.statusText || "HTTP " + res.status, res.status, code);
 }
 
 async function getJSON(pathname, params) {
@@ -4480,7 +4483,7 @@ function closeEditor() {
   else if (p && p.el) p.el.grid.focus();
 }
 
-async function saveEditor() {
+async function saveEditor(inPlace = false) {
   if (!editor.open) return;
   const p = editor.p;
   const item = editor.item;
@@ -4494,6 +4497,7 @@ async function saveEditor() {
   try {
     const params = { server: p.server, path: full };
     if (editor.base) params.base = editor.base;
+    if (inPlace) params.in_place = "1";
     const res = await fetch(api("/api/write", params), {
       method: "POST",
       headers: { "X-Fleet-Token": TOKEN, "Content-Type": "text/plain" },
@@ -4503,9 +4507,23 @@ async function saveEditor() {
     const saved = await res.json().catch(() => ({}));
     editor.base = saved.sha256 || "";
   } catch (e) {
-    toast("Save failed: " + friendlyError(e, p.server), "error");
     saveBtn.disabled = false;
     saveBtn.textContent = "Save";
+    if (e.code === "cannot_replace" && !inPlace) {
+      // The file can't be swapped for a new copy (a bind-mounted file, a
+      // folder the agent may not write…); offer to write it where it is.
+      const why = e.message.replace(/ It can be written in place instead.*$/, "");
+      const ok = await confirmDialog({
+        title: "Write the file in place?",
+        message: why.charAt(0).toUpperCase() + why.slice(1) +
+          " Writing in place keeps the same file (owner, mode and labels stay as they are) but is not atomic. The current version is saved on the controller first, so it can be restored with “fleet file edit --undo”.",
+        okLabel: "Write in place",
+      });
+      if (ok) return saveEditor(true);
+      $("#ed-input").focus();
+      return;
+    }
+    toast("Save failed: " + friendlyError(e, p.server), "error");
     return;
   }
   editor.original = content;
@@ -4535,7 +4553,7 @@ function setupEditor() {
       setDirty(ta.value !== editor.original);
     }
   });
-  $("#ed-save").addEventListener("click", saveEditor);
+  $("#ed-save").addEventListener("click", () => saveEditor());
   $("#ed-cancel").addEventListener("click", tryCloseEditor);
 }
 

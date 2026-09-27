@@ -76,8 +76,17 @@ type FileEditPayload struct {
 	// MaxBytes lowers the size limit below MaxEditFileBytes (0 = the maximum).
 	MaxBytes int64 `json:"max_bytes,omitempty"`
 	// ReturnOriginal asks for the file's previous content in the reply (for
-	// the controller's undo history).
+	// the controller's undo history). With DryRun it returns the current
+	// content, which the controller saves before an in-place write.
 	ReturnOriginal bool `json:"return_original,omitempty"`
+	// InPlace writes the new content into the existing file instead of
+	// replacing it with a new file. It is for files that cannot be replaced
+	// (code "cannot_replace"): one bind-mounted into a container, one in a
+	// folder the agent may not write, or one whose owner the agent cannot
+	// give a new file. It is not atomic: if the write fails, the agent writes
+	// the original back, and only if that fails too does it answer
+	// "write_incomplete".
+	InPlace bool `json:"in_place,omitempty"`
 	// Binary asks for the reply's bulk bytes (Original) as a binary frame.
 	Binary bool `json:"binary,omitempty"`
 }
@@ -120,11 +129,14 @@ type FileEditResult struct {
 	Preserved []string `json:"preserved,omitempty"`
 	// Verified reports that the bytes written were read back from disk and
 	// matched NewSHA256 before they were installed.
-	Verified      bool   `json:"verified,omitempty"`
+	Verified bool `json:"verified,omitempty"`
+	// InPlace reports that the content was written into the existing file
+	// (see FileEditPayload.InPlace) rather than installed as a new file.
+	InPlace       bool   `json:"in_place,omitempty"`
 	Diff          string `json:"diff,omitempty"`
 	DiffTruncated bool   `json:"diff_truncated,omitempty"`
 	// Original is the previous content, returned only when ReturnOriginal
-	// was set and the file changed.
+	// was set and the file changed (or would change, for a dry run).
 	Original []byte `json:"original,omitempty"`
 }
 

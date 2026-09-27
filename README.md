@@ -250,7 +250,7 @@ File manager and transfers (**new in v2**):
 - `fleet file download <server> <remote> [local] [--parallel N]`
 - `fleet file mkdir|rm|mv <server> ...`
 - `fleet file view <server> <path>` — show a text file with line numbers and the sha256 an edit can expect
-- `fleet file edit <server> <path> --old TEXT --new TEXT [--expect-sha256 H]` — **edit a file in place on the server** (also `--insert-after N --text`, `--edits FILE`, `--content FILE`, `--dry-run`, `--undo`; no flags opens `$EDITOR`): the agent applies the change and installs it atomically with the original owner, group, mode, ACLs and SELinux label, only if the file still has the expected sha256; a dropped connection never leaves a half-written file
+- `fleet file edit <server> <path> --old TEXT --new TEXT [--expect-sha256 H]` — **edit a file in place on the server** (also `--insert-after N --text`, `--edits FILE`, `--content FILE`, `--dry-run`, `--undo`; no flags opens `$EDITOR`): the agent applies the change and installs it atomically with the original owner, group, mode, ACLs and SELinux label, only if the file still has the expected sha256; a dropped connection never leaves a half-written file. A file that can't be replaced (bind-mounted into a container, in a folder the agent may not write) is written with `--in-place` after its current version is saved for `--undo`
 - `fleet file diff <serverA:path> <serverB:path>` (or `--group EXPR <path>`) — unified diff across servers
 - `fleet file compress|extract <server> ...` — create and unpack archives on the host (chmod, checksum and duplicate are in the file managers below)
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults

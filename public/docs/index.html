@@ -798,7 +798,8 @@ fleet file defaults set web-01 <span class="f">--parallel</span> 2 <span class="
             <li><strong>Only the version you read</strong> — <code>fleet file view</code> prints the file's sha256; pass it as <code>--expect-sha256</code> and the edit is refused with <code>edit_conflict</code> if the file changed in between, even while the edit is being applied.</li>
             <li><strong>Permissions kept</strong> — the new content is written to a private temp file beside the original, fsynced, read back and checked against its sha256, and given the original's owner, group, mode (including set-uid/set-gid), POSIX ACLs, SELinux label and other extended attributes before one atomic rename replaces the original. If anything cannot be carried over, nothing changes. Editing through a symlink changes its target and keeps the link.</li>
             <li><strong>Network drops</strong> — the agent acts only on a request that arrived whole, so a dropped connection changes nothing and nobody ever sees a half-written file. A retry after a lost reply returns the first result instead of editing twice.</li>
-            <li><strong>Undo</strong> — the previous version is kept on the controller; <code>--undo</code> restores it, but only while the file is still exactly what that edit produced.</li>
+            <li><strong>Undo</strong> — the previous version is kept on the controller; <code>--undo</code> restores it, but only while the file is still exactly what that edit produced (<code>--undo --force</code> restores it anyway).</li>
+            <li><strong>Files that cannot be replaced</strong> — a file bind-mounted into a container, one in a folder the agent may not write, or one whose owner the agent cannot give a new file can't be swapped for a new copy. That edit fails with <code>cannot_replace</code> and changes nothing; repeat it with <code>--in-place</code> to write into the file itself. That write is not atomic, so the controller first saves the current version, the agent reserves the space (on Linux), writes, reads it back and writes the original back if anything fails, and <code>--undo --force</code> restores the saved version if even that fails or the connection drops mid-write.</li>
           </ul>
 
           <h3>View, then edit</h3>
@@ -824,6 +825,9 @@ fleet file edit web-01 /srv/app/.env <span class="f">--edits</span> edits.json <
 <span class="c"># Replace the whole file, or create a new one</span>
 fleet file edit web-01 /srv/app/config.yml <span class="f">--content</span> ./config.yml <span class="f">--expect-sha256</span> &lt;sha256&gt;
 fleet file edit web-01 /etc/motd <span class="f">--content</span> - <span class="f">--create</span> <span class="f">--mode</span> 0644 &lt; motd.txt
+
+<span class="c"># A file bind-mounted into a container: write it in place</span>
+fleet file edit app-01 /etc/app/app.conf <span class="f">--old</span> <span class="s">'debug: false'</span> <span class="f">--new</span> <span class="s">'debug: true'</span> <span class="f">--in-place</span>
 
 <span class="c"># What can be undone</span>
 fleet file edit web-01 /etc/nginx/nginx.conf <span class="f">--history</span></pre></div>

@@ -21,6 +21,8 @@ func preserveMetadata(_, _ *os.File, _ os.FileInfo) ([]string, *RPCError) {
 	return nil, &RPCError{Code: "unsupported_platform", Message: "file.edit cannot preserve file metadata on this platform"}
 }
 
+func replaceBlockedReason(error) string { return "" }
+
 func installEditedTemp(root *os.Root, tempRel, finalRel string, tempInfo os.FileInfo) ([]string, *RPCError) {
 	return nil, installTemp(root, tempRel, finalRel, tempInfo)
 }

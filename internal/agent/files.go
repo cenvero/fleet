@@ -1081,7 +1081,7 @@ func installTemp(root *os.Root, tempRel, finalRel string, info os.FileInfo) *RPC
 	}
 	if err := root.Rename(tempRel, finalRel); err != nil {
 		removeIfSame(root, tempRel, info)
-		return &RPCError{Code: "rename_failed", Message: err.Error()}
+		return &RPCError{Code: "rename_failed", Message: err.Error(), cause: err}
 	}
 	if got, err := root.Lstat(finalRel); err != nil || !sameInode(got, info) {
 		if err == nil {
