@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,6 +28,7 @@ import (
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/internal/version"
+	"golang.org/x/crypto/blake2b"
 )
 
 const agentGitHubRepo = "cenvero/fleet"
@@ -183,9 +186,12 @@ func (a *App) AutoInstallAgentContext(ctx context.Context, serverName, loginUser
 	} else {
 		// Release builds connect to the target first. Over that authenticated,
 		// host-key-pinned SSH connection the target detects its architecture and
-		// downloads only its matching manifest/archive/signature with wget or curl.
-		// The controller then verifies size, minisign binding, SHA-256, and archive
-		// contents before staging the extracted binary back on that same connection.
+		// downloads only its matching manifest/archive/signature with wget or curl,
+		// keeping the archive in the private staging directory. The target reports
+		// the archive's size and digests; the controller checks them against the
+		// minisign signature, its binding and the manifest's SHA-256, and the target
+		// unpacks the binary only once they pass. A target that cannot hash or
+		// unpack the archive sends it back to be verified and unpacked here.
 		tempBinPath := stagingDir + "/agent.bin"
 		agentRelease = &BootstrapAgentRelease{
 			Version:         version.Version,
@@ -498,46 +504,310 @@ func verifySelectedAgentRelease(selected selectedAgentRelease, archive, signatur
 	return binary, nil
 }
 
-func fetchVerifiedAgentRelease(ctx context.Context, runner remoteOutputRunner, spec BootstrapAgentRelease) ([]byte, error) {
-	return fetchVerifiedAgentReleaseWithKey(ctx, runner, spec, update.SigningPublicKey())
+// verifyMinisignDigest reports whether sig, a prehashed minisign signature,
+// signs the BLAKE2b-512 digest and its trusted comment with publicKey. It is
+// the check minisign.Verify makes once it has hashed the message, so a file
+// can be verified from its digest alone.
+func verifyMinisignDigest(publicKey minisign.PublicKey, digest []byte, sig minisign.Signature) bool {
+	if sig.Algorithm != minisign.HashEdDSA || sig.KeyID != publicKey.ID() || len(digest) != blake2b.Size {
+		return false
+	}
+	// A minisign public key is the algorithm (2 bytes), the key ID (8 bytes)
+	// and the Ed25519 key.
+	raw, err := base64.StdEncoding.DecodeString(publicKey.String())
+	if err != nil || len(raw) != 10+ed25519.PublicKeySize {
+		return false
+	}
+	key := ed25519.PublicKey(raw[10:])
+	if !ed25519.Verify(key, digest, sig.Signature[:]) {
+		return false
+	}
+	signed := make([]byte, 0, len(sig.Signature)+len(sig.TrustedComment))
+	signed = append(signed, sig.Signature[:]...)
+	signed = append(signed, sig.TrustedComment...)
+	return ed25519.Verify(key, signed, sig.CommentSignature[:])
+}
+
+// agentArchiveDigests is what the target reports about the archive it
+// downloaded.
+type agentArchiveDigests struct {
+	size       int64
+	blake2b512 []byte
+	sha256     []byte
+}
+
+// verifySelectedAgentReleaseDigests is verifySelectedAgentRelease for an
+// archive that stays on the target: it checks the target's report of the
+// archive against the release signature and manifest entry.
+func verifySelectedAgentReleaseDigests(selected selectedAgentRelease, digests agentArchiveDigests, signature []byte, publicKeyText string) error {
+	if digests.size != selected.info.Size {
+		return fmt.Errorf("agent %s size mismatch", selected.target.name)
+	}
+	var publicKey minisign.PublicKey
+	if err := publicKey.UnmarshalText([]byte(strings.TrimSpace(publicKeyText))); err != nil {
+		return fmt.Errorf("parse embedded minisign key: %w", err)
+	}
+	var parsed minisign.Signature
+	if err := parsed.UnmarshalText(signature); err != nil {
+		return fmt.Errorf("agent %s signature verification failed", selected.target.name)
+	}
+	if parsed.Algorithm != minisign.HashEdDSA {
+		// A legacy signature signs the whole archive; only the archive verifies it.
+		return fmt.Errorf("agent %s signature does not sign a digest", selected.target.name)
+	}
+	if !verifyMinisignDigest(publicKey, digests.blake2b512, parsed) {
+		return fmt.Errorf("agent %s signature verification failed", selected.target.name)
+	}
+	expectedComment := fmt.Sprintf("cenvero-fleet fleet-agent %s %s", selected.versionTag, selected.target.name)
+	if parsed.TrustedComment != expectedComment {
+		return fmt.Errorf("agent %s signature binding mismatch", selected.target.name)
+	}
+	if !strings.EqualFold(hex.EncodeToString(digests.sha256), selected.info.SHA256) {
+		return fmt.Errorf("agent %s checksum mismatch", selected.target.name)
+	}
+	return nil
 }
 
 func fetchVerifiedAgentReleaseWithKey(ctx context.Context, runner remoteOutputRunner, spec BootstrapAgentRelease, publicKeyText string) ([]byte, error) {
+	selected, err := selectTargetAgentRelease(ctx, runner, spec)
+	if err != nil {
+		return nil, err
+	}
+	archive, err := runner.Output(ctx, buildRemoteAgentDownloadCommand(selected.info.URL, selected.info.Size), selected.info.Size)
+	if err != nil {
+		return nil, fmt.Errorf("target download %s: %w", selected.target.name, err)
+	}
+	signature, err := runner.Output(ctx, buildRemoteAgentDownloadCommand(selected.info.Signature, maxAgentSignatureBytes), maxAgentSignatureBytes)
+	if err != nil {
+		return nil, fmt.Errorf("target download %s signature: %w", selected.target.name, err)
+	}
+	return verifySelectedAgentRelease(selected, archive, signature, publicKeyText)
+}
+
+// selectTargetAgentRelease detects the target's architecture and picks the
+// release for it from the manifest the target downloads.
+func selectTargetAgentRelease(ctx context.Context, runner remoteOutputRunner, spec BootstrapAgentRelease) (selectedAgentRelease, error) {
 	uname, err := runner.Output(ctx, "uname -s && uname -m", 4<<10)
 	if err != nil {
-		return nil, fmt.Errorf("detect target architecture: %w", err)
+		return selectedAgentRelease{}, fmt.Errorf("detect target architecture: %w", err)
 	}
 	fields := strings.Fields(string(uname))
 	if len(fields) != 2 {
-		return nil, fmt.Errorf("unexpected uname output %q", strings.TrimSpace(string(uname)))
+		return selectedAgentRelease{}, fmt.Errorf("unexpected uname output %q", strings.TrimSpace(string(uname)))
 	}
 	target, err := agentTargetForUname(fields[0], fields[1])
 	if err != nil {
-		return nil, err
+		return selectedAgentRelease{}, err
 	}
 
 	manifestData, err := runner.Output(ctx, buildRemoteAgentDownloadCommand(update.DefaultManifestURL, maxRemoteAgentManifestBytes), maxRemoteAgentManifestBytes)
 	if err != nil {
-		return nil, fmt.Errorf("target download release manifest: %w", err)
+		return selectedAgentRelease{}, fmt.Errorf("target download release manifest: %w", err)
 	}
 	var manifest update.Manifest
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return nil, fmt.Errorf("decode target-downloaded release manifest: %w", err)
+		return selectedAgentRelease{}, fmt.Errorf("decode target-downloaded release manifest: %w", err)
 	}
-	selected, err := selectAgentRelease(spec.Version, target, manifest)
+	return selectAgentRelease(spec.Version, target, manifest)
+}
+
+// acquireVerifiedAgentRelease has the target download the release matching
+// spec and verifies it. With a private stagingDir the archive is downloaded
+// into it and stays there: the target reports the archive's size and digests,
+// the controller checks them against the release signature and manifest, and
+// the target then checks the digests again and unpacks the binary to
+// spec.DestinationPath itself, so staged is true and nothing larger than the
+// manifest and signature crosses the connection. Otherwise (the target cannot
+// hash or unpack the archive, or its digests do not verify) the archive is
+// read back, verified whole and its binary returned for the caller to upload
+// to spec.DestinationPath, as it always is without a stagingDir. Either way a
+// release is accepted only if it would be when verified whole.
+func acquireVerifiedAgentRelease(ctx context.Context, runner remoteOutputRunner, spec BootstrapAgentRelease, stagingDir, publicKeyText string) (binary []byte, staged bool, err error) {
+	if stagingDir == "" {
+		binary, err := fetchVerifiedAgentReleaseWithKey(ctx, runner, spec, publicKeyText)
+		return binary, false, err
+	}
+	destination := strings.TrimSpace(spec.DestinationPath)
+	archivePath := agentReleaseArchivePath(stagingDir)
+	selected, err := selectTargetAgentRelease(ctx, runner, spec)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	archive, err := runner.Output(ctx, buildRemoteAgentDownloadCommand(selected.info.URL, selected.info.Size), selected.info.Size)
+	report, err := runner.Output(ctx, buildRemoteAgentFetchCommand(selected.info.URL, selected.info.Size, archivePath), 4<<10)
 	if err != nil {
-		return nil, fmt.Errorf("target download %s: %w", target.name, err)
+		return nil, false, fmt.Errorf("target download %s: %w", selected.target.name, err)
 	}
 	signature, err := runner.Output(ctx, buildRemoteAgentDownloadCommand(selected.info.Signature, maxAgentSignatureBytes), maxAgentSignatureBytes)
 	if err != nil {
-		return nil, fmt.Errorf("target download %s signature: %w", target.name, err)
+		return nil, false, fmt.Errorf("target download %s signature: %w", selected.target.name, err)
 	}
-	return verifySelectedAgentRelease(selected, archive, signature, publicKeyText)
+	digests, hashed, err := parseAgentArchiveReport(report)
+	if err != nil {
+		return nil, false, fmt.Errorf("target report on %s: %w", selected.target.name, err)
+	}
+	// Digests that do not verify are not trusted to mean a bad release (the
+	// target's tool may be at fault, or the signature may not sign a digest):
+	// the archive itself is read back and decides.
+	if hashed && verifySelectedAgentReleaseDigests(selected, digests, signature, publicKeyText) == nil {
+		out, err := runner.Output(ctx, buildRemoteAgentStageCommand(archivePath, destination, digests), 4<<10)
+		if err != nil {
+			return nil, false, fmt.Errorf("unpack verified %s on the target: %w", selected.target.name, err)
+		}
+		switch strings.TrimSpace(string(out)) {
+		case agentStagedMarker:
+			return nil, true, nil
+		case agentUnpackUnavailableMarker:
+		default:
+			return nil, false, fmt.Errorf("unpack verified %s on the target: unexpected output %q", selected.target.name, bytes.TrimSpace(out))
+		}
+	}
+
+	archive, err := runner.Output(ctx, "cat "+shellQuote(archivePath), selected.info.Size)
+	if err != nil {
+		return nil, false, fmt.Errorf("read back %s from the target: %w", selected.target.name, err)
+	}
+	binary, err = verifySelectedAgentRelease(selected, archive, signature, publicKeyText)
+	return binary, false, err
+}
+
+// agentReleaseArchivePath is where the target keeps the release archive it
+// downloads into the private staging directory.
+func agentReleaseArchivePath(stagingDir string) string {
+	return TargetPathPOSIX.Join(stagingDir, "agent-release.tar.gz")
+}
+
+const (
+	agentDigestsMarker           = "fleet-agent-archive"
+	agentDigestsUnavailable      = "fleet-agent-archive-unhashed"
+	agentStagedMarker            = "fleet-agent-unpacked"
+	agentUnpackUnavailableMarker = "fleet-agent-not-unpacked"
+)
+
+// parseAgentArchiveReport reads buildRemoteAgentFetchCommand's output, a single
+// line: the archive's size and digests, or that the target has no working tool
+// to compute them (hashed is false).
+func parseAgentArchiveReport(report []byte) (digests agentArchiveDigests, hashed bool, err error) {
+	fields := strings.Fields(string(report))
+	if len(fields) == 1 && fields[0] == agentDigestsUnavailable {
+		return agentArchiveDigests{}, false, nil
+	}
+	if len(fields) != 4 || fields[0] != agentDigestsMarker {
+		return agentArchiveDigests{}, false, fmt.Errorf("unexpected archive report %q", bytes.TrimSpace(report))
+	}
+	size, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || size <= 0 {
+		return agentArchiveDigests{}, false, fmt.Errorf("invalid archive size %q", fields[1])
+	}
+	blake, err := hex.DecodeString(fields[2])
+	if err != nil || len(blake) != blake2b.Size {
+		return agentArchiveDigests{}, false, fmt.Errorf("invalid BLAKE2b-512 digest %q", fields[2])
+	}
+	sum, err := hex.DecodeString(fields[3])
+	if err != nil || len(sum) != sha256.Size {
+		return agentArchiveDigests{}, false, fmt.Errorf("invalid SHA-256 digest %q", fields[3])
+	}
+	return agentArchiveDigests{size: size, blake2b512: blake, sha256: sum}, true, nil
+}
+
+// remoteDigestFunctions defines fleet_blake2b and fleet_sha256 for the
+// target's shell. Each prints a file's digest in lowercase hex, computed with
+// the first of the usual tools that is installed and gives the right digest
+// of empty input, and fails when none does.
+func remoteDigestFunctions() []string {
+	emptyBlake := blake2b.Sum512(nil)
+	emptySHA := sha256.Sum256(nil)
+	const python = `'import hashlib,sys; print(getattr(hashlib, sys.argv[1])(open(sys.argv[2], "rb").read()).hexdigest())'`
+	return []string{
+		`fleet_digest_run() {`,
+		`  fd_out=$("$@" 2>/dev/null) || return 1`,
+		`  set -- $fd_out`,
+		`  [ "$#" -ge 1 ] || return 1`,
+		`  fd_hex=$(printf '%s' "$1" | tr 'ABCDEF' 'abcdef')`,
+		`  case $fd_hex in ''|*[!0-9a-f]*) return 1 ;; esac`,
+		`  printf '%s\n' "$fd_hex"`,
+		`}`,
+		`fleet_digest_try() {`,
+		`  fd_empty=$1; fd_file=$2; shift 2`,
+		`  fd_got=$(fleet_digest_run "$@" /dev/null) || return 1`,
+		`  [ "$fd_got" = "$fd_empty" ] || return 1`,
+		`  fd_got=$(fleet_digest_run "$@" "$fd_file") || return 1`,
+		`  [ "${#fd_got}" -eq "${#fd_empty}" ] || return 1`,
+		`  printf '%s\n' "$fd_got"`,
+		`}`,
+		`fleet_blake2b() {`,
+		`  E=` + hex.EncodeToString(emptyBlake[:]),
+		`  fleet_digest_try "$E" "$1" b2sum && return 0`,
+		`  fleet_digest_try "$E" "$1" openssl dgst -blake2b512 -r && return 0`,
+		`  fleet_digest_try "$E" "$1" python3 -c ` + python + ` blake2b && return 0`,
+		`  return 1`,
+		`}`,
+		`fleet_sha256() {`,
+		`  E=` + hex.EncodeToString(emptySHA[:]),
+		`  fleet_digest_try "$E" "$1" sha256sum && return 0`,
+		`  fleet_digest_try "$E" "$1" shasum -a 256 && return 0`,
+		`  fleet_digest_try "$E" "$1" openssl dgst -sha256 -r && return 0`,
+		`  fleet_digest_try "$E" "$1" python3 -c ` + python + ` sha256 && return 0`,
+		`  return 1`,
+		`}`,
+	}
+}
+
+// buildRemoteAgentFetchCommand downloads the archive at rawURL to archivePath
+// on the target, like buildRemoteAgentDownloadCommand, and prints its size and
+// digests instead of its contents.
+func buildRemoteAgentFetchCommand(rawURL string, maxBytes int64, archivePath string) string {
+	lines := remoteAgentDownloadLines(rawURL, maxBytes, remoteAgentDownloadTimeoutSeconds,
+		"ARCHIVE="+shellQuote(archivePath), `TMP=$(mktemp "$ARCHIVE.XXXXXX")`)
+	lines = append(lines, `mv -f "$TMP" "$ARCHIVE"`, "set -f")
+	lines = append(lines, remoteDigestFunctions()...)
+	lines = append(lines,
+		`SIZE=$(wc -c < "$ARCHIVE")`,
+		`if BLAKE2B=$(fleet_blake2b "$ARCHIVE") && SHA256=$(fleet_sha256 "$ARCHIVE"); then`,
+		`  printf '`+agentDigestsMarker+` %s %s %s\n' $SIZE "$BLAKE2B" "$SHA256"`,
+		`else`,
+		`  echo `+agentDigestsUnavailable,
+		`fi`,
+	)
+	return strings.Join(lines, "\n")
+}
+
+// buildRemoteAgentStageCommand checks that the archive on the target still has
+// the digests the controller verified, then unpacks its fleet-agent to
+// destination. It prints agentUnpackUnavailableMarker, leaving the archive in
+// place, when the target cannot unpack it.
+func buildRemoteAgentStageCommand(archivePath, destination string, digests agentArchiveDigests) string {
+	lines := []string{
+		"set -eu",
+		"set -f",
+		"umask 077",
+		"ARCHIVE=" + shellQuote(archivePath),
+		"DEST=" + shellQuote(destination),
+		"PART=" + shellQuote(remoteUploadPartialPath(destination)),
+		"WANT_BLAKE2B=" + hex.EncodeToString(digests.blake2b512),
+		"WANT_SHA256=" + hex.EncodeToString(digests.sha256),
+		`trap 'rm -f "$PART"' 0`,
+		`trap 'exit 1' 1 2 13 15`,
+	}
+	lines = append(lines, remoteDigestFunctions()...)
+	lines = append(lines,
+		`if ! GOT_BLAKE2B=$(fleet_blake2b "$ARCHIVE") || ! GOT_SHA256=$(fleet_sha256 "$ARCHIVE"); then`,
+		`  echo "cannot hash the downloaded agent archive again" >&2; exit 1`,
+		`fi`,
+		`if [ "$GOT_BLAKE2B" != "$WANT_BLAKE2B" ] || [ "$GOT_SHA256" != "$WANT_SHA256" ]; then`,
+		`  echo "the downloaded agent archive changed after it was verified" >&2; exit 1`,
+		`fi`,
+		`rm -f "$PART"`,
+		`if tar -xzOf "$ARCHIVE" fleet-agent > "$PART" 2>/dev/null && [ -s "$PART" ]; then`,
+		`  chmod 0700 "$PART"`,
+		`  mv -f "$PART" "$DEST"`,
+		`  rm -f "$ARCHIVE"`,
+		`  echo `+agentStagedMarker,
+		`else`,
+		`  echo `+agentUnpackUnavailableMarker,
+		`fi`,
+	)
+	return strings.Join(lines, "\n")
 }
 
 func buildRemoteAgentDownloadCommand(rawURL string, maxBytes int64) string {
@@ -545,6 +815,13 @@ func buildRemoteAgentDownloadCommand(rawURL string, maxBytes int64) string {
 }
 
 func buildRemoteAgentDownloadCommandWithTimeout(rawURL string, maxBytes int64, timeoutSeconds int) string {
+	return strings.Join(append(remoteAgentDownloadLines(rawURL, maxBytes, timeoutSeconds, "TMP=$(mktemp)"), `cat "$TMP"`), "\n")
+}
+
+// remoteAgentDownloadLines downloads rawURL on the target into the temporary
+// file $TMP, which the lines in setup create, with wget or else curl, bounded
+// to maxBytes and timeoutSeconds. $TMP is removed when the shell exits.
+func remoteAgentDownloadLines(rawURL string, maxBytes int64, timeoutSeconds int, setup ...string) []string {
 	if maxBytes <= 0 {
 		maxBytes = 1
 	}
@@ -555,27 +832,34 @@ func buildRemoteAgentDownloadCommandWithTimeout(rawURL string, maxBytes int64, t
 	if maxBytes%512 != 0 {
 		fileBlocks++
 	}
-	return strings.Join([]string{
+	lines := []string{
 		"set -eu",
 		"umask 077",
 		"URL=" + shellQuote(rawURL),
 		"MAX_BLOCKS=" + strconv.FormatInt(fileBlocks, 10),
 		"DEADLINE_SECONDS=" + strconv.Itoa(timeoutSeconds),
-		"TMP=$(mktemp)",
+	}
+	lines = append(lines, setup...)
+	return append(lines,
 		"DOWNLOAD_PID=",
 		"WATCHDOG_PID=",
 		`cleanup() {`,
 		`  status=$?`,
 		`  trap - 0 1 2 15`,
 		`  if [ -n "$DOWNLOAD_PID" ]; then kill "$DOWNLOAD_PID" 2>/dev/null || true; wait "$DOWNLOAD_PID" 2>/dev/null || true; fi`,
-		`  if [ -n "$WATCHDOG_PID" ]; then kill "$WATCHDOG_PID" 2>/dev/null || true; wait "$WATCHDOG_PID" 2>/dev/null || true; fi`,
+		// SIGKILL: a TERM that reaches the watchdog before its shell has reset
+		// the inherited trap is lost, and waiting for it would take the
+		// whole deadline.
+		`  if [ -n "$WATCHDOG_PID" ]; then kill -9 "$WATCHDOG_PID" 2>/dev/null || true; wait "$WATCHDOG_PID" 2>/dev/null || true; fi`,
 		`  rm -f "$TMP"`,
 		`  exit "$status"`,
 		`}`,
 		`trap cleanup 0`,
 		`trap 'exit 124' 1 2 15`,
 		`ulimit -f "$MAX_BLOCKS"`,
-		`( remaining=$DEADLINE_SECONDS; while [ "$remaining" -gt 0 ]; do sleep 1; remaining=$((remaining - 1)); done; kill -TERM "$$" 2>/dev/null || true ) &`,
+		// The watchdog must not hold the command's output open: its sleep
+		// outlives the kill below and would delay the end of the output.
+		`( remaining=$DEADLINE_SECONDS; while [ "$remaining" -gt 0 ]; do sleep 1; remaining=$((remaining - 1)); done; kill -TERM "$$" 2>/dev/null || true ) >/dev/null 2>&1 &`,
 		`WATCHDOG_PID=$!`,
 		`run_download() {`,
 		`  "$@" &`,
@@ -597,8 +881,7 @@ func buildRemoteAgentDownloadCommandWithTimeout(rawURL string, maxBytes int64, t
 		`  if run_download curl -fL --silent --show-error --retry 3 --retry-delay 1 --connect-timeout 15 --max-time "$DEADLINE_SECONDS" --proto '=https' -o "$TMP" "$URL"; then DOWNLOADED=1; fi`,
 		"fi",
 		`if [ "$DOWNLOADED" -ne 1 ]; then echo "wget and curl could not download the Fleet release payload" >&2; exit 1; fi`,
-		`cat "$TMP"`,
-	}, "\n")
+	)
 }
 
 func extractVerifiedAgentBinary(archive []byte) ([]byte, error) {

@@ -34,6 +34,26 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+### Changed
+
+- Agent auto-install no longer moves the agent through the controller. The server keeps
+  the release archive it downloads and reports its size and BLAKE2b-512 and SHA-256
+  digests; the controller verifies the minisign signature (which signs the BLAKE2b-512
+  digest), the version and target it names, the size and the SHA-256 from those, and only
+  then does the server check the digests again and unpack the agent itself. For
+  linux-amd64 that is about 12 MB less over the SSH connection per server: the 3.6 MB
+  archive no longer comes down and the 8.6 MB binary no longer goes back up. A server
+  without `b2sum`, `openssl` or `python3`, or without `tar`, sends the archive back to be
+  verified and unpacked on the controller as before, and so does one whose digests do not
+  verify, so a release is accepted exactly when it would be if verified whole.
+
+### Fixed
+
+- Each download step of an agent install ended up to a second late, and on a busy server
+  one could stall for the whole five-minute download deadline and then fail: the
+  download's timeout watchdog kept its output open, and could miss the signal that stops
+  it.
+
 ## [v2.5.0] — 2026-09-27 (stable)
 
 ### Added

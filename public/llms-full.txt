@@ -461,8 +461,8 @@ Press Enter to continue:
 
 1. Fleet opens an SSH connection and pins the server's host key on first contact.
 2. It detects the CPU architecture with `uname -m`.
-3. The server downloads only its matching `fleet-agent` archive, signature and release manifest (`wget`, falling back to `curl`, with retries).
-4. The files are streamed back through the pinned connection, and the controller checks the minisign signature, the version and target, the size and the SHA-256 before installing.
+3. The server downloads only its matching `fleet-agent` archive, signature and release manifest (`wget`, falling back to `curl`, with retries), and keeps the archive.
+4. The server reports the archive's size and its BLAKE2b-512 and SHA-256 digests. The controller checks the minisign signature against that digest, and the version, target, size and SHA-256 against the release; only then does the server check the digests again and unpack the agent. The archive and the binary never pass through your machine. A server with no tool to hash or unpack the archive sends it back through the pinned connection to be checked and unpacked on your machine instead.
 5. The agent is installed to `/opt/cenvero-fleet/fleet-agent`, and `cenvero-fleet-agent.service` is created, enabled and started.
 
 When it finishes, connect with `fleet server reconnect web-02`.
