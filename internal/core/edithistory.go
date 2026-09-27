@@ -40,6 +40,9 @@ type editHistoryEntry struct {
 	OldSHA256    string    `json:"old_sha256"`
 	NewSHA256    string    `json:"new_sha256"`
 	OldSize      int64     `json:"old_size"`
+	// InPlace marks a version saved before an in-place write; undo writes it
+	// back in place too.
+	InPlace bool `json:"in_place,omitempty"`
 	// dirRel is where the entry was found (not serialised).
 	dirRel string
 }
@@ -53,10 +56,11 @@ type EditHistoryItem struct {
 	OldSHA256 string    `json:"old_sha256"`
 	NewSHA256 string    `json:"new_sha256"`
 	OldSize   int64     `json:"old_size"`
+	InPlace   bool      `json:"in_place,omitempty"`
 }
 
 func (e editHistoryEntry) item() EditHistoryItem {
-	return EditHistoryItem{ID: e.ID, Time: e.Time, Operator: e.Operator, Path: e.ResolvedPath, OldSHA256: e.OldSHA256, NewSHA256: e.NewSHA256, OldSize: e.OldSize}
+	return EditHistoryItem{ID: e.ID, Time: e.Time, Operator: e.Operator, Path: e.ResolvedPath, OldSHA256: e.OldSHA256, NewSHA256: e.NewSHA256, OldSize: e.OldSize, InPlace: e.InPlace}
 }
 
 func (a *App) editHistory() editHistory {
@@ -209,6 +213,11 @@ func (h editHistory) content(e editHistoryEntry) ([]byte, error) {
 		return nil, fmt.Errorf("the kept version of %s is damaged (its sha256 does not match); not restoring it", e.ResolvedPath)
 	}
 	return data, nil
+}
+
+// forget removes the entry id recorded for resolvedPath on server.
+func (h editHistory) forget(server, resolvedPath, id string) error {
+	return h.remove(editHistoryEntry{ID: id, dirRel: filepath.Join(hashName(server), hashName(resolvedPath))})
 }
 
 func (h editHistory) remove(e editHistoryEntry) error {

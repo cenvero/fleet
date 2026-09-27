@@ -30,6 +30,10 @@ func checkEditWritable(*os.Root, string) *RPCError { return nil }
 // ReplaceFileW carries the original's owner, ACL and attributes over.
 func preserveMetadata(_, _ *os.File, _ os.FileInfo) ([]string, *RPCError) { return nil, nil }
 
+// replaceBlockedReason: ReplaceFileW has no failure that writing the file in
+// place would reliably avoid.
+func replaceBlockedReason(error) string { return "" }
+
 // installEditedTemp swaps the temp file in with ReplaceFileW, which keeps the
 // replaced file's security descriptor (owner and ACL), attributes and
 // alternate data streams. Without REPLACEFILE_IGNORE_MERGE_ERRORS a failure
@@ -50,7 +54,7 @@ func installEditedTemp(root *os.Root, tempRel, finalRel string, _ os.FileInfo) (
 	r1, _, callErr := procReplaceFileW.Call(uintptr(unsafe.Pointer(rp)), uintptr(unsafe.Pointer(np)), 0, 0, 0, 0)
 	if r1 == 0 {
 		_ = os.Remove(replacement)
-		return nil, &RPCError{Code: "rename_failed", Message: fmt.Sprintf("ReplaceFileW: %v", callErr)}
+		return nil, &RPCError{Code: "rename_failed", Message: fmt.Sprintf("ReplaceFileW: %v", callErr), cause: callErr}
 	}
 	return []string{"owner", "acl", "attributes"}, nil
 }

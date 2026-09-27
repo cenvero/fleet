@@ -234,7 +234,7 @@ func RunDashboardWithOptions(opts DashboardOptions) error {
 	// registered once per rendered frame.
 	zone.NewGlobal()
 	// Query the terminal background once, before Bubble Tea owns stdin.
-	dark := lipgloss.HasDarkBackground()
+	dark := dashTerminalIsDark(os.Getenv, lipgloss.HasDarkBackground)
 	exe, _ := os.Executable()
 
 	rt := newDashRuntime(loader, dark, exe, opts.Token, app.ConfigDir)
@@ -244,6 +244,21 @@ func RunDashboardWithOptions(opts DashboardOptions) error {
 	// movement does not generate an event (and a frame) per cell.
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 	return err
+}
+
+// dashTerminalIsDark reports whether to use the palette for a dark terminal
+// background. FLEET_THEME=light or dark overrides detection, which cannot
+// work everywhere: tmux and screen are never asked for the terminal's colours,
+// so inside them detection relies on COLORFGBG and otherwise assumes dark —
+// which puts pale text on a light terminal.
+func dashTerminalIsDark(getenv func(string) string, detect func() bool) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("FLEET_THEME"))) {
+	case "light":
+		return false
+	case "dark":
+		return true
+	}
+	return detect()
 }
 
 func newDashRuntime(loader *dashLoader, dark bool, exe, token, configDir string) *dashRuntime {

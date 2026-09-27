@@ -156,6 +156,9 @@ type fmPalette struct {
 	keyChip, hintLabel                              fmPaint
 	// transfer bar
 	barFill, barTrack fmPaint
+	// pageBg and panelBg are the bare SGR sequences that set the page and the
+	// popup background (empty without colour); see fillBackground.
+	pageBg, panelBg string
 	// icons: plain + zebra
 	icons  map[fmIconKind]fmPaint
 	iconsZ map[fmIconKind]fmPaint
@@ -248,6 +251,11 @@ func fmBuildPalette(prof termenv.Profile) *fmPalette {
 	p.keyChip = fmPaintOf(on(fmBorderC).Foreground(fmAccent2).Bold(true))
 	p.hintLabel = fmPaintOf(pg().Foreground(fmMutedC))
 
+	if !p.noColor {
+		p.pageBg = fmPaintOf(pg()).pre
+		p.panelBg = fmPaintOf(on(fmPanelBg)).pre
+	}
+
 	p.barFill = fmPaintOf(pg().Foreground(fmAccent))
 	p.barTrack = fmPaintOf(pg().Foreground(fmBorderC))
 
@@ -259,6 +267,31 @@ func fmBuildPalette(prof termenv.Profile) *fmPalette {
 	}
 	return p
 }
+
+// fillBackground gives every cell of s that sets no background of its own the
+// background bg (an SGR sequence from pageBg or panelBg). Text styled with only
+// a foreground colour ends in a reset, and the cells after a reset otherwise
+// fall back to the terminal's own background — invisible on a dark terminal,
+// but white holes and light-grey-on-white text on a light one. Each line
+// starts with bg, and bg is set again after every reset.
+func fillBackground(s, bg string) string {
+	if bg == "" || s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/8)
+	for i, line := range strings.Split(s, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(bg)
+		b.WriteString(strings.ReplaceAll(line, fmSGRReset, fmSGRReset+bg))
+	}
+	return b.String()
+}
+
+// fmSGRReset is the reset sequence termenv (and so lipgloss) ends styles with.
+const fmSGRReset = "\x1b[0m"
 
 // pageLine pads a painted line (whose visible width is known) to w columns
 // with page background so the whole screen stays one colour.

@@ -33,6 +33,10 @@ type fileEditor interface {
 // checks that the original is unchanged. Production code never sets it.
 var testHookBeforeEditInstall func()
 
+// testHookBeforeInPlaceVerify, when set by a test, runs after an in-place
+// write and before it is read back (to simulate a write that went wrong).
+var testHookBeforeInPlaceVerify func(*os.File)
+
 // maxEditDiffBytes caps the diff returned with an edit.
 const maxEditDiffBytes = 64 * 1024
 
@@ -246,7 +250,13 @@ func (m *fileManager) editExisting(p proto.FileEditPayload, limit int64) (proto.
 		return proto.FileEditResult{}, &RPCError{Code: textedit.CodeFileTooLarge, Message: fmt.Sprintf("the file is %d bytes, over the %d-byte edit limit; transfer it with file upload/download instead", info.Size(), limit)}
 	}
 	if n := linkCount(info); n > 1 {
-		return proto.FileEditResult{}, &RPCError{Code: "hard_linked", Message: fmt.Sprintf("the file has %d hard links; replacing it would split them apart, so it is left unchanged", n)}
+		why := "replacing it would split them apart"
+		if p.InPlace {
+			// Also refused in place: the other names may lie outside the
+			// block list and --file-root this edit was checked against.
+			why = "writing it would change the file under its other names too, which were not checked"
+		}
+		return proto.FileEditResult{}, &RPCError{Code: "hard_linked", Message: fmt.Sprintf("the file has %d hard links; %s, so it is left unchanged", n, why)}
 	}
 	if rerr := checkEditWritable(root, rel); rerr != nil {
 		return proto.FileEditResult{}, rerr
@@ -289,11 +299,21 @@ func (m *fileManager) editExisting(p proto.FileEditPayload, limit int64) (proto.
 	}
 	if !res.Changed || p.DryRun {
 		describeFile(&res, info)
+		if res.Changed && p.ReturnOriginal {
+			// The controller saves this before an in-place write.
+			res.Original = content
+		}
 		return res, nil
 	}
 
-	preserved, rerr := installEdit(root, rel, f, info, next, newSum)
-	if rerr != nil {
+	var preserved []string
+	if p.InPlace {
+		if rerr := installInPlace(root, rel, info, content, next, newSum); rerr != nil {
+			return proto.FileEditResult{}, rerr
+		}
+		res.InPlace = true
+		preserved = []string{"all metadata (same file)"}
+	} else if preserved, rerr = installEdit(root, rel, f, info, next, newSum); rerr != nil {
 		return proto.FileEditResult{}, rerr
 	}
 	res.Verified = true
@@ -392,7 +412,7 @@ func writeVerifiedTemp(root *os.Root, rel string, data []byte, sum string) (*os.
 	maybeReapStalePartsRoot(root, filepath.Dir(rel), filepath.Base(tempRel), time.Now())
 	tf, err := root.OpenFile(tempRel, os.O_RDWR|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
 	if err != nil {
-		return nil, "", nil, &RPCError{Code: "open_failed", Message: err.Error()}
+		return nil, "", nil, &RPCError{Code: "open_failed", Message: err.Error(), cause: err}
 	}
 	created, err := tf.Stat()
 	if err != nil {
@@ -432,6 +452,9 @@ func writeVerifiedTemp(root *os.Root, rel string, data []byte, sum string) (*os.
 func installEdit(root *os.Root, rel string, orig *os.File, origInfo os.FileInfo, data []byte, sum string) ([]string, *RPCError) {
 	tf, tempRel, created, rerr := writeVerifiedTemp(root, rel, data, sum)
 	if rerr != nil {
+		if rerr.Code == "open_failed" && errors.Is(rerr, fs.ErrPermission) {
+			return nil, cannotReplace(fmt.Sprintf("the agent may not create files in the file's folder (%v), which replacing the file needs", rerr.cause))
+		}
 		return nil, rerr
 	}
 	fail := func(rerr *RPCError) ([]string, *RPCError) {
@@ -441,6 +464,11 @@ func installEdit(root *os.Root, rel string, orig *os.File, origInfo os.FileInfo,
 	}
 	preserved, rerr := preserveMetadata(tf, orig, origInfo)
 	if rerr != nil {
+		switch rerr.Code {
+		case "cannot_preserve_owner", "cannot_preserve_xattrs", "cannot_preserve_mode":
+			// Written in place, the file keeps all of these by itself.
+			rerr = cannotReplace(strings.TrimSuffix(rerr.Message, "; nothing was changed"))
+		}
 		return fail(rerr)
 	}
 	if err := tf.Sync(); err != nil {
@@ -464,10 +492,89 @@ func installEdit(root *os.Root, rel string, orig *os.File, origInfo os.FileInfo,
 	}
 	more, rerr := installEditedTemp(root, tempRel, rel, tempInfo)
 	if rerr != nil {
+		if reason := replaceBlockedReason(rerr.cause); rerr.Code == "rename_failed" && reason != "" {
+			return nil, cannotReplace(reason)
+		}
 		return nil, rerr
 	}
 	syncParentDir(root, rel)
 	return append(preserved, more...), nil
+}
+
+// cannotReplace reports an edit that installing a new file cannot make but
+// writing the file in place (InPlace) could.
+func cannotReplace(reason string) *RPCError {
+	return &RPCError{Code: "cannot_replace", Message: reason + "; nothing was changed. It can be written in place instead (fleet file edit --in-place), which keeps the same file but is not atomic"}
+}
+
+// installInPlace writes data (whose SHA-256 is sum) into the file rel itself
+// instead of replacing it with a new file: the InPlace mode, for files a
+// replacement cannot work on (see cannotReplace). The file stays the same
+// file, so its owner, group, mode, ACLs and labels are kept without copying
+// anything. origInfo describes the file as it was read, with content before.
+//
+// Writing in place is not atomic, so it is made as safe as it can be: the
+// file must still be the one that was read; the space the new content needs
+// is reserved before the first byte changes (where the filesystem can); the
+// result is fsynced and read back; and if any step fails, the original
+// content is written back. The controller saves the original before it asks
+// for an in-place write, so an agent that dies mid-write still leaves a
+// version to restore.
+func installInPlace(root *os.Root, rel string, origInfo os.FileInfo, before, data []byte, sum string) *RPCError {
+	w, err := root.OpenFile(rel, os.O_RDWR|oNoFollow|oNonBlock, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return &RPCError{Code: "permission_denied", Message: fmt.Sprintf("the agent may not write this file (%v); nothing was changed", err)}
+		}
+		return &RPCError{Code: "open_failed", Message: err.Error()}
+	}
+	defer w.Close()
+	if testHookBeforeEditInstall != nil {
+		testHookBeforeEditInstall()
+	}
+	// Something outside Fleet may have written the file since it was read;
+	// writing now would throw that change away.
+	if cur, err := w.Stat(); err != nil || !sameInode(cur, origInfo) || cur.Size() != origInfo.Size() || !cur.ModTime().Equal(origInfo.ModTime()) {
+		return &RPCError{Code: "edit_conflict", Message: "the file changed while the edit was being applied; nothing was changed — read it again and redo the edit"}
+	}
+	if grow := int64(len(data)) - origInfo.Size(); grow > 0 {
+		if err := reserveFileSpace(w, origInfo.Size(), grow); err != nil {
+			return &RPCError{Code: "no_space", Message: fmt.Sprintf("cannot reserve room for %d more bytes (%v); nothing was changed", grow, err)}
+		}
+	}
+	if err := overwriteFile(w, data, sum); err != nil {
+		if rerr := overwriteFile(w, before, sha256Hex(before)); rerr != nil {
+			return &RPCError{Code: "write_incomplete", Message: fmt.Sprintf("writing the file in place failed (%v), and its original content could not be written back (%v), so the file may be part-written; the controller saved the original before the write — restore it with `fleet file edit --undo --force`", err, rerr)}
+		}
+		return &RPCError{Code: "write_failed", Message: fmt.Sprintf("writing the file in place failed (%v); its original content was written back, so nothing was changed", err)}
+	}
+	return nil
+}
+
+// overwriteFile makes the open file w hold exactly data: written from the
+// start, cut to its length, fsynced, then read back from disk and checked
+// against sum (a longer file fails the check too).
+func overwriteFile(w *os.File, data []byte, sum string) error {
+	if _, err := w.WriteAt(data, 0); err != nil {
+		return err
+	}
+	if err := w.Truncate(int64(len(data))); err != nil {
+		return err
+	}
+	if err := w.Sync(); err != nil {
+		return err
+	}
+	if testHookBeforeInPlaceVerify != nil {
+		testHookBeforeInPlaceVerify(w)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(w, 0, int64(len(data))+1)); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != sum {
+		return fmt.Errorf("the file read back with sha256 %s, expected %s", got, sum)
+	}
+	return nil
 }
 
 // syncParentDir flushes the directory entry change of a rename to disk. It is

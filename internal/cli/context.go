@@ -265,7 +265,10 @@ const contextForAgents = "## How to use this as an agent\n\n" +
 	"Use `--insert-after N --text ...` to add lines, `--edits <file|->` for several changes at once (all or nothing), " +
 	"`--dry-run` to preview the diff, `--json` for a structured result, and `--undo` to restore the previous version. " +
 	"The agent keeps the file's owner, group, mode, ACLs and SELinux label, replaces it atomically (a dropped connection never leaves " +
-	"a half-written file), and refuses the edit if the file changed since your view (`edit_conflict` — view it again and redo the edit).\n" +
+	"a half-written file), and refuses the edit if the file changed since your view (`edit_conflict` — view it again and redo the edit). " +
+	"If an edit fails with `cannot_replace` (a file bind-mounted into a container, a folder the agent may not write, an owner it cannot keep), " +
+	"nothing was changed; repeat the same command with `--in-place` to write into the file itself — not atomic, so Fleet saves the current " +
+	"version first, and if the result says `write_incomplete` or the connection dropped mid-write, restore it with `--undo --force`.\n" +
 	"- If you see \"not initialized\", the controller needs `fleet init` first — confirm with the user before initializing.\n" +
 	"- DESTRUCTIVE or outward-facing actions require explicit user intent — confirm before running: " +
 	"`server remove`, `file rm`, `key rotate`, `update apply`, `self-uninstall`, `config restore`.\n" +

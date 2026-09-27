@@ -38,9 +38,10 @@ function api(pathname, params = {}) {
 // ApiError carries the HTTP status and the server's message (the backend
 // answers {"error": "..."} JSON or a plain-text http.Error body).
 class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, code = "") {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -48,11 +49,13 @@ async function errorFrom(res) {
   let text = "";
   try { text = await res.text(); } catch { /* ignore */ }
   let msg = text.trim();
+  let code = "";
   try {
     const parsed = JSON.parse(text);
     if (parsed && typeof parsed.error === "string") msg = parsed.error;
+    if (parsed && typeof parsed.code === "string") code = parsed.code;
   } catch { /* plain text */ }
-  return new ApiError(msg || res.statusText || "HTTP " + res.status, res.status);
+  return new ApiError(msg || res.statusText || "HTTP " + res.status, res.status, code);
 }
 
 async function getJSON(pathname, params) {
@@ -751,6 +754,8 @@ function promptDialog({ title, message = "", value = "", okLabel = "OK", validat
   const inputId = "dlg-in-" + ++dialogSeq;
   const errId = inputId + "-err";
   const input = h("input", { id: inputId, class: "text-input" + (mono ? " mono" : ""), type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", "aria-describedby": errId, value });
+  // Without a visible label the field is named after the dialog.
+  if (!label) input.setAttribute("aria-label", title);
   const err = h("div", { id: errId, class: "field-error", "aria-live": "polite" });
   const fieldKids = [];
   if (label) fieldKids.push(h("label", { for: inputId, class: "mf-label", text: label }));
@@ -1397,6 +1402,8 @@ function crumbRoom(p) {
 
 function renderCrumbs(p) {
   if (!p.el) return;
+  // One "Path" landmark per pane: name them apart for screen readers.
+  p.el.crumbs.setAttribute("aria-label", "Path, pane " + paneNumber(p));
   const list = p.el.crumbList;
   list.replaceChildren();
   const path = p.path || p.initialRoot;
@@ -1529,8 +1536,10 @@ function renderSort(p) {
   const names = { name: "Name", size: "Size", mod: "Modified" };
   for (const col of $$(".col", p.el.head)) {
     const active = col.dataset.sort === p.sort.key;
-    if (active) col.setAttribute("aria-sort", p.sort.dir > 0 ? "ascending" : "descending");
-    else col.removeAttribute("aria-sort");
+    // (Not aria-sort: that belongs on a columnheader, and these are buttons
+    // whose label already says the order.)
+    if (active) col.dataset.sortDir = p.sort.dir > 0 ? "ascending" : "descending";
+    else delete col.dataset.sortDir;
     const dir = active ? (p.sort.dir > 0 ? "ascending" : "descending") : "";
     col.setAttribute("aria-label", "Sort by " + names[col.dataset.sort] + (dir ? " (currently " + dir + ")" : ""));
   }
@@ -4474,7 +4483,7 @@ function closeEditor() {
   else if (p && p.el) p.el.grid.focus();
 }
 
-async function saveEditor() {
+async function saveEditor(inPlace = false) {
   if (!editor.open) return;
   const p = editor.p;
   const item = editor.item;
@@ -4488,6 +4497,7 @@ async function saveEditor() {
   try {
     const params = { server: p.server, path: full };
     if (editor.base) params.base = editor.base;
+    if (inPlace) params.in_place = "1";
     const res = await fetch(api("/api/write", params), {
       method: "POST",
       headers: { "X-Fleet-Token": TOKEN, "Content-Type": "text/plain" },
@@ -4497,9 +4507,23 @@ async function saveEditor() {
     const saved = await res.json().catch(() => ({}));
     editor.base = saved.sha256 || "";
   } catch (e) {
-    toast("Save failed: " + friendlyError(e, p.server), "error");
     saveBtn.disabled = false;
     saveBtn.textContent = "Save";
+    if (e.code === "cannot_replace" && !inPlace) {
+      // The file can't be swapped for a new copy (a bind-mounted file, a
+      // folder the agent may not write…); offer to write it where it is.
+      const why = e.message.replace(/ It can be written in place instead.*$/, "");
+      const ok = await confirmDialog({
+        title: "Write the file in place?",
+        message: why.charAt(0).toUpperCase() + why.slice(1) +
+          " Writing in place keeps the same file (owner, mode and labels stay as they are) but is not atomic. The current version is saved on the controller first, so it can be restored with “fleet file edit --undo”.",
+        okLabel: "Write in place",
+      });
+      if (ok) return saveEditor(true);
+      $("#ed-input").focus();
+      return;
+    }
+    toast("Save failed: " + friendlyError(e, p.server), "error");
     return;
   }
   editor.original = content;
@@ -4529,7 +4553,7 @@ function setupEditor() {
       setDirty(ta.value !== editor.original);
     }
   });
-  $("#ed-save").addEventListener("click", saveEditor);
+  $("#ed-save").addEventListener("click", () => saveEditor());
   $("#ed-cancel").addEventListener("click", tryCloseEditor);
 }
 

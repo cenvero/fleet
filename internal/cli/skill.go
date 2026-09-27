@@ -229,6 +229,10 @@ func skillCoreBody() string {
 		"  --dry-run, --undo). Never download/re-upload a file to change it, and never\n" +
 		"  rewrite files with `fleet exec` + sed/echo — `file edit` keeps owner, mode,\n" +
 		"  ACLs and SELinux labels and never leaves a half-written file.\n" +
+		"- If an edit fails with `cannot_replace` (e.g. a file bind-mounted into a\n" +
+		"  container), nothing changed: repeat it with `--in-place`. That is not atomic;\n" +
+		"  Fleet saves the current version first, and `--undo --force` restores it if\n" +
+		"  the write was interrupted (`write_incomplete`).\n" +
 		"- Move files with `fleet file upload|download|list`; interactive UIs are\n" +
 		"  `fleet files <server>` (terminal) and `fleet file ui` (browser).\n"
 }

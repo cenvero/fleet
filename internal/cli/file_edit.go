@@ -4,10 +4,12 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -181,6 +183,7 @@ type fileEditFlags struct {
 	expect      string
 	dryRun      bool
 	force       bool
+	inPlace     bool
 	jsonOut     bool
 	undo        bool
 	history     bool
@@ -204,6 +207,15 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 			"twice. Editing through a symlink changes its target and keeps the link.\n" +
 			"Hard-linked files, binary files (for text edits) and files the agent could not\n" +
 			"write with its own permissions are refused and left unchanged.\n\n" +
+			"Some files cannot be replaced by a new file: one bind-mounted into a container\n" +
+			"(a mount point), one in a folder the agent may not write, or one whose owner\n" +
+			"the agent cannot give a new file. Those edits fail with error cannot_replace\n" +
+			"and nothing changed; repeat them with --in-place, which writes the new content\n" +
+			"into the file itself. The file keeps its owner, mode and labels, but the write\n" +
+			"is not atomic, so before writing Fleet saves the current version on the\n" +
+			"controller. If the write fails, the agent writes the original back. If that\n" +
+			"fails too (error write_incomplete), or the connection drops mid-write, restore\n" +
+			"the saved version with --undo --force.\n\n" +
 			"Say what to change with exactly one of:\n" +
 			"  --old TEXT --new TEXT [--all]   replace TEXT; it must match the file exactly\n" +
 			"                                  (whitespace, indentation, line breaks) and\n" +
@@ -218,6 +230,7 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 			"                                  (or --force), or --create for a new file\n" +
 			"  --undo                          restore the version before the last Fleet edit,\n" +
 			"                                  only if the file is unchanged since that edit\n" +
+			"                                  (--force: whatever the file holds now)\n" +
 			"  --history                       list the versions kept for --undo\n" +
 			"With none of these, the file opens in $EDITOR and is saved back the same safe\n" +
 			"way when you quit (only if you changed it).\n\n" +
@@ -236,6 +249,7 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 			"  fleet file edit web-01 /srv/app/config.yml --content ./config.yml --expect-sha256 <sha256>\n" +
 			"  fleet file edit web-01 /etc/motd --content - --create --mode 0644 < motd.txt\n" +
 			"  fleet file edit web-01 /etc/nginx/nginx.conf --undo\n" +
+			"  fleet file edit app-01 /etc/app/app.conf --old 'debug: false' --new 'debug: true' --in-place\n" +
 			"  fleet file edit web-01:/etc/nginx/nginx.conf           # interactive, $EDITOR",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -258,7 +272,8 @@ func newFileEditCommand(configDir *string) *cobra.Command {
 	fl.StringVar(&f.mode, "mode", "", "with --create: permissions of the new file, e.g. 0644 (default 0644)")
 	fl.StringVar(&f.expect, "expect-sha256", "", "only edit if the file's current sha256 is this (from `fleet file view`)")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "show the diff and result without changing the file")
-	fl.BoolVar(&f.force, "force", false, "with --content: replace the file without --expect-sha256")
+	fl.BoolVar(&f.force, "force", false, "with --content: replace the file without --expect-sha256; with --undo: restore even if the file changed since")
+	fl.BoolVar(&f.inPlace, "in-place", false, "write into the file itself instead of replacing it (for bind-mounted files and the like; not atomic, the current version is saved first)")
 	fl.BoolVar(&f.jsonOut, "json", false, "print the result (hashes, sizes, mode, owner, diff) as JSON")
 	fl.BoolVar(&f.undo, "undo", false, "restore the version from before the last edit made through Fleet")
 	fl.BoolVar(&f.history, "history", false, "list the previous versions kept for --undo")
@@ -287,8 +302,12 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 		return fmt.Errorf("--all only applies to --old/--new")
 	case fl.Changed("text") != fl.Changed("insert-after"):
 		return fmt.Errorf("--insert-after and --text go together")
-	case (f.create || f.force) && !fl.Changed("content"):
-		return fmt.Errorf("--create and --force only apply to --content")
+	case f.create && !fl.Changed("content"):
+		return fmt.Errorf("--create only applies to --content")
+	case f.force && !fl.Changed("content") && !f.undo:
+		return fmt.Errorf("--force only applies to --content and --undo")
+	case f.inPlace && (f.create || f.history):
+		return fmt.Errorf("--in-place writes an existing file; it does not apply to --create or --history")
 	case f.mode != "" && !f.create:
 		return fmt.Errorf("--mode only applies with --create")
 	case f.create && f.expect != "":
@@ -321,7 +340,7 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 		}
 		return nil
 	case f.undo:
-		res, err := app.UndoRemoteEdit(server, remotePath)
+		res, err := app.UndoRemoteEdit(server, remotePath, f.force)
 		if err != nil {
 			return err
 		}
@@ -333,7 +352,7 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 		return runInteractiveEdit(cmd, app, configDir, server, remotePath, f)
 	}
 
-	req := core.EditRequest{Path: remotePath, BaseSHA256: strings.TrimSpace(f.expect), DryRun: f.dryRun}
+	req := core.EditRequest{Path: remotePath, BaseSHA256: strings.TrimSpace(f.expect), DryRun: f.dryRun, InPlace: f.inPlace}
 	switch {
 	case fl.Changed("old"):
 		req.Ops = []proto.FileEditOp{{Kind: proto.FileEditOpReplace, Old: f.old, New: f.repl, All: f.all}}
@@ -376,6 +395,21 @@ func runFileEdit(cmd *cobra.Command, configDir, server, remotePath string, f fil
 		verb = "created"
 	}
 	return printEditResult(cmd, server, remotePath, res, f.jsonOut, verb)
+}
+
+// askYesNo prints question and reports whether the answer was yes (the
+// default is no).
+func askYesNo(out io.Writer, in *bufio.Reader, question string) bool {
+	fmt.Fprint(out, question)
+	line, err := in.ReadString('\n')
+	if err != nil && line == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }
 
 func isHexSHA256(s string) bool {
@@ -452,8 +486,11 @@ func printEditResult(cmd *cobra.Command, server, remotePath string, res core.Edi
 		target += " → " + clean(res.Path)
 	}
 	check := ""
+	if res.InPlace {
+		check = ", written in place"
+	}
 	if res.Verified {
-		check = ", verified on disk"
+		check += ", verified on disk"
 	}
 	fmt.Fprintf(out, "%s %s (%s%s)\n", verb, target, changes, check)
 	fmt.Fprintf(out, "  sha256 %s → %s\n", clean(firstNonEmpty(res.OldSHA256, "(new file)")), clean(res.NewSHA256))
@@ -523,7 +560,15 @@ func runInteractiveEdit(cmd *cobra.Command, app *core.App, configDir, server, re
 		fmt.Fprintln(cmd.OutOrStdout(), "no changes — nothing saved")
 		return nil
 	}
-	res, err := app.EditRemoteFile(server, core.EditRequest{Path: remotePath, Replace: true, Content: edited, BaseSHA256: view.SHA256})
+	req := core.EditRequest{Path: remotePath, Replace: true, Content: edited, BaseSHA256: view.SHA256, InPlace: f.inPlace}
+	res, err := app.EditRemoteFile(server, req)
+	if core.EditErrorCode(err) == "cannot_replace" && !req.InPlace {
+		fmt.Fprintln(cmd.ErrOrStderr(), safetext.Terminal(err.Error(), false))
+		if askYesNo(cmd.ErrOrStderr(), bufio.NewReader(cmd.InOrStdin()), "Write your changes into the file in place instead? [y/N] ") {
+			req.InPlace = true
+			res, err = app.EditRemoteFile(server, req)
+		}
+	}
 	if errors.Is(err, core.ErrEditUnsupported) {
 		// An older agent: fall back to the checksummed atomic upload, which
 		// cannot carry the file's owner over. Say so.

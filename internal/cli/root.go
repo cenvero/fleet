@@ -947,6 +947,14 @@ func newDashboardCommand(configDir *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "dashboard",
 		Short: "Launch the terminal dashboard",
+		Long: "Open the live terminal dashboard: fleet overview, servers, services, logs,\n" +
+			"alerts and the audit trail, refreshed in the background.\n\n" +
+			"Colours follow the terminal's background. Inside tmux or screen the terminal\n" +
+			"can't be asked, so the dashboard assumes a dark background unless COLORFGBG\n" +
+			"says otherwise; set FLEET_THEME=light (or dark) to choose. NO_COLOR turns\n" +
+			"colour off.\n\n" +
+			"  fleet dashboard\n" +
+			"  FLEET_THEME=light fleet dashboard",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Dashboard actions re-run this binary; hand them the verified token.
 			return tui.RunDashboardWithOptions(tui.DashboardOptions{ConfigDir: *configDir, Token: resolveTokenID(cmd)})

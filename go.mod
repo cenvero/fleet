@@ -13,6 +13,7 @@ require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/lrstanley/bubblezone v1.0.0
 	github.com/muesli/termenv v0.16.0
+	github.com/rivo/uniseg v0.4.7
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
@@ -62,7 +63,6 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect

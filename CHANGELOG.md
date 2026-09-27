@@ -49,6 +49,15 @@ Omit sections that have no entries for that release.
   reverted with `--undo` (settings: `fleet config set edit-backups | edit-max-size |
   edit-require-hash`). `fleet context` and the AI skills teach agents to use it. Needs
   updated agents (new `file.edit` RPC).
+- Some files can't be replaced by a new copy: one bind-mounted into a container, one in a
+  folder the agent may not write, or one whose owner the agent cannot give a new file.
+  Editing one now fails with `cannot_replace`, changes nothing and names the fix:
+  `fleet file edit --in-place` writes into the file itself. The controller first saves the
+  current version. The agent then reserves the disk space (on Linux), writes, fsyncs and
+  reads the result back, and writes the original back if anything fails. `--undo --force` restores
+  the saved version if even that fails or the connection drops mid-write. Hard-linked
+  files stay refused. Both file managers' editors offer the in-place write when a save
+  fails this way.
 - `fleet version` (with `--json`) prints the controller version, OS and architecture.
 - `fleet start` runs the daemon in the background (output in `logs/daemon.log`) and
   `fleet stop` stops it; `fleet status` reports whether it is running. `fleet daemon`
@@ -144,6 +153,16 @@ Omit sections that have no entries for that release.
 
 ### Fixed
 
+- On a light terminal, the terminal file manager's help screen, dialogs, menus and editor
+  showed light-grey text on white and white gaps. Text styled with only a foreground colour
+  fell back to the terminal's own background. Every cell now keeps the file manager's dark
+  background.
+- Inside tmux or screen the dashboard can't detect a light terminal and used its
+  dark-background colours. `FLEET_THEME=light` (or `dark`) now picks the palette.
+- In the web file manager, the "Discard unsaved changes?" and save-conflict dialogs opened
+  behind the editor, so the editor seemed frozen. They now open on top of it. Also fixed:
+  sort buttons carried `aria-sort` (valid only on column headers), both panes' path bars had
+  the same accessible name, and unlabelled dialog fields had no accessible name.
 - Unattended managed-agent activation is Linux-only. Windows delivery reports
   pending activation and preserves the observed live version until restart and
   reconnect.

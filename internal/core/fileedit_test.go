@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,7 +170,7 @@ func TestEditRemoteFileViewEditUndo(t *testing.T) {
 	if EditErrorCode(err) != "edit_conflict" {
 		t.Fatalf("stale base: %v", err)
 	}
-	if _, err := app.UndoRemoteEdit("loopback", remote); err != nil {
+	if _, err := app.UndoRemoteEdit("loopback", remote, false); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(remote); string(got) != "port=80\n" {
@@ -178,7 +179,7 @@ func TestEditRemoteFileViewEditUndo(t *testing.T) {
 	if fi, _ := os.Stat(remote); fi.Mode().Perm() != 0o640 {
 		t.Fatalf("undo changed the mode to %v", fi.Mode().Perm())
 	}
-	if _, err := app.UndoRemoteEdit("loopback", remote); err == nil {
+	if _, err := app.UndoRemoteEdit("loopback", remote, false); err == nil {
 		t.Fatal("nothing is left to undo")
 	}
 	// An edit made outside Fleet after a Fleet edit blocks its undo.
@@ -188,7 +189,7 @@ func TestEditRemoteFileViewEditUndo(t *testing.T) {
 	if err := os.WriteFile(remote, []byte("changed by hand\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.UndoRemoteEdit("loopback", remote); err == nil || !strings.Contains(err.Error(), "changed after that edit") {
+	if _, err := app.UndoRemoteEdit("loopback", remote, false); err == nil || !strings.Contains(err.Error(), "changed after that edit") {
 		t.Fatalf("undo over a newer change must be refused: %v", err)
 	}
 	if got, _ := os.ReadFile(remote); string(got) != "changed by hand\n" {
@@ -217,5 +218,113 @@ func TestEditRemoteFileRequireHash(t *testing.T) {
 	_, err := app.EditRemoteFile("loopback", EditRequest{Path: "/tmp/x", Ops: []proto.FileEditOp{{Old: "a", New: "b"}}})
 	if err == nil || !strings.Contains(err.Error(), "expected sha256") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEditRemoteFileInPlaceSavesTheOriginalFirst(t *testing.T) {
+	t.Parallel()
+	app := newEditRig(t, agent.NewFileManager())
+	remote := filepath.Join(t.TempDir(), "app.conf")
+	if err := os.WriteFile(remote, []byte("port=80\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Stat(remote)
+	res, err := app.EditRemoteFile("loopback", EditRequest{Path: remote, InPlace: true, Ops: []proto.FileEditOp{{Old: "80", New: "8080"}}})
+	if err != nil || !res.InPlace || !res.Verified || res.BackupID == "" || res.Original != nil {
+		t.Fatalf("edit = %+v, %v", res, err)
+	}
+	after, _ := os.Stat(remote)
+	if got, _ := os.ReadFile(remote); string(got) != "port=8080\n" || !os.SameFile(before, after) {
+		t.Fatalf("remote = %q (same file %v)", got, os.SameFile(before, after))
+	}
+	items, err := app.EditHistory("loopback", remote)
+	if err != nil || len(items) != 1 || !items[0].InPlace || items[0].OldSHA256 != sha256Hex([]byte("port=80\n")) {
+		t.Fatalf("history = %+v, %v", items, err)
+	}
+	// Undo writes the saved version back in place too.
+	if _, err := app.UndoRemoteEdit("loopback", remote, false); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := os.Stat(remote)
+	if got, _ := os.ReadFile(remote); string(got) != "port=80\n" || !os.SameFile(before, restored) {
+		t.Fatalf("after undo = %q (same file %v)", got, os.SameFile(before, restored))
+	}
+}
+
+func TestEditRemoteFileInPlaceKeepsNothingWhenNothingWasWritten(t *testing.T) {
+	t.Parallel()
+	app := newEditRig(t, agent.NewFileManager())
+	remote := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(remote, []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.EditRemoteFile("loopback", EditRequest{Path: remote, InPlace: true, Ops: []proto.FileEditOp{{Old: "zzz", New: "b"}}})
+	if EditErrorCode(err) != "old_not_found" {
+		t.Fatalf("err = %v", err)
+	}
+	_, err = app.EditRemoteFile("loopback", EditRequest{Path: remote, InPlace: true, BaseSHA256: sha256Hex([]byte("other\n")), Ops: []proto.FileEditOp{{Old: "a", New: "b"}}})
+	if EditErrorCode(err) != "edit_conflict" {
+		t.Fatalf("err = %v", err)
+	}
+	if items, _ := app.EditHistory("loopback", remote); len(items) != 0 {
+		t.Fatalf("a refused edit left history entries: %+v", items)
+	}
+	if _, err := app.EditRemoteFile("loopback", EditRequest{Path: remote, InPlace: true, Create: true, Replace: true, Content: []byte("x")}); err == nil {
+		t.Fatal("--in-place with --create must be refused")
+	}
+}
+
+// interruptedEditor makes the next in-place write of a file fail half-way
+// in a way the agent could not undo, as a crash or a dying disk would.
+type interruptedEditor struct {
+	agent.FileManager
+	mu    sync.Mutex
+	fails int
+}
+
+func (e *interruptedEditor) Edit(ctx context.Context, p proto.FileEditPayload) (proto.FileEditResult, error) {
+	e.mu.Lock()
+	fail := !p.DryRun && e.fails > 0
+	if fail {
+		e.fails--
+	}
+	e.mu.Unlock()
+	if fail {
+		if err := os.WriteFile(p.Path, []byte("half-writ"), 0o644); err != nil {
+			return proto.FileEditResult{}, err
+		}
+		return proto.FileEditResult{}, &agent.RPCError{Code: "write_incomplete", Message: "simulated: the write stopped half-way and the original could not be written back"}
+	}
+	return e.FileManager.(interface {
+		Edit(context.Context, proto.FileEditPayload) (proto.FileEditResult, error)
+	}).Edit(ctx, p)
+}
+
+func TestEditRemoteFileInPlaceInterruptedWriteCanBeRestored(t *testing.T) {
+	t.Parallel()
+	app := newEditRig(t, &interruptedEditor{FileManager: agent.NewFileManager(), fails: 1})
+	zero := 0
+	app.Config.Runtime.FileEdit.Backups = &zero // even with the history off
+	remote := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(remote, []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.EditRemoteFile("loopback", EditRequest{Path: remote, InPlace: true, Ops: []proto.FileEditOp{{Old: "original", New: "changed"}}})
+	if EditErrorCode(err) != "write_incomplete" {
+		t.Fatalf("err = %v", err)
+	}
+	// The file no longer matches that edit, so a plain undo refuses...
+	if _, err := app.UndoRemoteEdit("loopback", remote, false); err == nil || !strings.Contains(err.Error(), "--undo --force") {
+		t.Fatalf("plain undo: %v", err)
+	}
+	// ...and --force restores the version saved before the write.
+	if _, err := app.UndoRemoteEdit("loopback", remote, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(remote); string(got) != "original\n" {
+		t.Fatalf("after undo --force = %q", got)
+	}
+	if items, _ := app.EditHistory("loopback", remote); len(items) != 0 {
+		t.Fatalf("the restored version is still listed: %+v", items)
 	}
 }
