@@ -1,0 +1,1163 @@
+================================================================================
+ HOW OPENCODE DOES TOOL CALLS
+ Read from the actual source: github.com/sst/opencode @ 907b3bc (dev)
+================================================================================
+ Everything below was taken from a clone of the repository, not from docs or
+ memory. Every claim cites the file it came from. Paths are relative to the
+ repo root unless noted.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+PART 0  THE TWO QUESTIONS, ANSWERED FIRST
+--------------------------------------------------------------------------------
+
+Q: "Is opencode Anthropic compatible?"
+
+YES. Anthropic/Claude is a first-class provider, and opencode even ships
+Anthropic-specific code that it ships for no other vendor. Concretely:
+
+  * It loads the official Anthropic AI SDK provider package:
+        "@ai-sdk/anthropic": () => import("@ai-sdk/anthropic")
+                                     .then((m) => m.createAnthropic)
+    -- packages/opencode/src/provider/provider.ts:151
+    plus "@ai-sdk/google-vertex/anthropic" for Claude on Vertex (line 155-156).
+
+  * It injects Anthropic beta headers on every request:
+        anthropic: () => Effect.succeed({
+          autoload: false,
+          options: { headers: {
+            "anthropic-beta":
+              "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+          }},
+        })
+    -- packages/opencode/src/provider/provider.ts:211-219
+    `fine-grained-tool-streaming` is specifically a TOOL-CALLING beta: it makes
+    Claude stream large tool inputs (file contents for the write tool) as they
+    are generated instead of in one buffered burst.
+
+  * It has an Anthropic 1M-context header path ("anthropic-beta":
+    "context-1m-2025-08-07", provider.ts:667), Anthropic prompt-cache control
+    (`anthropic: { cacheControl: { type: "ephemeral" } }`, transform.ts:363-364),
+    Anthropic empty-message filtering (transform.ts:168-170), and Anthropic
+    thinking/reasoning signature replay (transform.ts:185-186, 711-726).
+
+  * Its JSON-Schema transform step has branches for OpenAI/Azure, Moonshot/Kimi
+    and Google/Gemini -- and NO branch for Anthropic
+    (packages/opencode/src/provider/transform.ts:1575+). Anthropic gets the
+    schema unmodified, because Anthropic accepts plain JSON Schema as-is. That
+    absence is itself the compatibility statement.
+
+  * One behaviour actually differs BY model family: opencode swaps which edit
+    tools exist depending on the model. See PART 6.3 -- on Claude you get
+    `edit` + `write`; on GPT-5-class models you get `apply_patch` instead.
+
+Q: "How does opencode do tool calls?"
+
+opencode does NOT hand-roll the provider wire format. It defines tools in its
+own internal shape, converts them to JSON Schema, lets the Vercel AI SDK
+(`streamText` from the `ai` package) translate that into whatever the provider
+wants, and then runs an `execute` function when a call comes back. The chain is:
+
+  Tool.define(id, {description, parameters, execute})        tool/*.ts
+    -> ToolRegistry.tools({providerID, modelID, agent})      tool/registry.ts
+    -> ToolJsonSchema.fromTool(item)                         tool/json-schema.ts
+    -> ProviderTransform.schema(model, schema)               provider/transform.ts
+    -> aiTool({description, inputSchema: jsonSchema(...)})   session/tools.ts:99
+    -> streamText({ tools, ... })                            session/llm.ts:280
+    -> provider SDK emits the vendor format (tool_use for Anthropic)
+    -> AI SDK parses the call, invokes execute(args, ctx)
+    -> ExecuteResult {title, output, metadata, attachments}
+    -> output string becomes the tool result in the next request
+
+So opencode's tool-calling layer is provider-agnostic BY CONSTRUCTION, and
+Anthropic is one of the best-supported targets.
+
+
+--------------------------------------------------------------------------------
+PART 1  SOURCE MAP -- WHERE TOOL CALLING LIVES
+--------------------------------------------------------------------------------
+packages/opencode/src/tool/
+  tool.ts              The Tool.Def contract, Context, ExecuteResult,
+                       InvalidArgumentsError, and the define() wrapper that
+                       adds schema decoding + output truncation to every tool.
+  registry.ts          Builds the tool list; loads custom + plugin tools;
+                       filters per model/provider; applies the tool.definition
+                       plugin hook.
+  json-schema.ts       Effect Schema -> JSON Schema (draft 2020-12), with $ref
+                       inlining and normalization.
+  truncate.ts          MAX_LINES = 2000, MAX_BYTES = 50*1024; spills oversized
+                       output to a file.
+  invalid.ts           A real tool named "invalid" whose only job is to report
+                       bad arguments back to the model.
+  read.ts / read.txt         write.ts / write.txt      edit.ts / edit.txt
+  glob.ts / glob.txt         grep.ts / grep.txt        apply_patch.ts/.txt
+  todo.ts / todowrite.txt    task.ts / task.txt        webfetch.ts / .txt
+  websearch.ts / .txt        skill.ts / skill.txt      question.ts / .txt
+  lsp.ts / lsp.txt           plan.ts, plan-enter.txt, plan-exit.txt
+  code-mode.ts               (experimental "execute" tool)
+  shell.ts                   The shell tool implementation (tool ID is "bash").
+  shell/id.ts                ToolID = "bash"; Kind = bash|pwsh|powershell|cmd.
+  shell/prompt.ts            Builds a DIFFERENT description per shell.
+  shell/shell.txt            The description template with ${...} placeholders.
+  external-directory.ts      Guards writes outside the project.
+
+packages/opencode/src/session/
+  tools.ts             Bridges Tool.Def -> AI SDK `tool()`. Builds Tool.Context.
+  llm.ts               Calls streamText() with the tools.
+  prompt.ts            Additional tool wiring for prompts.
+packages/opencode/src/provider/
+  provider.ts          Provider/SDK loading, incl. the Anthropic beta headers.
+  transform.ts         Per-provider schema + message + reasoning massaging.
+packages/core/src/
+  shell.ts             Shell DETECTION and per-shell argv. killTree().
+packages/plugin/src/
+  tool.ts              The public custom-tool API (`tool({description,args,
+                       execute})`) and ToolContext.
+
+NOTE on naming: the file is `shell.ts` and the class is `ShellTool`, but the ID
+the model sees is **"bash"** on every OS, including Windows:
+
+    // Keep the exposed tool ID and permission key as "bash" for compatibility
+    // with existing plugins, users, and saved permissions. Rename with
+    // opencode 2.0.
+    export const ToolID = "bash"
+    -- packages/opencode/src/tool/shell/id.ts
+
+So on a Windows machine running PowerShell, Claude still calls a tool literally
+named `bash`. The description tells it which shell it actually is.
+
+
+--------------------------------------------------------------------------------
+PART 2  THE TOOL CONTRACT (tool/tool.ts)
+--------------------------------------------------------------------------------
+Every opencode tool is a `Tool.Def`:
+
+    export interface Def<Parameters, M extends Metadata> {
+      id: string
+      description: string
+      parameters: Parameters              // an Effect Schema
+      jsonSchema?: JSONSchema7            // optional pre-built schema
+      execute(args, ctx: Context): Effect.Effect<ExecuteResult<M>>
+      formatValidationError?(error: unknown): string
+    }
+
+What `execute` must return:
+
+    export interface ExecuteResult<M> {
+      title: string          // short label for the UI (usually a rel. path)
+      metadata: M            // structured data for the UI; NOT sent to the model
+      output: string         // THIS is what the model sees as the tool result
+      attachments?: ...FilePart[]   // images/PDFs returned as real attachments
+    }
+
+The execution context handed to every tool:
+
+    export type Context<M> = {
+      sessionID: SessionID
+      messageID: MessageID
+      agent: string
+      abort: AbortSignal            // wired to the user hitting escape
+      callID?: string               // the provider's tool-call id
+      extra?: { [key: string]: unknown }
+      messages: SessionV1.WithParts[]   // full history, if the tool needs it
+      metadata(input: {title?, metadata?}): Effect.Effect<void>  // live UI update
+      ask(input): Effect.Effect<void>   // THE PERMISSION PROMPT
+    }
+
+Two things `Tool.define()` adds to every tool automatically (tool.ts, `wrap`):
+
+  1. ARGUMENT DECODING. The parameters schema is compiled once per tool init
+     (`Schema.decodeUnknownEffect`, hoisted deliberately -- the comment in the
+     source says it avoids re-closing the closure on every invocation), then
+     every call is decoded. A failure becomes a typed error whose message is
+     written FOR THE MODEL:
+
+        export class InvalidArgumentsError extends ... {
+          override get message() {
+            return `The ${this.tool} tool was called with invalid arguments: `
+                 + `${this.detail}.\nPlease rewrite the input so it satisfies `
+                 + `the expected schema.`
+          }
+        }
+
+     The source comment calls this "the canonical 'rewrite the input' tool
+     error". A tool may override the wording with `formatValidationError`.
+
+  2. OUTPUT TRUNCATION. Unless the tool already set `metadata.truncated`, the
+     wrapper runs `truncate.output(result.output, {}, agent)` and rewrites the
+     output, adding `metadata.truncated` and `metadata.outputPath`. See PART 9.
+
+Also note `Effect.withSpan("Tool.execute", {attributes: {"tool.name",
+"session.id", "message.id", "tool.call_id"}})` -- every tool call is traced.
+
+
+--------------------------------------------------------------------------------
+PART 3  THE BUILT-IN TOOL LIST, IN REGISTRY ORDER
+--------------------------------------------------------------------------------
+Verbatim from packages/opencode/src/tool/registry.ts (the `builtin` array):
+
+    builtin: [
+      tool.invalid,
+      ...(questionEnabled ? [tool.question] : []),
+      tool.shell,          // id "bash"
+      tool.read,
+      tool.glob,
+      tool.grep,
+      tool.edit,
+      tool.write,
+      tool.task,
+      tool.fetch,          // webfetch
+      tool.todo,           // todowrite
+      tool.search,         // websearch
+      tool.skill,
+      tool.patch,          // apply_patch
+      ...(tool.execute ? [tool.execute] : []),          // experimental code-mode
+      ...(flags.experimentalLspTool ? [tool.lsp] : []),
+      ...(flags.experimentalPlanMode && flags.client === "cli"
+          ? [tool.plan] : []),
+    ]
+
+Conditional ones:
+  question  -- only when flags.client is "app" | "cli" | "desktop", or
+               flags.enableQuestionTool.
+  websearch -- only when `webSearchEnabled(providerID, {exa, parallel})`, i.e.
+               providerID is `opencode` / `opencode-go`, or an Exa/Parallel flag
+               is set. ON PLAIN ANTHROPIC, THE WEBSEARCH TOOL IS NOT OFFERED.
+               (registry.ts, `webSearchEnabled` + the filter in `tools()`)
+  execute   -- experimentalCodeMode flag AND a non-empty MCP tool catalog.
+  lsp, plan -- experimental flags.
+  edit/write vs apply_patch -- model-dependent, see PART 6.3.
+
+
+--------------------------------------------------------------------------------
+PART 4  THE REAL PARAMETERS AND THE REAL DESCRIPTIONS
+--------------------------------------------------------------------------------
+These are the exact schemas and the exact prompt text opencode sends. Note the
+camelCase parameter names (`filePath`, `oldString`, `replaceAll`) -- a detail
+people get wrong constantly when writing opencode plugins.
+
+................................................................................
+4.1  write      (tool/write.ts, description from tool/write.txt)
+................................................................................
+PARAMETERS (tool/write.ts):
+    Schema.Struct({
+      content:  Schema.String.annotate({
+                  description: "The content to write to the file" }),
+      filePath: Schema.String.annotate({
+                  description: "The absolute path to the file to write "
+                             + "(must be absolute, not relative)" }),
+    })
+
+DESCRIPTION (tool/write.txt, verbatim and complete):
+    Writes a file to the local filesystem.
+
+    Usage:
+    - This tool will overwrite the existing file if there is one at the provided path.
+    - If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
+    - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+    - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
+    - Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
+
+WHAT execute ACTUALLY DOES, in order (tool/write.ts):
+    1. Resolve filePath against instance.directory if it is not absolute.
+    2. assertExternalDirectoryEffect(ctx, filepath)   -- sandbox check.
+    3. Read the old content via Bom.readFile -> {bom: boolean, text}.
+       Split the new content the same way: desiredBom = source.bom || next.bom.
+       (UTF-8 BOM is explicitly preserved. util/bom.ts)
+    4. diff = trimDiff(createTwoFilesPatch(filepath, filepath, old, new))
+    5. ctx.ask({ permission: "edit",
+                 patterns: [path.relative(instance.worktree, filepath)],
+                 always: ["*"],
+                 metadata: { filepath, diff } })          <-- user approval
+    6. fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
+    7. If a formatter applies: format.file(filepath), then Bom.syncFile(...)
+       to re-assert the BOM the formatter may have dropped.
+    8. Publish FileSystem.Event.Edited and Watcher.Event.Updated
+       (event: exists ? "change" : "add").
+    9. lsp.touchFile(filepath, "document"), then lsp.diagnostics().
+   10. Build the output:
+         output = "Wrote file successfully."
+         + for THIS file:   "\n\nLSP errors detected in this file, please fix:\n<block>"
+         + for other files: "\n\nLSP errors detected in other files:\n<block>"
+           capped at MAX_PROJECT_DIAGNOSTICS_FILES = 5
+   11. return { title: relative path, metadata: {diagnostics, filepath, exists},
+                output }
+
+That step 10 is the most interesting thing in the whole file: the write tool
+feeds COMPILE ERRORS back to the model as part of the tool result, so the model
+notices it broke the build without being asked to check.
+
+................................................................................
+4.2  edit      (tool/edit.ts, description from tool/edit.txt)
+................................................................................
+PARAMETERS:
+    Schema.Struct({
+      filePath:   Schema.String.annotate({
+                    description: "The absolute path to the file to modify" }),
+      oldString:  Schema.String.annotate({ description: "The text to replace" }),
+      newString:  Schema.String.annotate({
+                    description: "The text to replace it with "
+                               + "(must be different from oldString)" }),
+      replaceAll: Schema.optional(Schema.Boolean).annotate({
+                    description: "Replace all occurrences of oldString "
+                               + "(default false)" }),
+    })
+
+DESCRIPTION (tool/edit.txt, verbatim):
+    Performs exact string replacements in files.
+
+    Usage:
+    - You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+    - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
+    - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+    - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+    - The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
+    - The edit will FAIL if `oldString` is found multiple times in the file with an error "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match." Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.
+    - Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+
+Two things worth copying from this description:
+  * It documents its own ERROR STRINGS inside the description, so the model has
+    already read the failure mode before it hits it.
+  * It explains the line-number prefix of the Read tool's output and tells the
+    model not to include it -- a direct fix for the most common edit failure.
+
+................................................................................
+4.3  read      (tool/read.ts, description from tool/read.txt)
+................................................................................
+PARAMETERS:
+    Schema.Struct({
+      filePath: Schema.String.annotate({
+                  description: "The absolute path to the file or directory to read" }),
+      offset:   Schema.optional(NonNegativeInt).annotate({
+                  description: "The line number to start reading from (1-indexed)" }),
+      limit:    Schema.optional(NonNegativeInt).annotate({
+                  description: "The maximum number of lines to read (defaults to 2000)" }),
+    })
+
+DESCRIPTION (tool/read.txt, verbatim):
+    Read a file or directory from the local filesystem. If the path does not exist, an error is returned.
+
+    Usage:
+    - The filePath parameter should be an absolute path.
+    - By default, this tool returns up to 2000 lines from the start of the file.
+    - The offset parameter is the line number to start from (1-indexed).
+    - To read later sections, call this tool again with a larger offset.
+    - Use the grep tool to find specific content in large files or files with long lines.
+    - If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.
+    - Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents "foo\n", you will receive "1: foo\n". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.
+    - Any line longer than 2000 characters is truncated.
+    - Call this tool in parallel when you know there are multiple files you want to read.
+    - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
+    - This tool can read image files and PDFs and return them as file attachments.
+
+The output format is `<line>: <content>` -- note the COLON. That is why edit.txt
+spends a paragraph on the prefix. Also note read handles directories and returns
+images/PDFs as `attachments` on ExecuteResult, not as text.
+
+................................................................................
+4.4  glob      (tool/glob.txt, verbatim)
+................................................................................
+    - Fast file pattern matching tool that works with any codebase size
+    - Supports glob patterns like "**/*.js" or "src/**/*.ts"
+    - Returns matching file paths
+    - Use this tool when you need to find files by name patterns
+    - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
+    - You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.
+
+................................................................................
+4.5  grep      (tool/grep.txt, verbatim)
+................................................................................
+    - Fast content search tool that works with any codebase size
+    - Searches file contents using regular expressions
+    - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
+    - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
+    - Returns file paths and line numbers with matching lines
+    - Use this tool when you need to find files containing specific patterns
+    - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
+    - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
+
+(Ripgrep is a real dependency: `Ripgrep` from @opencode-ai/core/ripgrep is in
+the registry's dependency list.)
+
+................................................................................
+4.6  bash / shell      (tool/shell.ts + tool/shell/prompt.ts + shell/shell.txt)
+................................................................................
+PARAMETERS (tool/shell/prompt.ts, `parameterSchema()`):
+    Schema.Struct({
+      command: Schema.String.annotate({ description: "The command to execute" }),
+      timeout: Schema.optional(PositiveInt).annotate({
+                 description: "Optional timeout in milliseconds" }),
+      workdir: Schema.optional(Schema.String).annotate({
+                 description: "The working directory to run the command in. "
+                            + "Defaults to the current directory. "
+                            + "Use this instead of 'cd' commands." }),
+    })
+
+Only three parameters, and `workdir` exists specifically so the model does not
+write `cd x && y`. The description hammers that point repeatedly.
+
+The DESCRIPTION IS GENERATED AT RUNTIME from a template, per shell. See PART 7
+-- this is the single most Windows-relevant thing in opencode.
+
+................................................................................
+4.7  the rest
+................................................................................
+  apply_patch  -- multi-file patch tool. Only offered to GPT-5-class models
+                  (PART 6.3). tool/apply_patch.ts + .txt
+  todowrite    -- the task list. tool/todo.ts + todowrite.txt
+  task         -- spawn a sub-agent. Its description is EXTENDED AT RUNTIME with
+                  the list of available agents the current agent is allowed to
+                  call (registry.ts `describeTask`):
+                      "Available agent types and the tools they have access to:"
+                      "- <name>: <description>"
+                  filtered by Permission.evaluate("task", item.name, ...) and
+                  excluding mode === "primary" agents.
+  webfetch     -- tool/webfetch.ts + .txt
+  websearch    -- tool/websearch.ts + .txt, gated (PART 3)
+  skill        -- tool/skill.ts + skill.txt, loads Agent Skills
+  question     -- ask the user a question, client-gated
+  lsp          -- experimental language-server queries
+  plan         -- experimental plan mode enter/exit
+  invalid      -- description is literally "Do not use". Parameters are
+                  {tool: string, error: string} and the output is
+                  `The arguments provided to the tool are invalid: ${error}`.
+                  It exists so a malformed call still produces a well-formed
+                  tool result instead of a protocol error.
+  execute      -- experimental "code mode": instead of exposing every MCP tool
+                  to the model, expose ONE tool that runs code which calls them.
+                  Its description is generated from the MCP catalog
+                  (`describeCodeMode` in registry.ts).
+
+
+--------------------------------------------------------------------------------
+PART 5  THE PIPELINE, STEP BY STEP, WITH LINE NUMBERS
+--------------------------------------------------------------------------------
+STEP 1 -- Registry assembles the list.
+  packages/opencode/src/tool/registry.ts, `tools({providerID, modelID, agent,
+  permission})`:
+    a. `all()` = builtin ++ custom.
+    b. Filter: websearch gate; the apply_patch / edit+write swap (PART 6.3);
+       drop `execute` if the code-mode catalog is empty.
+    c. For each surviving tool, fire the plugin hook
+         plugin.trigger("tool.definition", {toolID}, output)
+       where output = {description, parameters, jsonSchema}. A PLUGIN CAN
+       REWRITE ANY TOOL'S DESCRIPTION OR SCHEMA HERE.
+    d. Append runtime description text: the agent list for `task`, the MCP
+       catalog for `execute`.
+
+STEP 2 -- Effect Schema becomes JSON Schema.
+  packages/opencode/src/tool/json-schema.ts:
+    fromTool(tool) = tool.jsonSchema ?? fromSchema(tool.parameters)
+    fromSchema() calls Schema.toJsonSchemaDocument(schema,
+      {additionalProperties: true}), stamps
+      $schema: draft 2020-12, hoists definitions into $defs, then:
+        * normalize(): strips `additionalProperties: true`; strips null from
+          anyOf for OPTIONAL properties only (`stripNull: !required.has(name)`);
+          collapses single-member anyOf; flattens allOf when safe; and clamps
+          bare integers to [MIN_SAFE_INTEGER, MAX_SAFE_INTEGER].
+        * inlineLocalReferences(): inlines #/$defs/... and #/definitions/...
+          $refs, with a `seen` set to stop recursion.
+        * dropDefinitionsIfResolved(): removes $defs once nothing references it.
+    Results are memoized in a WeakMap keyed by schema.
+  Why the $ref inlining matters: many providers choke on $ref. Inlining makes
+  one schema that works everywhere.
+
+STEP 3 -- Per-provider massaging.
+  packages/opencode/src/provider/transform.ts:1575 `schema(model, schema)`:
+    * @ai-sdk/openai or @ai-sdk/azure -> sanitizeOpenAISchema()
+    * moonshotai / kimi -> strip sibling keys next to $ref; collapse tuple
+      `items` arrays to a single schema
+    * google / gemini -> integer enums to string enums, plus a large sanitizer
+    * ANTHROPIC -> no branch. Passes through untouched.
+
+STEP 4 -- Hand to the AI SDK.
+  packages/opencode/src/session/tools.ts:97-104:
+      const schema = ProviderTransform.schema(input.model,
+                                              ToolJsonSchema.fromTool(item))
+      tools[item.id] = tool({
+        description: item.description,
+        inputSchema: jsonSchema(schema),
+        execute(args, options) { ... }
+      })
+  `tool` and `jsonSchema` are imported from the `ai` package (line 15). The
+  key of `tools` is the tool id -- that is the name the model sees.
+
+STEP 5 -- Build the Context for the call.
+  session/tools.ts:57-87, `context(args, options)`:
+      sessionID, messageID, agent,
+      abort:   options.abortSignal!
+      callID:  options.toolCallId          <-- the provider's tool-call id
+      metadata: updates the UI part in place, only while status is
+                "running" | "pending"
+      ask:     permission.ask({... ruleset: Permission.merge(
+                 agent.permission, session.permission ?? []) })
+
+STEP 6 -- Execute, with plugin hooks on both sides.
+  session/tools.ts:105-131:
+      plugin.trigger("tool.execute.before", {tool, sessionID, callID}, {args})
+      const result = yield* item.execute(args, ctx)
+      ... stamp ids onto attachments ...
+      plugin.trigger("tool.execute.after", {tool, sessionID, callID, args}, output)
+      if (options.abortSignal?.aborted)
+        processor.completeToolCall(options.toolCallId, output)
+
+STEP 7 -- streamText runs the loop.
+  packages/opencode/src/session/llm.ts:280 -- `streamText({...})`. The AI SDK
+  owns the request/response/tool-result loop; opencode owns the tools.
+
+
+--------------------------------------------------------------------------------
+PART 6  WHAT ANTHROPIC SPECIFICALLY GETS
+--------------------------------------------------------------------------------
+6.1  The provider and the betas
+  provider/provider.ts:151
+      "@ai-sdk/anthropic": () => import("@ai-sdk/anthropic")
+                                  .then((m) => m.createAnthropic)
+  provider/provider.ts:155-156
+      "@ai-sdk/google-vertex/anthropic": () =>
+        import("@ai-sdk/google-vertex/anthropic")
+          .then((m) => m.createVertexAnthropic)
+  provider/provider.ts:211-219
+      anthropic: () => Effect.succeed({
+        autoload: false,
+        options: { headers: {
+          "anthropic-beta":
+            "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+        }},
+      })
+  provider/provider.ts:667
+      "anthropic-beta": "context-1m-2025-08-07"      (1M context path)
+
+  `fine-grained-tool-streaming-2025-05-14` is the tool-calling-relevant one: it
+  lets Claude stream a large tool input (the write tool's `content`) as it is
+  generated. The trade-off, which opencode accepts: with it on, the input is no
+  longer server-validated, so a truncated generation can yield invalid JSON --
+  which is exactly what `InvalidArgumentsError` and the `invalid` tool exist to
+  absorb.
+
+6.2  Schema: nothing is rewritten
+  As established in PART 0 and PART 5 STEP 3: there is no Anthropic branch in
+  `ProviderTransform.schema`. The JSON Schema produced by json-schema.ts goes
+  to Claude as-is. The normalization work (inlining $refs, dropping
+  `additionalProperties: true`) is done once for everyone and happens to be
+  exactly what Anthropic wants.
+
+6.3  THE MODEL-CONDITIONAL TOOL SWAP  (registry.ts, inside `tools()`)
+      const usePatch =
+        input.modelID.includes("gpt-")
+        && !input.modelID.includes("oss")
+        && !input.modelID.includes("gpt-4")
+      if (tool.id === ApplyPatchTool.id) return usePatch
+      if (tool.id === EditTool.id || tool.id === WriteTool.id) return !usePatch
+
+  Read that carefully:
+    * GPT-5-class models (id contains "gpt-", not "oss", not "gpt-4")
+      get `apply_patch` and do NOT get `edit` or `write`.
+    * EVERY OTHER MODEL -- all Claude models included -- gets `edit` + `write`
+      and does NOT get `apply_patch`.
+  So on Anthropic you are on the edit/write path. If you are debugging why
+  `apply_patch` "doesn't exist", this line is why.
+
+6.4  Caching
+  provider/transform.ts:363-364 maps providers to their cache-point syntax:
+      anthropic: { cacheControl: { type: "ephemeral" } }
+  and transform.ts:468-481 computes `usesAnthropicAutomaticCaching` from
+  `model.api.npm === "@ai-sdk/anthropic"` (or the Vertex-Anthropic package),
+  then suppresses manual cache points when automatic caching is in play.
+  Relevance to tools: tool definitions are serialized FIRST in the cached
+  prefix, so a plugin that rewrites a tool description per-turn via the
+  `tool.definition` hook will invalidate the cache every turn. Keep that hook's
+  output stable.
+
+6.5  Thinking / reasoning replay
+  transform.ts:185-186 keeps assistant parts whose
+  `providerOptions?.anthropic?.signature` or `...redactedData` is non-null, and
+  transform.ts:168-170 filters empty-content messages because "Anthropic rejects
+  messages with empty content". transform.ts:711-726 maps thinking config onto
+  the `thinking` key for `@ai-sdk/anthropic` (and `reasoningConfig` for
+  Bedrock). This is the plumbing that keeps interleaved thinking valid across
+  tool-call turns.
+
+
+--------------------------------------------------------------------------------
+PART 7  WINDOWS -- HOW OPENCODE ACTUALLY HANDLES IT
+--------------------------------------------------------------------------------
+This is where opencode does real, specific work rather than relying on the SDK.
+
+7.1  SHELL DETECTION ORDER  (packages/core/src/shell.ts)
+    function win() {
+      return Array.from(new Set(
+        [which("pwsh"), which("powershell"), gitbash(),
+         process.env.COMSPEC || "cmd.exe"]
+          .filter(Boolean).map(full),
+      ))
+    }
+  So on Windows the preference order is:
+      1. pwsh         (PowerShell 7+)
+      2. powershell   (Windows PowerShell 5.1)
+      3. Git Bash
+      4. %COMSPEC%, else cmd.exe
+  `select()` falls back to `win()[0]` on Windows when the configured shell is
+  unusable. Git Bash is located from `git` on PATH:
+    export function gitbash() {
+      if (process.platform !== "win32") return
+      if (Flag.OPENCODE_GIT_BASH_PATH) return Flag.OPENCODE_GIT_BASH_PATH
+      const git = which("git"); if (!git) return
+      const file = path.join(git, "..", "..", "bin", "bash.exe")
+      if (stat(file)?.size) return file
+    }
+  -- so `OPENCODE_GIT_BASH_PATH` is the env override, and otherwise it walks
+  two directories up from git.exe to find bin/bash.exe.
+
+  Shell names are lower-cased through `path.win32.parse` on Windows:
+    export function name(file: string) {
+      if (process.platform === "win32")
+        return path.win32.parse(FSUtil.windowsPath(file)).name.toLowerCase()
+      return path.basename(file).toLowerCase()
+    }
+
+7.2  THE ARGV FOR EACH SHELL  (core/src/shell.ts, `args(file, command, cwd)`)
+    nu, fish        -> ["-c", command]
+    cmd             -> ["/c", command]
+    pwsh/powershell -> ["-NoProfile", "-Command", command]
+    zsh             -> ["-l","-c", <script>, "opencode", cwd]  where the script
+                       sources ~/.zshenv and $ZDOTDIR/.zshrc, then
+                       `cd -- "$1"` then `eval <JSON.stringify(command)>`
+    bash            -> ["-l","-c", <script>, "opencode", cwd]  where the script
+                       does `shopt -s expand_aliases`, sources ~/.bashrc, then
+                       `cd -- "$1"` then `eval <JSON.stringify(command)>`
+    anything else   -> ["-c", command]
+
+  Notes you can act on:
+   * PowerShell gets `-NoProfile` (so a user's $PROFILE banner cannot corrupt
+     output) but NOT `-NonInteractive` and NOT `-ExecutionPolicy Bypass`.
+   * cmd gets a bare `/c` -- not `/d /s /c`.
+   * The bash/zsh paths pass `cwd` as a positional `$1` and `cd --` to it,
+     rather than interpolating the path into the script. That is the correct way
+     to avoid quoting bugs on a path with spaces. The command itself is passed
+     through `JSON.stringify` and `eval`'d.
+
+7.3  KILLING THE PROCESS TREE  (core/src/shell.ts, `killTree`)
+    if (process.platform === "win32") {
+      await new Promise<void>((resolve) => {
+        const killer = spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
+          stdio: "ignore", windowsHide: true,
+        })
+        killer.once("exit", () => resolve())
+        killer.once("error", () => resolve())
+      })
+      return
+    }
+    // POSIX: process.kill(-pid, "SIGTERM"), sleep(SIGKILL_TIMEOUT_MS),
+    //        then SIGKILL if still alive.
+  `taskkill /f /t` kills the whole tree, and `windowsHide: true` stops a console
+  window flashing. Note the POSIX path is graceful-then-forceful; the Windows
+  path is force-only, because Windows has no SIGTERM.
+
+7.4  A DIFFERENT TOOL DESCRIPTION PER SHELL  (tool/shell/prompt.ts)
+  This is the headline Windows feature. `render(name, platform, limits,
+  defaultTimeoutMs)` fills tool/shell/shell.txt, whose template begins:
+
+      ${intro}
+
+      Be aware: OS: ${os}, Shell: ${shell}
+
+      ${workdirSection}
+
+      Use `${tmp}` for temporary work outside the workspace. ...
+
+      IMPORTANT: This tool is for terminal operations like git, npm, docker,
+      etc. DO NOT use it for file operations (reading, writing, editing,
+      searching, finding files) - use the specialized tools for this instead.
+
+      ${commandSection}
+
+  The OS and shell are stated outright in the tool description. Then
+  `profile(name, ...)` picks one of THREE completely different
+  `commandSection` bodies:
+
+  (a) cmd.exe  -- `cmdCommandSection`:
+        # cmd.exe shell notes
+        - Use double quotes for paths with spaces.
+        - Use %VAR% for environment variables.
+        - Use `if exist` for existence checks.
+        - Use `call` when invoking batch files from another batch-style command.
+      ...with cmd-specific tool-preference mappings:
+        - File search: Use Glob (NOT dir /s)
+        - Content search: Use Grep (NOT findstr)
+        - Read files: Use Read (NOT type)
+        - Edit files: Use Edit (NOT copy)
+        - Write files: Use Write (NOT echo > file)
+        - Communication: Output text directly (NOT echo)
+      and a cmd-safe PR recipe that writes the body to a temp file first
+      "so cmd.exe quoting stays simple".
+
+  (b) PowerShell -- `powershellCommandSection` + `powershellNotes(name)`,
+      which DIFFERENTIATES 7+ from 5.1:
+        pwsh:        "This cross-platform shell supports pipeline chain
+                      operators (`&&` and `||`)."
+        powershell:  "Use `cmd1; if ($?) { cmd2 }` to chain dependent commands."
+      Both get:
+        - double quotes interpolate, single quotes are verbatim
+        - prefer full cmdlet names over aliases (Get-ChildItem, Set-Content,
+          Remove-Item, New-Item)
+        - `$(...)` subexpressions, `@(...)` array expressions
+        - call operator for exe paths with spaces: `& "path/to/exe" args`
+        - escape with the backtick
+      PowerShell tool-preference mappings:
+        - File search: Use Glob (NOT Get-ChildItem)
+        - Content search: Use Grep (NOT Select-String)
+        - Read files: Use Read (NOT Get-Content)
+        - Edit files: Use Edit (NOT Set-Content)
+        - Write files: Use Write (NOT Set-Content/Out-File or here-strings)
+        - Communication: Output text directly (NOT Write-Output/Write-Host)
+      Directory verification uses `Test-Path -LiteralPath <parent>`, and the
+      path separator in every example is chosen by platform:
+        platform === "win32" ? "\\" : "/"
+      The PR recipe uses a PowerShell here-string (@' ... '@).
+
+  (c) bash -- `bashCommandSection`: `ls` for directory verification, POSIX
+      quoting examples, `&&` chaining, and the familiar mappings
+      (Glob not find/ls, Grep not grep/rg, Read not cat/head/tail,
+       Edit not sed/awk, Write not echo >/cat <<EOF).
+
+  `chainGuidance(name)` is a separate per-shell string, and it is the clearest
+  example of the whole approach -- Windows PowerShell 5.1 gets:
+      "avoid '&&' in this shell because Windows PowerShell (5.1) does not
+       support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }`"
+
+  Every variant repeats: "AVOID changing directories inside the command. Use the
+  `workdir` parameter instead", with a good/bad example pair rendered in that
+  shell's own syntax.
+
+7.5  PARSING THE COMMAND TO DECIDE PERMISSIONS  (tool/shell.ts)
+  opencode does not pattern-match the command string. It parses it with
+  tree-sitter (`web-tree-sitter`, `Language`, `Node`) and walks
+  `descendantsOfType("command")` to find which commands and which paths a
+  command line touches. It keeps explicit Windows-aware sets:
+
+    const CWD = new Set(["cd","chdir","popd","pushd",
+                         "push-location","set-location"])
+    const FILES = new Set([...CWD, "rm","cp","mv","mkdir","touch","chmod",
+                           "chown","cat",
+                           "get-content","set-content","add-content",
+                           "copy-item","move-item","remove-item","new-item",
+                           "rename-item"])
+    const CMD_FILES = new Set(["copy","del","dir","erase","md","mkdir","move",
+                               "rd","ren","rename","rmdir","type"])
+    const FLAGS    = new Set(["-destination","-literalpath","-path"])
+    const SWITCHES = new Set(["-confirm","-debug","-force","-nonewline",
+                              "-recurse","-verbose","-whatif"])
+
+  There is even a source comment explaining a deliberate omission:
+    // Leave PowerShell aliases out for now. Common ones like cat/cp/mv/rm/mkdir
+    // already hit the entries above, and alias normalization should happen in
+    // one place later so we do not risk double-prompting.
+
+  Windows environment and path expansion is handled explicitly:
+    function envValue(key: string) {
+      if (process.platform !== "win32") return process.env[key]
+      const name = Object.keys(process.env)
+        .find((item) => item.toLowerCase() === key.toLowerCase())
+      return name ? process.env[name] : undefined
+    }
+  -- i.e. Windows env var names are case-insensitive, so the lookup is too.
+  And `expand()` handles `${env:NAME}`, `$env:NAME`, `$HOME`, `$PWD`, `$PSHOME`,
+  with `home()` accepting BOTH `~/` and `~\` prefixes.
+
+7.6  OTHER WINDOWS TOUCHES
+  * registry.ts, when loading custom tools from disk:
+      // `match` is an absolute filesystem path from `Glob.scanSync(...)`.
+      // Import it as `file://` so Node on Windows accepts the dynamic import.
+      const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
+    A bare absolute Windows path fails `import()`; pathToFileURL fixes it.
+  * tool/shell.ts `resolveWasm` accepts `/^[a-z]:/i` drive-letter paths as
+    already-absolute.
+  * FSUtil.windowsPath(...) is used throughout core/shell.ts before any
+    path.win32 parsing.
+  * The write tool preserves the UTF-8 BOM (PART 4.1 step 3/7) -- which matters
+    because Windows tooling writes BOMs and Windows PowerShell 5.1's
+    Set-Content adds them.
+
+
+--------------------------------------------------------------------------------
+PART 8  PERMISSIONS -- ctx.ask()
+--------------------------------------------------------------------------------
+A tool requests approval by calling `ctx.ask(...)` mid-execution. The write
+tool's call is the canonical shape:
+
+    yield* ctx.ask({
+      permission: "edit",
+      patterns: [path.relative(instance.worktree, filepath)],
+      always: ["*"],
+      metadata: { filepath, diff },
+    })
+
+Fields: `permission` is the permission KEY (for the shell tool the key is
+"bash", per shell/id.ts); `patterns` is what is being touched, used to match
+saved rules; `always` is what a "always allow" answer would cover; `metadata`
+carries the diff so the UI can show it.
+
+Wiring (session/tools.ts:78-87): `ask` forwards to `permission.ask()` with
+    sessionID,
+    tool: { messageID, callID: options.toolCallId },
+    ruleset: Permission.merge(agent.permission, session.permission ?? [])
+so rules are a merge of the AGENT's ruleset and the SESSION's.
+
+`Permission.evaluate(key, value, ruleset)` returns an action; registry.ts uses
+it to decide which sub-agents the `task` tool may even mention
+(`.action !== "deny"`), and `Permission.visibleTools(mcpTools, ruleset)` filters
+the MCP catalog. So permissions affect not just execution but TOOL VISIBILITY
+and DESCRIPTION CONTENT.
+
+
+--------------------------------------------------------------------------------
+PART 9  TRUNCATION  (tool/truncate.ts)
+--------------------------------------------------------------------------------
+    export const MAX_LINES = 2000
+    export const MAX_BYTES = 50 * 1024
+
+Overridable from opencode config:
+    maxLines: cfg?.tool_output?.max_lines ?? MAX_LINES
+    maxBytes: cfg?.tool_output?.max_bytes ?? MAX_BYTES
+
+Applied automatically by `Tool.define`'s wrapper to every tool that did not
+already set `metadata.truncated`. When output is truncated, the full text is
+written to a file and `metadata.outputPath` points at it. The shell tool's
+generated description tells the model exactly what to do about it:
+
+    If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be
+    truncated and the full output will be written to a file. You can use Read
+    with offset/limit to read specific sections or Grep to search the full
+    content. Do NOT use `head`, `tail`, or other truncation commands to limit
+    output; the full output will already be captured to a file for more precise
+    searching.
+
+...and the PowerShell and cmd variants substitute `Select-Object -First/-Last`
+and `more` respectively. That is a nice pattern: the limit, the spill file, and
+the recovery path are all stated in the prompt, in the right shell's dialect.
+
+
+--------------------------------------------------------------------------------
+PART 10  ERROR HANDLING
+--------------------------------------------------------------------------------
+Three distinct layers:
+
+  1. SCHEMA FAILURE -> `InvalidArgumentsError` (tool/tool.ts). Message:
+        "The <tool> tool was called with invalid arguments: <detail>.
+         Please rewrite the input so it satisfies the expected schema."
+     A tool can customize `detail` by implementing `formatValidationError`.
+
+  2. A MALFORMED CALL THE SDK CANNOT ROUTE -> the `invalid` tool
+     (tool/invalid.ts), description "Do not use", parameters {tool, error},
+     output `The arguments provided to the tool are invalid: <error>`.
+     It is registered FIRST in the builtin array so it always exists.
+
+  3. TOOL-SPECIFIC FAILURES are plain strings documented in the description --
+     e.g. edit's "oldString not found in content" and "Found multiple matches
+     for oldString. Provide more surrounding lines in oldString to identify the
+     correct match." The model has read these before it ever triggers one.
+
+Everything is `Effect.orDie`-wrapped at the tool boundary, and the AI SDK turns
+a thrown execute into a tool result rather than killing the session.
+
+
+--------------------------------------------------------------------------------
+PART 11  WRITING YOUR OWN OPENCODE TOOL
+--------------------------------------------------------------------------------
+11.1  THE PUBLIC API  (packages/plugin/src/tool.ts, complete)
+
+    import { z } from "zod"
+
+    export function tool<Args extends z.ZodRawShape>(input: {
+      description: string
+      args: Args
+      execute(args: z.infer<z.ZodObject<Args>>,
+              context: ToolContext): Promise<ToolResult>
+    }) { return input }
+    tool.schema = z
+
+    export type ToolContext = {
+      sessionID: string
+      messageID: string
+      agent: string
+      directory: string    // "Prefer this over process.cwd()"
+      worktree: string     // for stable relative paths
+      abort: AbortSignal
+      metadata(input: {title?: string; metadata?: {...}}): void
+      ask(input: { permission: string; patterns: string[];
+                   always: string[]; metadata: {...} }): Promise<void>
+    }
+
+    export type ToolResult =
+      | string
+      | { title?: string; output: string;
+          metadata?: {...}; attachments?: ToolAttachment[] }
+
+    export type ToolAttachment = {
+      type: "file"; mime: string; url: string; filename?: string
+    }
+
+  Note the plugin API is PROMISE-based and ZOD-based, while the internal API is
+  Effect-based and Effect-Schema-based. The registry bridges them.
+
+11.2  WHERE THE FILE GOES
+  registry.ts scans every config directory for:
+      "{tool,tools}/*.{js,ts}"       (Glob.scanSync, absolute, dot, symlink)
+  so `.opencode/tool/mytool.ts` or `.opencode/tools/mytool.ts`.
+
+11.3  HOW IT GETS NAMED
+      const namespace = path.basename(match, path.extname(match))
+      for (const [id, def] of Object.entries(mod)) {
+        if (!isPluginTool(def)) continue
+        custom.push(fromPlugin(id === "default" ? namespace
+                                               : `${namespace}_${id}`, def))
+      }
+  So in `.opencode/tool/db.ts`:
+      export default tool({...})        -> tool name "db"
+      export const query = tool({...})  -> tool name "db_query"
+  A value is recognized as a tool only if it has all of `args`, `description`
+  and `execute` (`isPluginTool`).
+
+11.4  HOW YOUR ZOD SCHEMA REACHES THE MODEL  (registry.ts `fromPlugin`)
+  * `def.args ?? {}` -- a missing `args` is normalized to `{}`. The source cites
+    issues #27451 and #27630: it used to be `z.object(def.args)` and Zod
+    silently tolerated undefined.
+  * If EVERY entry is a Zod type -> `z.object(args)` then `zodJsonSchema()`,
+    which calls `z.toJSONSchema(schema, {io: "input", metadata: ...})`,
+    normalizes it (drops boolean `exclusiveMaximum`/`exclusiveMinimum`, which
+    are draft-4-isms), and renames `$defs` to `definitions`.
+  * If not all Zod -> `legacyJsonSchema(entries)`, which treats the values as
+    raw JSON Schema fragments and marks ALL of them required.
+  * The description metadata is collected from `.meta()` and `.description` on
+    every nested Zod node (`zodMetadataRegistry`) so your `.describe("...")`
+    calls actually reach the model.
+  * Your `execute` gets a `ctx.ask` bridged from Effect to a Promise via
+    `EffectBridge`, plus `directory` and `worktree` injected.
+  * Your returned output goes through the same truncation as a builtin.
+
+11.5  MINIMAL EXAMPLE
+    // .opencode/tool/sysinfo.ts
+    import { tool } from "@opencode-ai/plugin"
+
+    export default tool({
+      description: "Return the OS, architecture and shell of this machine. "
+                 + "Use this before writing any shell command so you pick the "
+                 + "right syntax.",
+      args: {
+        verbose: tool.schema.boolean().optional()
+          .describe("Include every environment variable. Default false."),
+      },
+      async execute(args, ctx) {
+        const os = await import("node:os")
+        const lines = [
+          `platform: ${process.platform}`,
+          `arch: ${os.arch()}`,
+          `shell: ${process.env.SHELL ?? process.env.COMSPEC ?? "unknown"}`,
+          `cwd: ${ctx.directory}`,
+          `worktree: ${ctx.worktree}`,
+        ]
+        if (args.verbose) lines.push(...Object.keys(process.env).sort())
+        return { title: "system info", output: lines.join("\n") }
+      },
+    })
+
+  Tool name: `sysinfo`. It needs no permission, so it never calls ctx.ask.
+
+11.6  REWRITING A BUILT-IN TOOL'S DESCRIPTION
+  A plugin can hook `tool.definition` and mutate `{description, parameters,
+  jsonSchema}` for any tool id (registry.ts `tools()`, step 1c). Keep the output
+  STABLE across turns or you break Anthropic prompt caching (PART 6.4).
+
+
+--------------------------------------------------------------------------------
+PART 12  MCP TOOLS
+--------------------------------------------------------------------------------
+MCP tools are kept on a separate track from builtin/custom tools. In
+registry.ts the MCP service is injected (`const mcp = yield* MCP.Service`) and
+used for:
+  * `mcp.tools()` + `Permission.visibleTools(tools, ruleset)` to decide what the
+    code-mode catalog may expose.
+  * `mcp.clients()` with names run through `McpCatalog.sanitize` for naming.
+session/tools.ts additionally registers three resource tools by fixed name:
+    const MCP_RESOURCE_TOOLS = {
+      list: "list_mcp_resources",
+      listTemplates: "list_mcp_resource_templates",
+      read: "read_mcp_resource",
+    }
+with a blob cap `MAX_MCP_RESOURCE_BLOB_BYTES = 10 * 1024 * 1024` and an
+attachment MIME allow-list of application/pdf, image/gif, image/jpeg,
+image/png, image/webp.
+
+The experimental "code mode" (`execute` tool, tool/code-mode.ts) exists to avoid
+shipping hundreds of MCP tool schemas in the prompt: instead the model writes
+code that calls them, and the catalog is described in the single tool's
+description via `describeCodeMode`.
+
+
+--------------------------------------------------------------------------------
+PART 13  WHAT THE WIRE TRAFFIC LOOKS LIKE WITH CLAUDE
+--------------------------------------------------------------------------------
+opencode never writes this JSON by hand -- @ai-sdk/anthropic does -- but this is
+what `streamText` produces from opencode's definitions, so this is what you
+would see on the wire for "create hello.py and run it" on Windows with pwsh.
+
+REQUEST (tools array, abbreviated to two of the ~13 tools):
+  {
+    "model": "claude-opus-5-5",
+    "max_tokens": 16000,
+    "tools": [
+      {
+        "name": "write",
+        "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file ... (verbatim write.txt)",
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "content":  {"type": "string", "description": "The content to write to the file"},
+            "filePath": {"type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)"}
+          },
+          "required": ["content", "filePath"]
+        }
+      },
+      {
+        "name": "bash",
+        "description": "Executes a given PowerShell (7+) command with optional timeout, ensuring proper handling and security measures.\n\nBe aware: OS: win32, Shell: pwsh\n\n... # PowerShell (7+) shell notes\n- This cross-platform shell supports pipeline chain operators (`&&` and `||`).\n...",
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "command": {"type": "string", "description": "The command to execute"},
+            "timeout": {"type": "integer", "description": "Optional timeout in milliseconds", <bounds -- see note>},
+            "workdir": {"type": "string", "description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands."}
+          },
+          "required": ["command"]
+        }
+      }
+    ],
+    "messages": [{"role": "user", "content": "create hello.py and run it"}]
+  }
+  Headers include:
+    anthropic-beta: interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14
+
+  Note: the tool is named "bash" while the description says Shell: pwsh. That is
+  the shell/id.ts compatibility decision (PART 1), not a bug.
+  Note on `timeout`'s bounds: two transforms stack here, and I did not execute
+  the pipeline to capture the literal output, so the exact keywords are stated
+  as code rather than as a quoted result.
+    1. The Effect schema is
+         export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
+       -- packages/schema/src/schema.ts:3
+       That is a STRICT "> 0", so Effect emits an exclusive bound (an
+       `exclusiveMinimum: 0`-style keyword), not `minimum: 1`.
+    2. json-schema.ts `normalize()` then adds safe-integer bounds to any
+       integer that has no maximum:
+         if (schema.type === "integer" && schema.maximum === undefined)
+           return { minimum: Number.MIN_SAFE_INTEGER, ...schema,
+                    maximum: Number.MAX_SAFE_INTEGER }
+       Note the spread order: `...schema` comes after `minimum`, so the
+       schema's own bound wins, and `maximum` is appended unconditionally.
+       Also note `normalize()` strips `exclusiveMaximum`/`exclusiveMinimum`
+       ONLY when the value is a boolean (the draft-4 form); a numeric `0`
+       survives.
+    So expect an exclusive lower bound plus a MAX_SAFE_INTEGER upper bound.
+    To see the literal JSON, log `ToolJsonSchema.fromTool(shellTool)`.
+
+RESPONSE:
+  {
+    "content": [
+      {"type": "text", "text": "I'll create the file."},
+      {"type": "tool_use", "id": "toolu_01W1", "name": "write",
+       "input": {"filePath": "C:\\proj\\hello.py", "content": "print(\"hi\")\n"}}
+    ],
+    "stop_reason": "tool_use"
+  }
+
+WHAT OPENCODE DOES WITH IT:
+  session/tools.ts `execute(args, options)` fires:
+    options.toolCallId = "toolu_01W1" -> ctx.callID
+    plugin.trigger("tool.execute.before", {tool:"write", sessionID, callID}, {args})
+    WriteTool.execute(args, ctx):
+      -> absolute?             yes
+      -> assertExternalDirectoryEffect                           OK
+      -> Bom.readFile (file is new)       -> {bom:false, text:""}
+      -> createTwoFilesPatch -> trimDiff
+      -> ctx.ask({permission:"edit", patterns:["hello.py"],
+                  always:["*"], metadata:{filepath, diff}})       user approves
+      -> fs.writeWithDirs
+      -> format.file / Bom.syncFile
+      -> events.publish(Edited), events.publish(Updated, {event:"add"})
+      -> lsp.touchFile + lsp.diagnostics()
+      -> output = "Wrote file successfully."   (+ LSP errors if any)
+      -> return {title:"hello.py", metadata:{diagnostics, filepath, exists:false},
+                 output}
+    Tool.define wrapper: truncate.output(...) -> under 2000 lines/50KB, unchanged
+    plugin.trigger("tool.execute.after", ...)
+
+NEXT REQUEST carries the tool result:
+  {"role":"user","content":[
+    {"type":"tool_result","tool_use_id":"toolu_01W1",
+     "content":"Wrote file successfully."}]}
+
+Only `output` crosses back to the model. `title` and `metadata` (the diff, the
+diagnostics object, filepath, exists) go to the UI only.
+
+THEN the shell call:
+  {"type":"tool_use","id":"toolu_01R2","name":"bash",
+   "input":{"command":"python hello.py","workdir":"C:\\proj"}}
+executed as:
+    spawn(<resolved pwsh path>, ["-NoProfile","-Command","python hello.py"],
+          { cwd: "C:\\proj", ... })
+and on timeout: `taskkill /pid <pid> /f /t` with windowsHide: true.
+
+
+--------------------------------------------------------------------------------
+PART 14  CITATIONS
+--------------------------------------------------------------------------------
+Repository: https://github.com/sst/opencode
+Commit read for this document: 907b3bc (branch dev), cloned 2026-10-03.
+Verify any claim with:  git clone --depth 1 https://github.com/sst/opencode
+
+  packages/opencode/src/tool/tool.ts            Def, Context, ExecuteResult,
+                                                InvalidArgumentsError, define/wrap
+  packages/opencode/src/tool/registry.ts        builtin list, model filters,
+                                                custom+plugin loading, hooks
+  packages/opencode/src/tool/json-schema.ts     fromTool, fromSchema, normalize,
+                                                inlineLocalReferences
+  packages/opencode/src/tool/truncate.ts        MAX_LINES 2000, MAX_BYTES 50KB
+  packages/opencode/src/tool/invalid.ts         the "invalid" tool
+  packages/opencode/src/tool/write.ts           BOM, diff, ask, format, LSP
+  packages/opencode/src/tool/write.txt          write description
+  packages/opencode/src/tool/edit.ts/.txt       oldString/newString/replaceAll
+  packages/opencode/src/tool/read.ts/.txt       filePath/offset/limit
+  packages/opencode/src/tool/glob.txt           glob description
+  packages/opencode/src/tool/grep.txt           grep description
+  packages/opencode/src/tool/shell.ts           tree-sitter command parsing,
+                                                CWD/FILES/CMD_FILES/FLAGS/
+                                                SWITCHES, envValue, expand
+  packages/opencode/src/tool/shell/id.ts        ToolID = "bash"
+  packages/opencode/src/tool/shell/prompt.ts    per-shell descriptions,
+                                                parameterSchema, chainGuidance
+  packages/opencode/src/tool/shell/shell.txt    description template
+  packages/opencode/src/session/tools.ts        AI SDK bridge, Context, hooks,
+                                                MCP_RESOURCE_TOOLS
+  packages/opencode/src/session/llm.ts:280      streamText call
+  packages/opencode/src/provider/provider.ts    :151 @ai-sdk/anthropic
+                                                :155 vertex anthropic
+                                                :211-219 anthropic-beta headers
+                                                :667 context-1m header
+  packages/opencode/src/provider/transform.ts   :168-170 empty-content filter
+                                                :185-186 thinking signatures
+                                                :363-364 anthropic cacheControl
+                                                :468-481 automatic caching
+                                                :711-726 thinking key mapping
+                                                :1575+ schema(), no anthropic branch
+  packages/core/src/shell.ts                    win() order, gitbash(), args(),
+                                                killTree(), name()
+  packages/plugin/src/tool.ts                   public tool() API, ToolContext,
+                                                ToolResult, ToolAttachment
+
+================================================================================
+END
+================================================================================
