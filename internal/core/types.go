@@ -50,6 +50,10 @@ type CryptoConfig struct {
 type UpdateConfig struct {
 	Channel string        `toml:"channel" json:"channel"`
 	Policy  update.Policy `toml:"policy" json:"policy"`
+	// AgentAutoSync keeps managed agents on the controller's version
+	// automatically (hourly, see agent_autosync.go). Unset means on; only an
+	// explicit false turns it off.
+	AgentAutoSync *bool `toml:"agent_auto_sync,omitempty" json:"agent_auto_sync,omitempty"`
 }
 
 type RuntimeConfig struct {

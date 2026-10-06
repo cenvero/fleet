@@ -9,7 +9,7 @@ The default controller posture is intentionally conservative:
 - channel: `stable`
 - policy: `notify-only`
 
-That means Cenvero Fleet does not silently auto-update by default. Operators explicitly choose when to apply updates.
+That means Cenvero Fleet does not silently update the **controller** by default. Operators explicitly choose when to apply controller updates. Managed **agents** are different: they are kept on the controller's version automatically unless you turn that off (see [Automatic agent sync](#automatic-agent-sync)).
 
 Current commands:
 
@@ -21,6 +21,8 @@ fleet update channel stable
 fleet update channel beta
 fleet sync-agent                 # bring every agent up to the controller version
 fleet sync-agent --server web-01 # or just one (repeatable)
+fleet sync-agent auto status     # automatic hourly agent sync: status
+fleet sync-agent auto off        # ...or turn it off (on by default)
 ```
 
 `fleet update apply` updates the controller first and then rolls updates across managed agents. Partial agent failures are reported instead of bricking the whole rollout.
@@ -35,6 +37,27 @@ WinGet installs `Cenvero.Fleet` as a per-user ZIP/portable package for x64 or AR
 
 `fleet sync-agent` brings managed agents up to the controller's version. It syncs servers **in parallel** (bounded concurrency) and streams **per-server progress** as each finishes — `→ checking`, `✓ updated X → Y`, `• up to date`, `✗ error` — followed by a one-line summary, while `stdout` stays clean JSON for scripting. It runs **synchronously** (it waits for every server before returning), so there are no detached, orphaned, half-updated agents. Limit it to one or more servers with `--server <name>` (repeatable).
 
+### Automatic agent sync
+
+Agents that drift behind the controller cause subtle failures, and operators rarely remember to run `fleet sync-agent` after upgrading. So Fleet does it for you, **on by default** for every install method and update policy:
+
+- **Any `fleet` command.** When the last agent sync started more than an hour ago, the command records a new start and launches `fleet sync-agent --background` detached from the terminal. The command itself never waits for it. The background run's output goes to `logs/agent-sync.log`.
+- **The daemon (`fleet start`).** The daemon checks the same hourly schedule, so with a daemon running the fleet is synced hourly even when nobody runs a command. When an agent **connects** running an older version, the daemon syncs it within seconds instead of waiting for the next hourly run (at most once an hour per server).
+
+The CLI and the daemon share one schedule (`data/agent-sync.json`), and a lock ensures that background, daemon and manual (`fleet sync-agent`) runs never update agents at the same time. A manual `fleet sync-agent` that finds one in progress waits for it.
+
+Automatic runs only touch agents **known to be older** than the controller: agents that are current, newer, or have never reported a version are left alone. An agent whose new binary was delivered but cannot be activated unattended (Windows, macOS) is not re-sent every hour; it is listed under "Awaiting restart" in `fleet sync-agent auto status` until its service is restarted. Without a daemon, reverse-mode agents are skipped (they are reached through the daemon).
+
+Background runs are never started by a command run with a `--token` / `FLEET_TOKEN` (a scoped credential must not be able to trigger a fleet-wide agent update), by shell completion, by commands that replace the controller's config or binary (`init`, `backup`, `recover`, `update`, `config restore`/`import`, …), or by a development build.
+
+```bash
+fleet sync-agent auto              # status: last run, result, failures, next run, log path
+fleet sync-agent auto off          # turn it off (stored as updates.agent_auto_sync = false)
+fleet sync-agent auto on           # turn it back on
+fleet config set agent-auto-sync off   # same switch
+FLEET_AGENT_AUTOSYNC=off fleet ...     # skip the background start for one shell, setting unchanged
+```
+
 ### Update notice
 
 With the default `notify-only` posture you are never auto-updated, but you are told when a newer release exists. The daemon re-checks the configured channel's manifest every **10 minutes** and caches the result. Any `fleet` command then surfaces a yellow **"Update your fleet"** notice on stderr when a newer version is available, with the correct command for how you installed it:
@@ -47,7 +70,7 @@ The check is cached, so it never hammers the CDN, and it is skipped entirely for
 
 ### Auto-update policy
 
-If you set `policy: auto-update` in `config.toml`, Fleet automatically updates a version-mismatched managed agent only when Fleet can restart and reverify it without operator action (**currently Linux managed agents**). Windows replacement delivery remains explicit through `fleet sync-agent`; restart the Windows service, reconnect, and verify the live version. The daemon's controller update checker remains notice-only; it does not replace the running controller binary. Apply controller updates explicitly with `fleet update apply` for a self-managed install or the package-manager command shown by Fleet.
+With [automatic agent sync](#automatic-agent-sync) on (the default), agents are synced whatever the policy. If you turn it off and set `policy: auto-update` in `config.toml`, Fleet still automatically updates a version-mismatched managed agent on connect, but only when Fleet can restart and reverify it without operator action (**currently Linux managed agents**). Windows replacement delivery remains explicit through `fleet sync-agent`; restart the Windows service, reconnect, and verify the live version. The daemon's controller update checker remains notice-only; it does not replace the running controller binary. Apply controller updates explicitly with `fleet update apply` for a self-managed install or the package-manager command shown by Fleet.
 
 WinGet does not run background package upgrades merely because its source metadata refreshes. For unattended controller upgrades, schedule `winget upgrade --id Cenvero.Fleet --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity` under the same Windows user that installed the portable package. Stop any long-running `fleet daemon` process first so the in-use executable can be replaced.
 

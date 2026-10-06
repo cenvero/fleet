@@ -78,6 +78,11 @@ type App struct {
 	// slow endpoint never stalls the caller (see notify_queue.go).
 	notificationsMu sync.Mutex
 	notifications   *notifyDispatcher
+
+	// agentSyncQ is the daemon's queue of agents that connected running an
+	// older version (see agent_autosync.go); nil outside a daemon.
+	agentSyncMu sync.Mutex
+	agentSyncQ  *agentConnectSyncQueue
 }
 
 // SetActingOperator records who is acting for audit attribution. The CLI calls
@@ -1511,9 +1516,11 @@ func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server Server
 	}
 	_ = a.SaveServer(server)
 
-	// Auto-update the agent only when the policy permits it.
-	// notify_only and disabled must not trigger unsolicited binary replacements.
-	if hello.AgentVersion != "" && version.Canonical(hello.AgentVersion) != version.Canonical(version.Version) &&
+	// Inside the daemon an out-of-date agent goes to agent auto-sync. Otherwise
+	// auto-update it only when the policy permits it: notify_only and disabled
+	// must not trigger unsolicited binary replacements from here.
+	if !a.queueConnectedAgentSync(server.Name, hello.AgentVersion) &&
+		hello.AgentVersion != "" && version.Canonical(hello.AgentVersion) != version.Canonical(version.Version) &&
 		agentSupportsUnattendedUpdateActivation(hello.OS) &&
 		a.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() { // #nosec G118 -- policy-approved auto-update intentionally outlives the discovery RPC
