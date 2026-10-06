@@ -12,11 +12,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// stubBackgroundAgentSync pretends this is a release build and counts the
-// background syncs a command would launch. Not parallel-safe: it swaps
-// package globals.
-func stubBackgroundAgentSync(t *testing.T) *int {
+// newAutoSyncTestConfig initializes a controller in a temp dir and pins
+// FLEET_CONFIG_DIR to it, so a command that doesn't honour --config-dir
+// (cobra's __complete) can never fall back to the machine's real config. It
+// then pretends this is a release build and counts the background syncs a
+// command would launch. Not parallel-safe: it swaps package globals.
+func newAutoSyncTestConfig(t *testing.T) (string, *int) {
 	t.Helper()
+	configDir := newServerCommandTestConfig(t)
+	t.Setenv("FLEET_CONFIG_DIR", configDir)
 	origSupported, origStart, origTerm := agentAutoSyncSupported, startBackgroundAgentSync, stderrIsTerminal
 	t.Cleanup(func() {
 		agentAutoSyncSupported, startBackgroundAgentSync, stderrIsTerminal = origSupported, origStart, origTerm
@@ -27,12 +31,11 @@ func stubBackgroundAgentSync(t *testing.T) *int {
 	stderrIsTerminal = func() bool { return false }
 	t.Setenv("FLEET_AGENT_AUTOSYNC", "")
 	t.Setenv("FLEET_TOKEN", "")
-	return &launched
+	return configDir, &launched
 }
 
 func TestAnyCommandStartsBackgroundAgentSyncHourly(t *testing.T) {
-	launched := stubBackgroundAgentSync(t)
-	configDir := newServerCommandTestConfig(t)
+	configDir, launched := newAutoSyncTestConfig(t)
 
 	if _, err := runFleetIn(t, configDir, "server", "list"); err != nil {
 		t.Fatal(err)
@@ -63,8 +66,7 @@ func TestAnyCommandStartsBackgroundAgentSyncHourly(t *testing.T) {
 }
 
 func TestBackgroundAgentSyncSkips(t *testing.T) {
-	launched := stubBackgroundAgentSync(t)
-	configDir := newServerCommandTestConfig(t)
+	configDir, launched := newAutoSyncTestConfig(t)
 	due := func() {
 		t.Helper()
 		if err := os.Remove(core.AgentSyncStatePath(configDir)); err != nil && !os.IsNotExist(err) {
@@ -111,8 +113,7 @@ func TestBackgroundAgentSyncSkips(t *testing.T) {
 }
 
 func TestSyncAgentAutoOffAndOn(t *testing.T) {
-	launched := stubBackgroundAgentSync(t)
-	configDir := newServerCommandTestConfig(t)
+	configDir, launched := newAutoSyncTestConfig(t)
 
 	out, err := runFleetIn(t, configDir, "sync-agent", "auto", "off")
 	if err != nil || !strings.Contains(out, "Agent auto-sync is off") {
