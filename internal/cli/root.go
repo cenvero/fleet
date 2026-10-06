@@ -72,6 +72,92 @@ func NewRootCommand() *cobra.Command {
 	var configDir string
 	var tokenID string
 
+	// preRun is the gate every command passes before it runs (init check,
+	// command policy, RBAC token).
+	preRun := func(cmd *cobra.Command, _ []string) error {
+		// Flags and arguments have been validated by now, so any error from
+		// here on is a runtime failure (a server that doesn't exist, a
+		// refused connection): report it without dumping the usage block.
+		cmd.SilenceUsage = true
+		configDir = core.ResolveConfigDir(configDir)
+		// Commands that are always allowed before init
+		switch cmd.Name() {
+		case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
+			"check", "apply", "rollback", "channel",
+			"backup", "recover", "adjust-init",
+			// context/ai/skill describe the CLI and install agent integrations;
+			// they never touch controller state, so they must work pre-init.
+			"context", "ai", "skill",
+			// shell helpers + local-store commands operate on local files only
+			// (config dir + shell rc), so they work before init.
+			"automation", "shell-init", "autocomplete",
+			// `token` (bare) only touches tokens.json in the config dir, so it
+			// works before full init (FL-030).
+			"token",
+			// `secret` only touches secrets.json in the config dir (local store,
+			// no server needed), so it works before full init (FL-004).
+			"secret",
+			"jobs", "cmd-policy", "approvals", "approve":
+			return enforceToken(cmd, configDir, tokenID)
+		}
+		if cmd.HasParent() {
+			switch cmd.Parent().Name() {
+			// Truly-local helpers (cobra built-ins / CLI self-description) that
+			// never touch controller state — safe to short-circuit.
+			case "help", "completion":
+				return nil
+			// Skill targets write integration files unless --print is used. Classify
+			// the leaf conservatively and enforce the token gate.
+			case "skill":
+				return enforceToken(cmd, configDir, tokenID)
+			// Subcommands of these parents WRITE local controller state —
+			// tokens.json, secrets.json, automations/ (+ the shell rc that
+			// shell-init eval()s), and the controller/agent binaries. They MUST be
+			// token-enforced (reject unknown/revoked/scoped tokens + record the
+			// operator), never bypassed: otherwise a scoped or revoked token could
+			// plant a shell-init automation script (RC injection → admin code
+			// execution) or trigger a fleet-wide update. enforceToken returns
+			// before the init check, so the pre-init local behavior these commands
+			// rely on is preserved.
+			case "token", "secret", "automation", "autocomplete", "update":
+				return enforceToken(cmd, configDir, tokenID)
+			}
+		}
+		if !core.IsInitialized(configDir) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Fleet is not initialized yet.\n")
+			fmt.Fprintf(cmd.ErrOrStderr(), "Run 'fleet init' first to set up the controller.\n")
+			os.Exit(1)
+		}
+		// Check for pending config migrations and show a one-line hint.
+		if cfg, err := core.LoadConfigShared(core.ConfigPath(configDir)); err == nil {
+			if hint := core.AdjustInitHint(cfg); hint != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
+			}
+			// Update notice (any install method): shows the latest version on the
+			// configured channel + the correct upgrade command (brew vs
+			// `fleet update apply`), in yellow on a terminal. Backed by the same
+			// 10-minute cache the daemon's update checker keeps warm.
+			if notice := core.UpdateNotice(configDir, cfg.ManifestURL, cfg.Updates.Channel, cfg.Updates.Policy, term.IsTerminal(int(os.Stderr.Fd()))); notice != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n%s\n\n", notice)
+			}
+			// Stamp last-seen version so 'fleet recover' can detect mismatches.
+			core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
+		}
+		// Apply the cmd-policy deny/confirm gate to command paths that run an
+		// arbitrary operator-supplied command but are NOT `fleet exec` and so do
+		// not carry exec's own preflight: `guard` and `cron add`. (`job run` is
+		// gated in jobs.go where it assembles the command; `exec` gates itself.)
+		// This runs for every invocation, with or without a token, mirroring how
+		// exec always consults the policy.
+		if err := enforceCommandPolicyForLeaf(cmd, configDir); err != nil {
+			return err
+		}
+		// FL-030: controller-side RBAC enforcement. After the init check (so a
+		// scoped token can resolve servers/groups), if a token is presented,
+		// load it and authorize this invocation against its scope.
+		return enforceToken(cmd, configDir, tokenID)
+	}
+
 	root := &cobra.Command{
 		Use:   "fleet",
 		Short: "Cenvero Fleet controller",
@@ -89,88 +175,12 @@ func NewRootCommand() *cobra.Command {
 			}
 			return cmd.Help()
 		},
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			// Flags and arguments have been validated by now, so any error from
-			// here on is a runtime failure (a server that doesn't exist, a
-			// refused connection): report it without dumping the usage block.
-			cmd.SilenceUsage = true
-			configDir = core.ResolveConfigDir(configDir)
-			// Commands that are always allowed before init
-			switch cmd.Name() {
-			case "init", "help", "report", "version", "self-uninstall", "completion", "fleet",
-				"check", "apply", "rollback", "channel",
-				"backup", "recover", "adjust-init",
-				// context/ai/skill describe the CLI and install agent integrations;
-				// they never touch controller state, so they must work pre-init.
-				"context", "ai", "skill",
-				// shell helpers + local-store commands operate on local files only
-				// (config dir + shell rc), so they work before init.
-				"automation", "shell-init", "autocomplete",
-				// `token` (bare) only touches tokens.json in the config dir, so it
-				// works before full init (FL-030).
-				"token",
-				// `secret` only touches secrets.json in the config dir (local store,
-				// no server needed), so it works before full init (FL-004).
-				"secret",
-				"jobs", "cmd-policy", "approvals", "approve":
-				return enforceToken(cmd, configDir, tokenID)
-			}
-			if cmd.HasParent() {
-				switch cmd.Parent().Name() {
-				// Truly-local helpers (cobra built-ins / CLI self-description) that
-				// never touch controller state — safe to short-circuit.
-				case "help", "completion":
-					return nil
-				// Skill targets write integration files unless --print is used. Classify
-				// the leaf conservatively and enforce the token gate.
-				case "skill":
-					return enforceToken(cmd, configDir, tokenID)
-				// Subcommands of these parents WRITE local controller state —
-				// tokens.json, secrets.json, automations/ (+ the shell rc that
-				// shell-init eval()s), and the controller/agent binaries. They MUST be
-				// token-enforced (reject unknown/revoked/scoped tokens + record the
-				// operator), never bypassed: otherwise a scoped or revoked token could
-				// plant a shell-init automation script (RC injection → admin code
-				// execution) or trigger a fleet-wide update. enforceToken returns
-				// before the init check, so the pre-init local behavior these commands
-				// rely on is preserved.
-				case "token", "secret", "automation", "autocomplete", "update":
-					return enforceToken(cmd, configDir, tokenID)
-				}
-			}
-			if !core.IsInitialized(configDir) {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Fleet is not initialized yet.\n")
-				fmt.Fprintf(cmd.ErrOrStderr(), "Run 'fleet init' first to set up the controller.\n")
-				os.Exit(1)
-			}
-			// Check for pending config migrations and show a one-line hint.
-			if cfg, err := core.LoadConfigShared(core.ConfigPath(configDir)); err == nil {
-				if hint := core.AdjustInitHint(cfg); hint != "" {
-					fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
-				}
-				// Update notice (any install method): shows the latest version on the
-				// configured channel + the correct upgrade command (brew vs
-				// `fleet update apply`), in yellow on a terminal. Backed by the same
-				// 10-minute cache the daemon's update checker keeps warm.
-				if notice := core.UpdateNotice(configDir, cfg.ManifestURL, cfg.Updates.Channel, cfg.Updates.Policy, term.IsTerminal(int(os.Stderr.Fd()))); notice != "" {
-					fmt.Fprintf(cmd.ErrOrStderr(), "\n%s\n\n", notice)
-				}
-				// Stamp last-seen version so 'fleet recover' can detect mismatches.
-				core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
-			}
-			// Apply the cmd-policy deny/confirm gate to command paths that run an
-			// arbitrary operator-supplied command but are NOT `fleet exec` and so do
-			// not carry exec's own preflight: `guard` and `cron add`. (`job run` is
-			// gated in jobs.go where it assembles the command; `exec` gates itself.)
-			// This runs for every invocation, with or without a token, mirroring how
-			// exec always consults the policy.
-			if err := enforceCommandPolicyForLeaf(cmd, configDir); err != nil {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if err := preRun(cmd, args); err != nil {
 				return err
 			}
-			// FL-030: controller-side RBAC enforcement. After the init check (so a
-			// scoped token can resolve servers/groups), if a token is presented,
-			// load it and authorize this invocation against its scope.
-			return enforceToken(cmd, configDir, tokenID)
+			maybeStartBackgroundAgentSync(cmd, configDir, tokenID)
+			return nil
 		},
 		// Runs only after a command's RunE succeeded (cobra skips it on error).
 		PersistentPostRunE: func(cmd *cobra.Command, _ []string) error {
@@ -2110,7 +2120,7 @@ func newConfigCommand(configDir *string) *cobra.Command {
 	})
 	configCmd.AddCommand(&cobra.Command{
 		Use:   "set <key> <value>",
-		Short: "Change a runtime setting after init (job-log-retention, session-grace, edit-*)",
+		Short: "Change a runtime setting after init (job-log-retention, session-grace, edit-*, agent-auto-sync)",
 		Long: "Change a configurable runtime setting at any time. Supported keys:\n\n" +
 			"  job-log-retention   how long detached job logs are kept before they're\n" +
 			"                      auto-deleted on the controller + servers (e.g. 7d, 30d,\n" +
@@ -2124,12 +2134,15 @@ func newConfigCommand(configDir *string) *cobra.Command {
 			"                      512K; at most and by default 8M)\n" +
 			"  edit-require-hash   on: every non-interactive edit of an existing file must\n" +
 			"                      pass --expect-sha256, so it can only change the exact\n" +
-			"                      version that was viewed (good for AI agents); off: optional\n\n" +
+			"                      version that was viewed (good for AI agents); off: optional\n" +
+			"  agent-auto-sync     on (default): keep agents on the controller's version\n" +
+			"                      automatically, hourly; off: only `fleet sync-agent` does\n\n" +
 			"Examples:\n" +
 			"  fleet config set job-log-retention 30d\n" +
 			"  fleet config set session-grace 15m\n" +
 			"  fleet config set edit-backups 20\n" +
-			"  fleet config set edit-require-hash on",
+			"  fleet config set edit-require-hash on\n" +
+			"  fleet config set agent-auto-sync off",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value := strings.ToLower(strings.TrimSpace(args[0])), strings.TrimSpace(args[1])
@@ -2166,8 +2179,14 @@ func newConfigCommand(configDir *string) *cobra.Command {
 					return fmt.Errorf("invalid edit-require-hash %q: use on or off", value)
 				}
 				cfg.Runtime.FileEdit.RequireHash = on
+			case "agent-auto-sync", "agent_auto_sync":
+				on, err := parseOnOff(value)
+				if err != nil {
+					return fmt.Errorf("invalid agent-auto-sync %q: use on or off", value)
+				}
+				cfg.Updates.AgentAutoSync = &on
 			default:
-				return fmt.Errorf("unknown key %q (supported: job-log-retention, session-grace, edit-backups, edit-max-size, edit-require-hash)", args[0])
+				return fmt.Errorf("unknown key %q (supported: job-log-retention, session-grace, edit-backups, edit-max-size, edit-require-hash, agent-auto-sync)", args[0])
 			}
 			if err := cfg.Validate(); err != nil {
 				return err
@@ -3667,6 +3686,7 @@ func classifyAgentErrorStr(s string) string { return classifyAgentError(fmt.Erro
 
 func newSyncAgentCommand(configDir *string) *cobra.Command {
 	var targetServers []string
+	var background bool
 	cmd := &cobra.Command{
 		Use:   "sync-agent",
 		Short: "Sync agent versions; Linux restarts automatically, Windows activation is manual",
@@ -3678,20 +3698,29 @@ On Linux managed nodes, it schedules a systemd service restart automatically.
 On Windows managed nodes, Fleet delivers and replaces the executable but cannot
 restart or reverify the live Windows service automatically; restart it with
 Windows tooling, reconnect, and verify the live agent version. Servers already
-running the correct version are skipped.`,
+running the correct version are skipped.
+
+This also runs automatically every hour, in the background of any fleet command
+and in the daemon; see ` + "`fleet sync-agent auto`" + ` to check on it or turn it off.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
 			}
 			defer app.Close()
+			if background {
+				// Started detached by maybeStartBackgroundAgentSync, with stdout
+				// and stderr going to the agent-sync log.
+				return app.RunBackgroundAgentSync(cmd.Context(), cmd.ErrOrStderr())
+			}
 			// Stream per-server progress to stderr as each server (synced
 			// concurrently) starts/finishes, so the operator sees instant feedback
 			// instead of waiting silently for one big result. stdout stays clean
 			// JSON for piping. The callback is invoked serially by SyncAgent.
 			errOut := cmd.ErrOrStderr()
 			fmt.Fprintln(errOut, "Syncing agents across the fleet (in parallel)...")
-			result, err := app.SyncAgent(cmd.Context(), targetServers, func(p core.SyncAgentProgress) {
+			progress := func(p core.SyncAgentProgress) {
 				switch p.State {
 				case "start":
 					fmt.Fprintf(errOut, "  → %s: checking/updating...\n", p.Server)
@@ -3704,6 +3733,12 @@ running the correct version are skipped.`,
 				case "error":
 					fmt.Fprintf(errOut, "  ✗ %s: %s\n", p.Server, p.Err)
 				}
+			}
+			result, err := app.RunAgentSync(cmd.Context(), targetServers, core.AgentSyncOptions{
+				Trigger:  "manual",
+				Wait:     true,
+				OnWait:   func() { fmt.Fprintln(errOut, "  … an agent sync is already running; waiting for it to finish") },
+				Progress: progress,
 			})
 			if err != nil {
 				return err
@@ -3713,6 +3748,9 @@ running the correct version are skipped.`,
 		},
 	}
 	cmd.Flags().StringArrayVar(&targetServers, "server", nil, "sync only the specified server(s) instead of all")
+	cmd.Flags().BoolVar(&background, "background", false, "run as the automatic background sync (used internally)")
+	_ = cmd.Flags().MarkHidden("background")
+	cmd.AddCommand(newSyncAgentAutoCommand(configDir))
 	return cmd
 }
 

@@ -386,7 +386,7 @@ func (a *App) ApplyFleetUpdate(ctx context.Context, serverNames []string, allowU
 
 func (a *App) applyAgentUpdate(ctx context.Context, server ServerRecord) FleetUpdateAgentResult {
 	serviceName := agentServiceName(server)
-	response, err := a.callRPC(server, proto.Envelope{
+	response, err := a.callRPCContext(ctx, server, proto.Envelope{
 		Action: "update.apply",
 		Payload: proto.UpdateApplyPayload{
 			ManifestURL: a.Config.ManifestURL,

@@ -833,8 +833,10 @@ func (h *ReverseHub) setSession(serverName string, session *transport.Session, i
 		Details:  fmt.Sprintf("fingerprint=%s capabilities=%d", info.HostKeyFingerprint, len(info.Hello.Capabilities)),
 	})
 
-	// Auto-update the agent only when the policy permits it.
-	if info.Hello.AgentVersion != "" && version.Canonical(info.Hello.AgentVersion) != version.Canonical(version.Version) &&
+	// An out-of-date agent goes to the daemon's agent auto-sync. With auto-sync
+	// off, auto-update it only when the policy permits it.
+	if !h.app.queueConnectedAgentSync(serverName, info.Hello.AgentVersion) &&
+		info.Hello.AgentVersion != "" && version.Canonical(info.Hello.AgentVersion) != version.Canonical(version.Version) &&
 		agentSupportsUnattendedUpdateActivation(info.Hello.OS) &&
 		h.app.Config.Updates.Policy == update.PolicyAutoUpdate {
 		go func() {
@@ -963,6 +965,7 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	a.useHubInProcess(hub)
 	daemonApps.Store(a, struct{}{})
 	defer daemonApps.Delete(a)
+	defer a.startAgentAutoSync(ctx)() // before agents can connect
 	errCh := make(chan error, 2)
 	go func() { errCh <- hub.Serve(ctx, reverseListener) }()
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()

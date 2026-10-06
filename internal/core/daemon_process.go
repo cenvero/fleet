@@ -374,23 +374,7 @@ func StartDaemon(opts DaemonStartOptions) (DaemonStartResult, error) {
 // openDaemonLog opens the daemon log for appending (owner-only), rotating it
 // first when it has grown large, and returns the offset new output starts at.
 func openDaemonLog(path string) (*os.File, int64, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, 0, fmt.Errorf("create log directory: %w", err)
-	}
-	if info, err := os.Stat(path); err == nil && info.Size() > daemonLogRotateBytes {
-		_ = os.Rename(path, path+".1")
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) // #nosec G304 -- fixed file inside the controller's own config dir
-	if err != nil {
-		return nil, 0, fmt.Errorf("open daemon log %s: %w", path, err)
-	}
-	_ = f.Chmod(0o600) // tighten a log created by an older release
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, 0, fmt.Errorf("open daemon log %s: %w", path, err)
-	}
-	return f, info.Size(), nil
+	return openRotatingLog(path, daemonLogRotateBytes)
 }
 
 // daemonLogExcerpt returns the last lines the daemon wrote after offset,

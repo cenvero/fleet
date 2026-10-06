@@ -353,7 +353,7 @@ var commandMutationClassifications = map[string]bool{
 	"template list": false, "template apply": true,
 	"key rotate": true, "key fingerprint": false, "key export-pub": false, "key audit": false,
 	"update check": false, "update apply": true, "update rollback": true, "update channel": true,
-	"sync-agent": true, "backup": true, "recover": true, "adjust-init": true,
+	"sync-agent": true, "sync-agent auto": true, "backup": true, "recover": true, "adjust-init": true,
 	"self-uninstall": true, "report": false, "version": false,
 
 	"context": false, "ai": false,

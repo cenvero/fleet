@@ -242,6 +242,7 @@ Updates:
 - `fleet update rollback`
 - `fleet update channel stable|beta`
 - `fleet sync-agent [--server <name>]` — bring managed agents up to the controller version (parallel, with streamed per-server progress)
+- `fleet sync-agent auto [on|off|status]` — automatic hourly agent sync (on by default; see [Updates and Releases](#updates-and-releases))
 
 File manager and transfers (**new in v2**):
 
@@ -395,6 +396,8 @@ fleet update check
 fleet update apply
 fleet update rollback
 ```
+
+Managed **agents**, on the other hand, are kept on the controller's version automatically. Any `fleet` command whose last agent sync started more than an hour ago launches `fleet sync-agent` detached in the background (the command itself never waits), and a running daemon (`fleet start`) does the same hourly and syncs an agent as soon as it connects with an older version. Only agents known to be older than the controller are touched, through the same signed, verified agent update path as `fleet sync-agent`. Check on it with `fleet sync-agent auto status` (output in `logs/agent-sync.log`), and turn it off with `fleet sync-agent auto off` or `fleet config set agent-auto-sync off`.
 
 Release artifacts are minisign-signed, and both the installers and the updater verify signatures and checksums before swapping binaries. Signature verification is **fail-closed on every channel**: a manifest entry with no minisign signature is refused (a SHA-256 checksum alone is never accepted in its place). Updates are also **anti-rollback protected** — the updater refuses a target older than the running version or below the channel's `min_supported` floor — and downloads are confined to an `https`-only scheme allowlist with size/decompression bounds.
 

@@ -34,7 +34,24 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic agent sync, on by default.** Agents are kept on the controller's version
+  without anyone having to know about `fleet sync-agent`. Any `fleet` command whose last
+  agent sync started more than an hour ago launches `fleet sync-agent` detached in the
+  background (the command doesn't wait; output goes to `logs/agent-sync.log`), and the
+  daemon (`fleet start`) runs the same hourly schedule and syncs an agent as soon as it
+  connects with an older version. Only agents known to be older than the controller are
+  updated; one whose new binary awaits a manual restart (Windows, macOS) isn't re-sent
+  every hour. A shared schedule and a run lock keep background, daemon and manual runs
+  from overlapping. `fleet sync-agent auto [on|off|status]` (or
+  `fleet config set agent-auto-sync off`) shows or switches it; `FLEET_AGENT_AUTOSYNC=off`
+  skips it for one shell. Commands run with a `--token` never start one.
+
 ### Changed
+
+- `fleet sync-agent` now rejects stray positional arguments (`fleet sync-agent web-01`
+  used to sync every server; use `--server web-01`).
 
 - Agent auto-install no longer moves the agent through the controller. The server keeps
   the release archive it downloads and reports its size and BLAKE2b-512 and SHA-256
