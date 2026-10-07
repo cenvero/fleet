@@ -2,13 +2,26 @@
 
 > Markdown version of <https://fleet.cenvero.org/whats-new.html>. The complete reference in one file is at <https://fleet.cenvero.org/llms-full.txt>.
 
-Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.5.0, released on 27 September 2026. Every release is signed; upgrade with `fleet update apply` or `brew upgrade cenvero-fleet`. The complete, line-by-line history lives in the changelog.
+Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.0, released on 7 October 2026. Every release is signed; upgrade with `fleet update apply`, `brew upgrade cenvero-fleet` or `winget upgrade --id Cenvero.Fleet`. The complete, line-by-line history lives in the changelog.
 
 [Latest release](https://github.com/cenvero/fleet/releases) · [Full changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)
 
+## v2.6.0
+
+*Latest stable · Released 2026-10-07*
+
+Agents now keep themselves on the controller's version without anyone running a command, agent installs move far less over SSH, and Fleet is in the Windows Package Manager catalog.
+
+### Highlights
+
+- **Automatic agent sync, on by default:** any `fleet` command whose last agent sync started more than an hour ago runs `fleet sync-agent` in the background — the command never waits for it — and a running daemon (`fleet start`) syncs hourly and updates an agent as soon as it connects with an older version. Only agents known to be older than the controller are touched, and runs never overlap. `fleet sync-agent auto` shows the last run and the next; `fleet sync-agent auto off` turns it off. [Docs](https://fleet.cenvero.org/docs/#agent-auto-sync)
+- **Lighter agent installs:** the server keeps the release archive it downloads and verifies it with the controller checking the signature, instead of sending the archive back and the binary up again — about 12 MB less over SSH per Linux server.
+- **Windows Package Manager:** install with `winget install --id Cenvero.Fleet --exact --source winget`; WinGet then owns upgrades and removal of the controller.
+- An agent install's download steps no longer stall until the five-minute deadline on a busy server, and `fleet sync-agent` rejects a stray server name instead of syncing every server (use `--server`).
+
 ## v2.5.0
 
-*Latest stable · Released 2026-09-27*
+*Released 2026-09-27*
 
 Safe in-place file editing for people and AI agents, a large performance pass, rebuilt terminal and web interfaces, and a round of safety, security and correctness fixes found by an end-to-end review of every command.
 

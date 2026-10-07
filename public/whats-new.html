@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>What's New in Cenvero Fleet — Release Notes and Changelog</title>
-  <meta name="description" content="Cenvero Fleet release notes from v2.0 to v2.5.0 — file managers, live sync, agentic AI, RBAC, secrets and security hardening — plus what's coming next.">
+  <meta name="description" content="Cenvero Fleet release notes from v2.0 to v2.6.0 — file managers, live sync, agentic AI, RBAC, secrets and security hardening — plus what's coming next.">
   <link rel="canonical" href="https://fleet.cenvero.org/whats-new.html">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta name="color-scheme" content="dark light">
@@ -55,12 +55,12 @@
         "@id": "https://fleet.cenvero.org/whats-new.html#webpage",
         "url": "https://fleet.cenvero.org/whats-new.html",
         "name": "What's New in Cenvero Fleet — Release Notes and Changelog",
-        "description": "Release notes for Cenvero Fleet v2.0 through v2.5.0.",
+        "description": "Release notes for Cenvero Fleet v2.0 through v2.6.0.",
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "about": { "@id": "https://fleet.cenvero.org/#software" },
         "breadcrumb": { "@id": "https://fleet.cenvero.org/whats-new.html#breadcrumb" },
         "primaryImageOfPage": "https://fleet.cenvero.org/assets/og/og-whats-new.png",
-        "dateModified": "2026-09-27",
+        "dateModified": "2026-10-07",
         "inLanguage": "en"
       }
     ]
@@ -107,7 +107,7 @@
     <div class="container">
       <nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/">Home</a></li><li aria-current="page">What's new</li></ol></nav>
       <h1 id="page-title">What's new in <span class="grad-text">Cenvero Fleet</span></h1>
-      <p class="hero-lead">Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.5.0, released on 27 September 2026. Every release is signed; upgrade with <code>fleet update apply</code> or <code>brew upgrade cenvero-fleet</code>. The complete, line-by-line history lives in the changelog.</p>
+      <p class="hero-lead">Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.0, released on 7 October 2026. Every release is signed; upgrade with <code>fleet update apply</code>, <code>brew upgrade cenvero-fleet</code> or <code>winget upgrade --id Cenvero.Fleet</code>. The complete, line-by-line history lives in the changelog.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href="https://github.com/cenvero/fleet/releases"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Latest release</a>
         <a class="btn btn-secondary" href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg> Full changelog</a>
@@ -119,11 +119,28 @@
     <div class="container">
       <div class="timeline">
 
+        <article class="release" id="v2-6-0" aria-labelledby="v260-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v260-title">v2.6.0</h2>
+              <span class="tag tag-accent">Latest stable</span>
+              <time datetime="2026-10-07">7 Oct 2026</time>
+            </div>
+            <p>Agents now keep themselves on the controller's version without anyone running a command, agent installs move far less over SSH, and Fleet is in the Windows Package Manager catalog.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li><strong>Automatic agent sync, on by default:</strong> any <code>fleet</code> command whose last agent sync started more than an hour ago runs <code>fleet sync-agent</code> in the background — the command never waits for it — and a running daemon (<code>fleet start</code>) syncs hourly and updates an agent as soon as it connects with an older version. Only agents known to be older than the controller are touched, and runs never overlap. <code>fleet sync-agent auto</code> shows the last run and the next; <code>fleet sync-agent auto off</code> turns it off. <a href="/docs/#agent-auto-sync">Docs</a></li>
+              <li><strong>Lighter agent installs:</strong> the server keeps the release archive it downloads and verifies it with the controller checking the signature, instead of sending the archive back and the binary up again — about 12 MB less over SSH per Linux server.</li>
+              <li><strong>Windows Package Manager:</strong> install with <code>winget install --id Cenvero.Fleet --exact --source winget</code>; WinGet then owns upgrades and removal of the controller.</li>
+              <li>An agent install's download steps no longer stall until the five-minute deadline on a busy server, and <code>fleet sync-agent</code> rejects a stray server name instead of syncing every server (use <code>--server</code>).</li>
+            </ul>
+          </div>
+        </article>
+
         <article class="release" id="v2-5-0" aria-labelledby="v250-title">
           <div class="release-card">
             <div class="release-head">
               <h2 id="v250-title">v2.5.0</h2>
-              <span class="tag tag-accent">Latest stable</span>
               <time datetime="2026-09-27">27 Sep 2026</time>
             </div>
             <p>Safe in-place file editing for people and AI agents, a large performance pass, rebuilt terminal and web interfaces, and a round of safety, security and correctness fixes found by an end-to-end review of every command.</p>

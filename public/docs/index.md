@@ -59,7 +59,7 @@ Scoped tokens, named secrets, approvals, command policy and a dead-man's switch 
    fleet dashboard
    ```
 
-> These docs cover **v2.5.0**, the latest stable release. Some commands described here are new in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
+> These docs cover **v2.6.0**, the latest stable release. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
 
 ### Conventions and global flags
 
@@ -104,13 +104,19 @@ Detects your CPU architecture, verifies the signature and installs `/usr/bin/fle
 
 **Windows**
 
-PowerShell:
+Windows Package Manager:
+
+```powershell
+winget install --id Cenvero.Fleet --exact --source winget
+```
+
+or PowerShell:
 
 ```powershell
 irm https://fleet.cenvero.org/install.ps1 | iex
 ```
 
-Run in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned `minisign` verifier if you have none, installs `fleet.exe` to `%USERPROFILE%\.local\bin` and adds it to your user `PATH`.
+WinGet installs a per-user package checked against the SHA-256 in Microsoft's catalog, and owns upgrades (`winget upgrade --id Cenvero.Fleet`) and removal. A new release reaches the catalog after Microsoft reviews it, which can take a few days. The PowerShell script always gets the latest release: run it in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned `minisign` verifier if you have none, installs `fleet.exe` to `%USERPROFILE%\.local\bin` and adds it to your user `PATH`.
 
 The install script needs `curl` and `tar`, and offers to install `jq` and `minisign` if they are missing — signature verification cannot be skipped.
 
@@ -135,7 +141,7 @@ fleet version --json
 
 ### Uninstall
 
-`fleet self-uninstall` removes the binary and the controller's config directory (servers, keys, logs). On a Homebrew install it removes the config directory and prints the `brew uninstall` command instead of deleting the binary. Agents on your servers are left running — remove them first with [`fleet server remove`](https://fleet.cenvero.org/docs/#server-add) if you want them gone.
+`fleet self-uninstall` removes the binary and the controller's config directory (servers, keys, logs). On a Homebrew or WinGet install it removes the config directory and prints the `brew uninstall` or `winget uninstall` command instead of deleting the binary. Agents on your servers are left running — remove them first with [`fleet server remove`](https://fleet.cenvero.org/docs/#server-add) if you want them gone.
 
 ```sh
 fleet self-uninstall --yes
@@ -241,9 +247,9 @@ fleet server enroll-token edge-01
 
 ```text
 NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.5.0
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.5.0
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.5.0
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.0
 ```
 
 `reconnect` connects again and refreshes what the controller knows; add `--accept-new-host-key` after you have verified a changed host key. `enroll-token` mints a fresh one-time token for a reverse agent, for example after it lost its key.
@@ -1435,7 +1441,7 @@ fleet recover --from-dir /mnt/old-disk/.cenvero-fleet
 
 ## Updates
 
-Fleet updates itself, but only when you say so: the default policy is `notify-only` on the `stable` channel.
+Fleet updates the controller only when you say so: the default policy is `notify-only` on the `stable` channel. Agents are different — they are [kept on the controller's version automatically](https://fleet.cenvero.org/docs/#agent-auto-sync).
 
 ```sh
 fleet update check
@@ -1452,7 +1458,7 @@ fleet update channel beta
 | Policy | What happens |
 |---|---|
 | `notify-only` | Default. Tells you about new releases; you apply them. |
-| `auto-update` | Also updates version-mismatched managed Linux agents automatically. The controller itself is still updated only when you run `fleet update apply`. |
+| `auto-update` | With [agent auto-sync](https://fleet.cenvero.org/docs/#agent-auto-sync) turned off, still updates a version-mismatched managed Linux agent when it connects. The controller itself is still updated only when you run `fleet update apply`. |
 | `disabled` | No update checks. |
 
 ### Verification
@@ -1462,6 +1468,10 @@ Signature checks fail closed on every channel: an update without a minisign sign
 ### Homebrew installs
 
 Homebrew owns the controller binary, so upgrade it with `brew update && brew upgrade cenvero-fleet` and update agents with [`fleet sync-agent`](https://fleet.cenvero.org/docs/#agent-updates). There, `fleet update check` works, `update apply` only prints those instructions, and `channel` and `rollback` are blocked.
+
+### WinGet installs
+
+Windows Package Manager owns the controller binary in the same way: upgrade it with `winget upgrade --id Cenvero.Fleet --exact --source winget`. `update apply`, `rollback`, `channel` and `self-uninstall`'s binary removal defer to WinGet. WinGet does not upgrade packages in the background on its own; for unattended upgrades, schedule `winget upgrade` under the same Windows user that installed Fleet.
 
 ## Agent updates
 
@@ -1474,7 +1484,7 @@ fleet agent update --canary 1
 fleet agent update --group role=web --canary 2 --strict-health
 ```
 
-- `agent version` shows each agent's version in one form (`v2.5.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
+- `agent version` shows each agent's version in one form (`v2.6.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
 - `agent update` updates a first batch of `--canary N` servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. `--canary 0` updates everything at once.
 - Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass `--strict-health`.
 
@@ -1486,6 +1496,23 @@ fleet sync-agent --server web-01 --server web-02
 ```
 
 Brings agents up to the controller's version, several servers at a time, with progress per server on stderr (*updated*, *up to date* or an error) and JSON on stdout. Servers already on the right version are skipped. Linux agents are restarted through systemd automatically; on Windows the new binary is delivered, but you restart the service and reconnect yourself.
+
+### Automatic agent sync (New in v2.6.0)
+
+You don't have to remember `fleet sync-agent`: it runs on its own, on by default.
+
+- **Any `fleet` command** whose last agent sync started more than an hour ago starts `fleet sync-agent` in the background. The command itself never waits; the output goes to `logs/agent-sync.log` in the config directory.
+- **A running daemon** (`fleet start`) syncs hourly even when nobody runs a command, and updates an agent within seconds when it connects with an older version (at most once an hour per server).
+- Only agents known to be **older** than the controller are touched. An agent whose new binary needs a manual restart (Windows, macOS) is listed under *Awaiting restart* rather than sent again every hour, and reverse-mode agents wait for the daemon.
+- Background, daemon and manual runs never overlap; a manual `fleet sync-agent` waits for one in progress.
+- Commands run with a `--token` never start a sync, so a scoped token can't trigger a fleet-wide update.
+
+```sh
+fleet sync-agent auto          # status: last run, failures, next run, log
+fleet sync-agent auto off      # turn it off (or: fleet config set agent-auto-sync off)
+fleet sync-agent auto on
+FLEET_AGENT_AUTOSYNC=off fleet ...   # skip it for one shell
+```
 
 ## Agentic Fleet
 
@@ -1581,6 +1608,7 @@ All 62 top-level commands and their subcommands. Run `fleet ai <command>` for th
 | [`fleet svc`](https://fleet.cenvero.org/docs/#services) | `disable` `enable` `restart` `start` `status` `stop` | Structured systemd control for any unit |
 | [`fleet sync`](https://fleet.cenvero.org/docs/#sync) | — | Live mirror a directory between local and a server (writer → replica) |
 | [`fleet sync-agent`](https://fleet.cenvero.org/docs/#agent-updates) | — | Bring every agent up to the controller version |
+| [`fleet sync-agent auto`](https://fleet.cenvero.org/docs/#agent-auto-sync) | on\|off\|status | Show or switch automatic hourly agent sync (on by default) |
 | [`fleet tag`](https://fleet.cenvero.org/docs/#tags) | — | Tag servers with key=value labels and group them |
 | [`fleet template`](https://fleet.cenvero.org/docs/#templates) | `apply` `list` | List templates and apply one to a server |
 | [`fleet token`](https://fleet.cenvero.org/docs/#tokens) | `create` `list` `revoke` | Create, list and revoke scoped RBAC tokens |

@@ -71,7 +71,7 @@
         "applicationSubCategory": "Server and fleet management",
         "operatingSystem": "Linux, macOS, Windows",
         "softwareRequirements": "The controller is a single binary with no runtime dependencies. Managed servers need SSH access; automatic agent installation needs Linux with systemd (macOS and Windows agents are set up manually).",
-        "softwareVersion": "2.5.0",
+        "softwareVersion": "2.6.0",
         "releaseNotes": "https://fleet.cenvero.org/whats-new.html",
         "license": "https://spdx.org/licenses/AGPL-3.0-or-later.html",
         "isAccessibleForFree": true,
@@ -242,9 +242,11 @@ web-02   direct   <span class="t-ok">online</span>  linux/amd64  <span class="t-
             <p class="install-note">Detects your CPU architecture, verifies the signature and installs <code>fleet</code>. Homebrew on Linux works too.</p>
           </div>
           <div class="tabpanel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
-            <div class="cmd-label">PowerShell</div>
+            <div class="cmd-label">Windows Package Manager</div>
+            <div class="cmd ps"><code>winget install --id Cenvero.Fleet --exact --source winget</code><button class="copy-btn" type="button" data-copy="winget install --id Cenvero.Fleet --exact --source winget"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
+            <div class="cmd-label">or PowerShell</div>
             <div class="cmd ps"><code>irm https://fleet.cenvero.org/install.ps1 | iex</code><button class="copy-btn" type="button" data-copy="irm https://fleet.cenvero.org/install.ps1 | iex"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
-            <p class="install-note">Run in PowerShell 5.1 or later — no administrator rights needed. Installs <code>fleet.exe</code> to <code>%USERPROFILE%\.local\bin</code> and adds it to your user <code>PATH</code>.</p>
+            <p class="install-note">WinGet owns upgrades and removal of its install. The PowerShell script runs in PowerShell 5.1 or later — no administrator rights needed — installs <code>fleet.exe</code> to <code>%USERPROFILE%\.local\bin</code> and adds it to your user <code>PATH</code>.</p>
           </div>
         </div>
       </div>

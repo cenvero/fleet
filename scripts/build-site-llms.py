@@ -55,7 +55,7 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Name:** Cenvero Fleet ("Fleet" for short). Controller binary: `fleet`. Agent binary: `fleet-agent`. Made by Cenvero.
 - **What it is:** a self-hosted server fleet manager — an always-connected control plane for shells, fan-out commands, file transfer, live sync, services, logs, metrics, alerts and automation, driven from a CLI, a terminal dashboard, terminal and web file managers, scripts or AI coding agents.
 - **License and price:** AGPL-3.0-or-later. Free, with no paid tier, no account and no hosted service.
-- **Latest stable release:** v2.5.0, released 2026-09-27. Release notes: https://fleet.cenvero.org/whats-new.html
+- **Latest stable release:** v2.6.0, released 2026-10-07. Release notes: https://fleet.cenvero.org/whats-new.html
 - **Platforms:** the controller runs on Linux, macOS and Windows. Release builds exist for Linux (amd64, arm64, armv7), macOS (amd64, arm64) and Windows (amd64, arm64). Agents are installed automatically on Linux servers with systemd; macOS and Windows agents are set up manually. Service and firewall management are Linux features.
 - **Architecture:** the controller runs on the machine you work from (a laptop, a bastion host or a small VM) and keeps its state in a local config directory — `~/.cenvero-fleet` on Linux — with SQLite by default, or PostgreSQL, MySQL or MariaDB. Every call rides one authenticated `fleet-rpc` SSH channel with typed RPCs rather than shell strings.
 - **Transport:** direct mode (the controller connects to the agent, port 2222 by default) or reverse mode (the agent dials out to the controller daemon, port 9443 by default, enrolling with a one-time token and the controller's fingerprint). One fleet can mix both.
@@ -65,15 +65,24 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Install:**
   - macOS or Linux with Homebrew: `brew tap cenvero/fleet && brew install cenvero-fleet`
   - Linux or macOS install script: `curl -fsSL https://fleet.cenvero.org/install | sh`
+  - Windows Package Manager: `winget install --id Cenvero.Fleet --exact --source winget` (a new release reaches the catalog after Microsoft's review, which can take a few days)
   - Windows, in PowerShell 5.1 or later (no administrator rights needed; installs to `%USERPROFILE%\\.local\\bin` and adds it to the user PATH): `irm https://fleet.cenvero.org/install.ps1 | iex`
   - From source (Go 1.26): `git clone https://github.com/cenvero/fleet && cd fleet && make build`
 - **First steps:** `fleet init`, then `fleet server add web-01 192.0.2.10 --login-user root`, then `fleet exec web-01 uptime` or `fleet dashboard`.
-- **Upgrade:** `fleet update apply` (self-managed installs) or `brew upgrade cenvero-fleet` followed by `fleet sync-agent` (Homebrew).
+- **Upgrade:** `fleet update apply` (self-managed installs), `brew upgrade cenvero-fleet` (Homebrew) or `winget upgrade --id Cenvero.Fleet --exact --source winget` (WinGet). Agents then follow the controller automatically within the hour (automatic agent sync, on by default; `fleet sync-agent` does it at once).
 - **Links:** source https://github.com/cenvero/fleet · releases https://github.com/cenvero/fleet/releases · changelog https://github.com/cenvero/fleet/blob/main/CHANGELOG.md · security policy https://github.com/cenvero/fleet/security/policy (private reports to security@cenvero.org)
+
+## New in v2.6.0
+
+This file describes v2.6.0, the latest stable release (2026-10-07). If a controller still runs v2.5.0 or older, these items are **not** available there:
+
+- Automatic agent sync: any `fleet` command whose last agent sync started more than an hour ago runs `fleet sync-agent` in the background, and the daemon syncs hourly and when an out-of-date agent connects. `fleet sync-agent auto [on|off|status]` and `fleet config set agent-auto-sync on|off` control it; `FLEET_AGENT_AUTOSYNC=off` skips it for one shell. On older versions, run `fleet sync-agent` yourself after upgrading.
+- `fleet sync-agent` rejecting stray positional arguments (older versions ignored `fleet sync-agent web-01` and synced every server; use `--server`).
+- Agent auto-install verifying the release archive on the server, with only the signature check on the controller.
 
 ## New in v2.5.0
 
-This file describes v2.5.0, the latest stable release (2026-09-27). If a server or controller still runs v2.4.3 or older, these items are **not** available there:
+If a server or controller still runs v2.4.3 or older, these items are **not** available there:
 
 - `fleet version` (v2.4.3 and older print their version with `fleet --version`).
 - `fleet start` / `fleet stop` running and stopping a background daemon, and `fleet status` reporting whether it runs. On older versions, run `fleet daemon` under a service manager.

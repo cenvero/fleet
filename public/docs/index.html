@@ -59,7 +59,7 @@
         "mainEntityOfPage": "https://fleet.cenvero.org/docs/",
         "inLanguage": "en",
         "image": "https://fleet.cenvero.org/assets/og/og-docs.png",
-        "dateModified": "2026-09-27",
+        "dateModified": "2026-10-07",
         "breadcrumb": { "@id": "https://fleet.cenvero.org/docs/#breadcrumb" },
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "author": { "@id": "https://fleet.cenvero.org/#org" },
@@ -86,7 +86,7 @@
             "@type": "HowToStep",
             "position": 1,
             "name": "Install the controller",
-            "text": "On macOS run: brew tap cenvero/fleet && brew install cenvero-fleet. On Linux or macOS you can also run: curl -fsSL https://fleet.cenvero.org/install | sh. On Windows, in PowerShell 5.1 or later (no administrator rights needed), run: irm https://fleet.cenvero.org/install.ps1 | iex. Every installer verifies the release signature before installing.",
+            "text": "On macOS run: brew tap cenvero/fleet && brew install cenvero-fleet. On Linux or macOS you can also run: curl -fsSL https://fleet.cenvero.org/install | sh. On Windows, run: winget install --id Cenvero.Fleet --exact --source winget, or in PowerShell 5.1 or later (no administrator rights needed): irm https://fleet.cenvero.org/install.ps1 | iex. Every installer verifies the release signature before installing.",
             "url": "https://fleet.cenvero.org/docs/#install"
           },
           {
@@ -244,7 +244,7 @@
             <li><a href="#adjust-init" data-keywords="adjust-init migration migrations upgrade init_version">Config migrations</a></li>
             <li><a href="#backup" data-keywords="backup restore recover migrate reinstall archive">Backup and recovery</a></li>
             <li><a href="#updates" data-keywords="update upgrade check apply rollback channel stable beta policy homebrew signature minisign">Updates</a></li>
-            <li><a href="#agent-updates" data-keywords="agent version update canary strict-health sync-agent rollout">Agent updates</a></li>
+            <li><a href="#agent-updates" data-keywords="agent version update canary strict-health sync-agent rollout auto-sync automatic hourly">Agent updates</a></li>
           </ul>
         </div>
 
@@ -334,7 +334,7 @@ fleet dashboard</pre></div>
 
           <div class="callout info">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-info"/></svg>
-            <div><p>These docs cover <strong>v2.5.0</strong>, the latest stable release. Some commands described here are new in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
+            <div><p>These docs cover <strong>v2.6.0</strong>, the latest stable release. New in v2.6.0: <a href="#agent-auto-sync">automatic agent sync</a> (<code>fleet sync-agent auto</code>). New in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
           </div>
 
           <h3>Conventions and global flags</h3>
@@ -374,9 +374,11 @@ fleet dashboard</pre></div>
               <p class="install-note">Detects your CPU architecture, verifies the signature and installs <code>/usr/bin/fleet</code> (using <code>sudo</code> if needed). Homebrew on Linux works too.</p>
             </div>
             <div class="tabpanel" role="tabpanel" id="docs-panel-windows" aria-labelledby="docs-tab-windows" hidden>
-              <div class="cmd-label">PowerShell</div>
+              <div class="cmd-label">Windows Package Manager</div>
+              <div class="cmd ps"><code>winget install --id Cenvero.Fleet --exact --source winget</code><button class="copy-btn" type="button" data-copy="winget install --id Cenvero.Fleet --exact --source winget"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
+              <div class="cmd-label">or PowerShell</div>
               <div class="cmd ps"><code>irm https://fleet.cenvero.org/install.ps1 | iex</code><button class="copy-btn" type="button" data-copy="irm https://fleet.cenvero.org/install.ps1 | iex"><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button></div>
-              <p class="install-note">Run in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned <code>minisign</code> verifier if you have none, installs <code>fleet.exe</code> to <code>%USERPROFILE%\.local\bin</code> and adds it to your user <code>PATH</code>.</p>
+              <p class="install-note">WinGet installs a per-user package checked against the SHA-256 in Microsoft's catalog, and owns upgrades (<code>winget upgrade --id Cenvero.Fleet</code>) and removal. A new release reaches the catalog after Microsoft reviews it, which can take a few days. The PowerShell script always gets the latest release: run it in PowerShell 5.1 or later — no administrator rights needed. It fetches a checksum-pinned <code>minisign</code> verifier if you have none, installs <code>fleet.exe</code> to <code>%USERPROFILE%\.local\bin</code> and adds it to your user <code>PATH</code>.</p>
             </div>
           </div>
           <p>The install script needs <code>curl</code> and <code>tar</code>, and offers to install <code>jq</code> and <code>minisign</code> if they are missing — signature verification cannot be skipped.</p>
@@ -397,7 +399,7 @@ make build</pre></div>
 fleet version <span class="f">--json</span></pre></div>
 
           <h3>Uninstall</h3>
-          <p><code>fleet self-uninstall</code> removes the binary and the controller's config directory (servers, keys, logs). On a Homebrew install it removes the config directory and prints the <code>brew uninstall</code> command instead of deleting the binary. Agents on your servers are left running — remove them first with <a href="#server-add"><code>fleet server remove</code></a> if you want them gone.</p>
+          <p><code>fleet self-uninstall</code> removes the binary and the controller's config directory (servers, keys, logs). On a Homebrew or WinGet install it removes the config directory and prints the <code>brew uninstall</code> or <code>winget uninstall</code> command instead of deleting the binary. Agents on your servers are left running — remove them first with <a href="#server-add"><code>fleet server remove</code></a> if you want them gone.</p>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet self-uninstall <span class="f">--yes</span></pre></div>
         </section>
 
@@ -493,9 +495,9 @@ fleet server reconnect web-01
 fleet server mode edge-01 reverse
 fleet server enroll-token edge-01</pre></div>
           <div class="code"><pre>NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.5.0
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.5.0
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.5.0</pre></div>
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.0</pre></div>
           <p><code>reconnect</code> connects again and refreshes what the controller knows; add <code>--accept-new-host-key</code> after you have verified a changed host key. <code>enroll-token</code> mints a fresh one-time token for a reverse agent, for example after it lost its key.</p>
 
           <h3>Remove a server</h3>
@@ -1477,7 +1479,7 @@ fleet config restore /backups/fleet-20260926.tar.gz</pre></div>
 
         <section id="updates" class="prose">
           <h2>Updates</h2>
-          <p>Fleet updates itself, but only when you say so: the default policy is <code>notify-only</code> on the <code>stable</code> channel.</p>
+          <p>Fleet updates the controller only when you say so: the default policy is <code>notify-only</code> on the <code>stable</code> channel. Agents are different — they are <a href="#agent-auto-sync">kept on the controller's version automatically</a>.</p>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet update check
 fleet update apply
 fleet update rollback
@@ -1493,7 +1495,7 @@ fleet update channel beta</pre></div>
               <thead><tr><th scope="col">Policy</th><th scope="col">What happens</th></tr></thead>
               <tbody>
                 <tr><td><code>notify-only</code></td><td>Default. Tells you about new releases; you apply them.</td></tr>
-                <tr><td><code>auto-update</code></td><td>Also updates version-mismatched managed Linux agents automatically. The controller itself is still updated only when you run <code>fleet update apply</code>.</td></tr>
+                <tr><td><code>auto-update</code></td><td>With <a href="#agent-auto-sync">agent auto-sync</a> turned off, still updates a version-mismatched managed Linux agent when it connects. The controller itself is still updated only when you run <code>fleet update apply</code>.</td></tr>
                 <tr><td><code>disabled</code></td><td>No update checks.</td></tr>
               </tbody>
             </table>
@@ -1502,6 +1504,8 @@ fleet update channel beta</pre></div>
           <p>Signature checks fail closed on every channel: an update without a minisign signature is refused, and a checksum alone is never enough. Downloads are HTTPS-only with size and decompression limits. The updater refuses anything older than the running version or below the channel's minimum supported version. Two explicit overrides exist: <code>--allow-downgrade</code> for a deliberate downgrade, and <code>--allow-unsigned</code> for a local build (insecure).</p>
           <h3>Homebrew installs</h3>
           <p>Homebrew owns the controller binary, so upgrade it with <code>brew update &amp;&amp; brew upgrade cenvero-fleet</code> and update agents with <a href="#agent-updates"><code>fleet sync-agent</code></a>. There, <code>fleet update check</code> works, <code>update apply</code> only prints those instructions, and <code>channel</code> and <code>rollback</code> are blocked.</p>
+          <h3>WinGet installs</h3>
+          <p>Windows Package Manager owns the controller binary in the same way: upgrade it with <code>winget upgrade --id Cenvero.Fleet --exact --source winget</code>. <code>update apply</code>, <code>rollback</code>, <code>channel</code> and <code>self-uninstall</code>'s binary removal defer to WinGet. WinGet does not upgrade packages in the background on its own; for unattended upgrades, schedule <code>winget upgrade</code> under the same Windows user that installed Fleet.</p>
         </section>
 
         <section id="agent-updates" class="prose">
@@ -1512,7 +1516,7 @@ fleet agent version web-01
 fleet agent update <span class="f">--canary</span> 1
 fleet agent update <span class="f">--group</span> role=web <span class="f">--canary</span> 2 <span class="f">--strict-health</span></pre></div>
           <ul>
-            <li><code>agent version</code> shows each agent's version in one form (<code>v2.5.0</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
+            <li><code>agent version</code> shows each agent's version in one form (<code>v2.6.0</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
             <li><code>agent update</code> updates a first batch of <code>--canary N</code> servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. <code>--canary 0</code> updates everything at once.</li>
             <li>Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass <code>--strict-health</code>.</li>
           </ul>
@@ -1520,6 +1524,19 @@ fleet agent update <span class="f">--group</span> role=web <span class="f">--can
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet sync-agent
 fleet sync-agent <span class="f">--server</span> web-01 <span class="f">--server</span> web-02</pre></div>
           <p>Brings agents up to the controller's version, several servers at a time, with progress per server on stderr (<em>updated</em>, <em>up to date</em> or an error) and JSON on stdout. Servers already on the right version are skipped. Linux agents are restarted through systemd automatically; on Windows the new binary is delivered, but you restart the service and reconnect yourself.</p>
+          <h3 id="agent-auto-sync">Automatic agent sync <span class="tag tag-violet">New in v2.6.0</span></h3>
+          <p>You don't have to remember <code>fleet sync-agent</code>: it runs on its own, on by default.</p>
+          <ul>
+            <li><strong>Any <code>fleet</code> command</strong> whose last agent sync started more than an hour ago starts <code>fleet sync-agent</code> in the background. The command itself never waits; the output goes to <code>logs/agent-sync.log</code> in the config directory.</li>
+            <li><strong>A running daemon</strong> (<code>fleet start</code>) syncs hourly even when nobody runs a command, and updates an agent within seconds when it connects with an older version (at most once an hour per server).</li>
+            <li>Only agents known to be <strong>older</strong> than the controller are touched. An agent whose new binary needs a manual restart (Windows, macOS) is listed under <em>Awaiting restart</em> rather than sent again every hour, and reverse-mode agents wait for the daemon.</li>
+            <li>Background, daemon and manual runs never overlap; a manual <code>fleet sync-agent</code> waits for one in progress.</li>
+            <li>Commands run with a <code>--token</code> never start a sync, so a scoped token can't trigger a fleet-wide update.</li>
+          </ul>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet sync-agent auto          <span class="c"># status: last run, failures, next run, log</span>
+fleet sync-agent auto off      <span class="c"># turn it off (or: fleet config set agent-auto-sync off)</span>
+fleet sync-agent auto on
+FLEET_AGENT_AUTOSYNC=off fleet ...   <span class="c"># skip it for one shell</span></pre></div>
         </section>
 
         <section id="agentic" class="prose">
@@ -1608,6 +1625,7 @@ fleet ai sync <span class="f">--json</span></pre></div>
               <tr><td><a href="#services"><code>fleet svc</code></a></td><td><code>disable</code> <code>enable</code> <code>restart</code> <code>start</code> <code>status</code> <code>stop</code></td><td>Structured systemd control for any unit</td></tr>
               <tr><td><a href="#sync"><code>fleet sync</code></a></td><td><span class="muted">—</span></td><td>Live mirror a directory between local and a server (writer → replica)</td></tr>
               <tr><td><a href="#agent-updates"><code>fleet sync-agent</code></a></td><td><span class="muted">—</span></td><td>Bring every agent up to the controller version</td></tr>
+              <tr><td><a href="#agent-auto-sync"><code>fleet sync-agent auto</code></a></td><td><span class="muted">on|off|status</span></td><td>Show or switch automatic hourly agent sync (on by default)</td></tr>
               <tr><td><a href="#tags"><code>fleet tag</code></a></td><td><span class="muted">—</span></td><td>Tag servers with key=value labels and group them</td></tr>
               <tr><td><a href="#templates"><code>fleet template</code></a></td><td><code>apply</code> <code>list</code></td><td>List templates and apply one to a server</td></tr>
               <tr><td><a href="#tokens"><code>fleet token</code></a></td><td><code>create</code> <code>list</code> <code>revoke</code></td><td>Create, list and revoke scoped RBAC tokens</td></tr>
