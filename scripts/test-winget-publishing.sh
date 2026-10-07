@@ -10,6 +10,19 @@ submit="${ROOT_DIR}/scripts/submit-winget-release.sh"
 guide="${ROOT_DIR}/docs/winget-publishing.md"
 
 bash -n "${prepare}" "${submit}"
+
+# PR titles follow wingetcreate/Komac: New package / New version / Add version.
+title="${ROOT_DIR}/scripts/winget-pr-title.sh"
+[[ "$("${title}" Cenvero.Fleet 2.4.1)" == "New package: Cenvero.Fleet version 2.4.1" ]]
+[[ "$("${title}" Cenvero.Fleet 2.6.0 2.4.1)" == "New version: Cenvero.Fleet version 2.6.0" ]]
+[[ "$("${title}" Cenvero.Fleet 2.10.0 2.4.1 2.9.0)" == "New version: Cenvero.Fleet version 2.10.0" ]]
+[[ "$("${title}" Cenvero.Fleet 2.5.0 2.4.1 2.6.0)" == "Add version: Cenvero.Fleet version 2.5.0" ]]
+[[ "$("${title}" Cenvero.Fleet 2.6.0 2.4.1 2.6.0)" == "Update version: Cenvero.Fleet version 2.6.0" ]]
+grep -F 'scripts/winget-pr-title.sh' "${submit}" >/dev/null
+if grep -F 'title="Update: ' "${submit}" >/dev/null; then
+  echo "submit helper still uses the template-style Update: title" >&2
+  exit 1
+fi
 "${prepare}" --help | grep -F 'read-only with respect' >/dev/null
 "${submit}" --help | grep -F 'typed interactive confirmation' >/dev/null
 

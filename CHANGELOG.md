@@ -34,6 +34,13 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+### Changed
+
+- The WinGet submit helper titles its pull request the way `wingetcreate` and Komac do —
+  `New version: Cenvero.Fleet version X.Y.Z` for a newer release, `Add version:` for an
+  older one — instead of the template's `Update: Cenvero.Fleet to X.Y.Z`, which
+  `wingetcreate` reserves for changing an already published version.
+
 ## [v2.6.0] — 2026-10-07 (stable)
 
 ### Added
