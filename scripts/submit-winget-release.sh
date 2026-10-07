@@ -174,14 +174,21 @@ if api_path_exists "${version_endpoint}"; then
   fail "${PACKAGE_IDENTIFIER} ${version} already exists in the official repository"
 fi
 
+# Title the pull request the way wingetcreate and Komac do (see
+# winget-pr-title.sh): "New version:" when this is newer than every version in
+# the catalog, "Add version:" when it fills in an older one.
 package_endpoint="repos/${UPSTREAM_REPOSITORY}/contents/manifests/c/Cenvero/Fleet"
+catalog_versions=()
 if api_path_exists "${package_endpoint}"; then
-  title="Update: ${PACKAGE_IDENTIFIER} to ${version}"
+  while IFS= read -r catalog_version; do
+    [[ -n "${catalog_version}" ]] && catalog_versions+=("${catalog_version}")
+  done < <(gh api "${package_endpoint}" --jq '.[] | select(.type == "dir") | .name')
+  [[ "${#catalog_versions[@]}" -gt 0 ]] || fail "could not list the catalog versions of ${PACKAGE_IDENTIFIER}"
   branch="update-cenvero-fleet-${version//./-}"
 else
-  title="New package: ${PACKAGE_IDENTIFIER} version ${version}"
   branch="new-cenvero-fleet-${version//./-}"
 fi
+title="$("${ROOT_DIR}/scripts/winget-pr-title.sh" "${PACKAGE_IDENTIFIER}" "${version}" ${catalog_versions[@]+"${catalog_versions[@]}"})"
 
 open_prs="$(gh pr list --repo "${UPSTREAM_REPOSITORY}" --state open \
   --search "${PACKAGE_IDENTIFIER} ${version} in:title,body" --json number,title,url)"

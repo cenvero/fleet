@@ -132,7 +132,9 @@ Before any remote mutation, the helper revalidates the prepared archives and man
 submit Cenvero.Fleet 2.4.2
 ```
 
-Only then does it commit, push a version-specific branch to the maintainer's fork, and open the upstream pull request. It refuses non-interactive or CI execution and fails closed if `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, or `GITHUB_ENTERPRISE_TOKEN` is set, ensuring `gh` uses the maintainer's stored local authentication. It never calls `gh auth token` or accepts `--token`.
+Only then does it commit, push a version-specific branch to the maintainer's fork, and open the upstream pull request.
+
+The pull request title follows the rules of Microsoft's `wingetcreate` and of Komac, the tools that open most `winget-pkgs` pull requests (`scripts/winget-pr-title.sh`): `New package: Cenvero.Fleet version X.Y.Z` for the first submission, `New version: Cenvero.Fleet version X.Y.Z` when the version is newer than every one in the catalog, and `Add version: Cenvero.Fleet version X.Y.Z` when it is older than the newest. The `winget-pkgs` pull request template also suggests `Update: Publisher.Name to X.Y.Z`; reviewers accept either, but `wingetcreate` keeps "Update" for changing a version that is already published. It refuses non-interactive or CI execution and fails closed if `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, or `GITHUB_ENTERPRISE_TOKEN` is set, ensuring `gh` uses the maintainer's stored local authentication. It never calls `gh auth token` or accepts `--token`.
 
 To use a fork owned by a different authenticated account, set its owner explicitly:
 
