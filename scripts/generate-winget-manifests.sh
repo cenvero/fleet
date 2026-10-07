@@ -54,23 +54,41 @@ PublisherUrl: https://cenvero.org
 PublisherSupportUrl: https://github.com/cenvero/fleet/issues
 Author: Cenvero
 PackageName: Cenvero Fleet
-PackageUrl: https://github.com/cenvero/fleet
+PackageUrl: https://fleet.cenvero.org
 License: AGPL-3.0-or-later
 LicenseUrl: https://github.com/cenvero/fleet/blob/v${version}/LICENSE
 Copyright: Copyright (C) 2026 Cenvero / Shubhdeep Singh
-ShortDescription: Self-hosted, operator-owned fleet management controller
+ShortDescription: Self-hosted, open-source fleet manager for Linux, macOS and Windows servers
 Description: |-
-  Cenvero Fleet is a self-hosted fleet management controller for Linux, macOS,
-  and Windows. It manages remote nodes over authenticated SSH-based direct and
-  reverse transport modes while keeping controller data under operator control.
+  Cenvero Fleet is a free, open-source, self-hosted server fleet manager. A single
+  controller binary manages agents on Linux, macOS and Windows servers over
+  encrypted, host-key-pinned SSH, either connecting directly or with the agent
+  dialing out so servers behind NAT need no inbound port. There is no cloud
+  account or hosted control plane.
+
+  It provides persistent shells, concurrent commands across the fleet or a tag
+  group, chunked and resumable file transfer, safe in-place file editing, live
+  directory sync, services, logs, metrics and alerts, a terminal dashboard and
+  terminal and web file managers. Scoped RBAC tokens, encrypted secrets,
+  approvals, a hash-chained audit log and signed, anti-rollback updates keep it
+  safe to run unattended, and AI coding agents such as Claude Code and Codex can
+  operate it through its self-describing CLI.
 Moniker: fleet
 Tags:
   - cli
   - devops
+  - file-transfer
   - fleet-management
+  - monitoring
+  - remote-management
   - self-hosted
+  - server-management
   - ssh
+  - sysadmin
 ReleaseNotesUrl: https://github.com/cenvero/fleet/releases/tag/v${version}
+Documentations:
+  - DocumentLabel: Documentation
+    DocumentUrl: https://fleet.cenvero.org/docs/
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0
 EOF

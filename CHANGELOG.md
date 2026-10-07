@@ -34,6 +34,8 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+## [v2.6.0] — 2026-10-07 (stable)
+
 ### Added
 
 - **Automatic agent sync, on by default.** Agents are kept on the controller's version
@@ -52,6 +54,10 @@ Omit sections that have no entries for that release.
 
 - `fleet sync-agent` now rejects stray positional arguments (`fleet sync-agent web-01`
   used to sync every server; use `--server web-01`).
+- Cenvero Fleet is in the Windows Package Manager catalog
+  (`winget install --id Cenvero.Fleet --exact --source winget`), and the README and site
+  document it again. The generated WinGet manifest now links the website and
+  documentation, describes the product in full and carries more search tags.
 
 - Agent auto-install no longer moves the agent through the controller. The server keeps
   the release archive it downloads and reports its size and BLAKE2b-512 and SHA-256
