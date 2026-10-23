@@ -34,6 +34,28 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+## [v2.6.1] — 2026-10-23 (stable)
+
+### Fixed
+
+- **`fleet server remove` no longer needs SSH login credentials.** It asks the agent,
+  over its existing authenticated connection, to remove itself, and deletes the server
+  record once the agent stops answering. The removal runs as a transient systemd unit
+  (`cenvero-fleet-teardown-<token>`) so it outlives the agent's own service. Previously
+  remove only logged in to sshd with the stored login credentials, so a server whose
+  agent was installed with a password could not be removed (`ssh: unable to
+  authenticate`). If the agent cannot be reached, remove falls back to SSH as before;
+  `--via-ssh` still means SSH only.
+- `fleet server add` honours `runtime.default_agent_port` when `--port` is omitted (it
+  used to always use 2222), and interactive add now asks for the agent port, offering
+  that default. The port is range-checked before anything is saved, and auto-install
+  refuses an agent port equal to the login SSH port.
+
+### Security
+
+- Built with Go 1.26.10, which fixes 12 standard library vulnerabilities reachable from
+  Fleet in go1.26.6 (`net/http`, `net/textproto`, `crypto/tls`, `crypto/x509`, `os`).
+
 ### Changed
 
 - The WinGet submit helper titles its pull request the way `wingetcreate` and Komac do —
