@@ -1505,13 +1505,15 @@ func newServerCommand(configDir *string) *cobra.Command {
 		Short:             "Remove a server (and tear down its agent if managed)",
 		Long: `Removes a server from the fleet.
 
-If the agent is managed, fleet will SSH to the server using the stored login
-credentials and remove the systemd service, binary, and state directory.
+If the agent is managed, fleet asks it over its existing connection to remove
+its systemd service, binary, and state directory, and waits for it to stop.
+No login credentials are needed. If the agent cannot be reached, fleet falls
+back to SSH with the stored login credentials.
 
 If the server is unreachable or credentials have changed, use one of:
 
   --force          Delete the server record without touching the agent.
-  --via-ssh        Retry teardown with different SSH credentials.`,
+  --via-ssh        Tear down over SSH with different credentials.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			force, _ := cmd.Flags().GetBool("force")

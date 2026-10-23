@@ -72,7 +72,9 @@ Removing a server with a managed agent tears it down on the remote host and remo
 fleet server remove web-01
 ```
 
-To remove the local record without SSH-ing to the server (e.g. the server is gone):
+The teardown goes through the agent's existing, already-authenticated connection, so it needs no login credentials — it works for an agent installed with a password, whose stored login key was never authorized for sshd. The agent starts the removal as a transient systemd unit (`cenvero-fleet-teardown-<token>`), which outlives the agent's own service being stopped, and the record is deleted only once the agent stops answering. If the agent cannot be reached or cannot start the unit, fleet falls back to SSH with the stored login credentials; `--via-ssh` uses SSH with the credentials you give instead.
+
+To remove the local record without contacting the server (e.g. the server is gone):
 
 ```bash
 fleet server remove web-01 --force

@@ -498,22 +498,43 @@ func (a *App) RemoveServerWithOptions(name string, opts RemoveOptions) error {
 	// record (and possibly its credentials) is about to disappear, and a cached
 	// connection must not outlive it.
 	defer a.dropPooledSession(name)
-	if server.Agent.Managed && !opts.Force {
-		// Apply SSH credential overrides if requested
-		if opts.OverrideSSH {
-			if opts.LoginUser != "" {
-				server.Agent.LoginUser = opts.LoginUser
+	if server.Agent.Managed && !opts.Force && !opts.OverrideSSH {
+		// Prefer the agent's own authenticated connection: it needs no login
+		// credentials, which may never have reached sshd (a password install
+		// stores only the controller key, authorized for the agent alone).
+		started, viaAgentErr := a.TeardownAgentViaConnection(context.Background(), server)
+		if viaAgentErr != nil && started {
+			// The host may be mid-teardown; an SSH retry could race it.
+			return fmt.Errorf("agent teardown on %q failed: %w\n\n"+
+				"  To remove the server record without cleaning up the agent:\n"+
+				"    fleet server remove %s --force",
+				name, viaAgentErr, name)
+		}
+		if viaAgentErr != nil {
+			if sshErr := a.teardownAgentWithPassword(server, ""); sshErr != nil {
+				return fmt.Errorf("agent teardown on %q failed over the fleet connection (%v) and over SSH: %w\n\n"+
+					"  To remove the server record without cleaning up the agent:\n"+
+					"    fleet server remove %s --force\n\n"+
+					"  To retry with different SSH credentials:\n"+
+					"    fleet server remove %s --via-ssh --login-user <user> [--login-key <path> | --login-password <pw>]",
+					name, viaAgentErr, sshErr, name, name)
 			}
-			if opts.LoginKey != "" {
-				server.Agent.LoginKey = opts.LoginKey
-			}
-			if opts.LoginPassword != "" {
-				// store temporarily so TeardownAgent can use it
-				server.Agent.LoginKey = "" // prefer password when explicitly given
-			}
-			if opts.LoginPort > 0 {
-				server.Agent.LoginPort = opts.LoginPort
-			}
+		}
+	}
+	if server.Agent.Managed && !opts.Force && opts.OverrideSSH {
+		// --via-ssh: tear down over SSH with the given credentials.
+		if opts.LoginUser != "" {
+			server.Agent.LoginUser = opts.LoginUser
+		}
+		if opts.LoginKey != "" {
+			server.Agent.LoginKey = opts.LoginKey
+		}
+		if opts.LoginPassword != "" {
+			// store temporarily so TeardownAgent can use it
+			server.Agent.LoginKey = "" // prefer password when explicitly given
+		}
+		if opts.LoginPort > 0 {
+			server.Agent.LoginPort = opts.LoginPort
 		}
 		if teardownErr := a.teardownAgentWithPassword(server, opts.LoginPassword); teardownErr != nil {
 			return fmt.Errorf("agent teardown on %q failed: %w\n\n"+

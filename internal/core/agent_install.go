@@ -25,9 +25,11 @@ import (
 
 	"aead.dev/minisign"
 	"github.com/cenvero/fleet/internal/logs"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/internal/version"
+	"github.com/cenvero/fleet/pkg/proto"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -297,6 +299,99 @@ func boundedAgentInstallError(err error) string {
 	return message[:maxLen-3] + "..."
 }
 
+// Timings for TeardownAgentViaConnection; variables so tests can shorten them.
+var (
+	// agentTeardownSettle delays the removal so the agent's reply to the
+	// request that started it gets back before the agent stops.
+	agentTeardownSettle = 2 * time.Second
+	// agentTeardownGoneTimeout bounds the wait for the agent to stop answering.
+	agentTeardownGoneTimeout = 30 * time.Second
+	// agentTeardownPoll is the interval between reachability probes.
+	agentTeardownPoll = 500 * time.Millisecond
+)
+
+// TeardownAgentViaConnection removes a managed agent through its own fleet
+// connection, so it needs no login credentials: the connection is already
+// authenticated (pinned agent host key, controller key) and the agent runs as
+// root. Stopping the agent's service kills the agent's own process group, so
+// the script is started as a separate transient systemd unit that outlives it.
+// Success means the agent stopped answering afterwards.
+//
+// started reports whether the agent accepted the teardown. When it is false
+// nothing was changed on the host and the caller may fall back to SSH; when it
+// is true the host may be mid-teardown and must not be retried another way.
+func (a *App) TeardownAgentViaConnection(ctx context.Context, server ServerRecord) (started bool, err error) {
+	if !server.Agent.Managed {
+		return false, nil
+	}
+	if osName := strings.TrimSpace(server.Observed.OS); osName != "" && !strings.EqualFold(osName, "linux") {
+		return false, fmt.Errorf("teardown over the fleet connection needs a Linux agent; %s reports %s", server.Name, osName)
+	}
+	serviceName := server.Agent.ServiceName
+	if serviceName == "" {
+		serviceName = defaultServiceName
+	}
+	if err := validateBootstrapServiceName(serviceName); err != nil {
+		return false, err
+	}
+	token, err := randomBootstrapToken(rand.Reader)
+	if err != nil {
+		return false, fmt.Errorf("generate agent teardown unit name: %w", err)
+	}
+	unit := "cenvero-fleet-teardown-" + token
+	script := buildAgentTeardownScript(serviceName, "", "", agentTeardownSettle)
+	// --no-block returns once the unit is queued, before the settle delay, so
+	// the reply leaves while the agent is still running.
+	command := "systemd-run --unit=" + shellQuote(unit) + " --collect --quiet --no-block /bin/sh -c " + shellQuote(script)
+
+	result, err := a.execPayloadContext(ctx, server, proto.ExecPayload{Command: command})
+	if err != nil {
+		return false, fmt.Errorf("reach agent: %w", err)
+	}
+	if result.ExitCode != 0 {
+		detail := safetext.Terminal(safetext.Bound(strings.TrimSpace(result.Stderr), 512), false)
+		return false, fmt.Errorf("agent could not start its teardown (exit %d): %s", result.ExitCode, detail)
+	}
+
+	// The pooled connection dies with the agent; probe with fresh ones.
+	a.dropPooledSession(server.Name)
+	if err := sleepContext(ctx, agentTeardownSettle); err != nil {
+		return true, err
+	}
+	deadline := time.Now().Add(agentTeardownGoneTimeout)
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, probeErr := a.ProbeAgent(probeCtx, server.Name)
+		cancel()
+		if probeErr != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return true, fmt.Errorf("agent still answers %s after its teardown started; check 'systemctl status %s' on the host", agentTeardownGoneTimeout, unit)
+		}
+		if err := sleepContext(ctx, agentTeardownPoll); err != nil {
+			return true, err
+		}
+	}
+	return true, a.AuditLog.Append(logs.AuditEntry{
+		Action:   "agent.teardown",
+		Target:   server.Name,
+		Operator: a.operator(),
+		Details:  "via=agent-connection unit=" + unit,
+	})
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // TeardownAgent SSHes to the server using stored login credentials and removes the managed agent.
 func (a *App) TeardownAgent(server ServerRecord) error {
 	return a.TeardownAgentWithPassword(server, "")
@@ -335,7 +430,7 @@ func (a *App) TeardownAgentWithPassword(server ServerRecord, password string) er
 	}
 	teardownStagingDir := remoteStagingDir(token)
 	tempTeardownPath := teardownStagingDir + "/teardown.sh"
-	script := buildAgentTeardownScript(server.Agent.ServiceName, sudo, tempTeardownPath)
+	script := buildAgentTeardownScript(server.Agent.ServiceName, sudo, tempTeardownPath, 0)
 	executor := sshBootstrapExecutor{networkDialContext: a.NetworkDialContext}
 	req := BootstrapRequest{
 		Address:        server.Address,
@@ -966,7 +1061,12 @@ func buildAgentSetupLines(sudo, serviceName, binarySource, tempServicePath, temp
 	}
 }
 
-func buildAgentTeardownScript(serviceName, sudo, selfPath string) string {
+// buildAgentTeardownScript returns the script that removes a managed agent.
+// selfPath, when set, is the uploaded script file to delete afterwards. settle,
+// when positive, delays the removal so a reply already on its way (the agent's
+// answer to the request that started this script) reaches the controller
+// before the agent is stopped.
+func buildAgentTeardownScript(serviceName, sudo, selfPath string, settle time.Duration) string {
 	if serviceName == "" {
 		serviceName = defaultServiceName
 	}
@@ -975,13 +1075,20 @@ func buildAgentTeardownScript(serviceName, sudo, selfPath string) string {
 		"set -eu",
 		"SERVICE_NAME=" + shellQuote(serviceName),
 		"",
-		sudo + "systemctl disable --now \"$SERVICE_NAME\".service 2>/dev/null || true",
-		sudo + "rm -f /etc/systemd/system/\"$SERVICE_NAME\".service",
-		sudo + "systemctl daemon-reload",
-		sudo + "rm -rf " + shellQuote(defaultAgentBinDir),
-		sudo + "rm -rf " + shellQuote(defaultStateDir) + " " + shellQuote(defaultConfigDir),
-		"rm -f " + shellQuote(selfPath),
-		"echo \"" + version.ProductName + " agent removed\"",
 	}
+	if settle > 0 {
+		lines = append(lines, "sleep "+strconv.Itoa(int((settle+time.Second-1)/time.Second)))
+	}
+	lines = append(lines,
+		sudo+"systemctl disable --now \"$SERVICE_NAME\".service 2>/dev/null || true",
+		sudo+"rm -f /etc/systemd/system/\"$SERVICE_NAME\".service",
+		sudo+"systemctl daemon-reload",
+		sudo+"rm -rf "+shellQuote(defaultAgentBinDir),
+		sudo+"rm -rf "+shellQuote(defaultStateDir)+" "+shellQuote(defaultConfigDir),
+	)
+	if selfPath != "" {
+		lines = append(lines, "rm -f "+shellQuote(selfPath))
+	}
+	lines = append(lines, "echo \""+version.ProductName+" agent removed\"")
 	return strings.Join(lines, "\n") + "\n"
 }
