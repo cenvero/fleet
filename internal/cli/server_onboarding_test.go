@@ -109,6 +109,157 @@ func TestServerAddPreservesConfiguredAgentPort(t *testing.T) {
 	}
 }
 
+func newServerCommandTestConfigWithAgentPort(t *testing.T, agentPort int) string {
+	t.Helper()
+	configDir := t.TempDir()
+	if _, err := core.Initialize(core.InitOptions{
+		ConfigDir: configDir, Alias: "fleet", DefaultMode: transport.ModeDirect,
+		CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly,
+		DefaultAgentPort: agentPort,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	return configDir
+}
+
+func storedServerPort(t *testing.T, configDir, name string) int {
+	t.Helper()
+	app, err := core.Open(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	record, err := app.GetServer(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record.Port
+}
+
+func TestServerAddUsesConfiguredDefaultAgentPort(t *testing.T) {
+	configDir := newServerCommandTestConfigWithAgentPort(t, 5911)
+	cmd := newServerCommand(&configDir)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"add", "default-port", "192.0.2.31", "--no-agent"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("server add error = %v", err)
+	}
+	if got := storedServerPort(t, configDir, "default-port"); got != 5911 {
+		t.Fatalf("stored port=%d, want runtime.default_agent_port 5911", got)
+	}
+	if !strings.Contains(out.String(), "0.0.0.0:5911") {
+		t.Fatalf("manual instructions did not use the configured default port:\n%s", out.String())
+	}
+}
+
+func TestServerAddFallsBackTo2222WithoutConfiguredDefault(t *testing.T) {
+	configDir := newServerCommandTestConfig(t)
+	cmd := newServerCommand(&configDir)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"add", "plain", "192.0.2.32", "--no-agent"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("server add error = %v", err)
+	}
+	if got := storedServerPort(t, configDir, "plain"); got != 2222 {
+		t.Fatalf("stored port=%d, want 2222", got)
+	}
+}
+
+func TestServerAddExplicitPortOverridesConfiguredDefault(t *testing.T) {
+	configDir := newServerCommandTestConfigWithAgentPort(t, 5911)
+	cmd := newServerCommand(&configDir)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"add", "override", "192.0.2.33", "--no-agent", "--port", "2200"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("server add error = %v", err)
+	}
+	if got := storedServerPort(t, configDir, "override"); got != 2200 {
+		t.Fatalf("stored port=%d, want explicit 2200", got)
+	}
+}
+
+func TestServerAddRejectsExplicitZeroPort(t *testing.T) {
+	configDir := newServerCommandTestConfigWithAgentPort(t, 5911)
+	cmd := newServerCommand(&configDir)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"add", "zero", "192.0.2.34", "--no-agent", "--port", "0"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "invalid agent port 0") {
+		t.Fatalf("error=%v, want explicit --port 0 rejected rather than replaced by the default", err)
+	}
+}
+
+func TestServerAddInteractivePromptsForAgentPort(t *testing.T) {
+	configDir := newServerCommandTestConfigWithAgentPort(t, 5911)
+	cmd := newServerCommand(&configDir)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	// name, address, mode (default), agent port (default)
+	cmd.SetIn(strings.NewReader("box\n192.0.2.35\n\n\n"))
+	cmd.SetArgs([]string{"add", "--no-agent"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("server add error = %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Agent SSH port [5911]") {
+		t.Fatalf("interactive add did not offer the configured agent port:\n%s", out.String())
+	}
+	if got := storedServerPort(t, configDir, "box"); got != 5911 {
+		t.Fatalf("stored port=%d, want 5911", got)
+	}
+}
+
+func TestServerAddInteractiveRejectsInvalidAgentPort(t *testing.T) {
+	for _, input := range []string{"70000", "0", "-1", "22abc"} {
+		t.Run(input, func(t *testing.T) {
+			configDir := newServerCommandTestConfigWithAgentPort(t, 5911)
+			cmd := newServerCommand(&configDir)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetIn(strings.NewReader("box\n192.0.2.36\n\n" + input + "\n"))
+			cmd.SetArgs([]string{"add", "--no-agent"})
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), "invalid agent port") {
+				t.Fatalf("error=%v, want invalid agent port", err)
+			}
+			app, openErr := core.Open(configDir)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			defer app.Close()
+			servers, listErr := app.ListServers()
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if len(servers) != 0 {
+				t.Fatalf("invalid port persisted servers: %+v", servers)
+			}
+		})
+	}
+}
+
+func TestServerAddRejectsAgentPortEqualToLoginPort(t *testing.T) {
+	configDir := newServerCommandTestConfig(t)
+	cmd := newServerCommand(&configDir)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{"add", "clash", "192.0.2.37", "--login-user", "root", "--login-key", "/tmp/test-key", "--login-port", "2200", "--port", "2200"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "is the login SSH port") {
+		t.Fatalf("error=%v, want agent/login port clash rejected", err)
+	}
+	if strings.Contains(out.String(), "will be installed") {
+		t.Fatalf("clash was not rejected before the install plan:\n%s", out.String())
+	}
+}
+
 func TestWriteServerTableNormalizesVersionAndInstallState(t *testing.T) {
 	servers := []core.ServerRecord{
 		{Name: "online", Address: "192.0.2.1", Port: 2222, Mode: transport.ModeDirect, Observed: core.ServerObservation{Reachable: true, AgentVersion: "2.4.0"}},
