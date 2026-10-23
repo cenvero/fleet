@@ -1302,6 +1302,24 @@ func newServerCommand(configDir *string) *cobra.Command {
 					useSudo = strings.HasPrefix(strings.ToLower(s), "y")
 				}
 			}
+			// An omitted --port falls back to runtime.default_agent_port, then
+			// 2222, so a fleet that runs its agents on a non-standard port does
+			// not silently get 2222 on every add. Interactive direct-mode adds
+			// ask, offering that default.
+			if !cmd.Flags().Changed("port") {
+				port = app.Config.Runtime.DefaultAgentPort
+				if port == 0 {
+					port = 2222
+				}
+				if interactive && parsedMode == transport.ModeDirect {
+					ps := prompt("Agent SSH port", strconv.Itoa(port))
+					pi, err := strconv.Atoi(ps)
+					if err != nil || pi < 1 || pi > 65535 {
+						return fmt.Errorf("invalid agent port %q: must be 1-65535", ps)
+					}
+					port = pi
+				}
+			}
 			if port < 1 || port > 65535 {
 				return fmt.Errorf("invalid agent port %d: must be 1-65535", port)
 			}
@@ -1324,6 +1342,11 @@ func newServerCommand(configDir *string) *cobra.Command {
 			lp := loginPort
 			if lp == 0 {
 				lp = 22
+			}
+			// The agent binds its own SSH listener; on the login port it would
+			// fight sshd for the socket, so refuse before touching the host.
+			if autoInstall && port == lp {
+				return fmt.Errorf("agent port %d is the login SSH port; choose a different --port for the agent", port)
 			}
 			if autoInstall {
 				fmt.Fprintln(cmd.OutOrStdout())
@@ -1398,7 +1421,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 		},
 	}
 	add.Flags().StringVar(&mode, "mode", "direct", "server transport mode (direct/reverse)")
-	add.Flags().IntVar(&port, "port", 2222, "agent SSH port (after install)")
+	add.Flags().IntVar(&port, "port", 0, "agent SSH port (after install) (default: runtime.default_agent_port, else 2222)")
 	add.Flags().StringVar(&user, "user", "root", "agent SSH username")
 	add.Flags().StringVar(&keyPath, "key", "", "SSH key path override")
 	add.Flags().StringVar(&loginUser, "login-user", "", "login user for agent auto-install (e.g. root, ubuntu)")
