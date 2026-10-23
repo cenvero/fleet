@@ -1,13 +1,12 @@
 {
-  "generated_at": "2026-10-07T07:01:30Z",
+  "generated_at": "2026-10-23T14:11:44Z",
   "channels": {
     "stable": {
-      "version": "v2.6.0",
-      "release_date": "2026-10-07T07:01:30Z",
-      "release_notes_url": "https://github.com/cenvero/fleet/releases/tag/v2.6.0",
-      "min_supported": "v2.1.0",
+      "version": "v2.6.1",
+      "release_date": "2026-10-23T14:11:44Z",
+      "release_notes_url": "https://github.com/cenvero/fleet/releases/tag/v2.6.1",
+      "min_supported": "v2.2.0",
       "history": [
-        "v2.1.0",
         "v2.2.0",
         "v2.2.1",
         "v2.3.0",
@@ -16,7 +15,8 @@
         "v2.4.2",
         "v2.4.3",
         "v2.5.0",
-        "v2.6.0"
+        "v2.6.0",
+        "v2.6.1"
       ]
     },
     "beta": {
@@ -146,44 +146,6 @@
         "sha256": "48da3bb8d5c508ad8f19e99d4acf7a969cedc81557a5295f19857301f38d560e",
         "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.6.4-beta.1/fleet_1.6.4-beta.1_darwin_amd64.tar.gz.minisig",
         "size": 8538157
-      }
-    },
-    "v2.1.0": {
-      "windows-arm64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_windows_arm64.zip",
-        "sha256": "87ae779d0c792f3930a1c3e9c9cce65860e90807983a8d834a6fb8237cee0e83",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_windows_arm64.zip.minisig",
-        "size": 9188441
-      },
-      "darwin-arm64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_darwin_arm64.tar.gz",
-        "sha256": "be01732ff14e4375ca610e3753454ab30bf3b115486f8a4a3b08ec5670c20dbf",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_darwin_arm64.tar.gz.minisig",
-        "size": 9493316
-      },
-      "linux-arm64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_linux_arm64.tar.gz",
-        "sha256": "b6a1f15019213ee80e7bf77c2c57f81b9ec6acaef8ad85c94c77cc1cbe05b343",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_linux_arm64.tar.gz.minisig",
-        "size": 9117115
-      },
-      "darwin-amd64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_darwin_amd64.tar.gz",
-        "sha256": "122d44c7451d89220665994aeaa00bed052a190988c926d8c4acf86201d147ab",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_darwin_amd64.tar.gz.minisig",
-        "size": 10111405
-      },
-      "windows-amd64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_windows_amd64.zip",
-        "sha256": "4280d3a2fe297745f455de34d332846ac3d744646eb9643ab2399c106a6cf1e4",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_windows_amd64.zip.minisig",
-        "size": 10178251
-      },
-      "linux-amd64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_linux_amd64.tar.gz",
-        "sha256": "14a770e64953e2c04c8b03158a747bce5ef10ae868f14b8db5f302377ed2c4af",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet_2.1.0_linux_amd64.tar.gz.minisig",
-        "size": 9937420
       }
     },
     "v2.2.0": {
@@ -563,6 +525,50 @@
         "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.0/fleet_2.6.0_windows_amd64.zip.minisig",
         "size": 11230351
       }
+    },
+    "v2.6.1": {
+      "linux-armv7": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_linux_armv7.tar.gz",
+        "sha256": "cb9d04e996e4dcbe0e136330fcd44815a39cec7c9808f0ffe2e7f8befd727c04",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_linux_armv7.tar.gz.minisig",
+        "size": 10420022
+      },
+      "windows-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_windows_arm64.zip",
+        "sha256": "cd1c870870f1a7c5a3156345e6049707564f9e84b091f5346b6266ec22768c44",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_windows_arm64.zip.minisig",
+        "size": 10124602
+      },
+      "windows-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_windows_amd64.zip",
+        "sha256": "ce6571a1371625a272c5f6a496e7777c6f8186f63f02b112cbe9b7fbb24ebf21",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_windows_amd64.zip.minisig",
+        "size": 11244087
+      },
+      "darwin-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_darwin_amd64.tar.gz",
+        "sha256": "dff3b1309d32118ea352029e4f7bcb348b8933fc808e7799decc635536437447",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_darwin_amd64.tar.gz.minisig",
+        "size": 11191753
+      },
+      "linux-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_linux_arm64.tar.gz",
+        "sha256": "45d47ee0d2d05d68d34bb9c04b551349fe242c65c17735821bd02e129c46c315",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_linux_arm64.tar.gz.minisig",
+        "size": 10051327
+      },
+      "linux-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_linux_amd64.tar.gz",
+        "sha256": "118b6a5770418a2027ae19290c46b6b0a0caa8f0f41bbeffe26343b2318632d3",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_linux_amd64.tar.gz.minisig",
+        "size": 10973952
+      },
+      "darwin-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_darwin_arm64.tar.gz",
+        "sha256": "301fb757da96e9a3602c6b622d8349550f21a5c46e49be674c4064d8890310b3",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet_2.6.1_darwin_arm64.tar.gz.minisig",
+        "size": 10469663
+      }
     }
   },
   "agent_binaries": {
@@ -672,44 +678,6 @@
         "sha256": "d79a26254e21e3d93b779ca2f5e7b2c12e9ecfd133abfdeed536a3c8458e1749",
         "signature_url": "https://github.com/cenvero/fleet/releases/download/v1.6.4-beta.1/fleet-agent_1.6.4-beta.1_linux_amd64.tar.gz.minisig",
         "size": 3458571
-      }
-    },
-    "v2.1.0": {
-      "darwin-amd64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_darwin_amd64.tar.gz",
-        "sha256": "204ff1e3abffed7f945054e6df421b9e664bb9edb54418398eda099fb890f5c6",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_darwin_amd64.tar.gz.minisig",
-        "size": 3548637
-      },
-      "darwin-arm64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_darwin_arm64.tar.gz",
-        "sha256": "3d641f896d87089b8e51ebdb64c23a46402463f0f90c584cf5314277400b7110",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_darwin_arm64.tar.gz.minisig",
-        "size": 3283376
-      },
-      "windows-arm64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_windows_arm64.zip",
-        "sha256": "f382d83f417a1997d8f2e167c2dce91df91efa4e11a0e44aae1f3f6646cffba2",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_windows_arm64.zip.minisig",
-        "size": 3233566
-      },
-      "windows-amd64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_windows_amd64.zip",
-        "sha256": "44e995d16195f7a5bdfeb61be26549870a18f505e077572b2fddca0d64906262",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_windows_amd64.zip.minisig",
-        "size": 3611215
-      },
-      "linux-amd64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_linux_amd64.tar.gz",
-        "sha256": "e906d4db7da973bf396704063209bb68c869d01f3291e592c53d1a5b1a0073cd",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_linux_amd64.tar.gz.minisig",
-        "size": 3513018
-      },
-      "linux-arm64": {
-        "url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_linux_arm64.tar.gz",
-        "sha256": "dcbaf3939e068e438cdc4b7ddb92018f995930bffafa045967c31b7e4fa3fa53",
-        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.1.0/fleet-agent_2.1.0_linux_arm64.tar.gz.minisig",
-        "size": 3185499
       }
     },
     "v2.2.0": {
@@ -1088,6 +1056,50 @@
         "sha256": "443eb180523669b84247637c77bb83304dcf92e23ba1ba7b18dae73f15d295ce",
         "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.0/fleet-agent_2.6.0_linux_arm64.tar.gz.minisig",
         "size": 4023143
+      }
+    },
+    "v2.6.1": {
+      "linux-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_linux_arm64.tar.gz",
+        "sha256": "5dd731cad85ad017314f2c679c49e1e2351479f6924188fea7df5e8e8ab87785",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_linux_arm64.tar.gz.minisig",
+        "size": 4026834
+      },
+      "linux-armv7": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_linux_armv7.tar.gz",
+        "sha256": "1a745550dd8bd634b4e7ee2b1c44e021ba3dade7c173c3ab31b3977928a98467",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_linux_armv7.tar.gz.minisig",
+        "size": 4233129
+      },
+      "darwin-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_darwin_arm64.tar.gz",
+        "sha256": "58d40fec3787dcb7fccdb2aeda9bbc4afcd39a27e8767e319133075c69501129",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_darwin_arm64.tar.gz.minisig",
+        "size": 4182378
+      },
+      "darwin-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_darwin_amd64.tar.gz",
+        "sha256": "1558722322e022b5f5070d83f1e64e8296cd38b2339b4767792b7b15f9b7dac3",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_darwin_amd64.tar.gz.minisig",
+        "size": 4520899
+      },
+      "windows-arm64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_windows_arm64.zip",
+        "sha256": "431ed0fc3a013f1740a48aa0fc8bbb24aad4b3f7f42534e3f41e73efd98ea8f9",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_windows_arm64.zip.minisig",
+        "size": 4071672
+      },
+      "windows-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_windows_amd64.zip",
+        "sha256": "f378b0d326ca41aeaace2776cddc7630d5bc884188ef93f807a872f5159d2b95",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_windows_amd64.zip.minisig",
+        "size": 4557791
+      },
+      "linux-amd64": {
+        "url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_linux_amd64.tar.gz",
+        "sha256": "d512f3d161290f130d3b11384ea13e7b822ae0b9d1a33a09148647480669b18f",
+        "signature_url": "https://github.com/cenvero/fleet/releases/download/v2.6.1/fleet-agent_2.6.1_linux_amd64.tar.gz.minisig",
+        "size": 4440920
       }
     }
   }
