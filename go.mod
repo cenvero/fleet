@@ -1,6 +1,6 @@
 module github.com/cenvero/fleet
 
-go 1.26.6
+go 1.26.10
 
 require (
 	aead.dev/minisign v0.3.0
