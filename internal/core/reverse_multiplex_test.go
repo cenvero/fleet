@@ -106,9 +106,10 @@ func reverseTransferRig(t *testing.T) (*App, *ReverseHub, context.CancelFunc) {
 // directory was being removed. Close must wait for it.
 func TestReverseHubCloseWaitsForSessionCleanup(t *testing.T) {
 	app, hub, cancel := reverseTransferRig(t)
-	cancel() // keep the agent from reconnecting
 
-	// Hold the server records so the clean-up blocks at its write.
+	// Hold the server records so the clean-up blocks at its write. Take the
+	// lock before cancel: cancelling makes the agent close its end, and that
+	// alone can end the session and write the record before the test acts.
 	app.serverMu.Lock()
 	locked := true
 	defer func() {
@@ -116,8 +117,13 @@ func TestReverseHubCloseWaitsForSessionCleanup(t *testing.T) {
 			app.serverMu.Unlock()
 		}
 	}()
+	cancel() // keep the agent from reconnecting
 	if err := hub.Disconnect("reverse-node"); err != nil {
-		t.Fatalf("Disconnect() error = %v", err)
+		// The agent's close can win the race, leaving nothing to disconnect;
+		// that is fine as long as the session really is gone.
+		if _, statusErr := hub.Status("reverse-node"); statusErr == nil {
+			t.Fatalf("Disconnect() error = %v", err)
+		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
