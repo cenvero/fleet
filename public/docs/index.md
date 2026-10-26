@@ -59,7 +59,7 @@ Scoped tokens, named secrets, approvals, command policy and a dead-man's switch 
    fleet dashboard
    ```
 
-> These docs cover **v2.6.0**, the latest stable release. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
+> These docs cover **v2.6.1**, the latest stable release. New in v2.6.1: `fleet server remove` tears agents down over their own authenticated connection, and `fleet server add` honours `runtime.default_agent_port`. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
 
 ### Conventions and global flags
 
@@ -247,9 +247,9 @@ fleet server enroll-token edge-01
 
 ```text
 NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.0
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.0
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.0
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.1
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.1
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.1
 ```
 
 `reconnect` connects again and refreshes what the controller knows; add `--accept-new-host-key` after you have verified a changed host key. `enroll-token` mints a fresh one-time token for a reverse agent, for example after it lost its key.
@@ -1484,7 +1484,7 @@ fleet agent update --canary 1
 fleet agent update --group role=web --canary 2 --strict-health
 ```
 
-- `agent version` shows each agent's version in one form (`v2.6.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
+- `agent version` shows each agent's version in one form (`v2.6.1`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
 - `agent update` updates a first batch of `--canary N` servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. `--canary 0` updates everything at once.
 - Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass `--strict-health`.
 

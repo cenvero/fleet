@@ -59,7 +59,7 @@
         "mainEntityOfPage": "https://fleet.cenvero.org/docs/",
         "inLanguage": "en",
         "image": "https://fleet.cenvero.org/assets/og/og-docs.png",
-        "dateModified": "2026-10-07",
+        "dateModified": "2026-10-23",
         "breadcrumb": { "@id": "https://fleet.cenvero.org/docs/#breadcrumb" },
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "author": { "@id": "https://fleet.cenvero.org/#org" },
@@ -334,7 +334,7 @@ fleet dashboard</pre></div>
 
           <div class="callout info">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-info"/></svg>
-            <div><p>These docs cover <strong>v2.6.0</strong>, the latest stable release. New in v2.6.0: <a href="#agent-auto-sync">automatic agent sync</a> (<code>fleet sync-agent auto</code>). New in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
+            <div><p>These docs cover <strong>v2.6.1</strong>, the latest stable release. New in v2.6.1: <code>fleet server remove</code> tears agents down over their own authenticated connection, and <code>fleet server add</code> honours <code>runtime.default_agent_port</code>. New in v2.6.0: <a href="#agent-auto-sync">automatic agent sync</a> (<code>fleet sync-agent auto</code>). New in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
           </div>
 
           <h3>Conventions and global flags</h3>
@@ -495,9 +495,9 @@ fleet server reconnect web-01
 fleet server mode edge-01 reverse
 fleet server enroll-token edge-01</pre></div>
           <div class="code"><pre>NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.0
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.0
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.0</pre></div>
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.1
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.1
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.1</pre></div>
           <p><code>reconnect</code> connects again and refreshes what the controller knows; add <code>--accept-new-host-key</code> after you have verified a changed host key. <code>enroll-token</code> mints a fresh one-time token for a reverse agent, for example after it lost its key.</p>
 
           <h3>Remove a server</h3>
@@ -1516,7 +1516,7 @@ fleet agent version web-01
 fleet agent update <span class="f">--canary</span> 1
 fleet agent update <span class="f">--group</span> role=web <span class="f">--canary</span> 2 <span class="f">--strict-health</span></pre></div>
           <ul>
-            <li><code>agent version</code> shows each agent's version in one form (<code>v2.6.0</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
+            <li><code>agent version</code> shows each agent's version in one form (<code>v2.6.1</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
             <li><code>agent update</code> updates a first batch of <code>--canary N</code> servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. <code>--canary 0</code> updates everything at once.</li>
             <li>Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass <code>--strict-health</code>.</li>
           </ul>

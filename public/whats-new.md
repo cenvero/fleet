@@ -2,13 +2,26 @@
 
 > Markdown version of <https://fleet.cenvero.org/whats-new.html>. The complete reference in one file is at <https://fleet.cenvero.org/llms-full.txt>.
 
-Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.0, released on 7 October 2026. Every release is signed; upgrade with `fleet update apply`, `brew upgrade cenvero-fleet` or `winget upgrade --id Cenvero.Fleet`. The complete, line-by-line history lives in the changelog.
+Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.1, released on 23 October 2026. Every release is signed; upgrade with `fleet update apply`, `brew upgrade cenvero-fleet` or `winget upgrade --id Cenvero.Fleet`. The complete, line-by-line history lives in the changelog.
 
 [Latest release](https://github.com/cenvero/fleet/releases) · [Full changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)
 
+## v2.6.1
+
+*Latest stable · Released 2026-10-23*
+
+A patch release that lets `fleet server remove` tear an agent down over its own connection, makes `server add` honour your configured default agent port, and rebuilds on Go 1.26.10 for a round of standard-library security fixes.
+
+### Highlights
+
+- **Remove servers without SSH login credentials:** `fleet server remove` now asks the agent, over its existing authenticated connection, to remove itself — running the teardown as a transient systemd unit (`cenvero-fleet-teardown-<token>`) so it outlives the agent's own service. A server whose agent was installed with a password, and whose login key is not authorised for sshd, no longer fails with `ssh: unable to authenticate`. If the agent cannot be reached, remove falls back to SSH as before; `--via-ssh` still means SSH only.
+- **`fleet server add` honours `runtime.default_agent_port`** when `--port` is omitted, instead of always using 2222. Interactive add now asks for the agent port and offers that default; the port is range-checked before anything is saved, and auto-install refuses an agent port equal to the login SSH port.
+- **Security:** built with Go 1.26.10, which fixes 12 standard-library vulnerabilities reachable from Fleet in go1.26.6 (`net/http`, `net/textproto`, `crypto/tls`, `crypto/x509`, `os`).
+- The WinGet submit helper now titles its pull request the way `wingetcreate` and Komac do — `New version: Cenvero.Fleet version X.Y.Z` for a newer release and `Add version:` for an older one.
+
 ## v2.6.0
 
-*Latest stable · Released 2026-10-07*
+*Released 2026-10-07*
 
 Agents now keep themselves on the controller's version without anyone running a command, agent installs move far less over SSH, and Fleet is in the Windows Package Manager catalog.
 

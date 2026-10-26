@@ -55,7 +55,7 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Name:** Cenvero Fleet ("Fleet" for short). Controller binary: `fleet`. Agent binary: `fleet-agent`. Made by Cenvero.
 - **What it is:** a self-hosted server fleet manager — an always-connected control plane for shells, fan-out commands, file transfer, live sync, services, logs, metrics, alerts and automation, driven from a CLI, a terminal dashboard, terminal and web file managers, scripts or AI coding agents.
 - **License and price:** AGPL-3.0-or-later. Free, with no paid tier, no account and no hosted service.
-- **Latest stable release:** v2.6.0, released 2026-10-07. Release notes: https://fleet.cenvero.org/whats-new.html
+- **Latest stable release:** v2.6.1, released 2026-10-23. Release notes: https://fleet.cenvero.org/whats-new.html
 - **Platforms:** the controller runs on Linux, macOS and Windows. Release builds exist for Linux (amd64, arm64, armv7), macOS (amd64, arm64) and Windows (amd64, arm64). Agents are installed automatically on Linux servers with systemd; macOS and Windows agents are set up manually. Service and firewall management are Linux features.
 - **Architecture:** the controller runs on the machine you work from (a laptop, a bastion host or a small VM) and keeps its state in a local config directory — `~/.cenvero-fleet` on Linux — with SQLite by default, or PostgreSQL, MySQL or MariaDB. Every call rides one authenticated `fleet-rpc` SSH channel with typed RPCs rather than shell strings.
 - **Transport:** direct mode (the controller connects to the agent, port 2222 by default) or reverse mode (the agent dials out to the controller daemon, port 9443 by default, enrolling with a one-time token and the controller's fingerprint). One fleet can mix both.
@@ -72,9 +72,17 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Upgrade:** `fleet update apply` (self-managed installs), `brew upgrade cenvero-fleet` (Homebrew) or `winget upgrade --id Cenvero.Fleet --exact --source winget` (WinGet). Agents then follow the controller automatically within the hour (automatic agent sync, on by default; `fleet sync-agent` does it at once).
 - **Links:** source https://github.com/cenvero/fleet · releases https://github.com/cenvero/fleet/releases · changelog https://github.com/cenvero/fleet/blob/main/CHANGELOG.md · security policy https://github.com/cenvero/fleet/security/policy (private reports to security@cenvero.org)
 
+## New in v2.6.1
+
+This file describes v2.6.1, the latest stable release (2026-10-23). If a controller still runs v2.6.0 or older, these items are **not** available there:
+
+- `fleet server remove` tearing an agent down over its existing authenticated connection with a transient systemd unit, so a server whose agent was installed with a password can be removed even though its login key is not authorised for sshd. If the agent cannot be reached, remove falls back to SSH; `--via-ssh` stays SSH-only.
+- `fleet server add` honouring `runtime.default_agent_port` when `--port` is omitted, with the interactive prompt offering that default and auto-install refusing an agent port equal to the login SSH port.
+- Builds with Go 1.26.10, which fixes 12 standard-library vulnerabilities reachable from Fleet in go1.26.6 (`net/http`, `net/textproto`, `crypto/tls`, `crypto/x509`, `os`).
+
 ## New in v2.6.0
 
-This file describes v2.6.0, the latest stable release (2026-10-07). If a controller still runs v2.5.0 or older, these items are **not** available there:
+If a controller still runs v2.5.0 or older, these items are **not** available there:
 
 - Automatic agent sync: any `fleet` command whose last agent sync started more than an hour ago runs `fleet sync-agent` in the background, and the daemon syncs hourly and when an out-of-date agent connects. `fleet sync-agent auto [on|off|status]` and `fleet config set agent-auto-sync on|off` control it; `FLEET_AGENT_AUTOSYNC=off` skips it for one shell. On older versions, run `fleet sync-agent` yourself after upgrading.
 - `fleet sync-agent` rejecting stray positional arguments (older versions ignored `fleet sync-agent web-01` and synced every server; use `--server`).

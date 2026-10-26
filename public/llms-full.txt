@@ -9,7 +9,7 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Name:** Cenvero Fleet ("Fleet" for short). Controller binary: `fleet`. Agent binary: `fleet-agent`. Made by Cenvero.
 - **What it is:** a self-hosted server fleet manager — an always-connected control plane for shells, fan-out commands, file transfer, live sync, services, logs, metrics, alerts and automation, driven from a CLI, a terminal dashboard, terminal and web file managers, scripts or AI coding agents.
 - **License and price:** AGPL-3.0-or-later. Free, with no paid tier, no account and no hosted service.
-- **Latest stable release:** v2.6.0, released 2026-10-07. Release notes: https://fleet.cenvero.org/whats-new.html
+- **Latest stable release:** v2.6.1, released 2026-10-23. Release notes: https://fleet.cenvero.org/whats-new.html
 - **Platforms:** the controller runs on Linux, macOS and Windows. Release builds exist for Linux (amd64, arm64, armv7), macOS (amd64, arm64) and Windows (amd64, arm64). Agents are installed automatically on Linux servers with systemd; macOS and Windows agents are set up manually. Service and firewall management are Linux features.
 - **Architecture:** the controller runs on the machine you work from (a laptop, a bastion host or a small VM) and keeps its state in a local config directory — `~/.cenvero-fleet` on Linux — with SQLite by default, or PostgreSQL, MySQL or MariaDB. Every call rides one authenticated `fleet-rpc` SSH channel with typed RPCs rather than shell strings.
 - **Transport:** direct mode (the controller connects to the agent, port 2222 by default) or reverse mode (the agent dials out to the controller daemon, port 9443 by default, enrolling with a one-time token and the controller's fingerprint). One fleet can mix both.
@@ -26,9 +26,17 @@ This file collects everything published on <https://fleet.cenvero.org/> in one M
 - **Upgrade:** `fleet update apply` (self-managed installs), `brew upgrade cenvero-fleet` (Homebrew) or `winget upgrade --id Cenvero.Fleet --exact --source winget` (WinGet). Agents then follow the controller automatically within the hour (automatic agent sync, on by default; `fleet sync-agent` does it at once).
 - **Links:** source https://github.com/cenvero/fleet · releases https://github.com/cenvero/fleet/releases · changelog https://github.com/cenvero/fleet/blob/main/CHANGELOG.md · security policy https://github.com/cenvero/fleet/security/policy (private reports to security@cenvero.org)
 
+## New in v2.6.1
+
+This file describes v2.6.1, the latest stable release (2026-10-23). If a controller still runs v2.6.0 or older, these items are **not** available there:
+
+- `fleet server remove` tearing an agent down over its existing authenticated connection with a transient systemd unit, so a server whose agent was installed with a password can be removed even though its login key is not authorised for sshd. If the agent cannot be reached, remove falls back to SSH; `--via-ssh` stays SSH-only.
+- `fleet server add` honouring `runtime.default_agent_port` when `--port` is omitted, with the interactive prompt offering that default and auto-install refusing an agent port equal to the login SSH port.
+- Builds with Go 1.26.10, which fixes 12 standard-library vulnerabilities reachable from Fleet in go1.26.6 (`net/http`, `net/textproto`, `crypto/tls`, `crypto/x509`, `os`).
+
 ## New in v2.6.0
 
-This file describes v2.6.0, the latest stable release (2026-10-07). If a controller still runs v2.5.0 or older, these items are **not** available there:
+If a controller still runs v2.5.0 or older, these items are **not** available there:
 
 - Automatic agent sync: any `fleet` command whose last agent sync started more than an hour ago runs `fleet sync-agent` in the background, and the daemon syncs hourly and when an out-of-date agent connects. `fleet sync-agent auto [on|off|status]` and `fleet config set agent-auto-sync on|off` control it; `FLEET_AGENT_AUTOSYNC=off` skips it for one shell. On older versions, run `fleet sync-agent` yourself after upgrading.
 - `fleet sync-agent` rejecting stray positional arguments (older versions ignored `fleet sync-agent web-01` and synced every server; use `--server`).
@@ -244,7 +252,7 @@ Scoped tokens, named secrets, approvals, command policy and a dead-man's switch 
    fleet dashboard
    ```
 
-> These docs cover **v2.6.0**, the latest stable release. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
+> These docs cover **v2.6.1**, the latest stable release. New in v2.6.1: `fleet server remove` tears agents down over their own authenticated connection, and `fleet server add` honours `runtime.default_agent_port`. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
 
 #### Conventions and global flags
 
@@ -432,9 +440,9 @@ fleet server enroll-token edge-01
 
 ```text
 NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.0
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.0
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.0
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.1
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.1
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.1
 ```
 
 `reconnect` connects again and refreshes what the controller knows; add `--accept-new-host-key` after you have verified a changed host key. `enroll-token` mints a fresh one-time token for a reverse agent, for example after it lost its key.
@@ -1669,7 +1677,7 @@ fleet agent update --canary 1
 fleet agent update --group role=web --canary 2 --strict-health
 ```
 
-- `agent version` shows each agent's version in one form (`v2.6.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
+- `agent version` shows each agent's version in one form (`v2.6.1`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
 - `agent update` updates a first batch of `--canary N` servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. `--canary 0` updates everything at once.
 - Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass `--strict-health`.
 
@@ -2094,13 +2102,26 @@ fleet skill claude    # then type /fleet in Claude Code
 
 Source: <https://fleet.cenvero.org/whats-new.html>
 
-Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.0, released on 7 October 2026. Every release is signed; upgrade with `fleet update apply`, `brew upgrade cenvero-fleet` or `winget upgrade --id Cenvero.Fleet`. The complete, line-by-line history lives in the changelog.
+Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.1, released on 23 October 2026. Every release is signed; upgrade with `fleet update apply`, `brew upgrade cenvero-fleet` or `winget upgrade --id Cenvero.Fleet`. The complete, line-by-line history lives in the changelog.
 
 [Latest release](https://github.com/cenvero/fleet/releases) · [Full changelog](https://github.com/cenvero/fleet/blob/main/CHANGELOG.md)
 
+### v2.6.1
+
+*Latest stable · Released 2026-10-23*
+
+A patch release that lets `fleet server remove` tear an agent down over its own connection, makes `server add` honour your configured default agent port, and rebuilds on Go 1.26.10 for a round of standard-library security fixes.
+
+#### Highlights
+
+- **Remove servers without SSH login credentials:** `fleet server remove` now asks the agent, over its existing authenticated connection, to remove itself — running the teardown as a transient systemd unit (`cenvero-fleet-teardown-<token>`) so it outlives the agent's own service. A server whose agent was installed with a password, and whose login key is not authorised for sshd, no longer fails with `ssh: unable to authenticate`. If the agent cannot be reached, remove falls back to SSH as before; `--via-ssh` still means SSH only.
+- **`fleet server add` honours `runtime.default_agent_port`** when `--port` is omitted, instead of always using 2222. Interactive add now asks for the agent port and offers that default; the port is range-checked before anything is saved, and auto-install refuses an agent port equal to the login SSH port.
+- **Security:** built with Go 1.26.10, which fixes 12 standard-library vulnerabilities reachable from Fleet in go1.26.6 (`net/http`, `net/textproto`, `crypto/tls`, `crypto/x509`, `os`).
+- The WinGet submit helper now titles its pull request the way `wingetcreate` and Komac do — `New version: Cenvero.Fleet version X.Y.Z` for a newer release and `Add version:` for an older one.
+
 ### v2.6.0
 
-*Latest stable · Released 2026-10-07*
+*Released 2026-10-07*
 
 Agents now keep themselves on the controller's version without anyone running a command, agent installs move far less over SSH, and Fleet is in the Windows Package Manager catalog.
 
