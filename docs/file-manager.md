@@ -354,13 +354,49 @@ the transfers dock. The same secure transfer engine runs underneath.
   verified as they go; if verification fails the download is aborted, so the browser
   shows a failed download rather than a corrupt file.
 - **Very large folders** (tens of thousands of entries) scroll smoothly.
-- **Fleet overview** (the *Fleet* tab): a read-only table of every server with its
-  status, mode, OS, CPU/memory/disk, last seen, tags and open alerts, with filters and
-  auto-refresh; *Browse* opens that server in a file pane. When the UI is started with
-  `--token`, the overview is authorized like `fleet server list`, `fleet alerts` and
-  `fleet tag`.
+- **Fleet overview** (the *Fleet* tab): a table of every server with its status, mode,
+  OS, CPU/memory/disk, last seen, tags and open alerts, with filters and auto-refresh.
+  *Browse* opens that server in a file pane; *Manage* opens a menu of per-server actions
+  (services, unit status, journal, run a command, live metrics, health checklist,
+  firewall, open ports, definition, tags, reconnect, remove). *Add server* opens the
+  `server add` form, and each open alert has *Ack* and *Snooze 1h*. When the UI is
+  started with `--token`, the overview is authorized like `fleet server list`,
+  `fleet alerts` and `fleet tag`.
+- **Control** (the *Control* tab): every fleet command, from the browser. Commands are
+  grouped by area and searchable (also from the `Ctrl/Cmd+K` palette). Each one opens a
+  form built from its own arguments and flags, with server names suggested, a live preview
+  of the equivalent terminal command (copyable), and an *Extra arguments* box for
+  anything else. Quick actions cover the common jobs. Runs stream stdout and stderr live,
+  can be cancelled (interrupt, then kill after 5 s) and re-run, stay in a *Recent runs*
+  history (newest 60, 4 MiB of output each), and JSON output (`--json`, `inventory`, …)
+  can be shown as a table. Up to 8 commands run at once.
+
+### How Control runs commands
+
+Control does not reimplement commands. Each run starts the `fleet` binary itself as a
+child process with this controller's `--config-dir` and the token the UI was started
+with (`--token` or `FLEET_TOKEN`), so **RBAC, command policy, redaction, confirmations
+and the audit log behave exactly as in a terminal**. A scoped token's limits apply to
+every run, and a denied command shows the same `denied: …` message. The UI also writes a
+`webui.command` audit entry per run (the command path only; arguments can carry secrets
+and the child audits its own action).
+
+- The browser picks the command and its arguments only. It cannot set `--token`,
+  `--config-dir` or environment variables, and the arguments must resolve to the command
+  that was asked for.
+- Commands that need a terminal are listed but refused, with the reason: `dashboard`,
+  `files` / `filemanager`, `file ui`, `ssh`, `config edit`, `daemon` (use `start` /
+  `stop`), `init`, `recover` and `self-uninstall`.
+- There is no terminal, so prompts fail closed. Tick `--yes` (or `--confirm` for
+  command-policy confirm patterns) to approve on purpose. Commands that change things
+  (remove, stop, restart, rotate, update apply, …) also ask in the browser first.
+- `secret set` and `automation set` take their input in a text box sent on stdin, which
+  is never stored or echoed. Values of password and secret flags are masked in the run
+  history.
+- Closing the UI (`Ctrl-C`) interrupts any commands still running.
 
 Security: in addition to the loopback bind, per-process token and strict CSP, every
-mutating request must be a same-origin `POST` (another localhost port is refused),
+mutating request (including starting or cancelling a command) must be a same-origin
+`POST` (another localhost port is refused),
 extra isolation headers are sent, and the *Local* source refuses paths inside the
 controller's config directory (keys, tokens, databases), including through symlinks.

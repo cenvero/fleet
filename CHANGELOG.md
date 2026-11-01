@@ -34,6 +34,27 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+### Added
+
+- **Web UI: Control view, so the whole fleet can be run from the browser.** `fleet file ui`
+  gains a *Control* tab that lists every fleet command, grouped by area, with a form built
+  from the command's own arguments and flags. Runs stream live output (stdout and stderr),
+  can be cancelled, keep a history, and show JSON output as a table. Quick actions cover
+  common work (add a server, run a command, fleet health, unit status, updates, backup).
+  The *Fleet* overview gains *Add server*, a per-server *Manage* menu (services, journal,
+  run a command, live metrics, health checklist, firewall, ports, tags, reconnect, remove)
+  and *Ack* / *Snooze 1h* buttons on open alerts. The command palette lists every command.
+- Each run is the `fleet` binary itself, started as a child process with this controller's
+  config dir and the token the UI was launched with. RBAC, command policy, redaction,
+  confirmations and audit therefore apply exactly as in a terminal, and the UI also audits
+  each run as `webui.command` (command path only, never arguments). The browser cannot set
+  `--token`, `--config-dir` or the environment. Interactive commands (`dashboard`, `ssh`,
+  `config edit`, the terminal file manager, `daemon`, `init`, `recover`, `self-uninstall`)
+  are listed with the reason they need a terminal and are refused. Prompts get no terminal
+  and fail closed unless the operator ticks `--yes` / `--confirm`. Commands that change
+  things ask for confirmation in the browser first. Values of password and secret flags are
+  masked in the run history, and stdin input is never kept.
+
 ## [v2.6.1] — 2026-10-23 (stable)
 
 ### Fixed

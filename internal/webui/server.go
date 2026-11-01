@@ -59,6 +59,10 @@ type Server struct {
 	authorizer func(command string) error
 	// operator is the audit attribution for actions the UI records itself.
 	operator string
+	// console, when set, powers the Control view (see console.go).
+	console *console
+	// baseCtx is the server's lifetime; command runs are cancelled with it.
+	baseCtx context.Context
 }
 
 // New builds a web UI server with a fresh random session token.
@@ -101,6 +105,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 	if err != nil {
 		return err
 	}
+	s.baseCtx = ctx
 	srv := &http.Server{
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -123,6 +128,11 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 		}()
 	}
 	err = srv.Serve(listener)
+	if s.console != nil {
+		// Interrupt every command still running from the browser and give it
+		// a moment to exit cleanly before this process does.
+		s.console.runs.cancelAll(runCancelGrace + time.Second)
+	}
 	if err == http.ErrServerClosed {
 		return nil
 	}
@@ -165,6 +175,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/extract", s.guard(postOnly(s.handleExtract)))
 	mux.HandleFunc("/api/chmod", s.guard(postOnly(s.handleChmod)))
 	mux.HandleFunc("/api/duplicate", s.guard(postOnly(s.handleDuplicate)))
+	// Control view: run any (non-interactive) fleet command as a child
+	// process. Starting, cancelling and clearing runs are POSTs, so the CSRF
+	// check covers them.
+	mux.HandleFunc("/api/commands", s.guard(getOnly(s.handleCommands)))
+	mux.HandleFunc("/api/runs", s.guard(s.handleRuns))
+	mux.HandleFunc("/api/runs/stream", s.guard(getOnly(s.handleRunStream)))
+	mux.HandleFunc("/api/runs/cancel", s.guard(postOnly(s.handleRunCancel)))
+	mux.HandleFunc("/api/runs/clear", s.guard(postOnly(s.handleRunsClear)))
 	return securityHeaders(gzipHandler(mux))
 }
 

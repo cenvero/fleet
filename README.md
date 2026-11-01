@@ -21,6 +21,7 @@ Today the repository includes:
 - Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
 - Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet file ui`)
+- A localhost web UI (`fleet file ui`) that runs the whole fleet from the browser: files, a live Fleet overview with per-server actions, and a *Control* view that runs every non-interactive `fleet` command with live output under the same token, policy and audit as the CLI
 - Structured remote execution (`fleet exec --json`) with timeouts, retries, dry-run, concurrent tag-group fan-out (`--parallel`), and automatic output redaction
 - Unattended-operation guardrails: scoped RBAC tokens (`fleet token` / `--token`), named secrets (`fleet secret`), a dead-man's-switch (`fleet guard`/`confirm`/`revert`), command policy (`fleet cmd-policy`), and an approval queue (`fleet approvals`/`approve`, which runs the approved command)
 - Transactional, idempotent playbooks (`fleet run`) with check/apply/rollback, plus tag-based grouping (`fleet tag`) and scheduled jobs (`fleet cron`)
@@ -271,7 +272,7 @@ File manager and transfers (**new in v2**):
 - `fleet file compress|extract <server> ...` — create and unpack archives on the host (chmod, checksum and duplicate are in the file managers below)
 - `fleet file defaults show|set [server]` — per-server and global transfer defaults
 - `fleet files [server...]` (also `fleet filemanager` / `fleet fm`) — desktop-grade **dual-pane** terminal file manager: each pane is Local or any server, with full operations (new folder, rename, delete, copy, move), a right-click menu, a hidden-file toggle, List/Icons views, Finder-style drag-to-copy/move (local↔server **and** server↔server), a transfer queue with speed/ETA/retry, a preview pane, go-to/jump/bookmarks, and a `?` key reference
-- `fleet file ui` (also `fleet filemanager ui`) — premium **dual-pane** localhost browser file manager (Local + server panes, same operations, drag-to-copy/move, desktop-drop upload, live progress, light/dark themes, phone layout, command palette, previews, streaming downloads) plus a read-only **Fleet overview**
+- `fleet file ui` (also `fleet filemanager ui`) — premium **dual-pane** localhost browser file manager (Local + server panes, same operations, drag-to-copy/move, desktop-drop upload, live progress, light/dark themes, phone layout, command palette, previews, streaming downloads) plus a **Fleet overview** (per-server *Manage* menu, *Add server*, alert *Ack* / *Snooze*) and a **Control** view that runs every non-interactive `fleet` command from a form, with live output, cancel, run history and JSON tables
 - `fleet file copy <srcServer:path> <dstServer:path> [-r]` / `fleet file move …` — copy or move a file or directory **directly between two servers** (relayed through the controller)
 - `fleet sync <server> <local-dir> <remote-dir> [--from local|remote] [--no-delete]` — live mirror: one side is the writer (source of truth, `--from`), the other a replica; the writer is copied once, then changes overwrite the replica and (by default) its extra files are deleted, until you stop the command
 
@@ -477,7 +478,7 @@ A few boundaries are intentional in the current codebase:
 
 - Linux is the primary operational target for service management, firewall control, and remote bootstrap
 - macOS and Windows agents support transport, metrics, inventory, and update flows, but some ops commands return typed unsupported-capability errors
-- The file-manager web UI (`fleet file ui`) was introduced in **v2** — it is localhost-only by design; there is still no remote/hosted web console, and the fleet dashboard remains terminal-based (`fleet dashboard`)
+- The web UI (`fleet file ui`) is localhost-only by design; there is no remote/hosted web console. Its Control view runs commands as the `fleet` CLI, so interactive commands (`fleet dashboard`, `fleet ssh`, `fleet config edit`, the terminal file manager) still need a terminal
 
 ## Contributing
 

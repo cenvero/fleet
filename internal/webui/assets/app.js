@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Cenvero / Shubhdeep Singh
 //
-// Cenvero Fleet web file manager + read-only Fleet overview. Vanilla JS, no
+// Cenvero Fleet web UI: file manager, Fleet overview and Control (every fleet
+// command). Vanilla JS, no
 // build step, no dependencies, no external requests. The CSP forbids inline
 // scripts, inline styles and event-handler attributes, so every behaviour
 // lives here, DOM is built with createElement/textContent (never innerHTML
@@ -3454,6 +3455,7 @@ function paletteCommands() {
   const cmds = [
     { label: "Go to Files", icon: "folder", run: () => showView("files") },
     { label: "Go to Fleet overview", icon: "server", run: () => showView("overview") },
+    { label: "Go to Control (run any fleet command)", icon: "command", run: () => showView("control") },
     { label: "Show transfers", icon: "transfer", run: openTransfers },
     { label: "Keyboard shortcuts", icon: "keyboard", hint: "?", run: showShortcuts },
     { label: "Toggle light / dark theme", icon: "moon", run: toggleTheme },
@@ -3474,6 +3476,11 @@ function paletteCommands() {
       { label: "Paste", icon: "clipboard", hint: MOD + "+V", run: () => pasteInto(p) },
     );
     if (state.panes.length > 1) cmds.push({ label: "Close pane", icon: "x", run: () => removePane(p) });
+  for (const c of ctl.commands) {
+    if (c.unavailable) continue;
+    const key = ctlKey(c.path);
+    cmds.push({ label: "fleet " + key + (c.short ? " — " + c.short : ""), icon: "command", run: () => openCommand(key) });
+  }
   }
   return cmds;
 }
@@ -3632,8 +3639,11 @@ function showShortcuts() {
 
 // ----------------------------------------------------------------- views / theme
 
+const VIEWS = ["files", "overview", "control"];
+const VIEW_TITLES = { files: "Cenvero Fleet — Files", overview: "Cenvero Fleet — Fleet overview", control: "Cenvero Fleet — Control" };
+
 function showView(view) {
-  if (view !== "files" && view !== "overview") return;
+  if (!VIEWS.includes(view)) return;
   state.view = view;
   for (const tab of $$(".view-tab")) {
     const on = tab.dataset.view === view;
@@ -3642,9 +3652,11 @@ function showView(view) {
   }
   $("#view-files").hidden = view !== "files";
   $("#view-overview").hidden = view !== "overview";
-  document.title = view === "files" ? "Cenvero Fleet — Files" : "Cenvero Fleet — Fleet overview";
+  $("#view-control").hidden = view !== "control";
+  document.title = VIEW_TITLES[view];
   if (location.hash !== "#" + view) history.replaceState(null, "", location.pathname + "#" + view);
   if (view === "overview") { closePreview(); loadOverview(); scheduleOverview(); }
+  else if (view === "control") { closePreview(); stopOverviewTimer(); showControlPage(); }
   else {
     stopOverviewTimer();
     const p = activePane();
@@ -3910,6 +3922,11 @@ function renderOverview() {
       "aria-label": "Browse files on " + s.name,
       onclick: (e) => { e.stopPropagation(); openServerInFiles(s.name); },
     }, icon("folder"), "Browse");
+    const manage = h("button", {
+      class: "btn sm", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
+      title: "Services, logs, commands and settings for " + s.name, "aria-label": "Manage " + s.name,
+      onclick: (e) => { e.stopPropagation(); openMenu(serverMenuItems(s.name, s.reachable), { anchor: manage, label: "Manage " + s.name }); },
+    }, icon("more"), "Manage");
     const tr = h("tr", { class: s.reachable ? "" : "unreachable", dataset: { server: s.name } },
       h("td", { class: "c-status", "data-label": "Status" }, h("span", { class: "status-cell" }, h("span", { class: "dot " + (s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other") }), statusLabel(s.status))),
       h("td", { class: "c-name" }, h("div", { class: "srv-name" },
@@ -3923,13 +3940,14 @@ function renderOverview() {
       h("td", { class: "c-seen", "data-label": "Last seen", title: fmtDateFull(s.last_seen) + (s.last_error ? "\n" + s.last_error : ""), text: fmtRelative(s.last_seen) }),
       h("td", { class: "c-tags", "data-label": "Tags" }, tags.length ? h("div", { class: "tags" }, tags.map(([k, v]) => h("span", { class: "tag" }, h("b", { text: k }), "=" + v))) : h("span", { class: "muted", text: d.tags_restricted ? "—" : "No tags" })),
       alertsCell,
-      h("td", { class: "c-open" }, browse),
+      h("td", { class: "c-open" }, h("div", { class: "row-actions" }, browse, manage)),
     );
     tr.addEventListener("click", () => { if (s.reachable) openServerInFiles(s.name); });
     return tr;
   }));
   empty.hidden = rows.length > 0;
-  empty.textContent = d.servers.length ? "No servers match the current filter." : "No servers yet — add one with `fleet server add`.";
+  empty.replaceChildren(d.servers.length ? "No servers match the current filter." : h("span", null, "No servers yet. ",
+    h("button", { type: "button", class: "linkish", onclick: () => openCommand("server add"), text: "Add your first server" }), "."));
 
   const list = $("#ov-alerts");
   if (d.alerts_restricted) list.replaceChildren(h("li", { class: "alert-none", text: "Hidden by the token this UI was started with." }));
@@ -3947,6 +3965,9 @@ function renderOverview() {
           al.code ? h("span", { text: al.code }) : null,
           h("span", { text: "since " + fmtRelative(al.created_at), title: fmtDateFull(al.created_at) }),
           al.occurrences > 1 ? h("span", { text: al.occurrences + "×" }) : null)),
+      h("div", { class: "alert-actions" },
+        h("button", { type: "button", class: "btn sm", title: "Acknowledge this alert", onclick: (e) => { e.currentTarget.disabled = true; alertAction(al, "ack"); } }, icon("check"), "Ack"),
+        h("button", { type: "button", class: "btn sm ghost", title: "Silence notifications for an hour", onclick: (e) => { e.currentTarget.disabled = true; alertAction(al, "snooze"); } }, icon("clock"), "Snooze 1h")),
     )));
   }
 }
@@ -4641,6 +4662,7 @@ function init() {
   setupTransfers();
   setupPreview();
   setupOverview();
+  setupControl();
 
   $("#theme-toggle").addEventListener("click", toggleTheme);
   $("#open-palette").addEventListener("click", openPalette);
@@ -4649,7 +4671,8 @@ function init() {
   $(".views").addEventListener("keydown", (e) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
-    const next = state.view === "files" ? "overview" : "files";
+    const i = VIEWS.indexOf(state.view);
+    const next = VIEWS[(i + (e.key === "ArrowRight" ? 1 : VIEWS.length - 1)) % VIEWS.length];
     showView(next);
     $("#tab-" + next).focus();
   });
@@ -4666,7 +4689,7 @@ function init() {
     if (drag.active) { drag.target = null; onDragUp({ clientX: drag.startX, clientY: drag.startY }); }
   });
   window.addEventListener("hashchange", () => {
-    const v = location.hash === "#overview" ? "overview" : "files";
+    const v = viewFromHash();
     if (v !== state.view) showView(v);
   });
   window.addEventListener("beforeunload", (e) => {
@@ -4674,12 +4697,844 @@ function init() {
     if (busy || (editor.open && editor.dirty)) { e.preventDefault(); e.returnValue = ""; }
   });
 
-  const initialView = location.hash === "#overview" ? "overview" : "files";
+  const initialView = viewFromHash();
   state.view = initialView;
   loadServers().then(() => {
     showView(initialView);
     if (initialView !== "overview") loadOverview(); // fills the alert badge
   });
+}
+
+// ----------------------------------------------------------------- control (every fleet command)
+//
+// The Control view runs any non-interactive fleet command. The backend starts
+// each run as a fresh `fleet` child process under the token, policy and audit
+// of this UI (see internal/webui/console.go), so nothing here can do more than
+// the CLI would. This code only builds argument vectors from forms, streams
+// output and keeps a run history.
+
+const CTL_GROUPS = [
+  { id: "servers", label: "Servers", icon: "server", tops: ["server", "tag", "inventory", "doctor", "drift", "template"] },
+  { id: "services", label: "Services & logs", icon: "activity", tops: ["service", "svc", "journal", "logs"] },
+  { id: "run", label: "Run & automate", icon: "play", tops: ["exec", "job", "jobs", "run", "guard", "confirm", "revert", "cron", "tunnel", "automation", "approvals", "approve"] },
+  { id: "files", label: "Files", icon: "folder", tops: ["file", "cp", "sync"] },
+  { id: "monitor", label: "Monitoring & alerts", icon: "alert", tops: ["health", "top", "alerts", "notify"] },
+  { id: "security", label: "Network & security", icon: "lock", tops: ["firewall", "fw", "port", "key", "token", "secret", "cmd-policy", "policy"] },
+  { id: "updates", label: "Updates & agents", icon: "download", tops: ["update", "agent", "sync-agent"] },
+  { id: "controller", label: "Controller", icon: "laptop", tops: ["status", "start", "stop", "config", "backup", "database", "adjust-init", "version", "report", "context", "ai", "skill", "autocomplete", "shell-init"] },
+];
+
+// Quick actions on the Control home page. `now` runs straight away (read-only,
+// no required input); the rest open the prefilled form.
+const CTL_QUICK = [
+  { title: "Servers", items: [
+    { key: "server add", label: "Add a server", desc: "Register a server and install its agent", icon: "plus" },
+    { key: "server list", label: "List servers", desc: "Every server with its status", icon: "server", now: true },
+    { key: "health", label: "Fleet health", desc: "Offline, disk, swap, reboot and clock checks", icon: "activity", now: true },
+    { key: "inventory", label: "Inventory", desc: "Hostnames, IPs, OS, resources, services", icon: "list", args: [], flags: { json: true }, now: true },
+  ] },
+  { title: "Run things", items: [
+    { key: "exec", label: "Run a command", desc: "On one server, a tag group, or all of them", icon: "command" },
+    { key: "job run", label: "Start a background job", desc: "Detached, with captured output", icon: "clock" },
+    { key: "run", label: "Run a playbook", desc: "Idempotent check / apply / rollback", icon: "play" },
+    { key: "approvals list", label: "Pending approvals", desc: "Commands waiting for a second pair of eyes", icon: "check", now: true },
+  ] },
+  { title: "Services & logs", items: [
+    { key: "svc status", label: "Unit status", desc: "Active / enabled / failed plus recent logs", icon: "info" },
+    { key: "service restart", label: "Restart a service", desc: "A tracked service on one server", icon: "refresh" },
+    { key: "journal", label: "Journal", desc: "Page or follow a systemd unit's journal", icon: "file-text" },
+    { key: "logs", label: "Audit log", desc: "Everything the controller has done", icon: "history", now: true },
+  ] },
+  { title: "Maintenance", items: [
+    { key: "update check", label: "Check for updates", desc: "Fetch the release manifest", icon: "download", now: true },
+    { key: "agent version", label: "Agent versions", desc: "Flag servers on a different version", icon: "tag", flags: { all: true }, now: true },
+    { key: "backup", label: "Back up the controller", desc: "Config, keys and state as tar.gz", icon: "archive" },
+    { key: "status", label: "Controller status", desc: "Daemon, listeners, version", icon: "laptop", now: true },
+  ] },
+];
+
+const ctl = {
+  commands: [],
+  byKey: new Map(),
+  loaded: null,
+  disabled: "",
+  current: "",
+  filter: "",
+  runs: [],
+  active: "",
+  out: new Map(),      // run id -> { chunks: [], lastSeq, text }
+  requests: new Map(), // run id -> { path, args, stdin } (this tab's runs, for "Run again")
+  streams: new Map(),  // run id -> EventSource
+  waiters: new Map(),  // run id -> [resolve]
+  quiet: new Set(),    // runs started by overview buttons (they toast themselves)
+  poll: 0,
+  formatted: true,
+};
+
+const ctlKey = (path) => path.join(" ");
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+const stripAnsi = (s) => s.replace(ANSI_RE, "").replace(/\r(?!\n)/g, "\n");
+
+// shellSplit splits "a 'b c' d\"e\"" into words, like a POSIX shell would
+// (quotes and backslashes, no expansion). The browser never runs a shell:
+// this only lets an operator type several arguments into one box.
+function shellSplit(text) {
+  const out = [];
+  let cur = "", has = false, quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = "";
+      else if (c === "\\" && quote === '"' && i + 1 < text.length && /["\\$`]/.test(text[i + 1])) cur += text[++i];
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; has = true; continue; }
+    if (c === "\\" && i + 1 < text.length) { cur += text[++i]; has = true; continue; }
+    if (/\s/.test(c)) { if (has) { out.push(cur); cur = ""; has = false; } continue; }
+    cur += c; has = true;
+  }
+  if (quote) throw new Error("unterminated " + (quote === "'" ? "single" : "double") + " quote");
+  if (has) out.push(cur);
+  return out;
+}
+
+// shellQuote renders one argument for the copyable command line.
+function shellQuote(a) {
+  if (a === "") return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a)) return a;
+  return "'" + a.replace(/'/g, "'\\''") + "'";
+}
+
+function groupOf(spec) {
+  return CTL_GROUPS.find((g) => g.tops.includes(spec.path[0])) || { id: "other", label: "Other", icon: "more" };
+}
+
+async function loadCommands() {
+  if (ctl.loaded) return ctl.loaded;
+  ctl.loaded = (async () => {
+    try {
+      const d = await getJSON("/api/commands");
+      ctl.commands = d.commands || [];
+      ctl.byKey = new Map(ctl.commands.map((c) => [ctlKey(c.path), c]));
+      ctl.disabled = "";
+    } catch (err) {
+      ctl.disabled = err.message || String(err);
+      ctl.loaded = null;
+    }
+    renderControlTree();
+  })();
+  return ctl.loaded;
+}
+
+function renderControlTree() {
+  const tree = $("#ctl-tree");
+  if (!tree) return;
+  if (ctl.disabled) {
+    tree.replaceChildren(h("p", { class: "ctl-tree-empty", text: "Commands are unavailable: " + ctl.disabled }));
+    return;
+  }
+  const q = ctl.filter.trim().toLowerCase();
+  const groups = new Map();
+  for (const g of [...CTL_GROUPS, { id: "other", label: "Other", icon: "more" }]) groups.set(g.id, { g, items: [] });
+  for (const c of ctl.commands) {
+    const key = ctlKey(c.path);
+    if (q && !(key.includes(q) || (c.short || "").toLowerCase().includes(q))) continue;
+    groups.get(groupOf(c).id).items.push(c);
+  }
+  const frag = [];
+  for (const { g, items } of groups.values()) {
+    if (!items.length) continue;
+    const order = g.tops || [];
+    items.sort((a, b) => (order.indexOf(a.path[0]) - order.indexOf(b.path[0])) || ctlKey(a.path).localeCompare(ctlKey(b.path)));
+    frag.push(h("div", { class: "ctl-group" },
+      h("div", { class: "ctl-group-title" }, icon(g.icon), h("span", { text: g.label })),
+      h("ul", { class: "ctl-list", role: "list" }, items.map((c) => {
+        const key = ctlKey(c.path);
+        return h("li", null, h("button", {
+          type: "button", class: "ctl-item" + (key === ctl.current ? " on" : "") + (c.unavailable ? " off" : ""),
+          "aria-current": key === ctl.current ? "page" : null,
+          title: c.unavailable ? "Not available here: " + c.unavailable : c.short || key,
+          onclick: () => openCommand(key),
+        }, h("span", { class: "ctl-item-name", text: key }), c.unavailable ? icon("lock", "ctl-item-lock") : null));
+      }))));
+  }
+  if (!frag.length) frag.push(h("p", { class: "ctl-tree-empty", text: q ? "No command matches “" + ctl.filter + "”." : "Loading commands…" }));
+  tree.replaceChildren(...frag);
+}
+
+function serverDatalist() {
+  let dl = $("#ctl-servers");
+  if (!dl) { dl = h("datalist", { id: "ctl-servers" }); document.body.append(dl); }
+  dl.replaceChildren(...state.servers.map((s) => h("option", { value: s.name, label: s.reachable ? s.name : s.name + " (offline)" })));
+  return "ctl-servers";
+}
+
+// ---- home page
+
+function renderControlHome() {
+  ctl.current = "";
+  renderControlTree();
+  const page = $("#ctl-page");
+  page.replaceChildren(...[
+    h("div", { class: "ctl-head" },
+      h("div", null,
+        h("h1", { text: "Control" }),
+        h("p", { class: "ctl-sub", text: "Every fleet command, from the browser. Each one runs as the fleet CLI with this UI's token, command policy and audit log." }))),
+    ctl.disabled ? callout("warn", "alert", h("p", { text: "The command console is not available: " + ctl.disabled })) : null,
+    ...CTL_QUICK.map((sec) => h("section", { class: "ctl-quick" },
+      h("h2", { text: sec.title }),
+      h("div", { class: "ctl-cards" }, sec.items.filter((it) => ctl.byKey.has(it.key)).map((it) => {
+        const card = h("div", { class: "ctl-card" },
+          h("button", { type: "button", class: "ctl-card-main", onclick: () => openCommand(it.key, { args: it.args, flags: it.flags }) },
+            h("span", { class: "ctl-card-ico" }, icon(it.icon)),
+            h("span", { class: "ctl-card-text" }, h("b", { text: it.label }), h("span", { text: it.desc }))),
+          it.now ? h("button", {
+            type: "button", class: "btn sm ctl-card-run", title: "Run fleet " + it.key + " now", "aria-label": "Run " + it.label + " now",
+            onclick: () => openCommand(it.key, { args: it.args, flags: it.flags, run: true }),
+          }, icon("play"), "Run") : null);
+        return card;
+      })))),
+  ].filter(Boolean));
+}
+
+// ---- command form
+
+// openCommand shows the form for `key`, prefilled with
+// { args: [values] | {name: value}, flags: {name: value}, run: bool }.
+async function openCommand(key, prefill = {}) {
+  if (state.view !== "control") showView("control");
+  await loadCommands();
+  const spec = ctl.byKey.get(key);
+  if (!spec) { toast("Unknown command: fleet " + key, "error"); return; }
+  ctl.current = key;
+  renderControlTree();
+  const form = renderCommandForm(spec, prefill);
+  const first = form && form.querySelector("input:not([type=checkbox]):not([disabled]), textarea");
+  if (prefill.run && form) form.requestSubmit();
+  else if (first && !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches)) first.focus();
+}
+
+let ctlFieldSeq = 0;
+
+function renderCommandForm(spec, prefill) {
+  const key = ctlKey(spec.path);
+  const page = $("#ctl-page");
+  const about = [];
+  if (spec.long) about.push(h("pre", { class: "ctl-long", text: spec.long }));
+  if (spec.example) about.push(h("pre", { class: "ctl-long", text: spec.example }));
+  const head = h("div", { class: "ctl-head" },
+    h("div", null,
+      h("p", { class: "ctl-crumb" }, h("button", { type: "button", class: "linkish", onclick: renderControlHome, text: "Control" }), " / " + groupOf(spec).label),
+      h("h1", { class: "mono", text: "fleet " + key }),
+      spec.short ? h("p", { class: "ctl-sub", text: spec.short }) : null),
+    spec.destructive ? h("span", { class: "badge warn", text: "Changes things" }) : null);
+  const kids = [head];
+  if (about.length) kids.push(h("details", { class: "ctl-about" }, h("summary", { text: "About this command" }), ...about));
+  if (spec.unavailable) {
+    kids.push(callout("warn", "lock", h("p", null, h("b", { text: "Not available from the browser. " }), "fleet " + key + ": " + spec.unavailable + ".")));
+    page.replaceChildren(...kids);
+    return null;
+  }
+
+  const fields = { args: [], flags: [], stdin: null, extra: null };
+  const argPrefill = prefill.args || [];
+  const argGrid = h("div", { class: "ctl-fields" });
+  spec.args.forEach((a, i) => {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const pre = Array.isArray(argPrefill) ? argPrefill[i] : argPrefill[a.name];
+    const input = h("input", {
+      id, class: "text-input mono", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off",
+      value: pre ?? "", required: a.required || null,
+      placeholder: a.variadic ? "one or more, space separated (quote to keep spaces)" : a.suggest ? a.suggest.join(" / ") : "",
+    });
+    if (a.server) input.setAttribute("list", serverDatalist());
+    else if (a.suggest) {
+      const dl = h("datalist", { id: id + "-dl" }, a.suggest.map((v) => h("option", { value: v })));
+      argGrid.append(dl);
+      input.setAttribute("list", id + "-dl");
+    }
+    const wide = a.variadic || /command|rule|patterns|cmd/.test(a.name);
+    argGrid.append(h("div", { class: "ctl-field" + (wide ? " wide" : "") },
+      h("label", { for: id }, h("span", { text: a.name }), a.required ? h("span", { class: "req", text: "required", "aria-hidden": "true" }) : h("span", { class: "opt", text: "optional" })),
+      input));
+    fields.args.push({ spec: a, input });
+  });
+
+  const flagPrefill = prefill.flags || {};
+  const sortedFlags = spec.flags.slice().sort((x, y) => (y.required === true) - (x.required === true));
+  const flagRows = sortedFlags.map((f) => {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const pre = flagPrefill[f.name];
+    const label = h("label", { for: id }, h("span", { class: "mono", text: "--" + f.name }), f.required ? h("span", { class: "req", text: "required" }) : null);
+    let input;
+    if (f.type === "bool") {
+      const checked = pre !== undefined ? !!pre : f.default === "true";
+      input = h("input", { id, type: "checkbox", checked });
+      fields.flags.push({ spec: f, input });
+      return h("div", { class: "ctl-field ctl-bool" + (f.name === "yes" || f.name === "confirm" ? " confirmish" : "") },
+        h("label", { class: "ctl-check", for: id }, input, h("span", { class: "mono", text: "--" + f.name })),
+        f.usage ? h("p", { class: "ctl-help", text: f.usage }) : null);
+    }
+    input = h("input", {
+      id, class: "text-input mono", spellcheck: "false", autocomplete: f.sensitive ? "new-password" : "off", autocapitalize: "off",
+      type: f.sensitive ? "password" : "text", value: pre !== undefined ? String(pre) : "",
+      placeholder: f.default ? "default: " + f.default : f.type === "duration" ? "e.g. 30s, 5m, 1h" : f.type.endsWith("Slice") || f.type.endsWith("Array") ? "comma separated" : "",
+      required: f.required || null,
+    });
+    if (f.name === "server") input.setAttribute("list", serverDatalist());
+    fields.flags.push({ spec: f, input });
+    return h("div", { class: "ctl-field" }, label, input, f.usage ? h("p", { class: "ctl-help", text: f.usage }) : null);
+  });
+
+  const form = h("form", { class: "ctl-form", autocomplete: "off" });
+  form.noValidate = true; // validation is ours (buildArgv), with clearer messages
+  if (fields.args.length) form.append(h("fieldset", { class: "ctl-set" }, h("legend", { text: "Arguments" }), argGrid));
+  if (flagRows.length) {
+    const visible = flagRows.length > 10 ? flagRows.filter((_, i) => sortedFlags[i].required || Object.prototype.hasOwnProperty.call(flagPrefill, sortedFlags[i].name)) : flagRows;
+    const hidden = flagRows.filter((r) => !visible.includes(r));
+    const set = h("fieldset", { class: "ctl-set" }, h("legend", { text: "Options" }));
+    if (visible.length) set.append(h("div", { class: "ctl-fields" }, visible));
+    if (hidden.length) set.append(h("details", { class: "ctl-more", open: !visible.length || null }, h("summary", { text: plural(hidden.length, "option") + (visible.length ? " more" : "") }), h("div", { class: "ctl-fields" }, hidden)));
+    form.append(set);
+  }
+  if (spec.stdin) {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const secret = spec.path[0] === "secret";
+    const input = secret
+      ? h("input", { id, class: "text-input mono", type: "password", autocomplete: "new-password" })
+      : h("textarea", { id, class: "text-input mono ctl-stdin", rows: "6", spellcheck: "false" });
+    fields.stdin = input;
+    form.append(h("fieldset", { class: "ctl-set" }, h("legend", { text: secret ? "Secret value" : "Input" }),
+      h("div", { class: "ctl-field wide" }, h("label", { for: id, text: secret ? "Value (sent on stdin, never shown or stored by the UI)" : "Sent to the command on stdin" }), input)));
+  }
+  const extraId = "ctl-f-" + ++ctlFieldSeq;
+  fields.extra = h("input", { id: extraId, class: "text-input mono", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", placeholder: "e.g. --flag value 'quoted arg'" });
+  form.append(h("details", { class: "ctl-more ctl-extra" }, h("summary", { text: "Extra arguments" }),
+    h("div", { class: "ctl-field wide" }, h("label", { for: extraId, text: "Appended as typed (shell-style quoting, nothing is expanded)" }), fields.extra)));
+
+  const preview = h("code", { class: "ctl-preview-cmd" });
+  const err = h("div", { class: "field-error", "aria-live": "polite" });
+  const runBtn = h("button", { type: "submit", class: "btn " + (spec.destructive ? "danger-solid" : "primary") }, icon("play"), "Run");
+  const copyBtn = h("button", { type: "button", class: "btn ghost sm", title: "Copy as a terminal command" }, icon("copy"), "Copy");
+  form.append(
+    h("div", { class: "ctl-preview" }, h("span", { class: "ctl-prompt", text: "$" }), preview, copyBtn),
+    err,
+    h("div", { class: "ctl-actions" }, runBtn, h("span", { class: "ctl-hint", text: MOD + "+Enter" })),
+  );
+
+  const build = () => buildArgv(spec, fields);
+  const refresh = () => {
+    try {
+      const { args } = build();
+      preview.textContent = "fleet " + [...spec.path, ...maskArgs(spec, args)].map(shellQuote).join(" ");
+      err.textContent = "";
+    } catch (e) {
+      preview.textContent = "fleet " + key + " …";
+      err.textContent = "";
+    }
+  };
+  form.addEventListener("input", refresh);
+  form.addEventListener("change", refresh);
+  form.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && modKey(e)) { e.preventDefault(); form.requestSubmit(); }
+  });
+  copyBtn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(preview.textContent); toast("Command copied", "success"); }
+    catch { toast("Could not copy to the clipboard", "error"); }
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    let req;
+    try { req = build(); } catch (ex) { err.textContent = ex.message; return; }
+    err.textContent = "";
+    if (spec.destructive) {
+      const ok = await confirmDialog({
+        title: "Run fleet " + key + "?",
+        message: "This command changes your fleet. Check it before running:",
+        extra: [h("pre", { class: "ctl-confirm-cmd", text: preview.textContent })],
+        okLabel: "Run", danger: true,
+      });
+      if (!ok) return;
+    }
+    runBtn.disabled = true;
+    try { await startRun(spec.path, req.args, req.stdin); }
+    finally { runBtn.disabled = false; }
+  });
+  kids.push(form);
+  page.replaceChildren(...kids);
+  refresh();
+  return form;
+}
+
+// buildArgv turns the form into { args, stdin }; it throws a readable error
+// for a missing or misplaced value.
+function buildArgv(spec, fields) {
+  const positional = [];
+  let gap = "";
+  for (const { spec: a, input } of fields.args) {
+    const raw = input.value;
+    if (raw.trim() === "") {
+      if (a.required) throw new Error(a.name + " is required");
+      gap = gap || a.name;
+      continue;
+    }
+    if (gap) throw new Error("fill in " + gap + " before " + a.name + " (or leave both empty)");
+    if (a.variadic) positional.push(...shellSplit(raw));
+    else positional.push(raw.trim() === raw ? raw : raw.trim());
+  }
+  const flags = [];
+  for (const { spec: f, input } of fields.flags) {
+    if (f.type === "bool") {
+      const def = f.default === "true";
+      if (input.checked !== def) flags.push(input.checked ? "--" + f.name : "--" + f.name + "=false");
+      continue;
+    }
+    const v = input.value;
+    if (v.trim() === "") {
+      if (f.required) throw new Error("--" + f.name + " is required");
+      continue;
+    }
+    if (f.default && v === f.default) continue;
+    if (f.type === "stringArray") for (const part of v.split(",")) { if (part.trim()) flags.push("--" + f.name + "=" + part.trim()); }
+    else flags.push("--" + f.name + "=" + (f.sensitive ? v : v.trim()));
+  }
+  const extra = fields.extra && fields.extra.value.trim() ? shellSplit(fields.extra.value) : [];
+  // A positional value that starts with "-" would be read as a flag, so then
+  // all flags go first and "--" marks the rest as plain arguments.
+  const needsDash = positional.some((p) => p.startsWith("-")) && !extra.includes("--");
+  const args = needsDash ? [...flags, ...extra, "--", ...positional] : [...positional, ...flags, ...extra];
+  return { args, stdin: fields.stdin ? fields.stdin.value : "" };
+}
+
+function maskArgs(spec, args) {
+  const sens = new Set(spec.flags.filter((f) => f.sensitive).map((f) => f.name));
+  return args.map((a) => {
+    const m = /^--([^=]+)=/.exec(a);
+    return m && sens.has(m[1]) ? "--" + m[1] + "=••••" : a;
+  });
+}
+
+// ---- runs
+
+async function startRun(path, args, stdin = "", { select = true, quiet = false } = {}) {
+  let res;
+  try {
+    const r = await fetch(api("/api/runs"), {
+      method: "POST",
+      headers: { "X-Fleet-Token": TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ path, args, stdin }),
+    });
+    if (!r.ok) throw await errorFrom(r);
+    res = await r.json();
+  } catch (err) {
+    toast("fleet " + ctlKey(path) + ": " + err.message, "error");
+    return null;
+  }
+  const run = res.run;
+  // Keep what is needed for "Run again", except runs fed from stdin: their
+  // input (often a secret) is never kept in the page.
+  if (!stdin) ctl.requests.set(run.id, { path, args });
+  if (quiet) ctl.quiet.add(run.id);
+  upsertRun(run);
+  ctl.out.set(run.id, { chunks: [], lastSeq: 0 });
+  if (select) selectRun(run.id);
+  else streamRun(run.id);
+  schedulePoll();
+  return run;
+}
+
+// runQuietly starts a command without switching views and resolves with its
+// final summary and output (used by overview buttons such as Ack).
+async function runQuietly(path, args) {
+  const run = await startRun(path, args, "", { select: false, quiet: true });
+  if (!run) return null;
+  const final = await new Promise((resolve) => {
+    const list = ctl.waiters.get(run.id) || [];
+    list.push(resolve);
+    ctl.waiters.set(run.id, list);
+    const known = ctl.runs.find((r) => r.id === run.id);
+    if (known && known.state !== "running") settleWaiters(known);
+  });
+  const o = ctl.out.get(run.id);
+  return { run: final, text: o ? o.chunks.map((c) => c.text).join("") : "" };
+}
+
+function settleWaiters(run) {
+  const list = ctl.waiters.get(run.id);
+  if (!list) return;
+  ctl.waiters.delete(run.id);
+  for (const fn of list) fn(run);
+}
+
+function upsertRun(run) {
+  const i = ctl.runs.findIndex((r) => r.id === run.id);
+  if (i >= 0) ctl.runs[i] = run;
+  else ctl.runs.unshift(run);
+  if (run.state !== "running") settleWaiters(run);
+  renderRunList();
+  if (run.id === ctl.active) renderRunHeader();
+}
+
+function streamRun(id) {
+  if (ctl.streams.has(id)) return;
+  const o = ctl.out.get(id) || { chunks: [], lastSeq: 0 };
+  ctl.out.set(id, o);
+  const es = new EventSource(api("/api/runs/stream", { id, after: String(o.lastSeq) }).toString());
+  ctl.streams.set(id, es);
+  let finished = false;
+  es.addEventListener("chunk", (ev) => {
+    let c;
+    try { c = JSON.parse(ev.data); } catch { return; }
+    if (c.seq <= o.lastSeq) return;
+    o.lastSeq = c.seq;
+    o.chunks.push(c);
+    if (id === ctl.active) appendTerm(c);
+  });
+  es.addEventListener("status", (ev) => {
+    let run;
+    try { run = JSON.parse(ev.data); } catch { return; }
+    upsertRun(run);
+    if (run.state !== "running") {
+      finished = true;
+      es.close();
+      ctl.streams.delete(id);
+      if (id === ctl.active) renderTermFormatted();
+      onRunFinished(run);
+    }
+  });
+  es.onerror = () => {
+    es.close();
+    ctl.streams.delete(id);
+    if (finished) return;
+    // Reconnect from the last chunk we have, unless the run is gone.
+    setTimeout(() => {
+      const run = ctl.runs.find((r) => r.id === id);
+      if (run && run.state === "running") streamRun(id);
+      else if (run) fetchRun(id);
+    }, 1000);
+  };
+}
+
+function onRunFinished(run) {
+  // Commands that change servers, tags or alerts refresh what the other views show.
+  const top = run.path[0];
+  if (["server", "tag", "alerts", "agent", "sync-agent", "update"].includes(top)) {
+    if (top === "server") loadServers().catch(() => {});
+    loadOverview();
+  }
+  if (state.view !== "control" && !ctl.quiet.has(run.id)) {
+    const label = "fleet " + ctlKey(run.path);
+    if (run.state === "ok") toast(label + " finished", "success");
+    else if (run.state === "failed") toast(label + " failed (exit " + run.exit_code + ")", "error", { action: { label: "Show", run: () => { showView("control"); selectRun(run.id); } } });
+  }
+}
+
+async function fetchRun(id) {
+  try {
+    const d = await getJSON("/api/runs", { id });
+    const o = { chunks: d.output || [], lastSeq: d.output && d.output.length ? d.output[d.output.length - 1].seq : 0 };
+    ctl.out.set(id, o);
+    upsertRun(d.run);
+    if (id === ctl.active) renderTerm();
+    if (d.run.state === "running") streamRun(id);
+  } catch (err) {
+    if (err.status === 404) {
+      ctl.runs = ctl.runs.filter((r) => r.id !== id);
+      renderRunList();
+    }
+  }
+}
+
+async function loadRuns() {
+  try {
+    const d = await getJSON("/api/runs");
+    // Merge rather than replace: this list may have been fetched before a run
+    // this tab just started (keep it), or before a run finished that this
+    // tab already saw finish (keep the newer, finished state).
+    const local = new Map(ctl.runs.map((r) => [r.id, r]));
+    const fresh = (d.runs || []).map((r) => {
+      const known = local.get(r.id);
+      if (known && known.state !== "running" && r.state === "running") return known;
+      if (known && known.state === "running" && r.state !== "running" && !ctl.streams.has(r.id)) settleWaiters(r);
+      return r;
+    });
+    const ids = new Set(fresh.map((r) => r.id));
+    const pending = ctl.runs.filter((r) => !ids.has(r.id) && (ctl.streams.has(r.id) || ctl.waiters.has(r.id)));
+    for (const r of pending) ids.add(r.id);
+    ctl.runs = [...pending, ...fresh];
+    for (const id of [...ctl.out.keys()]) if (!ids.has(id)) ctl.out.delete(id);
+    renderRunList();
+    if (ctl.active) renderRunHeader();
+  } catch { /* the next poll retries */ }
+}
+
+function schedulePoll() {
+  clearTimeout(ctl.poll);
+  const busy = ctl.runs.some((r) => r.state === "running");
+  if (!busy) return;
+  ctl.poll = setTimeout(async () => {
+    if (!document.hidden) await loadRuns();
+    schedulePoll();
+  }, 2000);
+}
+
+function selectRun(id) {
+  ctl.active = id;
+  renderRunList();
+  renderRunHeader();
+  const run = ctl.runs.find((r) => r.id === id);
+  if (!ctl.out.has(id)) { renderTerm(); fetchRun(id); return; }
+  renderTerm();
+  if (run && run.state === "running") streamRun(id);
+}
+
+function runDuration(run) {
+  const start = Date.parse(run.started);
+  const end = run.ended ? Date.parse(run.ended) : Date.now();
+  if (!start) return "";
+  const ms = Math.max(0, end - start);
+  if (ms < 1000) return Math.max(1, Math.round(ms)) + " ms";
+  return ms < 10000 ? (ms / 1000).toFixed(1) + " s" : fmtDuration(Math.round(ms / 1000));
+}
+
+function runStateLabel(run) {
+  switch (run.state) {
+    case "running": return "Running";
+    case "ok": return "Succeeded";
+    case "cancelled": return "Cancelled";
+    default: return run.exit_code >= 0 ? "Failed · exit " + run.exit_code : "Failed";
+  }
+}
+
+function renderRunList() {
+  const list = $("#ctl-runs");
+  if (!list) return;
+  $("#ctl-runs-clear").disabled = !ctl.runs.some((r) => r.state !== "running");
+  const running = ctl.runs.filter((r) => r.state === "running").length;
+  const badge = $("#ctl-badge");
+  if (badge) { badge.hidden = !running; badge.textContent = String(running); }
+  if (!ctl.runs.length) {
+    list.replaceChildren(h("li", { class: "ctl-runs-empty", text: "Commands you run appear here." }));
+    return;
+  }
+  list.replaceChildren(...ctl.runs.map((r) => h("li", null, h("button", {
+    type: "button", class: "ctl-run" + (r.id === ctl.active ? " on" : ""), "aria-current": r.id === ctl.active ? "true" : null,
+    onclick: () => { selectRun(r.id); $("#ctl-output").scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" }); },
+  },
+    h("span", { class: "run-dot " + r.state, title: runStateLabel(r) }),
+    h("span", { class: "ctl-run-text" },
+      h("span", { class: "ctl-run-cmd mono", text: r.command.slice(1).join(" "), title: r.command.map(shellQuote).join(" ") }),
+      h("span", { class: "ctl-run-meta", text: runStateLabel(r) + " · " + fmtRelative(r.started) + (r.state !== "running" ? " · " + runDuration(r) : "") }))))));
+}
+
+function renderRunHeader() {
+  const run = ctl.runs.find((r) => r.id === ctl.active);
+  const box = $("#ctl-output");
+  if (!run) { box.hidden = true; return; }
+  box.hidden = false;
+  $("#ctl-out-cmd").textContent = run.command.map(shellQuote).join(" ");
+  const pill = $("#ctl-out-state");
+  pill.className = "run-pill " + run.state;
+  pill.textContent = runStateLabel(run) + (run.state === "running" ? "" : " · " + runDuration(run));
+  $("#ctl-out-cancel").hidden = run.state !== "running";
+  $("#ctl-out-rerun").hidden = run.state === "running" || !ctl.requests.has(run.id);
+  $("#ctl-out-trunc").hidden = !run.truncated;
+}
+
+function termTarget() { return $("#ctl-term"); }
+
+function appendTerm(c) {
+  const term = termTarget();
+  const placeholder = term.querySelector(":scope > .muted");
+  if (placeholder) placeholder.remove();
+  const stick = term.scrollHeight - term.scrollTop - term.clientHeight < 40;
+  const text = stripAnsi(c.text);
+  if (c.stream === "err") term.append(h("span", { class: "err", text }));
+  else term.append(document.createTextNode(text));
+  if (stick) term.scrollTop = term.scrollHeight;
+}
+
+function renderTerm() {
+  const term = termTarget();
+  const o = ctl.out.get(ctl.active);
+  term.replaceChildren();
+  $("#ctl-out-format").hidden = true;
+  if (!o || !o.chunks.length) {
+    const run = ctl.runs.find((r) => r.id === ctl.active);
+    term.append(h("span", { class: "muted", text: run && run.state === "running" ? "Waiting for output…" : "No output." }));
+    if (run && run.state !== "running") renderTermFormatted();
+    return;
+  }
+  // Merge consecutive same-stream chunks into one node each.
+  let buf = "", stream = "";
+  const flush = () => { if (!buf) return; if (stream === "err") term.append(h("span", { class: "err", text: buf })); else term.append(document.createTextNode(buf)); buf = ""; };
+  for (const c of o.chunks) {
+    if (c.stream !== stream) { flush(); stream = c.stream; }
+    buf += stripAnsi(c.text);
+  }
+  flush();
+  term.scrollTop = term.scrollHeight;
+  renderTermFormatted();
+}
+
+// renderTermFormatted shows JSON stdout of a finished run as a table or a
+// pretty-printed tree, with a toggle back to the raw text.
+function renderTermFormatted() {
+  const run = ctl.runs.find((r) => r.id === ctl.active);
+  const fmtBtn = $("#ctl-out-format");
+  const view = $("#ctl-formatted");
+  view.hidden = true;
+  fmtBtn.hidden = true;
+  termTarget().hidden = false;
+  if (!run || run.state === "running") return;
+  const o = ctl.out.get(run.id);
+  if (!o) return;
+  const stdout = o.chunks.filter((c) => c.stream !== "err").map((c) => c.text).join("").trim();
+  if (!stdout || !/^[[{]/.test(stdout)) return;
+  let data;
+  try { data = JSON.parse(stdout); } catch { return; }
+  view.replaceChildren(jsonView(data));
+  fmtBtn.hidden = false;
+  fmtBtn.setAttribute("aria-pressed", String(ctl.formatted));
+  view.hidden = !ctl.formatted;
+  termTarget().hidden = ctl.formatted;
+  const errText = o.chunks.filter((c) => c.stream === "err").map((c) => c.text).join("").trim();
+  if (errText && ctl.formatted) view.prepend(h("pre", { class: "ctl-term ctl-term-err", text: stripAnsi(errText) }));
+}
+
+function scalarText(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function jsonView(data) {
+  const rows = Array.isArray(data) ? data : data && typeof data === "object" ? Object.values(data).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object") : null;
+  if (Array.isArray(rows) && rows.length && rows.every((r) => r && typeof r === "object" && !Array.isArray(r))) {
+    const cols = [];
+    for (const r of rows.slice(0, 200)) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
+    const shown = cols.slice(0, 12);
+    return h("div", { class: "ctl-json-table-wrap" },
+      h("table", { class: "ctl-json-table" },
+        h("thead", null, h("tr", null, shown.map((c) => h("th", { scope: "col", text: c })))),
+        h("tbody", null, rows.slice(0, 1000).map((r) => h("tr", null, shown.map((c) => {
+          const v = r[c];
+          const t = scalarText(v);
+          return h("td", { class: typeof v === "number" ? "num" : t.length > 48 ? "long" : "", title: t.length > 60 ? t : null, text: t.length > 160 ? t.slice(0, 160) + "…" : t });
+        }))))),
+      rows.length > 1000 || cols.length > shown.length ? h("p", { class: "ctl-help", text: "Showing " + Math.min(rows.length, 1000) + " of " + rows.length + " rows" + (cols.length > shown.length ? " and " + shown.length + " of " + cols.length + " columns" : "") + ". Switch to Raw for everything." }) : null);
+  }
+  return h("pre", { class: "ctl-term", text: JSON.stringify(data, null, 2) });
+}
+
+async function cancelActiveRun() {
+  const id = ctl.active;
+  try { await postJSON("/api/runs/cancel", { id }); toast("Cancelling…"); }
+  catch (err) { toast(err.message, "error"); }
+}
+
+async function clearRuns() {
+  try {
+    await postJSON("/api/runs/clear");
+    const active = ctl.runs.find((r) => r.id === ctl.active);
+    if (active && active.state !== "running") ctl.active = "";
+    await loadRuns();
+    renderRunHeader();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+function copyActiveOutput() {
+  const o = ctl.out.get(ctl.active);
+  const text = o ? stripAnsi(o.chunks.map((c) => c.text).join("")) : "";
+  navigator.clipboard.writeText(text).then(() => toast("Output copied", "success"), () => toast("Could not copy to the clipboard", "error"));
+}
+
+function rerunActive() {
+  const req = ctl.requests.get(ctl.active);
+  if (!req) return;
+  const spec = ctl.byKey.get(ctlKey(req.path));
+  if (spec && spec.destructive) {
+    confirmDialog({ title: "Run fleet " + ctlKey(req.path) + " again?", message: "This command changes your fleet.", okLabel: "Run again", danger: true })
+      .then((ok) => { if (ok) startRun(req.path, req.args); });
+    return;
+  }
+  startRun(req.path, req.args);
+}
+
+// ---- overview integration
+
+function serverMenuItems(name, reachable) {
+  const go = (key, args = [name], flags, run) => () => openCommand(key, { args, flags, run });
+  const has = (k) => !ctl.byKey.size || ctl.byKey.has(k);
+  return [
+    { title: name },
+    has("service list") && { label: "Services", icon: "activity", run: go("service list", [name], null, true) },
+    has("svc status") && { label: "Systemd unit status…", icon: "info", run: go("svc status") },
+    has("journal") && { label: "Journal…", icon: "file-text", run: go("journal") },
+    has("exec") && { label: "Run a command…", icon: "command", run: go("exec") },
+    "sep",
+    has("server metrics") && { label: "Live metrics", icon: "activity", run: go("server metrics", [name], null, true), disabled: !reachable },
+    has("doctor") && { label: "Health checklist", icon: "check", run: go("doctor", [name], null, true) },
+    has("firewall status") && { label: "Firewall status", icon: "lock", run: go("firewall status", [name], null, true) },
+    has("port list") && { label: "Open ports", icon: "hash", run: go("port list", [name], null, true) },
+    "sep",
+    has("server show") && { label: "Show definition", icon: "eye", run: go("server show", [name], null, true) },
+    has("tag") && { label: "Edit tags…", icon: "tag", run: go("tag") },
+    has("server reconnect") && { label: "Reconnect…", icon: "refresh", run: go("server reconnect") },
+    "sep",
+    has("server remove") && { label: "Remove server…", icon: "trash", danger: true, run: go("server remove") },
+  ];
+}
+
+async function alertAction(al, kind) {
+  const path = kind === "ack" ? ["alerts", "ack"] : ["alerts", "suppress"];
+  const args = kind === "ack" ? [al.id] : [al.id, "--for=1h"];
+  const res = await runQuietly(path, args);
+  if (!res) return;
+  if (res.run.state === "ok") toast(kind === "ack" ? "Alert acknowledged" : "Alert snoozed for an hour", "success");
+  else toast((res.text.trim().split("\n").pop() || "fleet " + path.join(" ") + " failed"), "error");
+  loadOverview();
+}
+
+// ---- setup
+
+function showControlPage() {
+  loadCommands().then(() => {
+    if (!ctl.current) renderControlHome();
+    else renderControlTree();
+  });
+  loadRuns().then(schedulePoll);
+}
+
+function setupControl() {
+  const filter = $("#ctl-filter");
+  filter.addEventListener("input", debounce(() => { ctl.filter = filter.value; renderControlTree(); }, 60));
+  filter.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && filter.value) { e.stopPropagation(); filter.value = ""; ctl.filter = ""; renderControlTree(); }
+    if (e.key === "Enter") {
+      const first = $("#ctl-tree .ctl-item:not(.off)");
+      if (first) { e.preventDefault(); first.click(); }
+    }
+  });
+  $("#ctl-home").addEventListener("click", renderControlHome);
+  $("#ctl-runs-clear").addEventListener("click", clearRuns);
+  $("#ctl-out-cancel").addEventListener("click", cancelActiveRun);
+  $("#ctl-out-copy").addEventListener("click", copyActiveOutput);
+  $("#ctl-out-rerun").addEventListener("click", rerunActive);
+  $("#ctl-out-close").addEventListener("click", () => { ctl.active = ""; renderRunList(); renderRunHeader(); });
+  $("#ctl-out-format").addEventListener("click", () => { ctl.formatted = !ctl.formatted; renderTermFormatted(); });
+  const add = $("#ov-add-server");
+  if (add) add.addEventListener("click", () => openCommand("server add"));
+  renderRunList();
+  // Learn the catalog early so menus and the palette can use it.
+  loadCommands();
+  loadRuns().then(schedulePoll);
+}
+
+function viewFromHash() {
+  const v = location.hash.replace(/^#/, "");
+  return VIEWS.includes(v) ? v : "files";
 }
 
 init();

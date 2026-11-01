@@ -94,11 +94,15 @@
         <svg class="i" aria-hidden="true"><use href="#i-server"/></svg><span>Fleet</span>
         <span class="tab-badge" id="alert-badge" hidden></span>
       </button>
+      <button class="view-tab" role="tab" id="tab-control" data-view="control" aria-controls="view-control" aria-selected="false" tabindex="-1" type="button">
+        <svg class="i" aria-hidden="true"><use href="#i-command"/></svg><span>Control</span>
+        <span class="tab-badge run" id="ctl-badge" title="Commands running" hidden></span>
+      </button>
     </nav>
 
     <button class="search-trigger" id="open-palette" type="button" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">
       <svg class="i" aria-hidden="true"><use href="#i-search"/></svg>
-      <span class="st-label">Search files, servers &amp; commands</span>
+      <span class="st-label">Search files, servers &amp; fleet commands</span>
       <kbd class="st-kbd" id="palette-kbd">Ctrl K</kbd>
     </button>
 
@@ -128,7 +132,7 @@
         <div class="ov-head">
           <div class="ov-title">
             <h1>Fleet overview</h1>
-            <p class="ov-sub"><span id="ov-updated">Loading…</span> · read-only</p>
+            <p class="ov-sub"><span id="ov-updated">Loading…</span> · Manage a server from its row</p>
           </div>
           <div class="ov-controls">
             <label class="field search-field">
@@ -146,6 +150,9 @@
             </button>
             <button type="button" class="icon-btn" id="ov-refresh" aria-label="Refresh now" title="Refresh now">
               <svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg>
+            </button>
+            <button type="button" class="btn primary" id="ov-add-server">
+              <svg class="i" aria-hidden="true"><use href="#i-plus"/></svg><span>Add server</span>
             </button>
           </div>
         </div>
@@ -177,6 +184,57 @@
           <h2 id="ov-alerts-title">Open alerts</h2>
           <ul class="alert-list" id="ov-alerts"></ul>
         </section>
+      </div>
+    </section>
+
+    <section id="view-control" class="view view-control" role="tabpanel" aria-labelledby="tab-control" hidden>
+      <div class="ctl">
+        <aside class="ctl-nav" aria-label="Commands">
+          <label class="field search-field">
+            <svg class="i" aria-hidden="true"><use href="#i-search"/></svg>
+            <input id="ctl-filter" type="search" placeholder="Find a command…" aria-label="Find a fleet command" spellcheck="false" autocomplete="off" />
+          </label>
+          <button type="button" class="ctl-home" id="ctl-home">
+            <svg class="i" aria-hidden="true"><use href="#i-home"/></svg><span>Quick actions</span>
+          </button>
+          <nav class="ctl-tree" id="ctl-tree" aria-label="All fleet commands"></nav>
+        </aside>
+        <div class="ctl-main">
+          <div class="ctl-page" id="ctl-page"></div>
+          <section class="ctl-output" id="ctl-output" aria-label="Command output" hidden>
+            <header class="ctl-out-head">
+              <span class="run-pill" id="ctl-out-state" role="status" aria-live="polite"></span>
+              <code class="ctl-out-cmd" id="ctl-out-cmd"></code>
+              <div class="ctl-out-actions">
+                <button type="button" class="btn sm" id="ctl-out-format" aria-pressed="true" title="Show JSON output as a table" hidden>
+                  <svg class="i" aria-hidden="true"><use href="#i-grid"/></svg><span>Formatted</span>
+                </button>
+                <button type="button" class="btn sm" id="ctl-out-rerun" title="Run the same command again" hidden>
+                  <svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg><span>Run again</span>
+                </button>
+                <button type="button" class="btn sm danger" id="ctl-out-cancel" title="Interrupt the command" hidden>
+                  <svg class="i" aria-hidden="true"><use href="#i-x"/></svg><span>Cancel</span>
+                </button>
+                <button type="button" class="icon-btn" id="ctl-out-copy" aria-label="Copy output" title="Copy output">
+                  <svg class="i" aria-hidden="true"><use href="#i-copy"/></svg>
+                </button>
+                <button type="button" class="icon-btn" id="ctl-out-close" aria-label="Close output" title="Close">
+                  <svg class="i" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+                </button>
+              </div>
+            </header>
+            <p class="ctl-trunc" id="ctl-out-trunc" hidden>Earlier output was dropped to keep memory bounded; the newest 4 MiB are shown.</p>
+            <pre class="ctl-term" id="ctl-term" tabindex="0" aria-label="Output"></pre>
+            <div class="ctl-formatted" id="ctl-formatted" hidden></div>
+          </section>
+        </div>
+        <aside class="ctl-history" aria-labelledby="ctl-runs-title">
+          <div class="ctl-history-head">
+            <h2 id="ctl-runs-title">Recent runs</h2>
+            <button type="button" class="btn sm ghost" id="ctl-runs-clear" title="Remove finished runs from the list">Clear</button>
+          </div>
+          <ul class="ctl-runs" id="ctl-runs"></ul>
+        </aside>
       </div>
     </section>
   </main>
