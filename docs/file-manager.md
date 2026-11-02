@@ -362,14 +362,18 @@ the transfers dock. The same secure transfer engine runs underneath.
   `server add` form, and each open alert has *Ack* and *Snooze 1h*. When the UI is
   started with `--token`, the overview is authorized like `fleet server list`,
   `fleet alerts` and `fleet tag`.
-- **Control** (the *Control* tab): every fleet command, from the browser. Commands are
-  grouped by area and searchable (also from the `Ctrl/Cmd+K` palette). Each one opens a
-  form built from its own arguments and flags, with server names suggested, a live preview
-  of the equivalent terminal command (copyable), and an *Extra arguments* box for
-  anything else. Quick actions cover the common jobs. Runs stream stdout and stderr live,
-  can be cancelled (interrupt, then kill after 5 s) and re-run, stay in a *Recent runs*
-  history (newest 60, 4 MiB of output each), and JSON output (`--json`, `inventory`, …)
-  can be shown as a table. Up to 8 commands run at once.
+- **Control** (the *Control* tab): every fleet command, from the browser, laid out like
+  System Settings. A sidebar lists *Overview*, *Activity* and the categories (Servers,
+  Services & Logs, Run & Automate, Files, Monitoring, Network & Security, Updates,
+  Controller), and search finds any command by its plain-language name or its CLI name
+  (also from the `Ctrl/Cmd+K` palette). Each command opens a form built from its own
+  arguments and flags: servers and fixed choices are pop-up menus, on/off flags are
+  switches, the rest of the options sit behind an *Options* disclosure, and the
+  equivalent terminal command is shown (copyable) above *Run*. *Overview* has quick
+  actions and recent activity. Output streams live into a result card; JSON output can
+  be shown as a table. Runs can be stopped (interrupt, then kill after 5 s) and run
+  again, and *Activity* keeps the newest 60 with 4 MiB of output each. Up to 8 commands
+  run at once.
 
 ### How Control runs commands
 

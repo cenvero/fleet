@@ -3479,7 +3479,7 @@ function paletteCommands() {
   for (const c of ctl.commands) {
     if (c.unavailable) continue;
     const key = ctlKey(c.path);
-    cmds.push({ label: "fleet " + key + (c.short ? " — " + c.short : ""), icon: "command", run: () => openCommand(key) });
+    cmds.push({ label: cmdLabel(c.path), hint: "fleet " + key, icon: "command", run: () => openCommand(key) });
   }
   }
   return cmds;
@@ -3528,8 +3528,11 @@ function openPalette() {
     }).filter(Boolean).slice(0, q ? 6 : 4));
     push("Commands", paletteCommands().map((c) => {
       const m = score(c.label);
-      return m ? Object.assign({}, c, { hits: m.hits, score: m.score }) : null;
-    }).filter(Boolean).sort((a, b) => (q ? b.score - a.score : 0)).slice(0, q ? 10 : 20));
+      if (m) return Object.assign({}, c, { hits: m.hits, score: m.score });
+      // Fleet commands also match their CLI name ("server add").
+      const alt = c.hint && c.hint.startsWith("fleet ") ? score(c.hint) : null;
+      return alt ? Object.assign({}, c, { hits: [], score: alt.score - 1 }) : null;
+    }).filter(Boolean).sort((a, b) => (q ? b.score - a.score : 0)).slice(0, q ? 12 : 20));
 
     list.replaceChildren();
     options = [];
@@ -3917,16 +3920,16 @@ function renderOverview() {
     if (s.alerts.info) alertsCell.append(h("span", { class: "badge info", text: s.alerts.info + " info" }));
     const tags = Object.entries(s.tags || {}).sort(([x], [y]) => x.localeCompare(y));
     const browse = h("button", {
-      class: "btn sm", type: "button", disabled: !s.reachable,
+      class: "btn sm ghost", type: "button", disabled: !s.reachable,
       title: s.reachable ? "Browse " + s.name + " in the active pane" : s.name + " is not reachable",
       "aria-label": "Browse files on " + s.name,
       onclick: (e) => { e.stopPropagation(); openServerInFiles(s.name); },
     }, icon("folder"), "Browse");
     const manage = h("button", {
-      class: "btn sm", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
+      class: "icon-btn more-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
       title: "Services, logs, commands and settings for " + s.name, "aria-label": "Manage " + s.name,
       onclick: (e) => { e.stopPropagation(); openMenu(serverMenuItems(s.name, s.reachable), { anchor: manage, label: "Manage " + s.name }); },
-    }, icon("more"), "Manage");
+    }, icon("more"));
     const tr = h("tr", { class: s.reachable ? "" : "unreachable", dataset: { server: s.name } },
       h("td", { class: "c-status", "data-label": "Status" }, h("span", { class: "status-cell" }, h("span", { class: "dot " + (s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other") }), statusLabel(s.status))),
       h("td", { class: "c-name" }, h("div", { class: "srv-name" },
@@ -4712,45 +4715,101 @@ function init() {
 // of this UI (see internal/webui/console.go), so nothing here can do more than
 // the CLI would. This code only builds argument vectors from forms, streams
 // output and keeps a run history.
+//
+// Design: like System Settings. A sidebar of categories, plain-language names
+// for every command, forms that show only what is needed (options behind a
+// disclosure), and one obvious action per page.
 
 const CTL_GROUPS = [
-  { id: "servers", label: "Servers", icon: "server", tops: ["server", "tag", "inventory", "doctor", "drift", "template"] },
-  { id: "services", label: "Services & logs", icon: "activity", tops: ["service", "svc", "journal", "logs"] },
-  { id: "run", label: "Run & automate", icon: "play", tops: ["exec", "job", "jobs", "run", "guard", "confirm", "revert", "cron", "tunnel", "automation", "approvals", "approve"] },
-  { id: "files", label: "Files", icon: "folder", tops: ["file", "cp", "sync"] },
-  { id: "monitor", label: "Monitoring & alerts", icon: "alert", tops: ["health", "top", "alerts", "notify"] },
-  { id: "security", label: "Network & security", icon: "lock", tops: ["firewall", "fw", "port", "key", "token", "secret", "cmd-policy", "policy"] },
-  { id: "updates", label: "Updates & agents", icon: "download", tops: ["update", "agent", "sync-agent"] },
-  { id: "controller", label: "Controller", icon: "laptop", tops: ["status", "start", "stop", "config", "backup", "database", "adjust-init", "version", "report", "context", "ai", "skill", "autocomplete", "shell-init"] },
+  { id: "servers", label: "Servers", icon: "server", tint: "blue", desc: "Add, inspect and organise the machines you manage.", tops: ["server", "tag", "inventory", "doctor", "drift", "template", "ssh"] },
+  { id: "services", label: "Services & Logs", icon: "file-text", tint: "green", desc: "Start, stop and inspect services. Read journals and logs.", tops: ["service", "svc", "journal", "logs"] },
+  { id: "run", label: "Run & Automate", icon: "command", tint: "indigo", desc: "Run commands, background jobs, playbooks and schedules.", tops: ["exec", "job", "jobs", "run", "guard", "confirm", "revert", "cron", "tunnel", "automation", "approvals", "approve"] },
+  { id: "files", label: "Files", icon: "folder", tint: "cyan", desc: "Copy, sync and manage files. The Files tab does this visually.", tops: ["file", "cp", "sync", "files", "filemanager"] },
+  { id: "monitor", label: "Monitoring", icon: "activity", tint: "orange", desc: "Health checks, live usage, alerts and notifications.", tops: ["health", "top", "alerts", "notify", "dashboard"] },
+  { id: "security", label: "Network & Security", icon: "lock", tint: "red", desc: "Firewalls, ports, keys, access tokens, secrets and policy.", tops: ["firewall", "fw", "port", "key", "token", "secret", "cmd-policy", "policy"] },
+  { id: "updates", label: "Updates", icon: "download", tint: "teal", desc: "Update the controller and keep every agent in step.", tops: ["update", "agent", "sync-agent"] },
+  { id: "controller", label: "Controller", icon: "laptop", tint: "gray", desc: "The daemon, configuration, backups and integrations.", tops: ["status", "start", "stop", "config", "backup", "database", "adjust-init", "version", "report", "context", "ai", "skill", "autocomplete", "shell-init", "daemon", "init", "recover", "self-uninstall"] },
 ];
+const CTL_OTHER = { id: "other", label: "Other", icon: "more", tint: "gray", desc: "Everything else.", tops: [] };
+
+// Plain-language names. The CLI path is still shown on each page.
+const CTL_LABELS = {
+  "adjust-init": "Apply config migrations", "agent update": "Roll out agent updates", "agent version": "Agent versions",
+  "ai": "Machine-readable help", "alerts": "Alerts", "alerts ack": "Acknowledge an alert", "alerts suppress": "Snooze an alert",
+  "alerts unsuppress": "Unsnooze an alert", "approvals": "Approvals overview", "approvals list": "Pending approvals",
+  "approvals reject": "Reject an approval", "approve": "Approve and run", "autocomplete": "Shell completion",
+  "autocomplete install": "Install shell completion", "automation get": "Show a script", "automation list": "Automation scripts",
+  "automation rm": "Delete a script", "automation set": "Save a script", "backup": "Back up the controller",
+  "cmd-policy set": "Set command policy", "cmd-policy show": "Command policy", "config agent-port": "Default agent port",
+  "config backup": "Back up configuration", "config edit": "Edit configuration", "config export": "Export state",
+  "config import": "Import state", "config restore": "Restore from a backup", "config set": "Change a setting",
+  "config show": "Configuration", "config validate": "Validate configuration", "confirm": "Confirm a guarded change",
+  "context": "Agent reference", "cp": "Copy between servers", "cron add": "Schedule a job", "cron list": "Scheduled jobs",
+  "cron rm": "Remove a scheduled job", "daemon": "Run the daemon in the foreground", "dashboard": "Terminal dashboard",
+  "database shift": "Move to another database", "database show": "Database", "doctor": "Health checklist",
+  "drift": "Check for config drift", "drift capture": "Capture a drift baseline", "exec": "Run a command",
+  "file cat": "Print a file", "file compress": "Compress files", "file copy": "Copy between servers",
+  "file defaults set": "Set transfer defaults", "file defaults show": "Transfer defaults", "file diff": "Compare a file",
+  "file download": "Download", "file edit": "Edit a file", "file extract": "Extract an archive", "file list": "List a folder",
+  "file mkdir": "New folder", "file move": "Move between servers", "file mv": "Rename or move", "file rm": "Delete a file",
+  "file stat": "File info", "file tail": "Tail a file", "file ui": "Web UI", "file upload": "Upload", "file view": "View a file",
+  "filemanager": "Terminal file manager", "filemanager ui": "Web UI", "files": "Terminal file manager",
+  "firewall add": "Add a firewall rule", "firewall disable": "Turn the firewall off", "firewall enable": "Turn the firewall on",
+  "firewall status": "Firewall status", "fw allow": "Allow a port", "fw enable": "Turn the firewall on safely",
+  "fw status": "Firewall overview", "guard": "Run with auto-revert", "health": "Fleet health", "init": "Set up the controller",
+  "inventory": "Inventory", "job logs": "Job output", "job run": "Start a background job", "job status": "Job status",
+  "job wait": "Wait for a job", "jobs": "Background jobs", "journal": "Journal", "key audit": "Key history",
+  "key export-pub": "Export public keys", "key fingerprint": "Key fingerprints", "key rotate": "Rotate controller keys",
+  "logs": "Audit log", "notify add": "Add a notification target", "notify list": "Notification targets",
+  "notify rm": "Remove a notification target", "notify test": "Send a test notification", "policy set": "Set output policy",
+  "policy show": "Output policy", "port close": "Close a port", "port list": "Open ports", "port open": "Open a port",
+  "recover": "Recover after a reinstall", "report": "Report a problem", "revert": "Revert a guarded change",
+  "run": "Run a playbook", "secret list": "Secrets", "secret rm": "Delete a secret", "secret rotate": "Rotate a secret",
+  "secret set": "Store a secret", "self-uninstall": "Uninstall Fleet", "server add": "Add a server",
+  "server bootstrap": "Install an agent", "server enroll-token": "New enrollment token", "server list": "All servers",
+  "server metrics": "Live metrics", "server mode": "Change connection mode", "server reconnect": "Reconnect",
+  "server remove": "Remove a server", "server show": "Server details", "service add": "Track a service",
+  "service list": "Services", "service logs": "Service logs", "service restart": "Restart a service",
+  "service start": "Start a service", "service stop": "Stop a service", "shell-init": "Shell integration",
+  "skill agents": "Write AGENTS.md", "skill claude": "Install for Claude Code", "skill codex": "Install for Codex",
+  "skill list": "AI integrations", "ssh": "Open a shell", "start": "Start the daemon", "status": "Controller status",
+  "stop": "Stop the daemon", "svc disable": "Disable a unit", "svc enable": "Enable a unit", "svc restart": "Restart a unit",
+  "svc start": "Start a unit", "svc status": "Unit status", "svc stop": "Stop a unit", "sync": "Live folder sync",
+  "sync-agent": "Sync agent versions", "sync-agent auto": "Automatic agent sync", "tag": "Tags",
+  "template apply": "Apply a template", "template list": "Templates", "token create": "Create an access token",
+  "token list": "Access tokens", "token revoke": "Revoke an access token", "top": "Live resource usage",
+  "tunnel": "Port forward", "update apply": "Install the update", "update channel": "Update channel",
+  "update check": "Check for updates", "update rollback": "Roll back an update", "version": "Version",
+};
+
+// Friendlier names for positional arguments.
+const CTL_ARG_LABELS = {
+  "srcServer:path": "From", "dstServer:path": "To", "serverA:path": "First", "serverB:path": "Second",
+  "localPort:targetHost:targetPort": "Forward", "alert-id": "Alert", "id": "ID", "deny|confirm": "List",
+  "on|off|status": "Setting", "slack|webhook": "Type", "index|url": "Target", "stable|beta": "Channel",
+  "key=value": "Tags", "risky command": "Command", "playbook.yaml": "Playbook", "port[/proto]": "Port",
+  "archivePath": "Archive", "local-dir": "Local folder", "remote-dir": "Server folder", "local": "On this computer",
+  "remote": "On the server", "item": "Items", "ip": "IP address",
+};
+const CTL_ARG_HINTS = {
+  "srcServer:path": "server:/path", "dstServer:path": "server:/path", "serverA:path": "server:/path", "serverB:path": "server:/path",
+  "localPort:targetHost:targetPort": "8080:localhost:80", "key=value": "env=prod role=web", "port[/proto]": "443 or 53/udp",
+};
+// Arguments with a fixed set of values become pop-up menus.
+const CTL_CHOICES = new Set(["deny|confirm", "on|off|status", "slack|webhook", "stable|beta"]);
+const CTL_FLAG_CHOICES = { mode: ["direct", "reverse"], from: ["local", "remote"], format: ["table", "json"], "on-fail": [] };
 
 // Quick actions on the Control home page. `now` runs straight away (read-only,
 // no required input); the rest open the prefilled form.
 const CTL_QUICK = [
-  { title: "Servers", items: [
-    { key: "server add", label: "Add a server", desc: "Register a server and install its agent", icon: "plus" },
-    { key: "server list", label: "List servers", desc: "Every server with its status", icon: "server", now: true },
-    { key: "health", label: "Fleet health", desc: "Offline, disk, swap, reboot and clock checks", icon: "activity", now: true },
-    { key: "inventory", label: "Inventory", desc: "Hostnames, IPs, OS, resources, services", icon: "list", args: [], flags: { json: true }, now: true },
-  ] },
-  { title: "Run things", items: [
-    { key: "exec", label: "Run a command", desc: "On one server, a tag group, or all of them", icon: "command" },
-    { key: "job run", label: "Start a background job", desc: "Detached, with captured output", icon: "clock" },
-    { key: "run", label: "Run a playbook", desc: "Idempotent check / apply / rollback", icon: "play" },
-    { key: "approvals list", label: "Pending approvals", desc: "Commands waiting for a second pair of eyes", icon: "check", now: true },
-  ] },
-  { title: "Services & logs", items: [
-    { key: "svc status", label: "Unit status", desc: "Active / enabled / failed plus recent logs", icon: "info" },
-    { key: "service restart", label: "Restart a service", desc: "A tracked service on one server", icon: "refresh" },
-    { key: "journal", label: "Journal", desc: "Page or follow a systemd unit's journal", icon: "file-text" },
-    { key: "logs", label: "Audit log", desc: "Everything the controller has done", icon: "history", now: true },
-  ] },
-  { title: "Maintenance", items: [
-    { key: "update check", label: "Check for updates", desc: "Fetch the release manifest", icon: "download", now: true },
-    { key: "agent version", label: "Agent versions", desc: "Flag servers on a different version", icon: "tag", flags: { all: true }, now: true },
-    { key: "backup", label: "Back up the controller", desc: "Config, keys and state as tar.gz", icon: "archive" },
-    { key: "status", label: "Controller status", desc: "Daemon, listeners, version", icon: "laptop", now: true },
-  ] },
+  { key: "server add", icon: "plus", tint: "blue", desc: "Register a machine and install its agent." },
+  { key: "exec", icon: "command", tint: "indigo", desc: "On one server, a tag group or all of them." },
+  { key: "health", icon: "activity", tint: "orange", desc: "Offline, disk, swap, reboot and clock checks.", now: true },
+  { key: "svc status", icon: "info", tint: "green", desc: "State and recent logs of a systemd unit." },
+  { key: "inventory", icon: "list", tint: "blue", desc: "Hostnames, IPs, OS, resources and services.", flags: { json: true }, now: true },
+  { key: "update check", icon: "download", tint: "teal", desc: "See whether a newer release is available.", now: true },
+  { key: "backup", icon: "archive", tint: "gray", desc: "Configuration, keys and state as a tar.gz." },
+  { key: "logs", icon: "history", tint: "gray", desc: "Everything the controller has done.", now: true },
 ];
 
 const ctl = {
@@ -4758,12 +4817,13 @@ const ctl = {
   byKey: new Map(),
   loaded: null,
   disabled: "",
+  page: { kind: "home", id: "" },
   current: "",
   filter: "",
   runs: [],
   active: "",
-  out: new Map(),      // run id -> { chunks: [], lastSeq, text }
-  requests: new Map(), // run id -> { path, args, stdin } (this tab's runs, for "Run again")
+  out: new Map(),      // run id -> { chunks: [], lastSeq }
+  requests: new Map(), // run id -> { path, args } (this tab's runs, for "Run again")
   streams: new Map(),  // run id -> EventSource
   waiters: new Map(),  // run id -> [resolve]
   quiet: new Set(),    // runs started by overview buttons (they toast themselves)
@@ -4774,6 +4834,26 @@ const ctl = {
 const ctlKey = (path) => path.join(" ");
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
 const stripAnsi = (s) => s.replace(ANSI_RE, "").replace(/\r(?!\n)/g, "\n");
+const capFirst = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+function cmdLabel(keyOrPath) {
+  const key = Array.isArray(keyOrPath) ? ctlKey(keyOrPath) : keyOrPath;
+  if (CTL_LABELS[key]) return CTL_LABELS[key];
+  const parts = key.split(" ");
+  return parts.length > 1 ? capFirst(parts[parts.length - 1]) + " " + parts.slice(0, -1).join(" ") : capFirst(key);
+}
+
+function humanFlag(name) {
+  const special = { "dsn": "DSN", "db-dsn": "Database DSN", "id": "ID", "url": "URL", "json": "JSON output", "yes": "Skip confirmation", "dry-run": "Dry run (change nothing)" };
+  if (special[name]) return special[name];
+  return capFirst(name.replace(/-/g, " ").replace(/\bip\b/g, "IP").replace(/\bssh\b/g, "SSH").replace(/\bdsn\b/g, "DSN"));
+}
+
+function humanArg(a, spec) {
+  if (CTL_ARG_LABELS[a.name]) return CTL_ARG_LABELS[a.name];
+  if (a.server && !a.name.includes(":")) return spec.path[0] === "server" && spec.path[1] === "add" ? "Name" : "Server";
+  return capFirst(a.name.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]/g, " ").toLowerCase());
+}
 
 // shellSplit splits "a 'b c' d\"e\"" into words, like a POSIX shell would
 // (quotes and backslashes, no expansion). The browser never runs a shell:
@@ -4807,7 +4887,15 @@ function shellQuote(a) {
 }
 
 function groupOf(spec) {
-  return CTL_GROUPS.find((g) => g.tops.includes(spec.path[0])) || { id: "other", label: "Other", icon: "more" };
+  return CTL_GROUPS.find((g) => g.tops.includes(spec.path[0])) || CTL_OTHER;
+}
+
+function groupById(id) {
+  return CTL_GROUPS.find((g) => g.id === id) || CTL_OTHER;
+}
+
+function tile(iconName, tint, cls = "") {
+  return h("span", { class: "tile tint-" + tint + (cls ? " " + cls : "") }, icon(iconName));
 }
 
 async function loadCommands() {
@@ -4822,205 +4910,288 @@ async function loadCommands() {
       ctl.disabled = err.message || String(err);
       ctl.loaded = null;
     }
-    renderControlTree();
+    renderSidebar();
   })();
   return ctl.loaded;
 }
 
-function renderControlTree() {
-  const tree = $("#ctl-tree");
-  if (!tree) return;
-  if (ctl.disabled) {
-    tree.replaceChildren(h("p", { class: "ctl-tree-empty", text: "Commands are unavailable: " + ctl.disabled }));
-    return;
+function commandsIn(groupId) {
+  const g = groupById(groupId);
+  const order = g.tops || [];
+  return ctl.commands
+    .filter((c) => groupOf(c).id === groupId)
+    .sort((a, b) => (!!a.unavailable - !!b.unavailable) || (order.indexOf(a.path[0]) - order.indexOf(b.path[0])) || cmdLabel(a.path).localeCompare(cmdLabel(b.path)));
+}
+
+// ---- sidebar
+
+function sideItem({ id, label, tileEl, count, on, onclick, badge }) {
+  return h("li", null, h("button", {
+    type: "button", class: "side-item" + (on ? " on" : ""), "aria-current": on ? "page" : null, onclick, dataset: { id },
+  }, tileEl, h("span", { class: "side-label", text: label }),
+  badge ? h("span", { class: "side-badge", text: String(badge) }) : count !== undefined ? h("span", { class: "side-count", text: String(count) }) : null));
+}
+
+function renderSidebar() {
+  const nav = $("#ctl-nav");
+  if (!nav) return;
+  const p = ctl.page;
+  const running = ctl.runs.filter((r) => r.state === "running").length;
+  const top = h("ul", { class: "side-list", role: "list" },
+    sideItem({ id: "home", label: "Overview", tileEl: tile("home", "blue"), on: p.kind === "home", onclick: () => showControl({ kind: "home" }) }),
+    sideItem({ id: "activity", label: "Activity", tileEl: tile("clock", "gray"), on: p.kind === "activity" || p.kind === "run", badge: running || 0, count: running ? undefined : ctl.runs.length || undefined, onclick: () => showControl({ kind: "activity" }) }));
+  const cats = [CTL_GROUPS, ctl.commands.some((c) => groupOf(c) === CTL_OTHER) ? [CTL_OTHER] : []].flat().map((g) => {
+    const curGroup = p.kind === "category" ? p.id : p.kind === "command" && ctl.byKey.has(p.id) ? groupOf(ctl.byKey.get(p.id)).id : "";
+    return sideItem({ id: g.id, label: g.label, tileEl: tile(g.icon, g.tint), count: commandsIn(g.id).filter((c) => !c.unavailable).length || undefined, on: curGroup === g.id, onclick: () => showControl({ kind: "category", id: g.id }) });
+  });
+  nav.replaceChildren(top, h("p", { class: "side-heading", text: "Categories" }), h("ul", { class: "side-list", role: "list" }, cats));
+  const badge = $("#ctl-badge");
+  if (badge) { badge.hidden = !running; badge.textContent = String(running); }
+}
+
+// ---- navigation
+
+function showControl(page) {
+  if (state.view !== "control") { ctl.page = page; showView("control"); return; }
+  const filter = $("#ctl-filter");
+  if (page.kind !== "search" && filter && filter.value) { filter.value = ""; ctl.filter = ""; }
+  ctl.page = page;
+  ctl.current = page.kind === "command" ? page.id : "";
+  if (page.kind !== "command" && page.kind !== "run") ctl.active = "";
+  $(".ctl").dataset.page = page.kind;
+  renderSidebar();
+  const content = $("#ctl-content");
+  content.scrollTop = 0;
+  switch (page.kind) {
+    case "category": renderCategory(page.id); break;
+    case "command": renderCommandPage(page.id, page.prefill || {}); break;
+    case "activity": renderActivity(); break;
+    case "run": renderRunPage(page.id); break;
+    case "search": renderSearch(); break;
+    default: renderHome();
   }
+}
+
+function backLink(label, page) {
+  return h("button", { type: "button", class: "back-link", onclick: () => showControl(page) }, icon("chevron-left"), label);
+}
+
+function pageHead(title, sub, extra = []) {
+  return h("header", { class: "page-head" },
+    h("div", { class: "page-titles" }, h("h1", { text: title }), sub ? h("p", { class: "page-sub", text: sub }) : null),
+    extra.length ? h("div", { class: "page-actions" }, extra) : null);
+}
+
+// ---- pages
+
+function renderHome() {
+  const recent = ctl.runs.slice(0, 5);
+  const quick = CTL_QUICK.filter((q) => ctl.byKey.has(q.key));
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    pageHead("Control", "Everything fleet can do, in one place. Each action runs with this window's access token, command policy and audit log."),
+    ctl.disabled ? callout("warn", "alert", h("p", { text: "Commands aren't available: " + ctl.disabled })) : null,
+    h("section", { class: "block" },
+      h("h2", { class: "block-title", text: "Quick actions" }),
+      h("div", { class: "quick-grid" }, quick.map((q) => h("div", { class: "quick" },
+        h("button", { type: "button", class: "quick-main", onclick: () => openCommand(q.key, { flags: q.flags }) },
+          tile(q.icon, q.tint, "lg"),
+          h("span", { class: "quick-text" }, h("b", { text: cmdLabel(q.key) }), h("span", { text: q.desc }))),
+        q.now ? h("button", { type: "button", class: "quick-run", title: "Run now", "aria-label": "Run " + cmdLabel(q.key) + " now", onclick: () => openCommand(q.key, { flags: q.flags, run: true }) }, icon("play")) : null)))),
+    h("section", { class: "block" },
+      h("div", { class: "block-head" }, h("h2", { class: "block-title", text: "Recent activity" }),
+        ctl.runs.length ? h("button", { type: "button", class: "link-btn", onclick: () => showControl({ kind: "activity" }), text: "Show all" }) : null),
+      recent.length ? runList(recent) : h("div", { class: "group" }, h("p", { class: "empty-row", text: "Nothing yet. Commands you run will show up here." }))),
+    h("section", { class: "block" },
+      h("h2", { class: "block-title", text: "Browse" }),
+      h("div", { class: "group" }, CTL_GROUPS.map((g) => h("button", { type: "button", class: "g-row g-nav", onclick: () => showControl({ kind: "category", id: g.id }) },
+        tile(g.icon, g.tint),
+        h("span", { class: "g-text" }, h("span", { class: "g-title", text: g.label }), h("span", { class: "g-sub", text: g.desc })),
+        icon("chevron-right", "g-chev"))))),
+  ));
+}
+
+function commandRow(c) {
+  const key = ctlKey(c.path);
+  return h("button", { type: "button", class: "g-row g-nav" + (c.unavailable ? " dim" : ""), onclick: () => openCommand(key), title: c.unavailable ? "Needs a terminal: " + c.unavailable : null },
+    h("span", { class: "g-text" },
+      h("span", { class: "g-title" }, cmdLabel(c.path), c.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null, c.unavailable ? h("span", { class: "pill", text: "Terminal only" }) : null),
+      h("span", { class: "g-sub", text: c.short || "" })),
+    h("code", { class: "g-cli", text: key }),
+    icon("chevron-right", "g-chev"));
+}
+
+function renderCategory(id) {
+  const g = groupById(id);
+  const list = commandsIn(id);
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    backLink("Control", { kind: "home" }),
+    h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"), pageHead(g.label, g.desc)),
+    list.length ? h("div", { class: "group" }, list.map(commandRow)) : h("p", { class: "empty-row", text: "Loading…" }),
+  ));
+}
+
+function renderSearch() {
   const q = ctl.filter.trim().toLowerCase();
-  const groups = new Map();
-  for (const g of [...CTL_GROUPS, { id: "other", label: "Other", icon: "more" }]) groups.set(g.id, { g, items: [] });
-  for (const c of ctl.commands) {
+  const hits = ctl.commands.filter((c) => {
     const key = ctlKey(c.path);
-    if (q && !(key.includes(q) || (c.short || "").toLowerCase().includes(q))) continue;
-    groups.get(groupOf(c).id).items.push(c);
+    return key.includes(q) || cmdLabel(c.path).toLowerCase().includes(q) || (c.short || "").toLowerCase().includes(q);
+  });
+  const byGroup = new Map();
+  for (const c of hits) {
+    const g = groupOf(c);
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g).push(c);
   }
-  const frag = [];
-  for (const { g, items } of groups.values()) {
-    if (!items.length) continue;
-    const order = g.tops || [];
-    items.sort((a, b) => (order.indexOf(a.path[0]) - order.indexOf(b.path[0])) || ctlKey(a.path).localeCompare(ctlKey(b.path)));
-    frag.push(h("div", { class: "ctl-group" },
-      h("div", { class: "ctl-group-title" }, icon(g.icon), h("span", { text: g.label })),
-      h("ul", { class: "ctl-list", role: "list" }, items.map((c) => {
-        const key = ctlKey(c.path);
-        return h("li", null, h("button", {
-          type: "button", class: "ctl-item" + (key === ctl.current ? " on" : "") + (c.unavailable ? " off" : ""),
-          "aria-current": key === ctl.current ? "page" : null,
-          title: c.unavailable ? "Not available here: " + c.unavailable : c.short || key,
-          onclick: () => openCommand(key),
-        }, h("span", { class: "ctl-item-name", text: key }), c.unavailable ? icon("lock", "ctl-item-lock") : null));
-      }))));
-  }
-  if (!frag.length) frag.push(h("p", { class: "ctl-tree-empty", text: q ? "No command matches “" + ctl.filter + "”." : "Loading commands…" }));
-  tree.replaceChildren(...frag);
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    pageHead("Results", hits.length ? plural(hits.length, "command") + " for “" + ctl.filter.trim() + "”" : "Nothing matches “" + ctl.filter.trim() + "”."),
+    ...[...byGroup.entries()].map(([g, cs]) => h("section", { class: "block" },
+      h("h2", { class: "block-title", text: g.label }),
+      h("div", { class: "group" }, cs.map(commandRow)))),
+  ));
 }
-
-function serverDatalist() {
-  let dl = $("#ctl-servers");
-  if (!dl) { dl = h("datalist", { id: "ctl-servers" }); document.body.append(dl); }
-  dl.replaceChildren(...state.servers.map((s) => h("option", { value: s.name, label: s.reachable ? s.name : s.name + " (offline)" })));
-  return "ctl-servers";
-}
-
-// ---- home page
-
-function renderControlHome() {
-  ctl.current = "";
-  renderControlTree();
-  const page = $("#ctl-page");
-  page.replaceChildren(...[
-    h("div", { class: "ctl-head" },
-      h("div", null,
-        h("h1", { text: "Control" }),
-        h("p", { class: "ctl-sub", text: "Every fleet command, from the browser. Each one runs as the fleet CLI with this UI's token, command policy and audit log." }))),
-    ctl.disabled ? callout("warn", "alert", h("p", { text: "The command console is not available: " + ctl.disabled })) : null,
-    ...CTL_QUICK.map((sec) => h("section", { class: "ctl-quick" },
-      h("h2", { text: sec.title }),
-      h("div", { class: "ctl-cards" }, sec.items.filter((it) => ctl.byKey.has(it.key)).map((it) => {
-        const card = h("div", { class: "ctl-card" },
-          h("button", { type: "button", class: "ctl-card-main", onclick: () => openCommand(it.key, { args: it.args, flags: it.flags }) },
-            h("span", { class: "ctl-card-ico" }, icon(it.icon)),
-            h("span", { class: "ctl-card-text" }, h("b", { text: it.label }), h("span", { text: it.desc }))),
-          it.now ? h("button", {
-            type: "button", class: "btn sm ctl-card-run", title: "Run fleet " + it.key + " now", "aria-label": "Run " + it.label + " now",
-            onclick: () => openCommand(it.key, { args: it.args, flags: it.flags, run: true }),
-          }, icon("play"), "Run") : null);
-        return card;
-      })))),
-  ].filter(Boolean));
-}
-
-// ---- command form
 
 // openCommand shows the form for `key`, prefilled with
 // { args: [values] | {name: value}, flags: {name: value}, run: bool }.
 async function openCommand(key, prefill = {}) {
-  if (state.view !== "control") showView("control");
   await loadCommands();
-  const spec = ctl.byKey.get(key);
-  if (!spec) { toast("Unknown command: fleet " + key, "error"); return; }
-  ctl.current = key;
-  renderControlTree();
-  const form = renderCommandForm(spec, prefill);
-  const first = form && form.querySelector("input:not([type=checkbox]):not([disabled]), textarea");
-  if (prefill.run && form) form.requestSubmit();
-  else if (first && !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches)) first.focus();
+  if (!ctl.byKey.has(key)) { toast("Unknown command: fleet " + key, "error"); return; }
+  showControl({ kind: "command", id: key, prefill });
 }
 
 let ctlFieldSeq = 0;
 
-function renderCommandForm(spec, prefill) {
-  const key = ctlKey(spec.path);
-  const page = $("#ctl-page");
-  const about = [];
-  if (spec.long) about.push(h("pre", { class: "ctl-long", text: spec.long }));
-  if (spec.example) about.push(h("pre", { class: "ctl-long", text: spec.example }));
-  const head = h("div", { class: "ctl-head" },
-    h("div", null,
-      h("p", { class: "ctl-crumb" }, h("button", { type: "button", class: "linkish", onclick: renderControlHome, text: "Control" }), " / " + groupOf(spec).label),
-      h("h1", { class: "mono", text: "fleet " + key }),
-      spec.short ? h("p", { class: "ctl-sub", text: spec.short }) : null),
-    spec.destructive ? h("span", { class: "badge warn", text: "Changes things" }) : null);
-  const kids = [head];
-  if (about.length) kids.push(h("details", { class: "ctl-about" }, h("summary", { text: "About this command" }), ...about));
+function gRow(labelText, control, { help = "", forId = "", cls = "" } = {}) {
+  return h("div", { class: "g-row g-field" + (cls ? " " + cls : "") },
+    h("div", { class: "g-text" },
+      h("label", { class: "g-title", for: forId || null, text: labelText }),
+      help ? h("span", { class: "g-sub", text: help }) : null),
+    h("div", { class: "g-control" }, control));
+}
+
+function switchControl(id, checked) {
+  const input = h("input", { id, type: "checkbox", role: "switch", checked });
+  return { input, el: h("span", { class: "switch" }, input, h("span", { class: "switch-track", "aria-hidden": "true" })) };
+}
+
+function selectControl(id, values, value, required) {
+  const sel = h("select", { id, class: "select-input" });
+  if (!required) sel.append(h("option", { value: "", text: "None" }));
+  else if (!values.includes(value)) sel.append(h("option", { value: "", text: "Choose…", disabled: true, selected: true }));
+  for (const v of values) sel.append(h("option", { value: v, text: v }));
+  if (value && values.includes(value)) sel.value = value;
+  return sel;
+}
+
+function renderCommandPage(key, prefill) {
+  const spec = ctl.byKey.get(key);
+  const g = groupOf(spec);
+  const head = h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"),
+    pageHead(cmdLabel(spec.path), spec.short && spec.short !== cmdLabel(spec.path) ? spec.short : ""));
+  const cli = h("div", { class: "cli-chip" }, h("code", { text: "fleet " + key }),
+    spec.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null);
+  const kids = [backLink(g.label, { kind: "category", id: g.id }), head, cli];
   if (spec.unavailable) {
-    kids.push(callout("warn", "lock", h("p", null, h("b", { text: "Not available from the browser. " }), "fleet " + key + ": " + spec.unavailable + ".")));
-    page.replaceChildren(...kids);
-    return null;
+    kids.push(h("div", { class: "group" }, h("div", { class: "g-row notice" }, tile("lock", "gray"),
+      h("div", { class: "g-text" },
+        h("span", { class: "g-title", text: "This one needs a terminal" }),
+        h("span", { class: "g-sub", text: capFirst(spec.unavailable) + "." })))));
+    if (spec.long) kids.push(aboutBlock(spec));
+    $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
+    return;
   }
 
   const fields = { args: [], flags: [], stdin: null, extra: null };
   const argPrefill = prefill.args || [];
-  const argGrid = h("div", { class: "ctl-fields" });
+  const flagPrefill = prefill.flags || {};
+  const details = [];
   spec.args.forEach((a, i) => {
     const id = "ctl-f-" + ++ctlFieldSeq;
-    const pre = Array.isArray(argPrefill) ? argPrefill[i] : argPrefill[a.name];
-    const input = h("input", {
-      id, class: "text-input mono", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off",
-      value: pre ?? "", required: a.required || null,
-      placeholder: a.variadic ? "one or more, space separated (quote to keep spaces)" : a.suggest ? a.suggest.join(" / ") : "",
-    });
-    if (a.server) input.setAttribute("list", serverDatalist());
-    else if (a.suggest) {
-      const dl = h("datalist", { id: id + "-dl" }, a.suggest.map((v) => h("option", { value: v })));
-      argGrid.append(dl);
-      input.setAttribute("list", id + "-dl");
+    const pre = (Array.isArray(argPrefill) ? argPrefill[i] : argPrefill[a.name]) ?? "";
+    let input;
+    const isNewServer = spec.path[0] === "server" && spec.path[1] === "add";
+    if (a.server && !a.name.includes(":") && !isNewServer && state.servers.length) {
+      input = selectControl(id, state.servers.map((s) => s.name), pre, a.required);
+    } else if (CTL_CHOICES.has(a.name)) {
+      input = selectControl(id, a.suggest || a.name.split("|"), pre, a.required);
+    } else {
+      input = h("input", {
+        id, class: "text-input", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", value: pre,
+        placeholder: CTL_ARG_HINTS[a.name] || (a.variadic ? "Separate with spaces" : a.required ? "Required" : "Optional"),
+      });
+      if (/command|patterns|rule|url|path|file|local|remote|archive|item/i.test(a.name)) input.classList.add("mono");
     }
-    const wide = a.variadic || /command|rule|patterns|cmd/.test(a.name);
-    argGrid.append(h("div", { class: "ctl-field" + (wide ? " wide" : "") },
-      h("label", { for: id }, h("span", { text: a.name }), a.required ? h("span", { class: "req", text: "required", "aria-hidden": "true" }) : h("span", { class: "opt", text: "optional" })),
-      input));
     fields.args.push({ spec: a, input });
+    details.push(gRow(humanArg(a, spec), input, { forId: id, help: a.variadic ? "One or more. Quote values that contain spaces." : "", cls: a.variadic || /command/.test(a.name) ? "wide" : "" }));
   });
 
-  const flagPrefill = prefill.flags || {};
-  const sortedFlags = spec.flags.slice().sort((x, y) => (y.required === true) - (x.required === true));
-  const flagRows = sortedFlags.map((f) => {
+  const optionRows = [];
+  for (const f of spec.flags) {
     const id = "ctl-f-" + ++ctlFieldSeq;
     const pre = flagPrefill[f.name];
-    const label = h("label", { for: id }, h("span", { class: "mono", text: "--" + f.name }), f.required ? h("span", { class: "req", text: "required" }) : null);
-    let input;
+    const help = capFirst(f.usage || "");
+    let row;
     if (f.type === "bool") {
-      const checked = pre !== undefined ? !!pre : f.default === "true";
-      input = h("input", { id, type: "checkbox", checked });
+      const sw = switchControl(id, pre !== undefined ? !!pre : f.default === "true");
+      fields.flags.push({ spec: f, input: sw.input });
+      row = gRow(humanFlag(f.name), sw.el, { help, forId: id, cls: "g-switch" });
+    } else {
+      let input;
+      const choices = CTL_FLAG_CHOICES[f.name];
+      if (choices && choices.length) input = selectControl(id, choices, pre !== undefined ? String(pre) : f.default || "", true);
+      else if (f.name === "server" && state.servers.length && f.type === "string") input = selectControl(id, state.servers.map((s) => s.name), pre || "", false);
+      else {
+        input = h("input", {
+          id, class: "text-input", spellcheck: "false", autocomplete: f.sensitive ? "new-password" : "off", autocapitalize: "off",
+          type: f.sensitive ? "password" : "text", value: pre !== undefined ? String(pre) : "",
+          placeholder: f.default ? f.default : f.type === "duration" ? "e.g. 30s, 5m, 1h" : f.type.endsWith("Slice") || f.type.endsWith("Array") ? "Comma separated" : f.required ? "Required" : "",
+        });
+        if (/path|key|file|dsn|cmd|command|dir|paths/.test(f.name)) input.classList.add("mono");
+        if (f.name === "server") input.setAttribute("list", serverDatalist());
+      }
       fields.flags.push({ spec: f, input });
-      return h("div", { class: "ctl-field ctl-bool" + (f.name === "yes" || f.name === "confirm" ? " confirmish" : "") },
-        h("label", { class: "ctl-check", for: id }, input, h("span", { class: "mono", text: "--" + f.name })),
-        f.usage ? h("p", { class: "ctl-help", text: f.usage }) : null);
+      row = gRow(humanFlag(f.name), input, { help, forId: id });
     }
-    input = h("input", {
-      id, class: "text-input mono", spellcheck: "false", autocomplete: f.sensitive ? "new-password" : "off", autocapitalize: "off",
-      type: f.sensitive ? "password" : "text", value: pre !== undefined ? String(pre) : "",
-      placeholder: f.default ? "default: " + f.default : f.type === "duration" ? "e.g. 30s, 5m, 1h" : f.type.endsWith("Slice") || f.type.endsWith("Array") ? "comma separated" : "",
-      required: f.required || null,
-    });
-    if (f.name === "server") input.setAttribute("list", serverDatalist());
-    fields.flags.push({ spec: f, input });
-    return h("div", { class: "ctl-field" }, label, input, f.usage ? h("p", { class: "ctl-help", text: f.usage }) : null);
-  });
+    row.title = "--" + f.name;
+    row.dataset.flag = f.name;
+    if (f.required) details.push(row);
+    else optionRows.push({ row, pre: pre !== undefined });
+  }
 
-  const form = h("form", { class: "ctl-form", autocomplete: "off" });
+  const form = h("form", { class: "cmd-form", autocomplete: "off" });
   form.noValidate = true; // validation is ours (buildArgv), with clearer messages
-  if (fields.args.length) form.append(h("fieldset", { class: "ctl-set" }, h("legend", { text: "Arguments" }), argGrid));
-  if (flagRows.length) {
-    const visible = flagRows.length > 10 ? flagRows.filter((_, i) => sortedFlags[i].required || Object.prototype.hasOwnProperty.call(flagPrefill, sortedFlags[i].name)) : flagRows;
-    const hidden = flagRows.filter((r) => !visible.includes(r));
-    const set = h("fieldset", { class: "ctl-set" }, h("legend", { text: "Options" }));
-    if (visible.length) set.append(h("div", { class: "ctl-fields" }, visible));
-    if (hidden.length) set.append(h("details", { class: "ctl-more", open: !visible.length || null }, h("summary", { text: plural(hidden.length, "option") + (visible.length ? " more" : "") }), h("div", { class: "ctl-fields" }, hidden)));
-    form.append(set);
+  if (details.length) form.append(h("section", { class: "block" }, h("div", { class: "group" }, details)));
+  if (optionRows.length) {
+    const openByDefault = optionRows.length <= 3 || optionRows.some((o) => o.pre);
+    form.append(h("details", { class: "block disclosure", open: openByDefault || null },
+      h("summary", { class: "disclosure-head" }, h("span", { text: "Options" }), h("span", { class: "disclosure-count", text: String(optionRows.length) }), icon("chevron-right", "disclosure-chev")),
+      h("div", { class: "group" }, optionRows.map((o) => o.row))));
   }
   if (spec.stdin) {
     const id = "ctl-f-" + ++ctlFieldSeq;
     const secret = spec.path[0] === "secret";
     const input = secret
-      ? h("input", { id, class: "text-input mono", type: "password", autocomplete: "new-password" })
-      : h("textarea", { id, class: "text-input mono ctl-stdin", rows: "6", spellcheck: "false" });
+      ? h("input", { id, class: "text-input", type: "password", autocomplete: "new-password", placeholder: "Value" })
+      : h("textarea", { id, class: "text-input mono stdin-box", rows: "7", spellcheck: "false", placeholder: "#!/bin/sh" });
     fields.stdin = input;
-    form.append(h("fieldset", { class: "ctl-set" }, h("legend", { text: secret ? "Secret value" : "Input" }),
-      h("div", { class: "ctl-field wide" }, h("label", { for: id, text: secret ? "Value (sent on stdin, never shown or stored by the UI)" : "Sent to the command on stdin" }), input)));
+    form.append(h("section", { class: "block" },
+      h("h2", { class: "block-title", text: secret ? "Secret value" : "Script" }),
+      h("div", { class: "group" }, h("div", { class: "g-row g-field wide" }, h("div", { class: "g-control" }, input))),
+      h("p", { class: "block-foot", text: secret ? "Sent once to the command. Never shown again or kept by this page." : "Sent to the command as its input." })));
   }
   const extraId = "ctl-f-" + ++ctlFieldSeq;
-  fields.extra = h("input", { id: extraId, class: "text-input mono", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", placeholder: "e.g. --flag value 'quoted arg'" });
-  form.append(h("details", { class: "ctl-more ctl-extra" }, h("summary", { text: "Extra arguments" }),
-    h("div", { class: "ctl-field wide" }, h("label", { for: extraId, text: "Appended as typed (shell-style quoting, nothing is expanded)" }), fields.extra)));
+  fields.extra = h("input", { id: extraId, class: "text-input mono", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", placeholder: "--flag value 'quoted arg'" });
+  form.append(h("details", { class: "block disclosure subtle" },
+    h("summary", { class: "disclosure-head" }, h("span", { text: "Advanced" }), icon("chevron-right", "disclosure-chev")),
+    h("div", { class: "group" }, gRow("Extra arguments", fields.extra, { forId: extraId, help: "Added to the end, as typed. Nothing is expanded.", cls: "wide" }))));
 
-  const preview = h("code", { class: "ctl-preview-cmd" });
-  const err = h("div", { class: "field-error", "aria-live": "polite" });
-  const runBtn = h("button", { type: "submit", class: "btn " + (spec.destructive ? "danger-solid" : "primary") }, icon("play"), "Run");
-  const copyBtn = h("button", { type: "button", class: "btn ghost sm", title: "Copy as a terminal command" }, icon("copy"), "Copy");
+  const preview = h("code", { class: "cmd-preview-text" });
+  const copyBtn = h("button", { type: "button", class: "icon-btn sm", title: "Copy terminal command", "aria-label": "Copy terminal command" }, icon("copy"));
+  const err = h("p", { class: "form-error", role: "alert" });
+  const runBtn = h("button", { type: "submit", class: "btn lg " + (spec.destructive ? "danger-solid" : "primary") }, icon("play"), spec.destructive ? "Run…" : "Run");
   form.append(
-    h("div", { class: "ctl-preview" }, h("span", { class: "ctl-prompt", text: "$" }), preview, copyBtn),
-    err,
-    h("div", { class: "ctl-actions" }, runBtn, h("span", { class: "ctl-hint", text: MOD + "+Enter" })),
+    h("div", { class: "cmd-footer" },
+      h("div", { class: "cmd-preview", title: "The same thing in a terminal" }, h("span", { class: "prompt", text: "$" }), preview, copyBtn),
+      h("div", { class: "cmd-actions" }, err, h("span", { class: "kbd-hint" }, h("kbd", { text: MOD }), h("kbd", { text: "↵" })), runBtn)),
   );
 
   const build = () => buildArgv(spec, fields);
@@ -5028,11 +5199,11 @@ function renderCommandForm(spec, prefill) {
     try {
       const { args } = build();
       preview.textContent = "fleet " + [...spec.path, ...maskArgs(spec, args)].map(shellQuote).join(" ");
-      err.textContent = "";
-    } catch (e) {
+    } catch {
       preview.textContent = "fleet " + key + " …";
-      err.textContent = "";
     }
+    err.textContent = "";
+    for (const el of form.querySelectorAll("[aria-invalid]")) el.removeAttribute("aria-invalid");
   };
   form.addEventListener("input", refresh);
   form.addEventListener("change", refresh);
@@ -5041,30 +5212,57 @@ function renderCommandForm(spec, prefill) {
   });
   copyBtn.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(preview.textContent); toast("Command copied", "success"); }
-    catch { toast("Could not copy to the clipboard", "error"); }
+    catch { toast("Couldn't copy to the clipboard", "error"); }
   });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     let req;
-    try { req = build(); } catch (ex) { err.textContent = ex.message; return; }
+    try { req = build(); } catch (ex) {
+      err.textContent = ex.message;
+      if (ex.field) { ex.field.setAttribute("aria-invalid", "true"); ex.field.focus(); }
+      return;
+    }
     err.textContent = "";
     if (spec.destructive) {
       const ok = await confirmDialog({
-        title: "Run fleet " + key + "?",
-        message: "This command changes your fleet. Check it before running:",
-        extra: [h("pre", { class: "ctl-confirm-cmd", text: preview.textContent })],
+        title: cmdLabel(spec.path) + "?",
+        message: "This changes your fleet. Here's exactly what will run:",
+        extra: [h("pre", { class: "confirm-cmd", text: preview.textContent })],
         okLabel: "Run", danger: true,
       });
       if (!ok) return;
     }
     runBtn.disabled = true;
-    try { await startRun(spec.path, req.args, req.stdin); }
-    finally { runBtn.disabled = false; }
+    try {
+      const run = await startRun(spec.path, req.args, req.stdin, { select: false });
+      if (run) showResult(run.id);
+    } finally { runBtn.disabled = false; }
   });
-  kids.push(form);
-  page.replaceChildren(...kids);
+
+  const result = h("section", { class: "block", id: "ctl-result-slot" });
+  kids.push(form, result);
+  if (spec.long || spec.example) kids.push(aboutBlock(spec));
+  $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
   refresh();
-  return form;
+  if (prefill.run) { delete prefill.run; form.requestSubmit(); }
+  else {
+    const first = form.querySelector(".g-control input:not([type=checkbox]), .g-control select, textarea");
+    if (first && !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches) && !first.value) first.focus();
+  }
+}
+
+function aboutBlock(spec) {
+  return h("details", { class: "block disclosure subtle" },
+    h("summary", { class: "disclosure-head" }, h("span", { text: "About this command" }), icon("chevron-right", "disclosure-chev")),
+    h("div", { class: "group about" },
+      spec.long ? h("pre", { class: "about-text", text: spec.long }) : null,
+      spec.example ? h("pre", { class: "about-text mono", text: spec.example }) : null));
+}
+
+function fieldError(message, field) {
+  const e = new Error(message);
+  e.field = field;
+  return e;
 }
 
 // buildArgv turns the form into { args, stdin }; it throws a readable error
@@ -5074,14 +5272,16 @@ function buildArgv(spec, fields) {
   let gap = "";
   for (const { spec: a, input } of fields.args) {
     const raw = input.value;
+    const label = humanArg(a, spec);
     if (raw.trim() === "") {
-      if (a.required) throw new Error(a.name + " is required");
-      gap = gap || a.name;
+      if (a.required) throw fieldError(label + " is required.", input);
+      gap = gap || label;
       continue;
     }
-    if (gap) throw new Error("fill in " + gap + " before " + a.name + " (or leave both empty)");
-    if (a.variadic) positional.push(...shellSplit(raw));
-    else positional.push(raw.trim() === raw ? raw : raw.trim());
+    if (gap) throw fieldError("Fill in " + gap + " before " + label + ", or leave both empty.", input);
+    if (a.variadic) {
+      try { positional.push(...shellSplit(raw)); } catch (e) { throw fieldError(label + ": " + e.message + ".", input); }
+    } else positional.push(raw.trim());
   }
   const flags = [];
   for (const { spec: f, input } of fields.flags) {
@@ -5092,14 +5292,17 @@ function buildArgv(spec, fields) {
     }
     const v = input.value;
     if (v.trim() === "") {
-      if (f.required) throw new Error("--" + f.name + " is required");
+      if (f.required) throw fieldError(humanFlag(f.name) + " is required.", input);
       continue;
     }
     if (f.default && v === f.default) continue;
     if (f.type === "stringArray") for (const part of v.split(",")) { if (part.trim()) flags.push("--" + f.name + "=" + part.trim()); }
     else flags.push("--" + f.name + "=" + (f.sensitive ? v : v.trim()));
   }
-  const extra = fields.extra && fields.extra.value.trim() ? shellSplit(fields.extra.value) : [];
+  let extra = [];
+  if (fields.extra && fields.extra.value.trim()) {
+    try { extra = shellSplit(fields.extra.value); } catch (e) { throw fieldError("Extra arguments: " + e.message + ".", fields.extra); }
+  }
   // A positional value that starts with "-" would be read as a flag, so then
   // all flags go first and "--" marks the rest as plain arguments.
   const needsDash = positional.some((p) => p.startsWith("-")) && !extra.includes("--");
@@ -5115,6 +5318,84 @@ function maskArgs(spec, args) {
   });
 }
 
+function serverDatalist() {
+  let dl = $("#ctl-servers");
+  if (!dl) { dl = h("datalist", { id: "ctl-servers" }); document.body.append(dl); }
+  dl.replaceChildren(...state.servers.map((s) => h("option", { value: s.name })));
+  return "ctl-servers";
+}
+
+// ---- activity
+
+function runIcon(run) {
+  if (run.state === "running") return h("span", { class: "run-ico running", "aria-hidden": "true" }, h("span", { class: "spinner sm" }));
+  const name = run.state === "ok" ? "check" : run.state === "cancelled" ? "pause" : "x";
+  return h("span", { class: "run-ico " + run.state, "aria-hidden": "true" }, icon(name));
+}
+
+function runList(runs) {
+  return h("div", { class: "group" }, runs.map((r) => h("button", {
+    type: "button", class: "g-row g-nav run-row", onclick: () => showControl({ kind: "run", id: r.id }),
+  },
+    runIcon(r),
+    h("span", { class: "g-text" },
+      h("span", { class: "g-title", text: cmdLabel(r.path) }),
+      h("span", { class: "g-sub mono", text: r.command.slice(1).join(" "), title: r.command.map(shellQuote).join(" ") })),
+    h("span", { class: "run-meta" }, h("span", { text: runStateLabel(r) }), h("span", { text: fmtRelative(r.started) + (r.state !== "running" ? " · " + runDuration(r) : "") })),
+    icon("chevron-right", "g-chev"))));
+}
+
+function renderActivity() {
+  const clear = h("button", { type: "button", class: "btn", disabled: !ctl.runs.some((r) => r.state !== "running"), onclick: clearRuns }, "Clear");
+  $("#ctl-content").replaceChildren(h("div", { class: "page narrow" },
+    backLink("Control", { kind: "home" }),
+    pageHead("Activity", "Commands run from this window. The newest 60 are kept while it's open.", [clear]),
+    ctl.runs.length ? runList(ctl.runs) : h("div", { class: "empty-state" }, tile("clock", "gray", "xl"), h("h3", { text: "No activity yet" }), h("p", { text: "Run something from Control or the Fleet tab and it will appear here." })),
+  ));
+}
+
+function renderRunPage(id) {
+  const run = ctl.runs.find((r) => r.id === id);
+  if (!run) { showControl({ kind: "activity" }); return; }
+  $("#ctl-content").replaceChildren(h("div", { class: "page narrow" },
+    backLink("Activity", { kind: "activity" }),
+    pageHead(cmdLabel(run.path), fmtDateFull(run.started)),
+    h("section", { class: "block", id: "ctl-result-slot" }),
+    ctl.byKey.has(ctlKey(run.path)) ? h("button", { type: "button", class: "link-btn", onclick: () => openCommand(ctlKey(run.path)), text: "Open the " + cmdLabel(run.path).toLowerCase() + " form" }) : null,
+  ));
+  showResult(id);
+}
+
+// ---- result card (shared by the command and run pages)
+
+function showResult(id) {
+  const slot = $("#ctl-result-slot");
+  if (!slot) return;
+  ctl.active = id;
+  slot.replaceChildren(h("div", { class: "result" },
+    h("div", { class: "result-head" },
+      h("span", { class: "run-pill", id: "ctl-out-state", role: "status", "aria-live": "polite" }),
+      h("code", { class: "result-cmd", id: "ctl-out-cmd" }),
+      h("div", { class: "result-actions" },
+        h("div", { class: "segmented sm", id: "ctl-out-format", role: "radiogroup", "aria-label": "Output view", hidden: true },
+          h("button", { type: "button", role: "radio", "aria-checked": String(ctl.formatted), onclick: () => { ctl.formatted = true; renderTermFormatted(); } }, "Table"),
+          h("button", { type: "button", role: "radio", "aria-checked": String(!ctl.formatted), onclick: () => { ctl.formatted = false; renderTermFormatted(); } }, "Raw")),
+        h("button", { type: "button", class: "btn sm", id: "ctl-out-rerun", hidden: true, onclick: rerunActive }, icon("refresh"), "Run again"),
+        h("button", { type: "button", class: "btn sm danger", id: "ctl-out-cancel", hidden: true, onclick: cancelActiveRun }, "Stop"),
+        h("button", { type: "button", class: "icon-btn sm", title: "Copy output", "aria-label": "Copy output", onclick: copyActiveOutput }, icon("copy")))),
+    h("p", { class: "result-note", id: "ctl-out-trunc", hidden: true, text: "Earlier output was dropped to keep memory bounded. The newest 4 MiB are shown." }),
+    h("pre", { class: "term", id: "ctl-term", tabindex: "0", "aria-label": "Output" }),
+    h("div", { class: "formatted", id: "ctl-formatted", hidden: true })));
+  renderRunHeader();
+  const run = ctl.runs.find((r) => r.id === id);
+  if (!ctl.out.has(id)) { renderTerm(); fetchRun(id); }
+  else {
+    renderTerm();
+    if (run && run.state === "running") streamRun(id);
+  }
+  requestAnimationFrame(() => slot.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" }));
+}
+
 // ---- runs
 
 async function startRun(path, args, stdin = "", { select = true, quiet = false } = {}) {
@@ -5128,7 +5409,7 @@ async function startRun(path, args, stdin = "", { select = true, quiet = false }
     if (!r.ok) throw await errorFrom(r);
     res = await r.json();
   } catch (err) {
-    toast("fleet " + ctlKey(path) + ": " + err.message, "error");
+    toast(cmdLabel(path) + ": " + err.message, "error");
     return null;
   }
   const run = res.run;
@@ -5136,9 +5417,9 @@ async function startRun(path, args, stdin = "", { select = true, quiet = false }
   // input (often a secret) is never kept in the page.
   if (!stdin) ctl.requests.set(run.id, { path, args });
   if (quiet) ctl.quiet.add(run.id);
-  upsertRun(run);
   ctl.out.set(run.id, { chunks: [], lastSeq: 0 });
-  if (select) selectRun(run.id);
+  upsertRun(run);
+  if (select) showControl({ kind: "run", id: run.id });
   else streamRun(run.id);
   schedulePoll();
   return run;
@@ -5172,8 +5453,17 @@ function upsertRun(run) {
   if (i >= 0) ctl.runs[i] = run;
   else ctl.runs.unshift(run);
   if (run.state !== "running") settleWaiters(run);
-  renderRunList();
+  runsChanged();
   if (run.id === ctl.active) renderRunHeader();
+}
+
+// runsChanged refreshes whatever shows the run list right now.
+function runsChanged() {
+  renderSidebar();
+  if (state.view !== "control") return;
+  const k = ctl.page.kind;
+  if (k === "activity") renderActivity();
+  else if (k === "home" && !$("#ctl-filter").value) renderHome();
 }
 
 function streamRun(id) {
@@ -5194,11 +5484,13 @@ function streamRun(id) {
   es.addEventListener("status", (ev) => {
     let run;
     try { run = JSON.parse(ev.data); } catch { return; }
-    upsertRun(run);
     if (run.state !== "running") {
       finished = true;
       es.close();
       ctl.streams.delete(id);
+    }
+    upsertRun(run);
+    if (run.state !== "running") {
       if (id === ctl.active) renderTermFormatted();
       onRunFinished(run);
     }
@@ -5224,9 +5516,9 @@ function onRunFinished(run) {
     loadOverview();
   }
   if (state.view !== "control" && !ctl.quiet.has(run.id)) {
-    const label = "fleet " + ctlKey(run.path);
+    const label = cmdLabel(run.path);
     if (run.state === "ok") toast(label + " finished", "success");
-    else if (run.state === "failed") toast(label + " failed (exit " + run.exit_code + ")", "error", { action: { label: "Show", run: () => { showView("control"); selectRun(run.id); } } });
+    else if (run.state === "failed") toast(label + " failed", "error", { action: { label: "Show", run: () => showControl({ kind: "run", id: run.id }) } });
   }
 }
 
@@ -5241,7 +5533,7 @@ async function fetchRun(id) {
   } catch (err) {
     if (err.status === 404) {
       ctl.runs = ctl.runs.filter((r) => r.id !== id);
-      renderRunList();
+      runsChanged();
     }
   }
 }
@@ -5262,9 +5554,11 @@ async function loadRuns() {
     const ids = new Set(fresh.map((r) => r.id));
     const pending = ctl.runs.filter((r) => !ids.has(r.id) && (ctl.streams.has(r.id) || ctl.waiters.has(r.id)));
     for (const r of pending) ids.add(r.id);
+    const changed = JSON.stringify(ctl.runs.map((r) => [r.id, r.state])) !== JSON.stringify([...pending, ...fresh].map((r) => [r.id, r.state]));
     ctl.runs = [...pending, ...fresh];
     for (const id of [...ctl.out.keys()]) if (!ids.has(id)) ctl.out.delete(id);
-    renderRunList();
+    if (changed) runsChanged();
+    else renderSidebar();
     if (ctl.active) renderRunHeader();
   } catch { /* the next poll retries */ }
 }
@@ -5279,16 +5573,6 @@ function schedulePoll() {
   }, 2000);
 }
 
-function selectRun(id) {
-  ctl.active = id;
-  renderRunList();
-  renderRunHeader();
-  const run = ctl.runs.find((r) => r.id === id);
-  if (!ctl.out.has(id)) { renderTerm(); fetchRun(id); return; }
-  renderTerm();
-  if (run && run.state === "running") streamRun(id);
-}
-
 function runDuration(run) {
   const start = Date.parse(run.started);
   const end = run.ended ? Date.parse(run.ended) : Date.now();
@@ -5301,51 +5585,27 @@ function runDuration(run) {
 function runStateLabel(run) {
   switch (run.state) {
     case "running": return "Running";
-    case "ok": return "Succeeded";
-    case "cancelled": return "Cancelled";
-    default: return run.exit_code >= 0 ? "Failed · exit " + run.exit_code : "Failed";
+    case "ok": return "Done";
+    case "cancelled": return "Stopped";
+    default: return run.exit_code >= 0 ? "Failed (exit " + run.exit_code + ")" : "Failed";
   }
-}
-
-function renderRunList() {
-  const list = $("#ctl-runs");
-  if (!list) return;
-  $("#ctl-runs-clear").disabled = !ctl.runs.some((r) => r.state !== "running");
-  const running = ctl.runs.filter((r) => r.state === "running").length;
-  const badge = $("#ctl-badge");
-  if (badge) { badge.hidden = !running; badge.textContent = String(running); }
-  if (!ctl.runs.length) {
-    list.replaceChildren(h("li", { class: "ctl-runs-empty", text: "Commands you run appear here." }));
-    return;
-  }
-  list.replaceChildren(...ctl.runs.map((r) => h("li", null, h("button", {
-    type: "button", class: "ctl-run" + (r.id === ctl.active ? " on" : ""), "aria-current": r.id === ctl.active ? "true" : null,
-    onclick: () => { selectRun(r.id); $("#ctl-output").scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" }); },
-  },
-    h("span", { class: "run-dot " + r.state, title: runStateLabel(r) }),
-    h("span", { class: "ctl-run-text" },
-      h("span", { class: "ctl-run-cmd mono", text: r.command.slice(1).join(" "), title: r.command.map(shellQuote).join(" ") }),
-      h("span", { class: "ctl-run-meta", text: runStateLabel(r) + " · " + fmtRelative(r.started) + (r.state !== "running" ? " · " + runDuration(r) : "") }))))));
 }
 
 function renderRunHeader() {
   const run = ctl.runs.find((r) => r.id === ctl.active);
-  const box = $("#ctl-output");
-  if (!run) { box.hidden = true; return; }
-  box.hidden = false;
-  $("#ctl-out-cmd").textContent = run.command.map(shellQuote).join(" ");
   const pill = $("#ctl-out-state");
+  if (!run || !pill) return;
+  $("#ctl-out-cmd").textContent = run.command.map(shellQuote).join(" ");
   pill.className = "run-pill " + run.state;
-  pill.textContent = runStateLabel(run) + (run.state === "running" ? "" : " · " + runDuration(run));
+  pill.replaceChildren(runIcon(run), h("span", { text: runStateLabel(run) + (run.state === "running" ? "" : " · " + runDuration(run)) }));
   $("#ctl-out-cancel").hidden = run.state !== "running";
   $("#ctl-out-rerun").hidden = run.state === "running" || !ctl.requests.has(run.id);
   $("#ctl-out-trunc").hidden = !run.truncated;
 }
 
-function termTarget() { return $("#ctl-term"); }
-
 function appendTerm(c) {
-  const term = termTarget();
+  const term = $("#ctl-term");
+  if (!term) return;
   const placeholder = term.querySelector(":scope > .muted");
   if (placeholder) placeholder.remove();
   const stick = term.scrollHeight - term.scrollTop - term.clientHeight < 40;
@@ -5356,7 +5616,8 @@ function appendTerm(c) {
 }
 
 function renderTerm() {
-  const term = termTarget();
+  const term = $("#ctl-term");
+  if (!term) return;
   const o = ctl.out.get(ctl.active);
   term.replaceChildren();
   $("#ctl-out-format").hidden = true;
@@ -5379,14 +5640,16 @@ function renderTerm() {
 }
 
 // renderTermFormatted shows JSON stdout of a finished run as a table or a
-// pretty-printed tree, with a toggle back to the raw text.
+// pretty-printed tree, with a Table / Raw switch.
 function renderTermFormatted() {
   const run = ctl.runs.find((r) => r.id === ctl.active);
-  const fmtBtn = $("#ctl-out-format");
+  const seg = $("#ctl-out-format");
   const view = $("#ctl-formatted");
+  const term = $("#ctl-term");
+  if (!seg || !view || !term) return;
   view.hidden = true;
-  fmtBtn.hidden = true;
-  termTarget().hidden = false;
+  seg.hidden = true;
+  term.hidden = false;
   if (!run || run.state === "running") return;
   const o = ctl.out.get(run.id);
   if (!o) return;
@@ -5395,12 +5658,14 @@ function renderTermFormatted() {
   let data;
   try { data = JSON.parse(stdout); } catch { return; }
   view.replaceChildren(jsonView(data));
-  fmtBtn.hidden = false;
-  fmtBtn.setAttribute("aria-pressed", String(ctl.formatted));
+  seg.hidden = false;
+  const [tBtn, rBtn] = $$("button", seg);
+  tBtn.setAttribute("aria-checked", String(ctl.formatted));
+  rBtn.setAttribute("aria-checked", String(!ctl.formatted));
   view.hidden = !ctl.formatted;
-  termTarget().hidden = ctl.formatted;
+  term.hidden = ctl.formatted;
   const errText = o.chunks.filter((c) => c.stream === "err").map((c) => c.text).join("").trim();
-  if (errText && ctl.formatted) view.prepend(h("pre", { class: "ctl-term ctl-term-err", text: stripAnsi(errText) }));
+  if (errText && ctl.formatted) view.prepend(h("pre", { class: "term term-err", text: stripAnsi(errText) }));
 }
 
 function scalarText(v) {
@@ -5415,51 +5680,49 @@ function jsonView(data) {
     const cols = [];
     for (const r of rows.slice(0, 200)) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
     const shown = cols.slice(0, 12);
-    return h("div", { class: "ctl-json-table-wrap" },
-      h("table", { class: "ctl-json-table" },
-        h("thead", null, h("tr", null, shown.map((c) => h("th", { scope: "col", text: c })))),
+    return h("div", { class: "json-table-wrap" },
+      h("table", { class: "json-table" },
+        h("thead", null, h("tr", null, shown.map((c) => h("th", { scope: "col", text: capFirst(c.replace(/_/g, " ")) })))),
         h("tbody", null, rows.slice(0, 1000).map((r) => h("tr", null, shown.map((c) => {
           const v = r[c];
           const t = scalarText(v);
           return h("td", { class: typeof v === "number" ? "num" : t.length > 48 ? "long" : "", title: t.length > 60 ? t : null, text: t.length > 160 ? t.slice(0, 160) + "…" : t });
         }))))),
-      rows.length > 1000 || cols.length > shown.length ? h("p", { class: "ctl-help", text: "Showing " + Math.min(rows.length, 1000) + " of " + rows.length + " rows" + (cols.length > shown.length ? " and " + shown.length + " of " + cols.length + " columns" : "") + ". Switch to Raw for everything." }) : null);
+      rows.length > 1000 || cols.length > shown.length ? h("p", { class: "result-note", text: "Showing " + Math.min(rows.length, 1000) + " of " + rows.length + " rows" + (cols.length > shown.length ? " and " + shown.length + " of " + cols.length + " columns" : "") + ". Switch to Raw for everything." }) : null);
   }
-  return h("pre", { class: "ctl-term", text: JSON.stringify(data, null, 2) });
+  return h("pre", { class: "term light", text: JSON.stringify(data, null, 2) });
 }
 
 async function cancelActiveRun() {
   const id = ctl.active;
-  try { await postJSON("/api/runs/cancel", { id }); toast("Cancelling…"); }
+  try { await postJSON("/api/runs/cancel", { id }); }
   catch (err) { toast(err.message, "error"); }
 }
 
 async function clearRuns() {
   try {
     await postJSON("/api/runs/clear");
-    const active = ctl.runs.find((r) => r.id === ctl.active);
-    if (active && active.state !== "running") ctl.active = "";
     await loadRuns();
-    renderRunHeader();
+    runsChanged();
   } catch (err) { toast(err.message, "error"); }
 }
 
 function copyActiveOutput() {
   const o = ctl.out.get(ctl.active);
   const text = o ? stripAnsi(o.chunks.map((c) => c.text).join("")) : "";
-  navigator.clipboard.writeText(text).then(() => toast("Output copied", "success"), () => toast("Could not copy to the clipboard", "error"));
+  navigator.clipboard.writeText(text).then(() => toast("Output copied", "success"), () => toast("Couldn't copy to the clipboard", "error"));
 }
 
-function rerunActive() {
+async function rerunActive() {
   const req = ctl.requests.get(ctl.active);
   if (!req) return;
   const spec = ctl.byKey.get(ctlKey(req.path));
   if (spec && spec.destructive) {
-    confirmDialog({ title: "Run fleet " + ctlKey(req.path) + " again?", message: "This command changes your fleet.", okLabel: "Run again", danger: true })
-      .then((ok) => { if (ok) startRun(req.path, req.args); });
-    return;
+    const ok = await confirmDialog({ title: "Run " + cmdLabel(req.path).toLowerCase() + " again?", message: "This changes your fleet.", okLabel: "Run again", danger: true });
+    if (!ok) return;
   }
-  startRun(req.path, req.args);
+  const run = await startRun(req.path, req.args, "", { select: false });
+  if (run) showResult(run.id);
 }
 
 // ---- overview integration
@@ -5470,7 +5733,7 @@ function serverMenuItems(name, reachable) {
   return [
     { title: name },
     has("service list") && { label: "Services", icon: "activity", run: go("service list", [name], null, true) },
-    has("svc status") && { label: "Systemd unit status…", icon: "info", run: go("svc status") },
+    has("svc status") && { label: "Unit status…", icon: "info", run: go("svc status") },
     has("journal") && { label: "Journal…", icon: "file-text", run: go("journal") },
     has("exec") && { label: "Run a command…", icon: "command", run: go("exec") },
     "sep",
@@ -5479,11 +5742,11 @@ function serverMenuItems(name, reachable) {
     has("firewall status") && { label: "Firewall status", icon: "lock", run: go("firewall status", [name], null, true) },
     has("port list") && { label: "Open ports", icon: "hash", run: go("port list", [name], null, true) },
     "sep",
-    has("server show") && { label: "Show definition", icon: "eye", run: go("server show", [name], null, true) },
+    has("server show") && { label: "Details", icon: "eye", run: go("server show", [name], null, true) },
     has("tag") && { label: "Edit tags…", icon: "tag", run: go("tag") },
     has("server reconnect") && { label: "Reconnect…", icon: "refresh", run: go("server reconnect") },
     "sep",
-    has("server remove") && { label: "Remove server…", icon: "trash", danger: true, run: go("server remove") },
+    has("server remove") && { label: "Remove…", icon: "trash", danger: true, run: go("server remove") },
   ];
 }
 
@@ -5493,40 +5756,36 @@ async function alertAction(al, kind) {
   const res = await runQuietly(path, args);
   if (!res) return;
   if (res.run.state === "ok") toast(kind === "ack" ? "Alert acknowledged" : "Alert snoozed for an hour", "success");
-  else toast((res.text.trim().split("\n").pop() || "fleet " + path.join(" ") + " failed"), "error");
+  else toast((res.text.trim().split("\n").pop() || cmdLabel(path) + " failed"), "error");
   loadOverview();
 }
 
 // ---- setup
 
 function showControlPage() {
-  loadCommands().then(() => {
-    if (!ctl.current) renderControlHome();
-    else renderControlTree();
-  });
+  // Coming back to the tab keeps a half-filled form as it was.
+  const kept = ctl.page.kind === "command" && $("#ctl-content").childElementCount;
+  loadCommands().then(() => { if (!kept) showControl(ctl.page); else renderSidebar(); });
   loadRuns().then(schedulePoll);
 }
 
 function setupControl() {
   const filter = $("#ctl-filter");
-  filter.addEventListener("input", debounce(() => { ctl.filter = filter.value; renderControlTree(); }, 60));
+  const apply = debounce(() => {
+    ctl.filter = filter.value;
+    if (filter.value.trim()) showControl({ kind: "search" });
+    else if (ctl.page.kind === "search") showControl({ kind: "home" });
+  }, 80);
+  filter.addEventListener("input", apply);
   filter.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && filter.value) { e.stopPropagation(); filter.value = ""; ctl.filter = ""; renderControlTree(); }
+    if (e.key === "Escape" && filter.value) { e.stopPropagation(); filter.value = ""; ctl.filter = ""; showControl({ kind: "home" }); }
     if (e.key === "Enter") {
-      const first = $("#ctl-tree .ctl-item:not(.off)");
+      const first = $("#ctl-content .g-row.g-nav:not(.dim)");
       if (first) { e.preventDefault(); first.click(); }
     }
   });
-  $("#ctl-home").addEventListener("click", renderControlHome);
-  $("#ctl-runs-clear").addEventListener("click", clearRuns);
-  $("#ctl-out-cancel").addEventListener("click", cancelActiveRun);
-  $("#ctl-out-copy").addEventListener("click", copyActiveOutput);
-  $("#ctl-out-rerun").addEventListener("click", rerunActive);
-  $("#ctl-out-close").addEventListener("click", () => { ctl.active = ""; renderRunList(); renderRunHeader(); });
-  $("#ctl-out-format").addEventListener("click", () => { ctl.formatted = !ctl.formatted; renderTermFormatted(); });
   const add = $("#ov-add-server");
   if (add) add.addEventListener("click", () => openCommand("server add"));
-  renderRunList();
   // Learn the catalog early so menus and the palette can use it.
   loadCommands();
   loadRuns().then(schedulePoll);

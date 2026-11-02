@@ -25,23 +25,17 @@ import (
 // a terminal (full-screen UIs, an interactive shell, $EDITOR), or they would
 // set up, replace or remove the controller this UI is running from.
 var webUnavailable = map[string]string{
-	"dashboard":             "it is a full-screen terminal UI. Run `fleet dashboard` in a terminal, or use the Fleet view here",
-	"files":                 "it is a full-screen terminal UI. Use the Files view here",
-	"filemanager":           "it is a full-screen terminal UI. Use the Files view here",
-	"filemanager ui":        "this web UI is already running",
-	"file ui":               "this web UI is already running",
-	"ssh":                   "it opens an interactive shell. Run `fleet ssh` in a terminal, or run commands with `exec` here",
-	"config edit":           "it opens $EDITOR. Use `config set`, or run `fleet config edit` in a terminal",
-	"daemon":                "it runs the daemon in the foreground. Use `start` / `stop` to run it in the background",
-	"init":                  "it sets up the controller this UI is already running from. Run it in a terminal",
-	"recover":               "it re-attaches the controller this UI is running from. Run it in a terminal",
-	"self-uninstall":        "it removes the controller this UI is running from. Run it in a terminal",
-	"help":                  "use the command list here instead",
-	"completion":            "shell completion scripts are for terminals. Use `autocomplete`",
-	"completion bash":       "shell completion scripts are for terminals. Use `autocomplete`",
-	"completion zsh":        "shell completion scripts are for terminals. Use `autocomplete`",
-	"completion fish":       "shell completion scripts are for terminals. Use `autocomplete`",
-	"completion powershell": "shell completion scripts are for terminals. Use `autocomplete`",
+	"dashboard":      "it is a full-screen terminal UI. Run `fleet dashboard` in a terminal, or use the Fleet view here",
+	"files":          "it is a full-screen terminal UI. Use the Files view here",
+	"filemanager":    "it is a full-screen terminal UI. Use the Files view here",
+	"filemanager ui": "this web UI is already running",
+	"file ui":        "this web UI is already running",
+	"ssh":            "it opens an interactive shell. Run `fleet ssh` in a terminal, or run commands with `exec` here",
+	"config edit":    "it opens $EDITOR. Use `config set`, or run `fleet config edit` in a terminal",
+	"daemon":         "it runs the daemon in the foreground. Use `start` / `stop` to run it in the background",
+	"init":           "it sets up the controller this UI is already running from. Run it in a terminal",
+	"recover":        "it re-attaches the controller this UI is running from. Run it in a terminal",
+	"self-uninstall": "it removes the controller this UI is running from. Run it in a terminal",
 }
 
 // webDestructiveLeaves are command names that change or remove things in a
@@ -74,6 +68,12 @@ func webConsoleCatalog(root *cobra.Command) []webui.CommandSpec {
 	walk = func(c *cobra.Command, path []string) {
 		for _, sub := range c.Commands() {
 			if sub.Hidden || sub.Deprecated != "" {
+				continue
+			}
+			// Cobra's own help and completion commands (added at run time)
+			// mean nothing in a browser; the UI has its own help and the
+			// autocomplete command covers shells.
+			if len(path) == 0 && (sub.Name() == "help" || sub.Name() == "completion") {
 				continue
 			}
 			p := append(append([]string(nil), path...), sub.Name())
