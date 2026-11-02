@@ -31,6 +31,12 @@ var newEndpoints = []struct {
 	{"/api/runs/stream", http.MethodGet, url.Values{"id": {"nope"}}},
 	{"/api/runs/cancel", http.MethodPost, url.Values{"id": {"nope"}}},
 	{"/api/runs/clear", http.MethodPost, nil},
+	{"/api/term", http.MethodGet, nil},
+	{"/api/term/stream", http.MethodGet, url.Values{"id": {"nope"}}},
+	{"/api/term/open", http.MethodPost, url.Values{"server": {"web"}}},
+	{"/api/term/input", http.MethodPost, url.Values{"id": {"nope"}}},
+	{"/api/term/resize", http.MethodPost, url.Values{"id": {"nope"}, "cols": {"80"}, "rows": {"24"}}},
+	{"/api/term/close", http.MethodPost, url.Values{"id": {"nope"}}},
 }
 
 func doReq(t *testing.T, method, rawURL string, headers map[string]string) *http.Response {

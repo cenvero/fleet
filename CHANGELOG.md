@@ -44,6 +44,13 @@ Omit sections that have no entries for that release.
   Control's Overview greets you with a one-line fleet status and at-a-glance tiles; commands
   can be pinned; Activity can be filtered; results can be downloaded or shown full screen.
   Fleet shows each server as a card with CPU, memory and disk ring gauges (or as a list).
+- **Web UI: Terminal.** A *Terminal* tab with interactive shells on direct-mode servers,
+  in tabs (xterm.js, vendored, WebGL-rendered). Open one from the tab, a server card or
+  menu, Control or the palette; `top`/`vim` work, the size follows the window, a reload
+  re-attaches, and an ended session can reconnect. Each tab is `fleet ssh` run by the
+  controller under a pseudo-terminal with the UI's token, so RBAC, the command-policy
+  refusal, host-key pinning and audit apply unchanged. The page CSP stays strict: scripts
+  are `'self'` only, and `<style>` elements need a nonce that changes on every load.
 - **Web UI: Control view, so the whole fleet can be run from the browser.** `fleet file ui`
   gains a *Control* tab that lists every fleet command, grouped by area, with a form built
   from the command's own arguments and flags. Runs stream live output (stdout and stderr),

@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -61,6 +62,8 @@ type Server struct {
 	operator string
 	// console, when set, powers the Control view (see console.go).
 	console *console
+	// terminal, when set, powers the Terminal view (see terminal.go).
+	terminal *termHub
 	// baseCtx is the server's lifetime; command runs are cancelled with it.
 	baseCtx context.Context
 }
@@ -133,6 +136,9 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 		// a moment to exit cleanly before this process does.
 		s.console.runs.cancelAll(runCancelGrace + time.Second)
 	}
+	if s.terminal != nil {
+		s.terminal.closeAll(3 * time.Second)
+	}
 	if err == http.ErrServerClosed {
 		return nil
 	}
@@ -146,6 +152,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/app.css", s.staticAsset("app.css", "text/css"))
 	mux.HandleFunc("/theme.js", s.staticAsset("theme.js", "text/javascript"))
 	mux.HandleFunc("/favicon.svg", s.staticAsset("favicon.svg", "image/svg+xml"))
+	// xterm.js (MIT), vendored: loaded only when the Terminal view opens.
+	mux.HandleFunc("/vendor/xterm.js", s.staticAsset("vendor/xterm.js", "text/javascript"))
+	mux.HandleFunc("/vendor/xterm-addon-fit.js", s.staticAsset("vendor/xterm-addon-fit.js", "text/javascript"))
+	mux.HandleFunc("/vendor/xterm-addon-webgl.js", s.staticAsset("vendor/xterm-addon-webgl.js", "text/javascript"))
+	mux.HandleFunc("/vendor/xterm.css", s.staticAsset("vendor/xterm.css", "text/css"))
 
 	mux.HandleFunc("/api/servers", s.guard(s.handleServers))
 	mux.HandleFunc("/api/formats", s.guard(s.handleFormats))
@@ -183,6 +194,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/runs/stream", s.guard(getOnly(s.handleRunStream)))
 	mux.HandleFunc("/api/runs/cancel", s.guard(postOnly(s.handleRunCancel)))
 	mux.HandleFunc("/api/runs/clear", s.guard(postOnly(s.handleRunsClear)))
+	// Terminal view: interactive `fleet ssh` sessions under a pseudo-terminal.
+	// Everything that changes a session (open, input, resize, close) is a
+	// same-origin POST.
+	mux.HandleFunc("/api/term", s.guard(getOnly(s.handleTermSessions)))
+	mux.HandleFunc("/api/term/open", s.guard(postOnly(s.handleTermOpen)))
+	mux.HandleFunc("/api/term/stream", s.guard(getOnly(s.handleTermStream)))
+	mux.HandleFunc("/api/term/input", s.guard(postOnly(s.handleTermInput)))
+	mux.HandleFunc("/api/term/resize", s.guard(postOnly(s.handleTermResize)))
+	mux.HandleFunc("/api/term/close", s.guard(postOnly(s.handleTermClose)))
 	return securityHeaders(gzipHandler(mux))
 }
 
@@ -206,8 +226,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy",
-			"default-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", contentSecurityPolicy(""))
 		// Isolate the page from other origins' windows and keep its responses
 		// (file bytes, previews, JSON) from being embedded cross-origin.
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
@@ -216,6 +235,21 @@ func securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// contentSecurityPolicy is the page's strict CSP. styleNonce, when set, also
+// admits <style> elements carrying that per-load nonce: xterm.js (the Terminal
+// view) builds its colour and size rules that way. Scripts stay 'self' only.
+func contentSecurityPolicy(styleNonce string) string {
+	style := "style-src 'self'"
+	if styleNonce != "" {
+		style += " 'nonce-" + styleNonce + "'"
+	}
+	return "default-src 'none'; img-src 'self' data:; " + style + "; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+}
+
+// styleNoncePlaceholder in index.html is replaced with a fresh nonce on every
+// page load.
+const styleNoncePlaceholder = "__FLEET_STYLE_NONCE__"
 
 // postOnly rejects non-POST requests, used for state-changing endpoints so the
 // guard's POST-gated Origin/CSRF check actually covers them.
@@ -304,8 +338,15 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: bad host header", http.StatusForbidden)
 		return
 	}
+	var raw [18]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(raw[:])
+	w.Header().Set("Content-Security-Policy", contentSecurityPolicy(nonce))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(indexHTML)
+	_, _ = w.Write(bytes.Replace(indexHTML, []byte(styleNoncePlaceholder), []byte(nonce), 1))
 }
 
 func (s *Server) staticAsset(name, contentType string) http.HandlerFunc {
@@ -608,7 +649,7 @@ func gzipHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path != "/app.js" && r.URL.Path != "/app.css" && r.URL.Path != "/api/list" {
+		if r.URL.Path != "/app.js" && r.URL.Path != "/app.css" && r.URL.Path != "/api/list" && !strings.HasPrefix(r.URL.Path, "/vendor/") {
 			next.ServeHTTP(w, r)
 			return
 		}

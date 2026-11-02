@@ -1056,6 +1056,8 @@ func newUICommand(configDir *string) *cobra.Command {
 			// RBAC, cmd-policy and audit code as in a terminal.
 			catalog := webConsoleCatalog(cmd.Root())
 			srv.SetConsole(catalog, webConsoleLauncher(cmd.Root(), app.ConfigDir, resolveTokenID(cmd), catalog))
+			// The Terminal view runs `fleet ssh` the same way, under a pty.
+			srv.SetTerminal(webTerminalLauncher(app.ConfigDir, resolveTokenID(cmd)))
 			// Decide whether to open the browser BEFORE installing the signal
 			// handler, so Ctrl-C during the prompt still quits normally.
 			shouldOpen := decideOpenBrowser(cmd, open)

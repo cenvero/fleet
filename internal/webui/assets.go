@@ -12,4 +12,5 @@ var indexHTML []byte
 // external origin, which is what lets the CSP stay at 'self'.
 //
 //go:embed assets/app.js assets/app.css assets/theme.js assets/favicon.svg
+//go:embed assets/vendor/xterm.js assets/vendor/xterm-addon-fit.js assets/vendor/xterm-addon-webgl.js assets/vendor/xterm.css
 var assets embed.FS

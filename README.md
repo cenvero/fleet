@@ -21,7 +21,7 @@ Today the repository includes:
 - Persistent shell sessions that survive network drops with automatic reconnect (3 retries, 5 s gap)
 - Live service, logs, metrics, firewall, and port RPCs
 - Secure file manager with chunked, parallel, checksummed, resumable transfers over the same SSH channel — CLI (`fleet file`), dual-pane TUI (`fleet files`), and a localhost web GUI (`fleet file ui`)
-- A localhost web UI (`fleet file ui`) that runs the whole fleet from the browser: files, a live Fleet overview with per-server actions, and a *Control* view that runs every non-interactive `fleet` command with live output under the same token, policy and audit as the CLI
+- A localhost web UI (`fleet file ui`) that runs the whole fleet from the browser: files, a live Fleet overview with per-server actions, and a *Control* view that runs every non-interactive `fleet` command with live output under the same token, policy and audit as the CLI, plus a *Terminal* tab with interactive shells on your servers
 - Structured remote execution (`fleet exec --json`) with timeouts, retries, dry-run, concurrent tag-group fan-out (`--parallel`), and automatic output redaction
 - Unattended-operation guardrails: scoped RBAC tokens (`fleet token` / `--token`), named secrets (`fleet secret`), a dead-man's-switch (`fleet guard`/`confirm`/`revert`), command policy (`fleet cmd-policy`), and an approval queue (`fleet approvals`/`approve`, which runs the approved command)
 - Transactional, idempotent playbooks (`fleet run`) with check/apply/rollback, plus tag-based grouping (`fleet tag`) and scheduled jobs (`fleet cron`)

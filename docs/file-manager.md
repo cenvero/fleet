@@ -354,8 +354,8 @@ the transfers dock. The same secure transfer engine runs underneath.
   verified as they go; if verification fails the download is aborted, so the browser
   shows a failed download rather than a corrupt file.
 - **Very large folders** (tens of thousands of entries) scroll smoothly.
-- The tabs are **Fleet**, **Control** and **Files**, in that order; the UI opens on
-  Fleet. `Alt+1`, `Alt+2` and `Alt+3` switch between them from anywhere, `/` searches
+- The tabs are **Fleet**, **Control**, **Files** and **Terminal**, in that order; the UI
+  opens on Fleet. `Alt+1` to `Alt+4` switch between them from anywhere, `/` searches
   the current page, and `?` lists every shortcut.
 - **Fleet overview** (the *Fleet* tab): every server as a card (status, OS, ring gauges for
   CPU, memory and disk, tags, alerts) or, with the layout switch, as a table with
@@ -382,6 +382,16 @@ the transfers dock. The same secure transfer engine runs underneath.
   state or text) keeps the newest 60 with 4 MiB of output each. Up to 8 commands
   run at once.
 
+- **Terminal** (the *Terminal* tab): interactive shells on direct-mode servers, in tabs,
+  drawn by xterm.js (vendored; WebGL when available). Open one from the tab, a server card
+  or its menu, Control → *Open a shell*, or the palette. Full-screen programs (`top`,
+  `vim`, `htop`) work, the window size follows the browser, a reload re-attaches to
+  shells that are still running, and an ended session offers *Reconnect*. Keys typed in a
+  terminal go to the shell, not to the UI's shortcuts. Each tab is `fleet ssh <server>`
+  run by the controller under a pseudo-terminal, with the same token, so RBAC, the rule
+  that refuses `ssh` while a command policy is configured, host-key pinning and the audit
+  log (`webui.terminal`) all apply. Up to 8 at once; needs a Linux or macOS controller.
+
 ### How Control runs commands
 
 Control does not reimplement commands. Each run starts the `fleet` binary itself as a
@@ -396,7 +406,7 @@ and the child audits its own action).
   `--config-dir` or environment variables, and the arguments must resolve to the command
   that was asked for.
 - Commands that need a terminal are listed but refused, with the reason: `dashboard`,
-  `files` / `filemanager`, `file ui`, `ssh`, `config edit`, `daemon` (use `start` /
+  `files` / `filemanager`, `file ui`, `config edit`, `daemon` (use `start` /
   `stop`), `init`, `recover` and `self-uninstall`.
 - There is no terminal, so prompts fail closed. Tick `--yes` (or `--confirm` for
   command-policy confirm patterns) to approve on purpose. Commands that change things

@@ -30,7 +30,7 @@ var webUnavailable = map[string]string{
 	"filemanager":    "it is a full-screen terminal UI. Use the Files view here",
 	"filemanager ui": "this web UI is already running",
 	"file ui":        "this web UI is already running",
-	"ssh":            "it opens an interactive shell. Run `fleet ssh` in a terminal, or run commands with `exec` here",
+	"ssh":            "it is an interactive shell. Open it from the Terminal tab",
 	"config edit":    "it opens $EDITOR. Use `config set`, or run `fleet config edit` in a terminal",
 	"daemon":         "it runs the daemon in the foreground. Use `start` / `stop` to run it in the background",
 	"init":           "it sets up the controller this UI is already running from. Run it in a terminal",
@@ -325,4 +325,46 @@ func webChildEnv(parent []string, tokenID string) []string {
 		env = append(env, "FLEET_TOKEN="+tokenID)
 	}
 	return append(env, "NO_COLOR=1", "CLICOLOR=0", "TERM=dumb", "PAGER=cat", "FLEET_WEBUI_CHILD=1")
+}
+
+// webTerminalLauncher starts a browser terminal session as `<this binary> ssh
+// --config-dir <dir> -- <server>`, with the token this UI was launched with,
+// so the session is exactly `fleet ssh` (RBAC, the command-policy refusal,
+// host-key pinning and audit included). The web UI has already checked that
+// the server exists; "--" keeps the name from ever being read as a flag.
+func webTerminalLauncher(configDir, tokenID string) webui.TerminalLauncher {
+	return func(ctx context.Context, server string) (*exec.Cmd, error) {
+		if server == "" || strings.HasPrefix(server, "-") || strings.ContainsAny(server, "\x00\n\r") {
+			return nil, errors.New("invalid server name")
+		}
+		if configDir == "" {
+			return nil, errors.New("the controller config dir is unknown")
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate the fleet binary: %w", err)
+		}
+		cmd := exec.CommandContext(ctx, exe, "ssh", "--config-dir="+configDir, "--", server) // #nosec G204 -- this binary; server checked against the server list
+		cmd.Env = webTerminalEnv(os.Environ(), tokenID)
+		cmd.Dir = configDir
+		return cmd, nil
+	}
+}
+
+// webTerminalEnv is the parent's environment with the token pinned (or
+// removed) and a colour-capable terminal type, as a real terminal would have.
+func webTerminalEnv(parent []string, tokenID string) []string {
+	env := make([]string, 0, len(parent)+4)
+	for _, kv := range parent {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "FLEET_TOKEN", "FLEET_CONFIG_DIR", "NO_COLOR", "TERM", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR":
+			continue
+		}
+		env = append(env, kv)
+	}
+	if tokenID != "" {
+		env = append(env, "FLEET_TOKEN="+tokenID)
+	}
+	return append(env, "TERM=xterm-256color", "COLORTERM=truecolor", "FLEET_WEBUI_CHILD=1")
 }

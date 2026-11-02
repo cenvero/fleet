@@ -9,6 +9,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="light dark" />
   <meta name="referrer" content="no-referrer" />
+  <meta name="fleet-style-nonce" content="__FLEET_STYLE_NONCE__" />
   <title>Cenvero Fleet</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <script src="/theme.js"></script>
@@ -137,6 +138,10 @@
       <button class="view-tab" role="tab" id="tab-files" data-view="files" aria-controls="view-files" aria-selected="false" tabindex="-1" type="button">
         <svg class="i" aria-hidden="true"><use href="#i-folder"/></svg><span>Files</span>
       </button>
+      <button class="view-tab" role="tab" id="tab-terminal" data-view="terminal" aria-controls="view-terminal" aria-selected="false" tabindex="-1" type="button">
+        <svg class="i" aria-hidden="true"><use href="#i-terminal"/></svg><span>Terminal</span>
+        <span class="tab-badge run" id="term-badge" title="Open terminals" hidden></span>
+      </button>
     </nav>
 
     <button class="search-trigger" id="open-palette" type="button" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">
@@ -241,6 +246,18 @@
           <nav class="ctl-nav" id="ctl-nav" aria-label="Categories"></nav>
         </aside>
         <div class="ctl-content" id="ctl-content"></div>
+      </div>
+    </section>
+    <section id="view-terminal" class="view view-terminal" role="tabpanel" aria-labelledby="tab-terminal" hidden>
+      <div class="term-shell">
+        <div class="term-bar">
+          <div class="term-tabs" id="term-tabs" role="tablist" aria-label="Open terminals"></div>
+          <button type="button" class="term-new" id="term-new" aria-haspopup="menu" aria-expanded="false" title="New terminal" aria-label="New terminal">
+            <svg class="i" aria-hidden="true"><use href="#i-plus"/></svg>
+          </button>
+        </div>
+        <div class="term-stage" id="term-stage" hidden></div>
+        <div class="term-empty" id="term-empty"></div>
       </div>
     </section>
   </main>

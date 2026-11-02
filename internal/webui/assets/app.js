@@ -3456,6 +3456,7 @@ function paletteCommands() {
     { label: "Go to Fleet", icon: "server", run: () => showView("overview") },
     { label: "Go to Control", icon: "command", run: () => showView("control") },
     { label: "Go to Files", icon: "folder", run: () => showView("files") },
+    { label: "Go to Terminal", icon: "terminal", run: () => showView("terminal") },
     { label: "Show activity", icon: "history", run: () => showControl({ kind: "activity" }) },
     { label: "Show transfers", icon: "transfer", run: openTransfers },
     { label: "Keyboard shortcuts", icon: "keyboard", hint: "?", run: showShortcuts },
@@ -3477,6 +3478,9 @@ function paletteCommands() {
       { label: "Paste", icon: "clipboard", hint: MOD + "+V", run: () => pasteInto(p) },
     );
     if (state.panes.length > 1) cmds.push({ label: "Close pane", icon: "x", run: () => removePane(p) });
+  for (const srv of terminalServers()) {
+    cmds.push({ label: "Open terminal on " + srv.name, icon: "terminal", run: () => openTerminal(srv.name) });
+  }
   for (const c of ctl.commands) {
     if (c.unavailable) continue;
     const key = ctlKey(c.path);
@@ -3600,7 +3604,7 @@ function showShortcuts() {
     h("h2", { id, text: "Keyboard shortcuts" }),
     h("div", { class: "shortcut-grid" },
       section("Everywhere", [
-        ["Fleet / Control / Files", k("Alt", "1–3")],
+        ["Fleet / Control / Files / Terminal", k("Alt", "1–4")],
         ["Command palette", k(MOD, "K")],
         ["Search this page", k("/")],
         ["Run the open command", k(MOD, "Enter")],
@@ -3648,8 +3652,8 @@ function showShortcuts() {
 
 // ----------------------------------------------------------------- views / theme
 
-const VIEWS = ["overview", "control", "files"];
-const VIEW_TITLES = { files: "Files — Cenvero Fleet", overview: "Fleet — Cenvero Fleet", control: "Control — Cenvero Fleet" };
+const VIEWS = ["overview", "control", "files", "terminal"];
+const VIEW_TITLES = { files: "Files — Cenvero Fleet", overview: "Fleet — Cenvero Fleet", control: "Control — Cenvero Fleet", terminal: "Terminal — Cenvero Fleet" };
 
 function showView(view) {
   if (!VIEWS.includes(view)) return;
@@ -3662,10 +3666,12 @@ function showView(view) {
   $("#view-files").hidden = view !== "files";
   $("#view-overview").hidden = view !== "overview";
   $("#view-control").hidden = view !== "control";
+  $("#view-terminal").hidden = view !== "terminal";
   document.title = VIEW_TITLES[view];
   if (location.hash !== "#" + view) history.replaceState(null, "", location.pathname + "#" + view);
   if (view === "overview") { closePreview(); loadOverview(); scheduleOverview(); }
   else if (view === "control") { closePreview(); stopOverviewTimer(); showControlPage(); }
+  else if (view === "terminal") { closePreview(); stopOverviewTimer(); showTerminalView(); }
   else {
     stopOverviewTimer();
     const p = activePane();
@@ -3726,9 +3732,11 @@ function setupKeyboard() {
     if (editor.open) return;
     if (modalOpen()) return; // the dialog traps its own keys
     if (menuOpen()) return;  // the menu handles its own keys
+    // Keys typed into a terminal belong to the shell (Ctrl+K, Alt+digits…).
+    if (e.target && e.target.closest && e.target.closest(".xterm")) return;
     if (modKey(e) && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
-    // Alt+1/2/3 switch between Fleet, Control and Files from anywhere.
-    if (e.altKey && !modKey(e) && /^Digit[123]$/.test(e.code)) { e.preventDefault(); showView(VIEWS[Number(e.code.slice(5)) - 1]); return; }
+    // Alt+1–4 switch between Fleet, Control, Files and Terminal from anywhere.
+    if (e.altKey && !modKey(e) && /^Digit[1-4]$/.test(e.code)) { e.preventDefault(); showView(VIEWS[Number(e.code.slice(5)) - 1]); return; }
     if (isTypingTarget(e.target)) return;
     if (e.key === "?" || (e.shiftKey && e.key === "/")) { e.preventDefault(); showShortcuts(); return; }
     if (state.view !== "files") {
@@ -4064,7 +4072,9 @@ function serverCard(s, d) {
     h("footer", { class: "srv-card-foot" },
       h("span", { class: "srv-seen", title: fmtDateFull(s.last_seen), text: s.last_seen ? "Seen " + fmtRelative(s.last_seen) : "Never seen" }),
       h("button", { class: "btn sm", type: "button", disabled: !s.reachable, onclick: () => openServerInFiles(s.name), title: s.reachable ? "Browse files on " + s.name : s.name + " is not reachable" }, icon("folder"), "Files"),
-      h("button", { class: "btn sm", type: "button", onclick: () => openCommand("exec", { args: [s.name] }), title: "Run a command on " + s.name }, icon("terminal"), "Run")));
+      s.mode === "direct"
+        ? h("button", { class: "btn sm", type: "button", onclick: () => openTerminal(s.name), title: "Open a terminal on " + s.name }, icon("terminal"), "Terminal")
+        : h("button", { class: "btn sm", type: "button", onclick: () => openCommand("exec", { args: [s.name] }), title: "Run a command on " + s.name }, icon("command"), "Run")));
 }
 
 function renderServerCards(rows, d) {
@@ -4767,6 +4777,7 @@ function init() {
   setupPreview();
   setupOverview();
   setupControl();
+  setupTerminal();
 
   $("#theme-toggle").addEventListener("click", toggleTheme);
   $("#open-palette").addEventListener("click", openPalette);
@@ -5273,6 +5284,14 @@ function renderCommandPage(key, prefill) {
     spec.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null,
     spec.unavailable ? null : pinBtn);
   const kids = [backLink(g.label, { kind: "category", id: g.id }), head, cli];
+  if (key === "ssh") {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const sel = selectControl(id, terminalServers().map((x) => x.name), "", true);
+    kids.push(h("div", { class: "group" }, gRow("Server", sel, { forId: id, help: "Direct-mode servers. The shell opens in the Terminal tab." })),
+      h("div", { class: "cmd-actions" }, h("button", { type: "button", class: "btn lg primary", onclick: () => { if (sel.value) openTerminal(sel.value); else sel.focus(); } }, icon("terminal"), "Open terminal")));
+    $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
+    return;
+  }
   if (spec.unavailable) {
     kids.push(h("div", { class: "group" }, h("div", { class: "g-row notice" }, tile("lock", "gray"),
       h("div", { class: "g-text" },
@@ -5980,10 +5999,12 @@ function serverMenuItems(name, reachable) {
   const has = (k) => !ctl.byKey.size || ctl.byKey.has(k);
   return [
     { title: name },
+    { label: "Open terminal", icon: "terminal", disabled: !terminalServers().some((x) => x.name === name), run: () => openTerminal(name) },
+    "sep",
     has("service list") && { label: "Services", icon: "layers", run: go("service list", [name], null, true) },
     has("svc status") && { label: "Unit status…", icon: "list-checks", run: go("svc status") },
     has("journal") && { label: "Journal…", icon: "scroll", run: go("journal") },
-    has("exec") && { label: "Run a command…", icon: "terminal", run: go("exec") },
+    has("exec") && { label: "Run a command…", icon: "command", run: go("exec") },
     "sep",
     has("server metrics") && { label: "Live metrics", icon: "chart", run: go("server metrics", [name], null, true), disabled: !reachable },
     has("doctor") && { label: "Health checklist", icon: "heart-pulse", run: go("doctor", [name], null, true) },
@@ -6037,6 +6058,336 @@ function setupControl() {
   // Learn the catalog early so menus and the palette can use it.
   loadCommands();
   loadRuns().then(schedulePoll);
+}
+
+// ----------------------------------------------------------------- terminal (interactive shells)
+//
+// Each tab is a `fleet ssh <server>` session the controller runs under a
+// pseudo-terminal (see internal/webui/terminal.go), so it carries the same
+// token, policy and audit as typing `fleet ssh` in a terminal. xterm.js
+// (vendored, MIT) draws it, preferably with its WebGL renderer.
+
+const termUI = {
+  loaded: null,
+  sessions: new Map(), // id -> { id, server, state, exitCode, xt, fit, host, es, lastSeq, sendQ, sending, title }
+  order: [],
+  active: "",
+  supported: true,
+  attached: false,
+  ro: null,
+};
+
+const TERM_THEME = {
+  background: "#1d1d1f", foreground: "#e5e5ea", cursor: "#0a84ff", cursorAccent: "#1d1d1f",
+  selectionBackground: "rgba(10, 132, 255, 0.38)",
+  black: "#1d1d1f", red: "#ff6b6b", green: "#32d74b", yellow: "#ffd60a", blue: "#409cff", magenta: "#bf5af2", cyan: "#64d2ff", white: "#d1d1d6",
+  brightBlack: "#8e8e93", brightRed: "#ff8a80", brightGreen: "#5ef08a", brightYellow: "#ffe066", brightBlue: "#6bb6ff", brightMagenta: "#da8fff", brightCyan: "#8be4ff", brightWhite: "#ffffff",
+};
+
+// xterm.js builds its colour and size rules as <style> elements. The page CSP
+// admits those only with this load's nonce, so tag every <style> this page
+// creates with it. Scripts stay 'self' only.
+(function installStyleNonce() {
+  const meta = document.querySelector('meta[name="fleet-style-nonce"]');
+  const nonce = meta ? meta.getAttribute("content") : "";
+  if (!nonce || nonce.startsWith("__")) return;
+  const create = document.createElement.bind(document);
+  document.createElement = function (tag, opts) {
+    const el = create(tag, opts);
+    if (String(tag).toLowerCase() === "style") el.nonce = nonce;
+    return el;
+  };
+})();
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("could not load " + src));
+    document.head.append(s);
+  });
+}
+
+function loadXterm() {
+  if (termUI.loaded) return termUI.loaded;
+  termUI.loaded = (async () => {
+    await new Promise((resolve, reject) => {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = "/vendor/xterm.css";
+      l.onload = resolve;
+      l.onerror = () => reject(new Error("could not load the terminal styles"));
+      document.head.append(l);
+    });
+    await loadScript("/vendor/xterm.js");
+    await loadScript("/vendor/xterm-addon-fit.js");
+    await loadScript("/vendor/xterm-addon-webgl.js").catch(() => {});
+  })();
+  termUI.loaded.catch(() => { termUI.loaded = null; });
+  return termUI.loaded;
+}
+
+function terminalServers() {
+  return state.servers.filter((s) => s.mode === "direct" || !s.mode);
+}
+
+// ---- view
+
+function renderTerminalTabs() {
+  const tabs = $("#term-tabs");
+  if (!tabs) return;
+  const seen = new Map();
+  tabs.replaceChildren(...termUI.order.map((id) => {
+    const t = termUI.sessions.get(id);
+    const on = id === termUI.active;
+    const n = (seen.get(t.server) || 0) + 1;
+    seen.set(t.server, n);
+    const label = n > 1 ? t.server + " " + n : t.server;
+    const btn = h("div", { class: "term-tab" + (on ? " on" : "") + (t.state !== "running" ? " ended" : ""), role: "tab", "aria-selected": String(on), tabindex: on ? "0" : "-1", title: t.title || t.server },
+      h("span", { class: "term-tab-dot", "aria-hidden": "true" }),
+      h("span", { class: "term-tab-label", text: label }),
+      h("button", { type: "button", class: "term-tab-close", "aria-label": "Close terminal on " + t.server, title: "Close", onclick: (e) => { e.stopPropagation(); closeTerminal(id); } }, icon("x")));
+    btn.addEventListener("click", () => activateTerminal(id));
+    btn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateTerminal(id); } });
+    return btn;
+  }));
+  const empty = !termUI.order.length;
+  $("#term-empty").hidden = !empty;
+  $("#term-stage").hidden = empty;
+  if (empty) renderTerminalEmpty();
+  const badge = $("#term-badge");
+  if (badge) {
+    const n = [...termUI.sessions.values()].filter((t) => t.state === "running").length;
+    badge.hidden = !n;
+    badge.textContent = String(n);
+  }
+}
+
+function renderTerminalEmpty() {
+  const box = $("#term-empty");
+  const servers = terminalServers();
+  const others = state.servers.filter((s) => !terminalServers().includes(s));
+  box.replaceChildren(h("div", { class: "term-empty-inner" },
+    tile("terminal", "indigo", "xl"),
+    h("h1", { text: "Open a terminal" }),
+    h("p", { text: termUI.supported
+      ? "A shell on any server, right here in the browser. It's fleet ssh underneath: same access token, same audit log."
+      : "Browser terminals need a Linux or macOS controller. Use fleet ssh in a terminal instead." }),
+    termUI.supported ? h("div", { class: "term-picks" }, servers.map((s) => h("button", {
+      type: "button", class: "term-pick" + (s.reachable ? "" : " offline"), title: s.reachable ? "Open a shell on " + s.name : s.name + " looked offline; try anyway",
+      onclick: () => openTerminal(s.name),
+    }, tile("server", s.reachable ? "blue" : "gray"), h("span", { class: "term-pick-text" }, h("b", { text: s.name }), h("span", { text: s.reachable ? (s.os || "online") : "offline" })), icon("chevron-right", "g-chev")))) : null,
+    termUI.supported && !servers.length ? h("p", { class: "muted", text: "No direct-mode servers yet." }) : null,
+    others.length ? h("p", { class: "term-note", text: plural(others.length, "reverse-mode server") + " can't open a terminal yet. Use Control → Run a command for those." }) : null));
+}
+
+async function showTerminalView() {
+  renderTerminalTabs();
+  if (!termUI.attached) {
+    termUI.attached = true;
+    // Re-attach to shells that are still running (e.g. after a page reload).
+    try {
+      const d = await getJSON("/api/term");
+      termUI.supported = d.supported !== false;
+      for (const s of d.sessions || []) {
+        if (s.state === "running" && !termUI.sessions.has(s.id)) await attachTerminal(s, { replay: true });
+      }
+    } catch { /* the view still works for new sessions */ }
+    renderTerminalTabs();
+  }
+  const t = termUI.sessions.get(termUI.active);
+  if (t) requestAnimationFrame(() => { fitTerminal(t); t.xt.focus(); });
+}
+
+function newTerminalMenu(anchor) {
+  const servers = terminalServers();
+  openMenu([
+    { title: "Open a terminal on" },
+    ...servers.map((s) => ({ label: s.name + (s.reachable ? "" : " (offline)"), icon: "server", run: () => openTerminal(s.name) })),
+    servers.length ? null : { label: "No direct-mode servers", icon: "info", disabled: true, run: () => {} },
+  ], { anchor, label: "New terminal" });
+}
+
+// ---- sessions
+
+async function openTerminal(server) {
+  if (state.view !== "terminal") showView("terminal");
+  try { await loadXterm(); } catch (err) { toast(err.message, "error"); return; }
+  const { xt, fit, host } = createXterm();
+  const dims = proposedSize(fit);
+  let res;
+  try {
+    res = await postJSON("/api/term/open", { server, cols: String(dims.cols), rows: String(dims.rows) });
+  } catch (err) {
+    host.remove();
+    xt.dispose();
+    toast("Terminal on " + server + ": " + err.message, "error");
+    return;
+  }
+  attachTerminal(res.session, { xt, fit, host });
+}
+
+function createXterm() {
+  const host = h("div", { class: "term-host" });
+  $("#term-stage").append(host);
+  const xt = new window.Terminal({
+    fontFamily: '"SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontSize: 13, lineHeight: 1.2, cursorBlink: true, cursorStyle: "bar", scrollback: 5000,
+    theme: TERM_THEME, allowTransparency: false, macOptionIsMeta: true, drawBoldTextInBrightColors: true,
+  });
+  const fit = new window.FitAddon.FitAddon();
+  xt.loadAddon(fit);
+  xt.open(host);
+  if (window.WebglAddon) {
+    try {
+      const gl = new window.WebglAddon.WebglAddon();
+      gl.onContextLoss(() => gl.dispose());
+      xt.loadAddon(gl);
+    } catch { /* fall back to the DOM renderer */ }
+  }
+  return { xt, fit, host };
+}
+
+function proposedSize(fit) {
+  try {
+    const d = fit.proposeDimensions();
+    if (d && d.cols > 1 && d.rows > 1) return d;
+  } catch { /* not laid out yet */ }
+  return { cols: 120, rows: 32 };
+}
+
+async function attachTerminal(summary, parts = {}) {
+  if (!parts.xt) {
+    await loadXterm();
+    Object.assign(parts, createXterm());
+  }
+  const t = {
+    id: summary.id, server: summary.server, state: summary.state, exitCode: summary.exit_code,
+    xt: parts.xt, fit: parts.fit, host: parts.host, es: null, lastSeq: 0, sendQ: "", sending: false, title: "",
+  };
+  termUI.sessions.set(t.id, t);
+  termUI.order.push(t.id);
+  t.xt.onData((data) => sendTerminalInput(t, data));
+  t.xt.onBinary((data) => sendTerminalInput(t, data));
+  t.xt.onResize(debounce(({ cols, rows }) => {
+    if (t.state === "running") postJSON("/api/term/resize", { id: t.id, cols: String(cols), rows: String(rows) }).catch(() => {});
+  }, 120));
+  t.xt.onTitleChange((title) => { t.title = title; renderTerminalTabs(); });
+  streamTerminal(t);
+  activateTerminal(t.id);
+}
+
+function streamTerminal(t) {
+  const es = new EventSource(api("/api/term/stream", { id: t.id, after: String(t.lastSeq) }).toString());
+  t.es = es;
+  es.addEventListener("data", (ev) => {
+    const seq = Number(ev.lastEventId) || 0;
+    if (seq && seq <= t.lastSeq) return;
+    t.lastSeq = seq || t.lastSeq;
+    const bin = atob(ev.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    t.xt.write(bytes);
+  });
+  es.addEventListener("exit", (ev) => {
+    es.close();
+    let sum = {};
+    try { sum = JSON.parse(ev.data); } catch { /* ignore */ }
+    endTerminal(t, sum);
+  });
+  // EventSource reconnects by itself and resumes from Last-Event-ID; only a
+  // session the server no longer knows ends here.
+  es.onerror = () => {
+    if (es.readyState !== EventSource.CLOSED) return;
+    getJSON("/api/term").then((d) => {
+      const s = (d.sessions || []).find((x) => x.id === t.id);
+      if (s && s.state === "running") setTimeout(() => streamTerminal(t), 1000);
+      else endTerminal(t, s || { exit_code: -1, error: "the session is gone" });
+    }).catch(() => setTimeout(() => streamTerminal(t), 2000));
+  };
+}
+
+function endTerminal(t, sum) {
+  if (t.state !== "running" && t.ended) return;
+  t.state = "exited";
+  t.exitCode = sum.exit_code ?? 0;
+  t.ended = true;
+  const code = t.exitCode;
+  t.xt.write("\r\n\x1b[2m[" + (sum.error ? sum.error : code === 0 ? "Session ended" : "Session ended with exit code " + code) + "]\x1b[0m\r\n");
+  const bar = h("div", { class: "term-ended" },
+    h("span", { text: code === 0 ? "This session has ended." : "This session ended with exit code " + code + "." }),
+    h("button", { type: "button", class: "btn sm", onclick: () => { closeTerminal(t.id); openTerminal(t.server); } }, icon("refresh"), "Reconnect"),
+    h("button", { type: "button", class: "btn sm ghost", onclick: () => closeTerminal(t.id) }, "Close"));
+  t.host.append(bar);
+  renderTerminalTabs();
+}
+
+// sendTerminalInput keeps keystrokes in order: one request at a time, with
+// anything typed meanwhile batched into the next.
+function sendTerminalInput(t, data) {
+  if (t.state !== "running") return;
+  t.sendQ += data;
+  if (t.sending) return;
+  const flush = async () => {
+    t.sending = true;
+    while (t.sendQ) {
+      const chunk = t.sendQ.slice(0, 16384);
+      t.sendQ = t.sendQ.slice(chunk.length);
+      try {
+        const r = await fetch(api("/api/term/input", { id: t.id }), {
+          method: "POST", headers: { "X-Fleet-Token": TOKEN, "Content-Type": "text/plain;charset=utf-8" }, body: chunk,
+        });
+        if (r.status === 409 || r.status === 404) { t.sendQ = ""; break; }
+      } catch { t.sendQ = ""; break; }
+    }
+    t.sending = false;
+  };
+  flush();
+}
+
+function activateTerminal(id) {
+  termUI.active = id;
+  for (const [sid, t] of termUI.sessions) t.host.hidden = sid !== id;
+  renderTerminalTabs();
+  const t = termUI.sessions.get(id);
+  if (t) requestAnimationFrame(() => { fitTerminal(t); t.xt.focus(); });
+}
+
+function fitTerminal(t) {
+  if (!t || t.host.hidden || state.view !== "terminal") return;
+  try { t.fit.fit(); } catch { /* not visible */ }
+}
+
+async function closeTerminal(id) {
+  const t = termUI.sessions.get(id);
+  if (!t) return;
+  if (t.es) t.es.close();
+  postJSON("/api/term/close", { id }).catch(() => {});
+  if (t.state === "running") setTimeout(() => postJSON("/api/term/close", { id }).catch(() => {}), 1500);
+  t.xt.dispose();
+  t.host.remove();
+  termUI.sessions.delete(id);
+  const i = termUI.order.indexOf(id);
+  termUI.order.splice(i, 1);
+  if (termUI.active === id) {
+    const next = termUI.order[Math.min(i, termUI.order.length - 1)];
+    if (next) activateTerminal(next);
+    else { termUI.active = ""; renderTerminalTabs(); }
+  } else renderTerminalTabs();
+}
+
+function setupTerminal() {
+  $("#term-new").addEventListener("click", (e) => newTerminalMenu(e.currentTarget));
+  termUI.ro = new ResizeObserver(debounce(() => fitTerminal(termUI.sessions.get(termUI.active)), 60));
+  termUI.ro.observe($("#term-stage"));
+  const tabs = $("#term-tabs");
+  tabs.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const i = termUI.order.indexOf(termUI.active);
+    const next = termUI.order[(i + (e.key === "ArrowRight" ? 1 : termUI.order.length - 1)) % termUI.order.length];
+    if (next) { e.preventDefault(); activateTerminal(next); $(".term-tab.on", tabs).focus(); }
+  });
 }
 
 function viewFromHash() {
