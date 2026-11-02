@@ -39,7 +39,11 @@ Omit sections that have no entries for that release.
 - **Web UI redesign.** A calmer, Apple-style look across Files, Fleet and Control: one blue
   accent, the system font, larger titles, softer corners, frosted toolbar, menus and
   dialogs, switches for on/off options, sentence-case labels, and matching light and dark
-  themes.
+  themes. Icons are now the Lucide set (bundled, no external requests) with a new app icon.
+  Tabs run Control → Fleet → Files and the UI opens on Control; `Alt+1`–`3` switch tabs.
+  Control's Overview greets you with a one-line fleet status and at-a-glance tiles; commands
+  can be pinned; Activity can be filtered; results can be downloaded or shown full screen.
+  Fleet shows each server as a card with CPU, memory and disk ring gauges (or as a list).
 - **Web UI: Control view, so the whole fleet can be run from the browser.** `fleet file ui`
   gains a *Control* tab that lists every fleet command, grouped by area, with a form built
   from the command's own arguments and flags. Runs stream live output (stdout and stderr),

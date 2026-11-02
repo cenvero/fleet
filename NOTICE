@@ -11,3 +11,6 @@ This project is licensed under the GNU Affero General Public License,
 version 3 or any later version. See `LICENSE` and `COPYING`.
 
 Third-party dependencies are declared in `go.mod` and `go.sum`.
+
+The web UI's icons (internal/webui/assets/index.html) are from Lucide
+(https://lucide.dev), ISC License; see internal/webui/assets/LICENSE-lucide.

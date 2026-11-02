@@ -3453,9 +3453,10 @@ function highlightHits(text, hits) {
 function paletteCommands() {
   const p = activePane();
   const cmds = [
+    { label: "Go to Control", icon: "command", run: () => showView("control") },
+    { label: "Go to Fleet", icon: "server", run: () => showView("overview") },
     { label: "Go to Files", icon: "folder", run: () => showView("files") },
-    { label: "Go to Fleet overview", icon: "server", run: () => showView("overview") },
-    { label: "Go to Control (run any fleet command)", icon: "command", run: () => showView("control") },
+    { label: "Show activity", icon: "history", run: () => showControl({ kind: "activity" }) },
     { label: "Show transfers", icon: "transfer", run: openTransfers },
     { label: "Keyboard shortcuts", icon: "keyboard", hint: "?", run: showShortcuts },
     { label: "Toggle light / dark theme", icon: "moon", run: toggleTheme },
@@ -3598,7 +3599,13 @@ function showShortcuts() {
   showModal([
     h("h2", { id, text: "Keyboard shortcuts" }),
     h("div", { class: "shortcut-grid" },
-      section("Navigate", [
+      section("Everywhere", [
+        ["Control / Fleet / Files", k("Alt", "1–3")],
+        ["Command palette", k(MOD, "K")],
+        ["Search this page", k("/")],
+        ["Run the open command", k(MOD, "Enter")],
+      ]),
+      section("Files: navigate", [
         ["Move through items", k("↑", "↓", "←", "→")],
         ["First / last item", k("Home", "End")],
         ["Open folder / preview file", k("Enter")],
@@ -3608,7 +3615,7 @@ function showShortcuts() {
         ["Filter this folder", k("/")],
         ["Next / previous pane", k("F6")],
       ]),
-      section("Select", [
+      section("Files: select", [
         ["Select item", k("Space")],
         ["Extend selection", k("Shift", "↑↓")],
         ["Select range", k("Shift", "Click")],
@@ -3616,7 +3623,7 @@ function showShortcuts() {
         ["Select all", k(MOD, "A")],
         ["Clear selection", k("Esc")],
       ]),
-      section("Act", [
+      section("Files: act", [
         ["Copy", k(MOD, "C")],
         ["Cut", k(MOD, "X")],
         ["Paste into this pane", k(MOD, "V")],
@@ -3627,8 +3634,7 @@ function showShortcuts() {
         ["Edit text file", k("E")],
         ["Context menu", k("Shift", "F10")],
       ]),
-      section("View", [
-        ["Command palette", k(MOD, "K")],
+      section("Files: view", [
         ["Preview panel", k("P")],
         ["List / icon view", k("V")],
         ["Show hidden files", k(".")],
@@ -3642,8 +3648,8 @@ function showShortcuts() {
 
 // ----------------------------------------------------------------- views / theme
 
-const VIEWS = ["files", "overview", "control"];
-const VIEW_TITLES = { files: "Cenvero Fleet — Files", overview: "Cenvero Fleet — Fleet overview", control: "Cenvero Fleet — Control" };
+const VIEWS = ["control", "overview", "files"];
+const VIEW_TITLES = { files: "Files — Cenvero Fleet", overview: "Fleet — Cenvero Fleet", control: "Control — Cenvero Fleet" };
 
 function showView(view) {
   if (!VIEWS.includes(view)) return;
@@ -3721,10 +3727,16 @@ function setupKeyboard() {
     if (modalOpen()) return; // the dialog traps its own keys
     if (menuOpen()) return;  // the menu handles its own keys
     if (modKey(e) && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
+    // Alt+1/2/3 switch between Control, Fleet and Files from anywhere.
+    if (e.altKey && !modKey(e) && /^Digit[123]$/.test(e.code)) { e.preventDefault(); showView(VIEWS[Number(e.code.slice(5)) - 1]); return; }
     if (isTypingTarget(e.target)) return;
     if (e.key === "?" || (e.shiftKey && e.key === "/")) { e.preventDefault(); showShortcuts(); return; }
     if (state.view !== "files") {
       if (e.key === "Escape") { closeTransfers(false); }
+      if (e.key === "/" && !modKey(e)) {
+        const box = state.view === "control" ? $("#ctl-filter") : $("#ov-filter");
+        if (box) { e.preventDefault(); box.focus(); box.select(); }
+      }
       return;
     }
     const p = activePane();
@@ -3751,7 +3763,7 @@ function setupKeyboard() {
 
 // ----------------------------------------------------------------- fleet overview (read-only)
 
-const ov = { data: null, loading: false, timer: 0, auto: true, sort: { key: "name", dir: 1 }, status: "all", filter: "", lastOk: 0, tick: 0 };
+const ov = { data: null, loading: false, timer: 0, auto: true, sort: { key: "name", dir: 1 }, status: "all", filter: "", lastOk: 0, tick: 0, layout: store.get("ovLayout", "cards") };
 const OV_REFRESH_MS = 10000;
 const STATUS_RANK = { online: 0, pending: 1, "reconcile-required": 2, "install-failed": 3, offline: 4 };
 
@@ -3802,7 +3814,7 @@ function renderAlertBadge() {
   badge.textContent = String(n);
   badge.classList.toggle("warn", a.critical === 0);
   badge.setAttribute("aria-label", plural(n, "open alert"));
-  $("#tab-overview").setAttribute("aria-label", "Fleet overview" + (n ? ", " + plural(n, "open alert") : ""));
+  $("#tab-overview").setAttribute("aria-label", "Fleet" + (n ? ", " + plural(n, "open alert") : ""));
 }
 
 function metricClass(v) { return v >= 90 ? "crit" : v >= 75 ? "warn" : ""; }
@@ -3951,6 +3963,8 @@ function renderOverview() {
   empty.hidden = rows.length > 0;
   empty.replaceChildren(d.servers.length ? "No servers match the current filter." : h("span", null, "No servers yet. ",
     h("button", { type: "button", class: "linkish", onclick: () => openCommand("server add"), text: "Add your first server" }), "."));
+  renderServerCards(rows, d);
+  if (state.view === "control" && ctl.page.kind === "home" && !$("#ctl-filter").value) renderHome();
 
   const list = $("#ov-alerts");
   if (d.alerts_restricted) list.replaceChildren(h("li", { class: "alert-none", text: "Hidden by the token this UI was started with." }));
@@ -4000,7 +4014,94 @@ function openServerInFiles(name) {
   toast("Browsing " + name + " in pane " + paneNumber(p), "success");
 }
 
+
+// ---- fleet cards: one card per server with ring gauges
+
+function ring(label, value) {
+  const has = value !== undefined && value !== null && !isNaN(value);
+  const v = has ? Math.max(0, Math.min(100, value)) : 0;
+  const r = 21, c = 2 * Math.PI * r;
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox", "0 0 52 52");
+  svg.setAttribute("aria-hidden", "true");
+  const mk = (cls) => {
+    const el = document.createElementNS(SVGNS, "circle");
+    el.setAttribute("cx", "26"); el.setAttribute("cy", "26"); el.setAttribute("r", String(r));
+    el.setAttribute("class", cls);
+    return el;
+  };
+  const track = mk("ring-track");
+  const fill = mk("ring-fill " + metricClass(v));
+  fill.setAttribute("stroke-dasharray", c.toFixed(2));
+  fill.setAttribute("stroke-dashoffset", (c * (1 - v / 100)).toFixed(2));
+  fill.setAttribute("transform", "rotate(-90 26 26)");
+  svg.append(track);
+  if (has) svg.append(fill);
+  return h("div", has ? { class: "ring", role: "meter", "aria-label": label, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(v)), "aria-valuetext": Math.round(v) + "%" } : { class: "ring empty", title: "No metrics yet. The daemon (fleet start) collects them." },
+    h("div", { class: "ring-dial" }, svg, h("span", { class: "ring-val", text: has ? Math.round(v) + "%" : "—" })),
+    h("span", { class: "ring-label", text: label }));
+}
+
+function serverCard(s, d) {
+  const m = s.metrics || {};
+  const more = h("button", {
+    class: "icon-btn sm more-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": "Manage " + s.name, title: "Manage " + s.name,
+    onclick: (e) => { e.stopPropagation(); openMenu(serverMenuItems(s.name, s.reachable), { anchor: more, label: "Manage " + s.name }); },
+  }, icon("more"));
+  const total = s.alerts.critical + s.alerts.warning + s.alerts.info;
+  const statusCls = s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other";
+  const tags = Object.entries(s.tags || {}).sort(([x], [y]) => x.localeCompare(y));
+  return h("article", { class: "srv-card" + (s.reachable ? "" : " off"), dataset: { server: s.name } },
+    h("header", { class: "srv-card-head" },
+      h("span", { class: "srv-status " + statusCls }, h("span", { class: "dot " + statusCls }), statusLabel(s.status)),
+      total && !d.alerts_restricted ? h("span", { class: "badge " + (s.alerts.critical ? "crit" : s.alerts.warning ? "warn" : "info"), text: plural(total, "alert") }) : null,
+      more),
+    h("div", { class: "srv-card-title" },
+      h("h3", { text: s.name }),
+      h("p", { class: "srv-card-sub", title: s.last_error || null, text: [s.address, s.os ? s.os + (s.arch ? "/" + s.arch : "") : "", s.mode].filter(Boolean).join(" · ") })),
+    h("div", { class: "rings" }, ring("CPU", m.cpu_percent), ring("Memory", m.memory_percent), ring("Disk", m.disk_percent)),
+    tags.length ? h("div", { class: "tags" }, tags.map(([k, v]) => h("span", { class: "tag" }, h("b", { text: k }), "=" + v))) : null,
+    h("footer", { class: "srv-card-foot" },
+      h("span", { class: "srv-seen", title: fmtDateFull(s.last_seen), text: s.last_seen ? "Seen " + fmtRelative(s.last_seen) : "Never seen" }),
+      h("button", { class: "btn sm", type: "button", disabled: !s.reachable, onclick: () => openServerInFiles(s.name), title: s.reachable ? "Browse files on " + s.name : s.name + " is not reachable" }, icon("folder"), "Files"),
+      h("button", { class: "btn sm", type: "button", onclick: () => openCommand("exec", { args: [s.name] }), title: "Run a command on " + s.name }, icon("terminal"), "Run")));
+}
+
+function renderServerCards(rows, d) {
+  const box = $("#ov-cards");
+  const cardsMode = ov.layout === "cards";
+  box.hidden = !cardsMode;
+  $("#ov-table-wrap").hidden = cardsMode;
+  for (const b of $$("#ov-layout button")) {
+    const on = b.dataset.layout === ov.layout;
+    b.setAttribute("aria-checked", String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  if (!cardsMode) return;
+  if (!rows.length) {
+    box.replaceChildren(h("div", { class: "empty-state" }, tile("server", "blue", "xl"),
+      h("h3", { text: d.servers.length ? "No servers match" : "No servers yet" }),
+      h("p", { text: d.servers.length ? "Try a different filter." : "Add a server and its agent, and it shows up here with live status." }),
+      d.servers.length ? null : h("button", { type: "button", class: "btn primary lg", onclick: () => openCommand("server add") }, icon("plus"), "Add a server")));
+    return;
+  }
+  box.replaceChildren(...rows.map((s) => serverCard(s, d)));
+}
+
+function setOverviewLayout(layout) {
+  ov.layout = layout;
+  store.set("ovLayout", layout);
+  renderOverview();
+}
+
 function setupOverview() {
+  for (const b of $$("#ov-layout button")) b.addEventListener("click", () => setOverviewLayout(b.dataset.layout));
+  $("#ov-layout").addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    setOverviewLayout(ov.layout === "cards" ? "list" : "cards");
+    $("#ov-layout [aria-checked=true]").focus();
+  });
   const filter = $("#ov-filter");
   filter.addEventListener("input", debounce(() => { ov.filter = filter.value; renderOverview(); }, 100));
   filter.addEventListener("keydown", (e) => { if (e.key === "Escape" && filter.value) { e.stopPropagation(); filter.value = ""; ov.filter = ""; renderOverview(); } });
@@ -4722,13 +4823,13 @@ function init() {
 
 const CTL_GROUPS = [
   { id: "servers", label: "Servers", icon: "server", tint: "blue", desc: "Add, inspect and organise the machines you manage.", tops: ["server", "tag", "inventory", "doctor", "drift", "template", "ssh"] },
-  { id: "services", label: "Services & Logs", icon: "file-text", tint: "green", desc: "Start, stop and inspect services. Read journals and logs.", tops: ["service", "svc", "journal", "logs"] },
-  { id: "run", label: "Run & Automate", icon: "command", tint: "indigo", desc: "Run commands, background jobs, playbooks and schedules.", tops: ["exec", "job", "jobs", "run", "guard", "confirm", "revert", "cron", "tunnel", "automation", "approvals", "approve"] },
+  { id: "services", label: "Services & Logs", icon: "scroll", tint: "green", desc: "Start, stop and inspect services. Read journals and logs.", tops: ["service", "svc", "journal", "logs"] },
+  { id: "run", label: "Run & Automate", icon: "terminal", tint: "indigo", desc: "Run commands, background jobs, playbooks and schedules.", tops: ["exec", "job", "jobs", "run", "guard", "confirm", "revert", "cron", "tunnel", "automation", "approvals", "approve"] },
   { id: "files", label: "Files", icon: "folder", tint: "cyan", desc: "Copy, sync and manage files. The Files tab does this visually.", tops: ["file", "cp", "sync", "files", "filemanager"] },
-  { id: "monitor", label: "Monitoring", icon: "activity", tint: "orange", desc: "Health checks, live usage, alerts and notifications.", tops: ["health", "top", "alerts", "notify", "dashboard"] },
-  { id: "security", label: "Network & Security", icon: "lock", tint: "red", desc: "Firewalls, ports, keys, access tokens, secrets and policy.", tops: ["firewall", "fw", "port", "key", "token", "secret", "cmd-policy", "policy"] },
-  { id: "updates", label: "Updates", icon: "download", tint: "teal", desc: "Update the controller and keep every agent in step.", tops: ["update", "agent", "sync-agent"] },
-  { id: "controller", label: "Controller", icon: "laptop", tint: "gray", desc: "The daemon, configuration, backups and integrations.", tops: ["status", "start", "stop", "config", "backup", "database", "adjust-init", "version", "report", "context", "ai", "skill", "autocomplete", "shell-init", "daemon", "init", "recover", "self-uninstall"] },
+  { id: "monitor", label: "Monitoring", icon: "gauge", tint: "orange", desc: "Health checks, live usage, alerts and notifications.", tops: ["health", "top", "alerts", "notify", "dashboard"] },
+  { id: "security", label: "Network & Security", icon: "shield", tint: "red", desc: "Firewalls, ports, keys, access tokens, secrets and policy.", tops: ["firewall", "fw", "port", "key", "token", "secret", "cmd-policy", "policy"] },
+  { id: "updates", label: "Updates", icon: "cloud-download", tint: "teal", desc: "Update the controller and keep every agent in step.", tops: ["update", "agent", "sync-agent"] },
+  { id: "controller", label: "Controller", icon: "settings", tint: "gray", desc: "The daemon, configuration, backups and integrations.", tops: ["status", "start", "stop", "config", "backup", "database", "adjust-init", "version", "report", "context", "ai", "skill", "autocomplete", "shell-init", "daemon", "init", "recover", "self-uninstall"] },
 ];
 const CTL_OTHER = { id: "other", label: "Other", icon: "more", tint: "gray", desc: "Everything else.", tops: [] };
 
@@ -4803,13 +4904,13 @@ const CTL_FLAG_CHOICES = { mode: ["direct", "reverse"], from: ["local", "remote"
 // no required input); the rest open the prefilled form.
 const CTL_QUICK = [
   { key: "server add", icon: "plus", tint: "blue", desc: "Register a machine and install its agent." },
-  { key: "exec", icon: "command", tint: "indigo", desc: "On one server, a tag group or all of them." },
-  { key: "health", icon: "activity", tint: "orange", desc: "Offline, disk, swap, reboot and clock checks.", now: true },
-  { key: "svc status", icon: "info", tint: "green", desc: "State and recent logs of a systemd unit." },
-  { key: "inventory", icon: "list", tint: "blue", desc: "Hostnames, IPs, OS, resources and services.", flags: { json: true }, now: true },
-  { key: "update check", icon: "download", tint: "teal", desc: "See whether a newer release is available.", now: true },
+  { key: "exec", icon: "terminal", tint: "indigo", desc: "On one server, a tag group or all of them." },
+  { key: "health", icon: "heart-pulse", tint: "orange", desc: "Offline, disk, swap, reboot and clock checks.", now: true },
+  { key: "svc status", icon: "list-checks", tint: "green", desc: "State and recent logs of a systemd unit." },
+  { key: "inventory", icon: "layers", tint: "blue", desc: "Hostnames, IPs, OS, resources and services.", flags: { json: true }, now: true },
+  { key: "update check", icon: "cloud-download", tint: "teal", desc: "See whether a newer release is available.", now: true },
   { key: "backup", icon: "archive", tint: "gray", desc: "Configuration, keys and state as a tar.gz." },
-  { key: "logs", icon: "history", tint: "gray", desc: "Everything the controller has done.", now: true },
+  { key: "logs", icon: "scroll", tint: "gray", desc: "Everything the controller has done.", now: true },
 ];
 
 const ctl = {
@@ -4829,7 +4930,18 @@ const ctl = {
   quiet: new Set(),    // runs started by overview buttons (they toast themselves)
   poll: 0,
   formatted: true,
+  pins: store.get("pins", []),
+  actFilter: "all",
+  actQuery: "",
 };
+
+function isPinned(key) { return ctl.pins.includes(key); }
+function togglePin(key) {
+  ctl.pins = isPinned(key) ? ctl.pins.filter((k) => k !== key) : [...ctl.pins, key];
+  store.set("pins", ctl.pins);
+  renderSidebar();
+  toast(isPinned(key) ? "Pinned to Overview" : "Unpinned", "success");
+}
 
 const ctlKey = (path) => path.join(" ");
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
@@ -4939,19 +5051,30 @@ function renderSidebar() {
   const running = ctl.runs.filter((r) => r.state === "running").length;
   const top = h("ul", { class: "side-list", role: "list" },
     sideItem({ id: "home", label: "Overview", tileEl: tile("home", "blue"), on: p.kind === "home", onclick: () => showControl({ kind: "home" }) }),
-    sideItem({ id: "activity", label: "Activity", tileEl: tile("clock", "gray"), on: p.kind === "activity" || p.kind === "run", badge: running || 0, count: running ? undefined : ctl.runs.length || undefined, onclick: () => showControl({ kind: "activity" }) }));
+    sideItem({ id: "activity", label: "Activity", tileEl: tile("history", "gray"), on: p.kind === "activity" || p.kind === "run", badge: running || 0, count: running ? undefined : ctl.runs.length || undefined, onclick: () => showControl({ kind: "activity" }) }));
   const cats = [CTL_GROUPS, ctl.commands.some((c) => groupOf(c) === CTL_OTHER) ? [CTL_OTHER] : []].flat().map((g) => {
-    const curGroup = p.kind === "category" ? p.id : p.kind === "command" && ctl.byKey.has(p.id) ? groupOf(ctl.byKey.get(p.id)).id : "";
+    // A pinned command highlights its pin, not also its category.
+    const curGroup = p.kind === "category" ? p.id : p.kind === "command" && ctl.byKey.has(p.id) && !isPinned(p.id) ? groupOf(ctl.byKey.get(p.id)).id : "";
     return sideItem({ id: g.id, label: g.label, tileEl: tile(g.icon, g.tint), count: commandsIn(g.id).filter((c) => !c.unavailable).length || undefined, on: curGroup === g.id, onclick: () => showControl({ kind: "category", id: g.id }) });
   });
-  nav.replaceChildren(top, h("p", { class: "side-heading", text: "Categories" }), h("ul", { class: "side-list", role: "list" }, cats));
+  const pins = ctl.pins.filter((k) => ctl.byKey.has(k));
+  const pinned = pins.length ? [h("p", { class: "side-heading", text: "Pinned" }), h("ul", { class: "side-list", role: "list" }, pins.map((k) => {
+    const g = groupOf(ctl.byKey.get(k));
+    return sideItem({ id: "pin:" + k, label: cmdLabel(k), tileEl: tile(g.icon, g.tint), on: p.kind === "command" && p.id === k, onclick: () => openCommand(k) });
+  }))] : [];
+  nav.replaceChildren(top, ...pinned, h("p", { class: "side-heading", text: "Categories" }), h("ul", { class: "side-list", role: "list" }, cats));
   const badge = $("#ctl-badge");
   if (badge) { badge.hidden = !running; badge.textContent = String(running); }
 }
 
 // ---- navigation
 
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("result-expanded") && !modalOpen()) { e.stopPropagation(); toggleResultExpanded(false); }
+}, true);
+
 function showControl(page) {
+  if (document.body.classList.contains("result-expanded")) toggleResultExpanded(false);
   if (state.view !== "control") { ctl.page = page; showView("control"); return; }
   const filter = $("#ctl-filter");
   if (page.kind !== "search" && filter && filter.value) { filter.value = ""; ctl.filter = ""; }
@@ -4984,12 +5107,63 @@ function pageHead(title, sub, extra = []) {
 
 // ---- pages
 
+function greeting() {
+  const hr = new Date().getHours();
+  return hr < 5 ? "Good evening" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+}
+
+// fleetSentence sums up the fleet in one line, like a status headline.
+function fleetSentence() {
+  const d = ov.data;
+  if (!d) return "Checking on your fleet…";
+  const sm = d.summary;
+  if (!sm.total) return "No servers yet. Add your first one to get started.";
+  const down = sm.offline + sm.other;
+  const a = sm.alerts;
+  const parts = [];
+  if (!down) parts.push(sm.total === 1 ? "Your server is online." : "All " + sm.total + " servers are online.");
+  else parts.push(down + " of " + sm.total + " servers " + (down === 1 ? "needs" : "need") + " attention.");
+  if (!d.alerts_restricted) {
+    if (a.critical) parts.push(plural(a.critical, "critical alert") + ".");
+    else if (a.warning) parts.push(plural(a.warning, "warning") + ".");
+    else if (!down) parts.push("Nothing needs you right now.");
+  }
+  return parts.join(" ");
+}
+
+function glanceTiles() {
+  const d = ov.data;
+  if (!d || !d.summary.total) return null;
+  const sm = d.summary, a = sm.alerts;
+  const go = (status) => () => { showView("overview"); setOverviewStatus(status); };
+  const t = (label, value, iconName, tint, cls, onclick) => h("button", { type: "button", class: "glance", onclick },
+    tile(iconName, tint), h("span", { class: "glance-text" }, h("span", { class: "glance-val " + (cls || ""), text: String(value) }), h("span", { class: "glance-label", text: label })));
+  const alerts = d.alerts_restricted ? "—" : a.critical + a.warning + a.info;
+  return h("div", { class: "glance-row" },
+    t("Servers", sm.total, "server", "blue", "", go("all")),
+    t("Online", sm.online, "circle-check", "green", "", go("online")),
+    t("Need attention", sm.offline + sm.other, "wifi-off", (sm.offline + sm.other) ? "red" : "gray", (sm.offline + sm.other) ? "bad" : "", go("offline")),
+    t("Open alerts", alerts, "bell", a.critical ? "red" : a.warning ? "orange" : "gray", a.critical ? "bad" : "", go("alerts")));
+}
+
 function renderHome() {
   const recent = ctl.runs.slice(0, 5);
   const quick = CTL_QUICK.filter((q) => ctl.byKey.has(q.key));
+  const pins = ctl.pins.filter((k) => ctl.byKey.has(k));
+  if (!ov.data || Date.now() - ov.lastOk > 30000) loadOverview();
   $("#ctl-content").replaceChildren(h("div", { class: "page" },
-    pageHead("Control", "Everything fleet can do, in one place. Each action runs with this window's access token, command policy and audit log."),
+    h("header", { class: "hello" },
+      h("p", { class: "hello-kicker", text: greeting() }),
+      h("h1", { text: fleetSentence() })),
+    glanceTiles(),
     ctl.disabled ? callout("warn", "alert", h("p", { text: "Commands aren't available: " + ctl.disabled })) : null,
+    pins.length ? h("section", { class: "block" },
+      h("h2", { class: "block-title", text: "Pinned" }),
+      h("div", { class: "quick-grid compact" }, pins.map((k) => {
+        const g = groupOf(ctl.byKey.get(k));
+        return h("div", { class: "quick" }, h("button", { type: "button", class: "quick-main inline", onclick: () => openCommand(k) },
+          tile(g.icon, g.tint), h("span", { class: "quick-text" }, h("b", { text: cmdLabel(k) }), h("span", { class: "mono", text: "fleet " + k }))));
+      }))) : null,
     h("section", { class: "block" },
       h("h2", { class: "block-title", text: "Quick actions" }),
       h("div", { class: "quick-grid" }, quick.map((q) => h("div", { class: "quick" },
@@ -5087,8 +5261,17 @@ function renderCommandPage(key, prefill) {
   const g = groupOf(spec);
   const head = h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"),
     pageHead(cmdLabel(spec.path), spec.short && spec.short !== cmdLabel(spec.path) ? spec.short : ""));
+  const pinBtn = h("button", { type: "button", class: "pin-btn" + (isPinned(key) ? " on" : ""), "aria-pressed": String(isPinned(key)), title: "Pin to Overview" },
+    icon("star"), h("span", { text: isPinned(key) ? "Pinned" : "Pin" }));
+  pinBtn.addEventListener("click", () => {
+    togglePin(key);
+    pinBtn.classList.toggle("on", isPinned(key));
+    pinBtn.setAttribute("aria-pressed", String(isPinned(key)));
+    pinBtn.lastChild.textContent = isPinned(key) ? "Pinned" : "Pin";
+  });
   const cli = h("div", { class: "cli-chip" }, h("code", { text: "fleet " + key }),
-    spec.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null);
+    spec.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null,
+    spec.unavailable ? null : pinBtn);
   const kids = [backLink(g.label, { kind: "category", id: g.id }), head, cli];
   if (spec.unavailable) {
     kids.push(h("div", { class: "group" }, h("div", { class: "g-row notice" }, tile("lock", "gray"),
@@ -5345,13 +5528,41 @@ function runList(runs) {
     icon("chevron-right", "g-chev"))));
 }
 
+function filteredRuns() {
+  const q = ctl.actQuery.trim().toLowerCase();
+  return ctl.runs.filter((r) => {
+    if (ctl.actFilter === "running" && r.state !== "running") return false;
+    if (ctl.actFilter === "failed" && r.state !== "failed") return false;
+    if (ctl.actFilter === "done" && r.state !== "ok") return false;
+    return !q || cmdLabel(r.path).toLowerCase().includes(q) || r.command.join(" ").toLowerCase().includes(q);
+  });
+}
+
 function renderActivity() {
   const clear = h("button", { type: "button", class: "btn", disabled: !ctl.runs.some((r) => r.state !== "running"), onclick: clearRuns }, "Clear");
+  const count = (st) => ctl.runs.filter((r) => st === "all" || (st === "done" ? r.state === "ok" : r.state === st)).length;
+  const seg = h("div", { class: "segmented", role: "radiogroup", "aria-label": "Show" }, [["all", "All"], ["running", "Running"], ["done", "Done"], ["failed", "Failed"]].map(([v, label]) =>
+    h("button", { type: "button", role: "radio", "aria-checked": String(ctl.actFilter === v), onclick: () => { ctl.actFilter = v; renderActivity(); } }, label, h("span", { class: "seg-count", text: String(count(v)) }))));
+  const search = h("label", { class: "field search-field act-search" }, icon("search"),
+    h("input", { type: "search", placeholder: "Filter", "aria-label": "Filter activity", value: ctl.actQuery, spellcheck: "false" }));
+  const input = search.querySelector("input");
+  input.addEventListener("input", debounce(() => {
+    ctl.actQuery = input.value;
+    const list = $("#act-list");
+    if (list) list.replaceChildren(activityBody());
+  }, 80));
   $("#ctl-content").replaceChildren(h("div", { class: "page narrow" },
     backLink("Control", { kind: "home" }),
     pageHead("Activity", "Commands run from this window. The newest 60 are kept while it's open.", [clear]),
-    ctl.runs.length ? runList(ctl.runs) : h("div", { class: "empty-state" }, tile("clock", "gray", "xl"), h("h3", { text: "No activity yet" }), h("p", { text: "Run something from Control or the Fleet tab and it will appear here." })),
+    ctl.runs.length ? h("div", { class: "toolbar-row" }, seg, search) : null,
+    h("div", { id: "act-list" }, activityBody()),
   ));
+}
+
+function activityBody() {
+  if (!ctl.runs.length) return h("div", { class: "empty-state" }, tile("history", "gray", "xl"), h("h3", { text: "No activity yet" }), h("p", { text: "Run something from Control or the Fleet tab and it will appear here." }));
+  const runs = filteredRuns();
+  return runs.length ? runList(runs) : h("div", { class: "group" }, h("p", { class: "empty-row", text: "Nothing matches." }));
 }
 
 function renderRunPage(id) {
@@ -5382,7 +5593,9 @@ function showResult(id) {
           h("button", { type: "button", role: "radio", "aria-checked": String(!ctl.formatted), onclick: () => { ctl.formatted = false; renderTermFormatted(); } }, "Raw")),
         h("button", { type: "button", class: "btn sm", id: "ctl-out-rerun", hidden: true, onclick: rerunActive }, icon("refresh"), "Run again"),
         h("button", { type: "button", class: "btn sm danger", id: "ctl-out-cancel", hidden: true, onclick: cancelActiveRun }, "Stop"),
-        h("button", { type: "button", class: "icon-btn sm", title: "Copy output", "aria-label": "Copy output", onclick: copyActiveOutput }, icon("copy")))),
+        h("button", { type: "button", class: "icon-btn sm", title: "Copy output", "aria-label": "Copy output", onclick: copyActiveOutput }, icon("copy")),
+        h("button", { type: "button", class: "icon-btn sm", title: "Download output", "aria-label": "Download output", onclick: downloadActiveOutput }, icon("download")),
+        h("button", { type: "button", class: "icon-btn sm", id: "ctl-out-expand", title: "Full screen", "aria-label": "Full screen", "aria-pressed": "false", onclick: toggleResultExpanded }, icon("maximize")))),
     h("p", { class: "result-note", id: "ctl-out-trunc", hidden: true, text: "Earlier output was dropped to keep memory bounded. The newest 4 MiB are shown." }),
     h("pre", { class: "term", id: "ctl-term", tabindex: "0", "aria-label": "Output" }),
     h("div", { class: "formatted", id: "ctl-formatted", hidden: true })));
@@ -5462,7 +5675,11 @@ function runsChanged() {
   renderSidebar();
   if (state.view !== "control") return;
   const k = ctl.page.kind;
-  if (k === "activity") renderActivity();
+  if (k === "activity") {
+    const list = $("#act-list");
+    if (list && document.activeElement && document.activeElement.closest && document.activeElement.closest(".act-search")) list.replaceChildren(activityBody());
+    else renderActivity();
+  }
   else if (k === "home" && !$("#ctl-filter").value) renderHome();
 }
 
@@ -5707,6 +5924,37 @@ async function clearRuns() {
   } catch (err) { toast(err.message, "error"); }
 }
 
+function downloadActiveOutput() {
+  const run = ctl.runs.find((r) => r.id === ctl.active);
+  const o = ctl.out.get(ctl.active);
+  if (!run || !o) return;
+  const text = stripAnsi(o.chunks.map((c) => c.text).join(""));
+  const json = /^[[{]/.test(text.trim()) && (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const blob = new Blob([text], { type: json ? "application/json" : "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const stamp = (run.started || "").replace(/[:.]/g, "-").slice(0, 19);
+  const a = h("a", { href: url, download: "fleet-" + run.path.join("-") + "-" + stamp + (json ? ".json" : ".txt") });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function toggleResultExpanded(force) {
+  const card = $(".result");
+  if (!card) return;
+  const on = typeof force === "boolean" ? force : !card.classList.contains("expanded");
+  card.classList.toggle("expanded", on);
+  document.body.classList.toggle("result-expanded", on);
+  const btn = $("#ctl-out-expand");
+  if (btn) {
+    btn.setAttribute("aria-pressed", String(on));
+    btn.title = on ? "Exit full screen" : "Full screen";
+    btn.setAttribute("aria-label", btn.title);
+    setIcon(btn.querySelector("svg"), on ? "minimize" : "maximize");
+  }
+}
+
 function copyActiveOutput() {
   const o = ctl.out.get(ctl.active);
   const text = o ? stripAnsi(o.chunks.map((c) => c.text).join("")) : "";
@@ -5732,19 +5980,19 @@ function serverMenuItems(name, reachable) {
   const has = (k) => !ctl.byKey.size || ctl.byKey.has(k);
   return [
     { title: name },
-    has("service list") && { label: "Services", icon: "activity", run: go("service list", [name], null, true) },
-    has("svc status") && { label: "Unit status…", icon: "info", run: go("svc status") },
-    has("journal") && { label: "Journal…", icon: "file-text", run: go("journal") },
-    has("exec") && { label: "Run a command…", icon: "command", run: go("exec") },
+    has("service list") && { label: "Services", icon: "layers", run: go("service list", [name], null, true) },
+    has("svc status") && { label: "Unit status…", icon: "list-checks", run: go("svc status") },
+    has("journal") && { label: "Journal…", icon: "scroll", run: go("journal") },
+    has("exec") && { label: "Run a command…", icon: "terminal", run: go("exec") },
     "sep",
-    has("server metrics") && { label: "Live metrics", icon: "activity", run: go("server metrics", [name], null, true), disabled: !reachable },
-    has("doctor") && { label: "Health checklist", icon: "check", run: go("doctor", [name], null, true) },
-    has("firewall status") && { label: "Firewall status", icon: "lock", run: go("firewall status", [name], null, true) },
-    has("port list") && { label: "Open ports", icon: "hash", run: go("port list", [name], null, true) },
+    has("server metrics") && { label: "Live metrics", icon: "chart", run: go("server metrics", [name], null, true), disabled: !reachable },
+    has("doctor") && { label: "Health checklist", icon: "heart-pulse", run: go("doctor", [name], null, true) },
+    has("firewall status") && { label: "Firewall status", icon: "shield", run: go("firewall status", [name], null, true) },
+    has("port list") && { label: "Open ports", icon: "network", run: go("port list", [name], null, true) },
     "sep",
-    has("server show") && { label: "Details", icon: "eye", run: go("server show", [name], null, true) },
+    has("server show") && { label: "Details", icon: "info", run: go("server show", [name], null, true) },
     has("tag") && { label: "Edit tags…", icon: "tag", run: go("tag") },
-    has("server reconnect") && { label: "Reconnect…", icon: "refresh", run: go("server reconnect") },
+    has("server reconnect") && { label: "Reconnect…", icon: "plug", run: go("server reconnect") },
     "sep",
     has("server remove") && { label: "Remove…", icon: "trash", danger: true, run: go("server remove") },
   ];
@@ -5793,7 +6041,7 @@ function setupControl() {
 
 function viewFromHash() {
   const v = location.hash.replace(/^#/, "");
-  return VIEWS.includes(v) ? v : "files";
+  return VIEWS.includes(v) ? v : "control";
 }
 
 init();

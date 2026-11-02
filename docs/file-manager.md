@@ -354,8 +354,12 @@ the transfers dock. The same secure transfer engine runs underneath.
   verified as they go; if verification fails the download is aborted, so the browser
   shows a failed download rather than a corrupt file.
 - **Very large folders** (tens of thousands of entries) scroll smoothly.
-- **Fleet overview** (the *Fleet* tab): a table of every server with its status, mode,
-  OS, CPU/memory/disk, last seen, tags and open alerts, with filters and auto-refresh.
+- The tabs are **Control**, **Fleet** and **Files**, in that order; the UI opens on
+  Control. `Alt+1`, `Alt+2` and `Alt+3` switch between them from anywhere, `/` searches
+  the current page, and `?` lists every shortcut.
+- **Fleet overview** (the *Fleet* tab): every server as a card (status, OS, ring gauges for
+  CPU, memory and disk, tags, alerts) or, with the layout switch, as a table with
+  last seen and sortable columns; filters and auto-refresh apply to both.
   *Browse* opens that server in a file pane; *Manage* opens a menu of per-server actions
   (services, unit status, journal, run a command, live metrics, health checklist,
   firewall, open ports, definition, tags, reconnect, remove). *Add server* opens the
@@ -363,7 +367,9 @@ the transfers dock. The same secure transfer engine runs underneath.
   started with `--token`, the overview is authorized like `fleet server list`,
   `fleet alerts` and `fleet tag`.
 - **Control** (the *Control* tab): every fleet command, from the browser, laid out like
-  System Settings. A sidebar lists *Overview*, *Activity* and the categories (Servers,
+  System Settings. *Overview* opens with a one-line summary of the fleet ("All 4 servers
+  are online.") and at-a-glance tiles. Star any command to pin it to the Overview and the
+  sidebar. A sidebar lists *Overview*, *Activity*, your pinned commands and the categories (Servers,
   Services & Logs, Run & Automate, Files, Monitoring, Network & Security, Updates,
   Controller), and search finds any command by its plain-language name or its CLI name
   (also from the `Ctrl/Cmd+K` palette). Each command opens a form built from its own
@@ -371,8 +377,9 @@ the transfers dock. The same secure transfer engine runs underneath.
   switches, the rest of the options sit behind an *Options* disclosure, and the
   equivalent terminal command is shown (copyable) above *Run*. *Overview* has quick
   actions and recent activity. Output streams live into a result card; JSON output can
-  be shown as a table. Runs can be stopped (interrupt, then kill after 5 s) and run
-  again, and *Activity* keeps the newest 60 with 4 MiB of output each. Up to 8 commands
+  be shown as a table, and output can be copied, downloaded or opened full screen. Runs can
+  be stopped (interrupt, then kill after 5 s) and run again, and *Activity* (filter by
+  state or text) keeps the newest 60 with 4 MiB of output each. Up to 8 commands
   run at once.
 
 ### How Control runs commands
