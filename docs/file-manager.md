@@ -354,8 +354,8 @@ the transfers dock. The same secure transfer engine runs underneath.
   verified as they go; if verification fails the download is aborted, so the browser
   shows a failed download rather than a corrupt file.
 - **Very large folders** (tens of thousands of entries) scroll smoothly.
-- The tabs are **Control**, **Fleet** and **Files**, in that order; the UI opens on
-  Control. `Alt+1`, `Alt+2` and `Alt+3` switch between them from anywhere, `/` searches
+- The tabs are **Fleet**, **Control** and **Files**, in that order; the UI opens on
+  Fleet. `Alt+1`, `Alt+2` and `Alt+3` switch between them from anywhere, `/` searches
   the current page, and `?` lists every shortcut.
 - **Fleet overview** (the *Fleet* tab): every server as a card (status, OS, ring gauges for
   CPU, memory and disk, tags, alerts) or, with the layout switch, as a table with

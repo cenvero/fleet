@@ -3453,8 +3453,8 @@ function highlightHits(text, hits) {
 function paletteCommands() {
   const p = activePane();
   const cmds = [
-    { label: "Go to Control", icon: "command", run: () => showView("control") },
     { label: "Go to Fleet", icon: "server", run: () => showView("overview") },
+    { label: "Go to Control", icon: "command", run: () => showView("control") },
     { label: "Go to Files", icon: "folder", run: () => showView("files") },
     { label: "Show activity", icon: "history", run: () => showControl({ kind: "activity" }) },
     { label: "Show transfers", icon: "transfer", run: openTransfers },
@@ -3600,7 +3600,7 @@ function showShortcuts() {
     h("h2", { id, text: "Keyboard shortcuts" }),
     h("div", { class: "shortcut-grid" },
       section("Everywhere", [
-        ["Control / Fleet / Files", k("Alt", "1–3")],
+        ["Fleet / Control / Files", k("Alt", "1–3")],
         ["Command palette", k(MOD, "K")],
         ["Search this page", k("/")],
         ["Run the open command", k(MOD, "Enter")],
@@ -3648,7 +3648,7 @@ function showShortcuts() {
 
 // ----------------------------------------------------------------- views / theme
 
-const VIEWS = ["control", "overview", "files"];
+const VIEWS = ["overview", "control", "files"];
 const VIEW_TITLES = { files: "Files — Cenvero Fleet", overview: "Fleet — Cenvero Fleet", control: "Control — Cenvero Fleet" };
 
 function showView(view) {
@@ -3727,7 +3727,7 @@ function setupKeyboard() {
     if (modalOpen()) return; // the dialog traps its own keys
     if (menuOpen()) return;  // the menu handles its own keys
     if (modKey(e) && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
-    // Alt+1/2/3 switch between Control, Fleet and Files from anywhere.
+    // Alt+1/2/3 switch between Fleet, Control and Files from anywhere.
     if (e.altKey && !modKey(e) && /^Digit[123]$/.test(e.code)) { e.preventDefault(); showView(VIEWS[Number(e.code.slice(5)) - 1]); return; }
     if (isTypingTarget(e.target)) return;
     if (e.key === "?" || (e.shiftKey && e.key === "/")) { e.preventDefault(); showShortcuts(); return; }
@@ -6041,7 +6041,7 @@ function setupControl() {
 
 function viewFromHash() {
   const v = location.hash.replace(/^#/, "");
-  return VIEWS.includes(v) ? v : "control";
+  return VIEWS.includes(v) ? v : "overview";
 }
 
 init();
