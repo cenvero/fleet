@@ -34,6 +34,42 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+### Added
+
+- **Web UI redesign.** A calmer, Apple-style look across Files, Fleet and Control: one blue
+  accent, the system font, larger titles, softer corners, frosted toolbar, menus and
+  dialogs, switches for on/off options, sentence-case labels, and matching light and dark
+  themes. Icons are now the Lucide set (bundled, no external requests) with a new app icon.
+  Tabs run Fleet → Control → Files and the UI opens on Fleet; `Alt+1`–`3` switch tabs.
+  Control's Overview greets you with a one-line fleet status and at-a-glance tiles; commands
+  can be pinned; Activity can be filtered; results can be downloaded or shown full screen.
+  Fleet shows each server as a card with CPU, memory and disk ring gauges (or as a list).
+- **Web UI: Terminal.** A *Terminal* tab with interactive shells on direct-mode servers,
+  in tabs (xterm.js, vendored, WebGL-rendered). Open one from the tab, a server card or
+  menu, Control or the palette; `top`/`vim` work, the size follows the window, a reload
+  re-attaches, and an ended session can reconnect. Each tab is `fleet ssh` run by the
+  controller under a pseudo-terminal with the UI's token, so RBAC, the command-policy
+  refusal, host-key pinning and audit apply unchanged. The page CSP stays strict: scripts
+  are `'self'` only, and `<style>` elements need a nonce that changes on every load.
+- **Web UI: Control view, so the whole fleet can be run from the browser.** `fleet file ui`
+  gains a *Control* tab that lists every fleet command, grouped by area, with a form built
+  from the command's own arguments and flags. Runs stream live output (stdout and stderr),
+  can be cancelled, keep a history, and show JSON output as a table. Quick actions cover
+  common work (add a server, run a command, fleet health, unit status, updates, backup).
+  The *Fleet* overview gains *Add server*, a per-server *Manage* menu (services, journal,
+  run a command, live metrics, health checklist, firewall, ports, tags, reconnect, remove)
+  and *Ack* / *Snooze 1h* buttons on open alerts. The command palette lists every command.
+- Each run is the `fleet` binary itself, started as a child process with this controller's
+  config dir and the token the UI was launched with. RBAC, command policy, redaction,
+  confirmations and audit therefore apply exactly as in a terminal, and the UI also audits
+  each run as `webui.command` (command path only, never arguments). The browser cannot set
+  `--token`, `--config-dir` or the environment. Interactive commands (`dashboard`, `ssh`,
+  `config edit`, the terminal file manager, `daemon`, `init`, `recover`, `self-uninstall`)
+  are listed with the reason they need a terminal and are refused. Prompts get no terminal
+  and fail closed unless the operator ticks `--yes` / `--confirm`. Commands that change
+  things ask for confirmation in the browser first. Values of password and secret flags are
+  masked in the run history, and stdin input is never kept.
+
 ## [v2.6.1] — 2026-10-23 (stable)
 
 ### Fixed

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Cenvero / Shubhdeep Singh
 //
-// Cenvero Fleet web file manager + read-only Fleet overview. Vanilla JS, no
+// Cenvero Fleet web UI: file manager, Fleet overview and Control (every fleet
+// command). Vanilla JS, no
 // build step, no dependencies, no external requests. The CSP forbids inline
 // scripts, inline styles and event-handler attributes, so every behaviour
 // lives here, DOM is built with createElement/textContent (never innerHTML
@@ -3452,8 +3453,11 @@ function highlightHits(text, hits) {
 function paletteCommands() {
   const p = activePane();
   const cmds = [
+    { label: "Go to Fleet", icon: "server", run: () => showView("overview") },
+    { label: "Go to Control", icon: "command", run: () => showView("control") },
     { label: "Go to Files", icon: "folder", run: () => showView("files") },
-    { label: "Go to Fleet overview", icon: "server", run: () => showView("overview") },
+    { label: "Go to Terminal", icon: "terminal", run: () => showView("terminal") },
+    { label: "Show activity", icon: "history", run: () => showControl({ kind: "activity" }) },
     { label: "Show transfers", icon: "transfer", run: openTransfers },
     { label: "Keyboard shortcuts", icon: "keyboard", hint: "?", run: showShortcuts },
     { label: "Toggle light / dark theme", icon: "moon", run: toggleTheme },
@@ -3474,6 +3478,14 @@ function paletteCommands() {
       { label: "Paste", icon: "clipboard", hint: MOD + "+V", run: () => pasteInto(p) },
     );
     if (state.panes.length > 1) cmds.push({ label: "Close pane", icon: "x", run: () => removePane(p) });
+  for (const srv of terminalServers()) {
+    cmds.push({ label: "Open terminal on " + srv.name, icon: "terminal", run: () => openTerminal(srv.name) });
+  }
+  for (const c of ctl.commands) {
+    if (c.unavailable) continue;
+    const key = ctlKey(c.path);
+    cmds.push({ label: cmdLabel(c.path), hint: "fleet " + key, icon: "command", run: () => openCommand(key) });
+  }
   }
   return cmds;
 }
@@ -3521,8 +3533,11 @@ function openPalette() {
     }).filter(Boolean).slice(0, q ? 6 : 4));
     push("Commands", paletteCommands().map((c) => {
       const m = score(c.label);
-      return m ? Object.assign({}, c, { hits: m.hits, score: m.score }) : null;
-    }).filter(Boolean).sort((a, b) => (q ? b.score - a.score : 0)).slice(0, q ? 10 : 20));
+      if (m) return Object.assign({}, c, { hits: m.hits, score: m.score });
+      // Fleet commands also match their CLI name ("server add").
+      const alt = c.hint && c.hint.startsWith("fleet ") ? score(c.hint) : null;
+      return alt ? Object.assign({}, c, { hits: [], score: alt.score - 1 }) : null;
+    }).filter(Boolean).sort((a, b) => (q ? b.score - a.score : 0)).slice(0, q ? 12 : 20));
 
     list.replaceChildren();
     options = [];
@@ -3588,7 +3603,13 @@ function showShortcuts() {
   showModal([
     h("h2", { id, text: "Keyboard shortcuts" }),
     h("div", { class: "shortcut-grid" },
-      section("Navigate", [
+      section("Everywhere", [
+        ["Fleet / Control / Files / Terminal", k("Alt", "1–4")],
+        ["Command palette", k(MOD, "K")],
+        ["Search this page", k("/")],
+        ["Run the open command", k(MOD, "Enter")],
+      ]),
+      section("Files: navigate", [
         ["Move through items", k("↑", "↓", "←", "→")],
         ["First / last item", k("Home", "End")],
         ["Open folder / preview file", k("Enter")],
@@ -3598,7 +3619,7 @@ function showShortcuts() {
         ["Filter this folder", k("/")],
         ["Next / previous pane", k("F6")],
       ]),
-      section("Select", [
+      section("Files: select", [
         ["Select item", k("Space")],
         ["Extend selection", k("Shift", "↑↓")],
         ["Select range", k("Shift", "Click")],
@@ -3606,7 +3627,7 @@ function showShortcuts() {
         ["Select all", k(MOD, "A")],
         ["Clear selection", k("Esc")],
       ]),
-      section("Act", [
+      section("Files: act", [
         ["Copy", k(MOD, "C")],
         ["Cut", k(MOD, "X")],
         ["Paste into this pane", k(MOD, "V")],
@@ -3617,8 +3638,7 @@ function showShortcuts() {
         ["Edit text file", k("E")],
         ["Context menu", k("Shift", "F10")],
       ]),
-      section("View", [
-        ["Command palette", k(MOD, "K")],
+      section("Files: view", [
         ["Preview panel", k("P")],
         ["List / icon view", k("V")],
         ["Show hidden files", k(".")],
@@ -3632,8 +3652,11 @@ function showShortcuts() {
 
 // ----------------------------------------------------------------- views / theme
 
+const VIEWS = ["overview", "control", "files", "terminal"];
+const VIEW_TITLES = { files: "Files — Cenvero Fleet", overview: "Fleet — Cenvero Fleet", control: "Control — Cenvero Fleet", terminal: "Terminal — Cenvero Fleet" };
+
 function showView(view) {
-  if (view !== "files" && view !== "overview") return;
+  if (!VIEWS.includes(view)) return;
   state.view = view;
   for (const tab of $$(".view-tab")) {
     const on = tab.dataset.view === view;
@@ -3642,9 +3665,13 @@ function showView(view) {
   }
   $("#view-files").hidden = view !== "files";
   $("#view-overview").hidden = view !== "overview";
-  document.title = view === "files" ? "Cenvero Fleet — Files" : "Cenvero Fleet — Fleet overview";
+  $("#view-control").hidden = view !== "control";
+  $("#view-terminal").hidden = view !== "terminal";
+  document.title = VIEW_TITLES[view];
   if (location.hash !== "#" + view) history.replaceState(null, "", location.pathname + "#" + view);
   if (view === "overview") { closePreview(); loadOverview(); scheduleOverview(); }
+  else if (view === "control") { closePreview(); stopOverviewTimer(); showControlPage(); }
+  else if (view === "terminal") { closePreview(); stopOverviewTimer(); showTerminalView(); }
   else {
     stopOverviewTimer();
     const p = activePane();
@@ -3705,11 +3732,19 @@ function setupKeyboard() {
     if (editor.open) return;
     if (modalOpen()) return; // the dialog traps its own keys
     if (menuOpen()) return;  // the menu handles its own keys
+    // Keys typed into a terminal belong to the shell (Ctrl+K, Alt+digits…).
+    if (e.target && e.target.closest && e.target.closest(".xterm")) return;
     if (modKey(e) && !e.altKey && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
+    // Alt+1–4 switch between Fleet, Control, Files and Terminal from anywhere.
+    if (e.altKey && !modKey(e) && /^Digit[1-4]$/.test(e.code)) { e.preventDefault(); showView(VIEWS[Number(e.code.slice(5)) - 1]); return; }
     if (isTypingTarget(e.target)) return;
     if (e.key === "?" || (e.shiftKey && e.key === "/")) { e.preventDefault(); showShortcuts(); return; }
     if (state.view !== "files") {
       if (e.key === "Escape") { closeTransfers(false); }
+      if (e.key === "/" && !modKey(e)) {
+        const box = state.view === "control" ? $("#ctl-filter") : $("#ov-filter");
+        if (box) { e.preventDefault(); box.focus(); box.select(); }
+      }
       return;
     }
     const p = activePane();
@@ -3736,7 +3771,7 @@ function setupKeyboard() {
 
 // ----------------------------------------------------------------- fleet overview (read-only)
 
-const ov = { data: null, loading: false, timer: 0, auto: true, sort: { key: "name", dir: 1 }, status: "all", filter: "", lastOk: 0, tick: 0 };
+const ov = { data: null, loading: false, timer: 0, auto: true, sort: { key: "name", dir: 1 }, status: "all", filter: "", lastOk: 0, tick: 0, layout: store.get("ovLayout", "cards") };
 const OV_REFRESH_MS = 10000;
 const STATUS_RANK = { online: 0, pending: 1, "reconcile-required": 2, "install-failed": 3, offline: 4 };
 
@@ -3787,7 +3822,7 @@ function renderAlertBadge() {
   badge.textContent = String(n);
   badge.classList.toggle("warn", a.critical === 0);
   badge.setAttribute("aria-label", plural(n, "open alert"));
-  $("#tab-overview").setAttribute("aria-label", "Fleet overview" + (n ? ", " + plural(n, "open alert") : ""));
+  $("#tab-overview").setAttribute("aria-label", "Fleet" + (n ? ", " + plural(n, "open alert") : ""));
 }
 
 function metricClass(v) { return v >= 90 ? "crit" : v >= 75 ? "warn" : ""; }
@@ -3905,11 +3940,16 @@ function renderOverview() {
     if (s.alerts.info) alertsCell.append(h("span", { class: "badge info", text: s.alerts.info + " info" }));
     const tags = Object.entries(s.tags || {}).sort(([x], [y]) => x.localeCompare(y));
     const browse = h("button", {
-      class: "btn sm", type: "button", disabled: !s.reachable,
+      class: "btn sm ghost", type: "button", disabled: !s.reachable,
       title: s.reachable ? "Browse " + s.name + " in the active pane" : s.name + " is not reachable",
       "aria-label": "Browse files on " + s.name,
       onclick: (e) => { e.stopPropagation(); openServerInFiles(s.name); },
     }, icon("folder"), "Browse");
+    const manage = h("button", {
+      class: "icon-btn more-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": "false",
+      title: "Services, logs, commands and settings for " + s.name, "aria-label": "Manage " + s.name,
+      onclick: (e) => { e.stopPropagation(); openMenu(serverMenuItems(s.name, s.reachable), { anchor: manage, label: "Manage " + s.name }); },
+    }, icon("more"));
     const tr = h("tr", { class: s.reachable ? "" : "unreachable", dataset: { server: s.name } },
       h("td", { class: "c-status", "data-label": "Status" }, h("span", { class: "status-cell" }, h("span", { class: "dot " + (s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other") }), statusLabel(s.status))),
       h("td", { class: "c-name" }, h("div", { class: "srv-name" },
@@ -3923,13 +3963,16 @@ function renderOverview() {
       h("td", { class: "c-seen", "data-label": "Last seen", title: fmtDateFull(s.last_seen) + (s.last_error ? "\n" + s.last_error : ""), text: fmtRelative(s.last_seen) }),
       h("td", { class: "c-tags", "data-label": "Tags" }, tags.length ? h("div", { class: "tags" }, tags.map(([k, v]) => h("span", { class: "tag" }, h("b", { text: k }), "=" + v))) : h("span", { class: "muted", text: d.tags_restricted ? "—" : "No tags" })),
       alertsCell,
-      h("td", { class: "c-open" }, browse),
+      h("td", { class: "c-open" }, h("div", { class: "row-actions" }, browse, manage)),
     );
     tr.addEventListener("click", () => { if (s.reachable) openServerInFiles(s.name); });
     return tr;
   }));
   empty.hidden = rows.length > 0;
-  empty.textContent = d.servers.length ? "No servers match the current filter." : "No servers yet — add one with `fleet server add`.";
+  empty.replaceChildren(d.servers.length ? "No servers match the current filter." : h("span", null, "No servers yet. ",
+    h("button", { type: "button", class: "linkish", onclick: () => openCommand("server add"), text: "Add your first server" }), "."));
+  renderServerCards(rows, d);
+  if (state.view === "control" && ctl.page.kind === "home" && !$("#ctl-filter").value) renderHome();
 
   const list = $("#ov-alerts");
   if (d.alerts_restricted) list.replaceChildren(h("li", { class: "alert-none", text: "Hidden by the token this UI was started with." }));
@@ -3947,6 +3990,9 @@ function renderOverview() {
           al.code ? h("span", { text: al.code }) : null,
           h("span", { text: "since " + fmtRelative(al.created_at), title: fmtDateFull(al.created_at) }),
           al.occurrences > 1 ? h("span", { text: al.occurrences + "×" }) : null)),
+      h("div", { class: "alert-actions" },
+        h("button", { type: "button", class: "btn sm", title: "Acknowledge this alert", onclick: (e) => { e.currentTarget.disabled = true; alertAction(al, "ack"); } }, icon("check"), "Ack"),
+        h("button", { type: "button", class: "btn sm ghost", title: "Silence notifications for an hour", onclick: (e) => { e.currentTarget.disabled = true; alertAction(al, "snooze"); } }, icon("clock"), "Snooze 1h")),
     )));
   }
 }
@@ -3976,7 +4022,96 @@ function openServerInFiles(name) {
   toast("Browsing " + name + " in pane " + paneNumber(p), "success");
 }
 
+
+// ---- fleet cards: one card per server with ring gauges
+
+function ring(label, value) {
+  const has = value !== undefined && value !== null && !isNaN(value);
+  const v = has ? Math.max(0, Math.min(100, value)) : 0;
+  const r = 21, c = 2 * Math.PI * r;
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox", "0 0 52 52");
+  svg.setAttribute("aria-hidden", "true");
+  const mk = (cls) => {
+    const el = document.createElementNS(SVGNS, "circle");
+    el.setAttribute("cx", "26"); el.setAttribute("cy", "26"); el.setAttribute("r", String(r));
+    el.setAttribute("class", cls);
+    return el;
+  };
+  const track = mk("ring-track");
+  const fill = mk("ring-fill " + metricClass(v));
+  fill.setAttribute("stroke-dasharray", c.toFixed(2));
+  fill.setAttribute("stroke-dashoffset", (c * (1 - v / 100)).toFixed(2));
+  fill.setAttribute("transform", "rotate(-90 26 26)");
+  svg.append(track);
+  if (has) svg.append(fill);
+  return h("div", has ? { class: "ring", role: "meter", "aria-label": label, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(v)), "aria-valuetext": Math.round(v) + "%" } : { class: "ring empty", title: "No metrics yet. The daemon (fleet start) collects them." },
+    h("div", { class: "ring-dial" }, svg, h("span", { class: "ring-val", text: has ? Math.round(v) + "%" : "—" })),
+    h("span", { class: "ring-label", text: label }));
+}
+
+function serverCard(s, d) {
+  const m = s.metrics || {};
+  const more = h("button", {
+    class: "icon-btn sm more-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": "false", "aria-label": "Manage " + s.name, title: "Manage " + s.name,
+    onclick: (e) => { e.stopPropagation(); openMenu(serverMenuItems(s.name, s.reachable), { anchor: more, label: "Manage " + s.name }); },
+  }, icon("more"));
+  const total = s.alerts.critical + s.alerts.warning + s.alerts.info;
+  const statusCls = s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other";
+  const tags = Object.entries(s.tags || {}).sort(([x], [y]) => x.localeCompare(y));
+  return h("article", { class: "srv-card" + (s.reachable ? "" : " off"), dataset: { server: s.name } },
+    h("header", { class: "srv-card-head" },
+      h("span", { class: "srv-status " + statusCls }, h("span", { class: "dot " + statusCls }), statusLabel(s.status)),
+      total && !d.alerts_restricted ? h("span", { class: "badge " + (s.alerts.critical ? "crit" : s.alerts.warning ? "warn" : "info"), text: plural(total, "alert") }) : null,
+      more),
+    h("div", { class: "srv-card-title" },
+      h("h3", { text: s.name }),
+      h("p", { class: "srv-card-sub", title: s.last_error || null, text: [s.address, s.os ? s.os + (s.arch ? "/" + s.arch : "") : "", s.mode].filter(Boolean).join(" · ") })),
+    h("div", { class: "rings" }, ring("CPU", m.cpu_percent), ring("Memory", m.memory_percent), ring("Disk", m.disk_percent)),
+    tags.length ? h("div", { class: "tags" }, tags.map(([k, v]) => h("span", { class: "tag" }, h("b", { text: k }), "=" + v))) : null,
+    h("footer", { class: "srv-card-foot" },
+      h("span", { class: "srv-seen", title: fmtDateFull(s.last_seen), text: s.last_seen ? "Seen " + fmtRelative(s.last_seen) : "Never seen" }),
+      h("button", { class: "btn sm", type: "button", disabled: !s.reachable, onclick: () => openServerInFiles(s.name), title: s.reachable ? "Browse files on " + s.name : s.name + " is not reachable" }, icon("folder"), "Files"),
+      s.mode === "direct"
+        ? h("button", { class: "btn sm", type: "button", onclick: () => openTerminal(s.name), title: "Open a terminal on " + s.name }, icon("terminal"), "Terminal")
+        : h("button", { class: "btn sm", type: "button", onclick: () => openCommand("exec", { args: [s.name] }), title: "Run a command on " + s.name }, icon("command"), "Run")));
+}
+
+function renderServerCards(rows, d) {
+  const box = $("#ov-cards");
+  const cardsMode = ov.layout === "cards";
+  box.hidden = !cardsMode;
+  $("#ov-table-wrap").hidden = cardsMode;
+  for (const b of $$("#ov-layout button")) {
+    const on = b.dataset.layout === ov.layout;
+    b.setAttribute("aria-checked", String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  if (!cardsMode) return;
+  if (!rows.length) {
+    box.replaceChildren(h("div", { class: "empty-state" }, tile("server", "blue", "xl"),
+      h("h3", { text: d.servers.length ? "No servers match" : "No servers yet" }),
+      h("p", { text: d.servers.length ? "Try a different filter." : "Add a server and its agent, and it shows up here with live status." }),
+      d.servers.length ? null : h("button", { type: "button", class: "btn primary lg", onclick: () => openCommand("server add") }, icon("plus"), "Add a server")));
+    return;
+  }
+  box.replaceChildren(...rows.map((s) => serverCard(s, d)));
+}
+
+function setOverviewLayout(layout) {
+  ov.layout = layout;
+  store.set("ovLayout", layout);
+  renderOverview();
+}
+
 function setupOverview() {
+  for (const b of $$("#ov-layout button")) b.addEventListener("click", () => setOverviewLayout(b.dataset.layout));
+  $("#ov-layout").addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    setOverviewLayout(ov.layout === "cards" ? "list" : "cards");
+    $("#ov-layout [aria-checked=true]").focus();
+  });
   const filter = $("#ov-filter");
   filter.addEventListener("input", debounce(() => { ov.filter = filter.value; renderOverview(); }, 100));
   filter.addEventListener("keydown", (e) => { if (e.key === "Escape" && filter.value) { e.stopPropagation(); filter.value = ""; ov.filter = ""; renderOverview(); } });
@@ -4641,6 +4776,8 @@ function init() {
   setupTransfers();
   setupPreview();
   setupOverview();
+  setupControl();
+  setupTerminal();
 
   $("#theme-toggle").addEventListener("click", toggleTheme);
   $("#open-palette").addEventListener("click", openPalette);
@@ -4649,7 +4786,8 @@ function init() {
   $(".views").addEventListener("keydown", (e) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
-    const next = state.view === "files" ? "overview" : "files";
+    const i = VIEWS.indexOf(state.view);
+    const next = VIEWS[(i + (e.key === "ArrowRight" ? 1 : VIEWS.length - 1)) % VIEWS.length];
     showView(next);
     $("#tab-" + next).focus();
   });
@@ -4666,7 +4804,7 @@ function init() {
     if (drag.active) { drag.target = null; onDragUp({ clientX: drag.startX, clientY: drag.startY }); }
   });
   window.addEventListener("hashchange", () => {
-    const v = location.hash === "#overview" ? "overview" : "files";
+    const v = viewFromHash();
     if (v !== state.view) showView(v);
   });
   window.addEventListener("beforeunload", (e) => {
@@ -4674,12 +4812,1587 @@ function init() {
     if (busy || (editor.open && editor.dirty)) { e.preventDefault(); e.returnValue = ""; }
   });
 
-  const initialView = location.hash === "#overview" ? "overview" : "files";
+  const initialView = viewFromHash();
   state.view = initialView;
   loadServers().then(() => {
     showView(initialView);
     if (initialView !== "overview") loadOverview(); // fills the alert badge
   });
+}
+
+// ----------------------------------------------------------------- control (every fleet command)
+//
+// The Control view runs any non-interactive fleet command. The backend starts
+// each run as a fresh `fleet` child process under the token, policy and audit
+// of this UI (see internal/webui/console.go), so nothing here can do more than
+// the CLI would. This code only builds argument vectors from forms, streams
+// output and keeps a run history.
+//
+// Design: like System Settings. A sidebar of categories, plain-language names
+// for every command, forms that show only what is needed (options behind a
+// disclosure), and one obvious action per page.
+
+const CTL_GROUPS = [
+  { id: "servers", label: "Servers", icon: "server", tint: "blue", desc: "Add, inspect and organise the machines you manage.", tops: ["server", "tag", "inventory", "doctor", "drift", "template", "ssh"] },
+  { id: "services", label: "Services & Logs", icon: "scroll", tint: "green", desc: "Start, stop and inspect services. Read journals and logs.", tops: ["service", "svc", "journal", "logs"] },
+  { id: "run", label: "Run & Automate", icon: "terminal", tint: "indigo", desc: "Run commands, background jobs, playbooks and schedules.", tops: ["exec", "job", "jobs", "run", "guard", "confirm", "revert", "cron", "tunnel", "automation", "approvals", "approve"] },
+  { id: "files", label: "Files", icon: "folder", tint: "cyan", desc: "Copy, sync and manage files. The Files tab does this visually.", tops: ["file", "cp", "sync", "files", "filemanager"] },
+  { id: "monitor", label: "Monitoring", icon: "gauge", tint: "orange", desc: "Health checks, live usage, alerts and notifications.", tops: ["health", "top", "alerts", "notify", "dashboard"] },
+  { id: "security", label: "Network & Security", icon: "shield", tint: "red", desc: "Firewalls, ports, keys, access tokens, secrets and policy.", tops: ["firewall", "fw", "port", "key", "token", "secret", "cmd-policy", "policy"] },
+  { id: "updates", label: "Updates", icon: "cloud-download", tint: "teal", desc: "Update the controller and keep every agent in step.", tops: ["update", "agent", "sync-agent"] },
+  { id: "controller", label: "Controller", icon: "settings", tint: "gray", desc: "The daemon, configuration, backups and integrations.", tops: ["status", "start", "stop", "config", "backup", "database", "adjust-init", "version", "report", "context", "ai", "skill", "autocomplete", "shell-init", "daemon", "init", "recover", "self-uninstall"] },
+];
+const CTL_OTHER = { id: "other", label: "Other", icon: "more", tint: "gray", desc: "Everything else.", tops: [] };
+
+// Plain-language names. The CLI path is still shown on each page.
+const CTL_LABELS = {
+  "adjust-init": "Apply config migrations", "agent update": "Roll out agent updates", "agent version": "Agent versions",
+  "ai": "Machine-readable help", "alerts": "Alerts", "alerts ack": "Acknowledge an alert", "alerts suppress": "Snooze an alert",
+  "alerts unsuppress": "Unsnooze an alert", "approvals": "Approvals overview", "approvals list": "Pending approvals",
+  "approvals reject": "Reject an approval", "approve": "Approve and run", "autocomplete": "Shell completion",
+  "autocomplete install": "Install shell completion", "automation get": "Show a script", "automation list": "Automation scripts",
+  "automation rm": "Delete a script", "automation set": "Save a script", "backup": "Back up the controller",
+  "cmd-policy set": "Set command policy", "cmd-policy show": "Command policy", "config agent-port": "Default agent port",
+  "config backup": "Back up configuration", "config edit": "Edit configuration", "config export": "Export state",
+  "config import": "Import state", "config restore": "Restore from a backup", "config set": "Change a setting",
+  "config show": "Configuration", "config validate": "Validate configuration", "confirm": "Confirm a guarded change",
+  "context": "Agent reference", "cp": "Copy between servers", "cron add": "Schedule a job", "cron list": "Scheduled jobs",
+  "cron rm": "Remove a scheduled job", "daemon": "Run the daemon in the foreground", "dashboard": "Terminal dashboard",
+  "database shift": "Move to another database", "database show": "Database", "doctor": "Health checklist",
+  "drift": "Check for config drift", "drift capture": "Capture a drift baseline", "exec": "Run a command",
+  "file cat": "Print a file", "file compress": "Compress files", "file copy": "Copy between servers",
+  "file defaults set": "Set transfer defaults", "file defaults show": "Transfer defaults", "file diff": "Compare a file",
+  "file download": "Download", "file edit": "Edit a file", "file extract": "Extract an archive", "file list": "List a folder",
+  "file mkdir": "New folder", "file move": "Move between servers", "file mv": "Rename or move", "file rm": "Delete a file",
+  "file stat": "File info", "file tail": "Tail a file", "file ui": "Web UI", "file upload": "Upload", "file view": "View a file",
+  "filemanager": "Terminal file manager", "filemanager ui": "Web UI", "files": "Terminal file manager",
+  "firewall add": "Add a firewall rule", "firewall disable": "Turn the firewall off", "firewall enable": "Turn the firewall on",
+  "firewall status": "Firewall status", "fw allow": "Allow a port", "fw enable": "Turn the firewall on safely",
+  "fw status": "Firewall overview", "guard": "Run with auto-revert", "health": "Fleet health", "init": "Set up the controller",
+  "inventory": "Inventory", "job logs": "Job output", "job run": "Start a background job", "job status": "Job status",
+  "job wait": "Wait for a job", "jobs": "Background jobs", "journal": "Journal", "key audit": "Key history",
+  "key export-pub": "Export public keys", "key fingerprint": "Key fingerprints", "key rotate": "Rotate controller keys",
+  "logs": "Audit log", "notify add": "Add a notification target", "notify list": "Notification targets",
+  "notify rm": "Remove a notification target", "notify test": "Send a test notification", "policy set": "Set output policy",
+  "policy show": "Output policy", "port close": "Close a port", "port list": "Open ports", "port open": "Open a port",
+  "recover": "Recover after a reinstall", "report": "Report a problem", "revert": "Revert a guarded change",
+  "run": "Run a playbook", "secret list": "Secrets", "secret rm": "Delete a secret", "secret rotate": "Rotate a secret",
+  "secret set": "Store a secret", "self-uninstall": "Uninstall Fleet", "server add": "Add a server",
+  "server bootstrap": "Install an agent", "server enroll-token": "New enrollment token", "server list": "All servers",
+  "server metrics": "Live metrics", "server mode": "Change connection mode", "server reconnect": "Reconnect",
+  "server remove": "Remove a server", "server show": "Server details", "service add": "Track a service",
+  "service list": "Services", "service logs": "Service logs", "service restart": "Restart a service",
+  "service start": "Start a service", "service stop": "Stop a service", "shell-init": "Shell integration",
+  "skill agents": "Write AGENTS.md", "skill claude": "Install for Claude Code", "skill codex": "Install for Codex",
+  "skill list": "AI integrations", "ssh": "Open a shell", "start": "Start the daemon", "status": "Controller status",
+  "stop": "Stop the daemon", "svc disable": "Disable a unit", "svc enable": "Enable a unit", "svc restart": "Restart a unit",
+  "svc start": "Start a unit", "svc status": "Unit status", "svc stop": "Stop a unit", "sync": "Live folder sync",
+  "sync-agent": "Sync agent versions", "sync-agent auto": "Automatic agent sync", "tag": "Tags",
+  "template apply": "Apply a template", "template list": "Templates", "token create": "Create an access token",
+  "token list": "Access tokens", "token revoke": "Revoke an access token", "top": "Live resource usage",
+  "tunnel": "Port forward", "update apply": "Install the update", "update channel": "Update channel",
+  "update check": "Check for updates", "update rollback": "Roll back an update", "version": "Version",
+};
+
+// Friendlier names for positional arguments.
+const CTL_ARG_LABELS = {
+  "srcServer:path": "From", "dstServer:path": "To", "serverA:path": "First", "serverB:path": "Second",
+  "localPort:targetHost:targetPort": "Forward", "alert-id": "Alert", "id": "ID", "deny|confirm": "List",
+  "on|off|status": "Setting", "slack|webhook": "Type", "index|url": "Target", "stable|beta": "Channel",
+  "key=value": "Tags", "risky command": "Command", "playbook.yaml": "Playbook", "port[/proto]": "Port",
+  "archivePath": "Archive", "local-dir": "Local folder", "remote-dir": "Server folder", "local": "On this computer",
+  "remote": "On the server", "item": "Items", "ip": "IP address",
+};
+const CTL_ARG_HINTS = {
+  "srcServer:path": "server:/path", "dstServer:path": "server:/path", "serverA:path": "server:/path", "serverB:path": "server:/path",
+  "localPort:targetHost:targetPort": "8080:localhost:80", "key=value": "env=prod role=web", "port[/proto]": "443 or 53/udp",
+};
+// Arguments with a fixed set of values become pop-up menus.
+const CTL_CHOICES = new Set(["deny|confirm", "on|off|status", "slack|webhook", "stable|beta"]);
+const CTL_FLAG_CHOICES = { mode: ["direct", "reverse"], from: ["local", "remote"], format: ["table", "json"], "on-fail": [] };
+
+// Quick actions on the Control home page. `now` runs straight away (read-only,
+// no required input); the rest open the prefilled form.
+const CTL_QUICK = [
+  { key: "server add", icon: "plus", tint: "blue", desc: "Register a machine and install its agent." },
+  { key: "exec", icon: "terminal", tint: "indigo", desc: "On one server, a tag group or all of them." },
+  { key: "health", icon: "heart-pulse", tint: "orange", desc: "Offline, disk, swap, reboot and clock checks.", now: true },
+  { key: "svc status", icon: "list-checks", tint: "green", desc: "State and recent logs of a systemd unit." },
+  { key: "inventory", icon: "layers", tint: "blue", desc: "Hostnames, IPs, OS, resources and services.", flags: { json: true }, now: true },
+  { key: "update check", icon: "cloud-download", tint: "teal", desc: "See whether a newer release is available.", now: true },
+  { key: "backup", icon: "archive", tint: "gray", desc: "Configuration, keys and state as a tar.gz." },
+  { key: "logs", icon: "scroll", tint: "gray", desc: "Everything the controller has done.", now: true },
+];
+
+const ctl = {
+  commands: [],
+  byKey: new Map(),
+  loaded: null,
+  disabled: "",
+  page: { kind: "home", id: "" },
+  current: "",
+  filter: "",
+  runs: [],
+  active: "",
+  out: new Map(),      // run id -> { chunks: [], lastSeq }
+  requests: new Map(), // run id -> { path, args } (this tab's runs, for "Run again")
+  streams: new Map(),  // run id -> EventSource
+  waiters: new Map(),  // run id -> [resolve]
+  quiet: new Set(),    // runs started by overview buttons (they toast themselves)
+  poll: 0,
+  formatted: true,
+  pins: store.get("pins", []),
+  actFilter: "all",
+  actQuery: "",
+};
+
+function isPinned(key) { return ctl.pins.includes(key); }
+function togglePin(key) {
+  ctl.pins = isPinned(key) ? ctl.pins.filter((k) => k !== key) : [...ctl.pins, key];
+  store.set("pins", ctl.pins);
+  renderSidebar();
+  toast(isPinned(key) ? "Pinned to Overview" : "Unpinned", "success");
+}
+
+const ctlKey = (path) => path.join(" ");
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+const stripAnsi = (s) => s.replace(ANSI_RE, "").replace(/\r(?!\n)/g, "\n");
+const capFirst = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+function cmdLabel(keyOrPath) {
+  const key = Array.isArray(keyOrPath) ? ctlKey(keyOrPath) : keyOrPath;
+  if (CTL_LABELS[key]) return CTL_LABELS[key];
+  const parts = key.split(" ");
+  return parts.length > 1 ? capFirst(parts[parts.length - 1]) + " " + parts.slice(0, -1).join(" ") : capFirst(key);
+}
+
+function humanFlag(name) {
+  const special = { "dsn": "DSN", "db-dsn": "Database DSN", "id": "ID", "url": "URL", "json": "JSON output", "yes": "Skip confirmation", "dry-run": "Dry run (change nothing)" };
+  if (special[name]) return special[name];
+  return capFirst(name.replace(/-/g, " ").replace(/\bip\b/g, "IP").replace(/\bssh\b/g, "SSH").replace(/\bdsn\b/g, "DSN"));
+}
+
+function humanArg(a, spec) {
+  if (CTL_ARG_LABELS[a.name]) return CTL_ARG_LABELS[a.name];
+  if (a.server && !a.name.includes(":")) return spec.path[0] === "server" && spec.path[1] === "add" ? "Name" : "Server";
+  return capFirst(a.name.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]/g, " ").toLowerCase());
+}
+
+// shellSplit splits "a 'b c' d\"e\"" into words, like a POSIX shell would
+// (quotes and backslashes, no expansion). The browser never runs a shell:
+// this only lets an operator type several arguments into one box.
+function shellSplit(text) {
+  const out = [];
+  let cur = "", has = false, quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = "";
+      else if (c === "\\" && quote === '"' && i + 1 < text.length && /["\\$`]/.test(text[i + 1])) cur += text[++i];
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; has = true; continue; }
+    if (c === "\\" && i + 1 < text.length) { cur += text[++i]; has = true; continue; }
+    if (/\s/.test(c)) { if (has) { out.push(cur); cur = ""; has = false; } continue; }
+    cur += c; has = true;
+  }
+  if (quote) throw new Error("unterminated " + (quote === "'" ? "single" : "double") + " quote");
+  if (has) out.push(cur);
+  return out;
+}
+
+// shellQuote renders one argument for the copyable command line.
+function shellQuote(a) {
+  if (a === "") return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a)) return a;
+  return "'" + a.replace(/'/g, "'\\''") + "'";
+}
+
+function groupOf(spec) {
+  return CTL_GROUPS.find((g) => g.tops.includes(spec.path[0])) || CTL_OTHER;
+}
+
+function groupById(id) {
+  return CTL_GROUPS.find((g) => g.id === id) || CTL_OTHER;
+}
+
+function tile(iconName, tint, cls = "") {
+  return h("span", { class: "tile tint-" + tint + (cls ? " " + cls : "") }, icon(iconName));
+}
+
+async function loadCommands() {
+  if (ctl.loaded) return ctl.loaded;
+  ctl.loaded = (async () => {
+    try {
+      const d = await getJSON("/api/commands");
+      ctl.commands = d.commands || [];
+      ctl.byKey = new Map(ctl.commands.map((c) => [ctlKey(c.path), c]));
+      ctl.disabled = "";
+    } catch (err) {
+      ctl.disabled = err.message || String(err);
+      ctl.loaded = null;
+    }
+    renderSidebar();
+  })();
+  return ctl.loaded;
+}
+
+function commandsIn(groupId) {
+  const g = groupById(groupId);
+  const order = g.tops || [];
+  return ctl.commands
+    .filter((c) => groupOf(c).id === groupId)
+    .sort((a, b) => (!!a.unavailable - !!b.unavailable) || (order.indexOf(a.path[0]) - order.indexOf(b.path[0])) || cmdLabel(a.path).localeCompare(cmdLabel(b.path)));
+}
+
+// ---- sidebar
+
+function sideItem({ id, label, tileEl, count, on, onclick, badge }) {
+  return h("li", null, h("button", {
+    type: "button", class: "side-item" + (on ? " on" : ""), "aria-current": on ? "page" : null, onclick, dataset: { id },
+  }, tileEl, h("span", { class: "side-label", text: label }),
+  badge ? h("span", { class: "side-badge", text: String(badge) }) : count !== undefined ? h("span", { class: "side-count", text: String(count) }) : null));
+}
+
+function renderSidebar() {
+  const nav = $("#ctl-nav");
+  if (!nav) return;
+  const p = ctl.page;
+  const running = ctl.runs.filter((r) => r.state === "running").length;
+  const top = h("ul", { class: "side-list", role: "list" },
+    sideItem({ id: "home", label: "Overview", tileEl: tile("home", "blue"), on: p.kind === "home", onclick: () => showControl({ kind: "home" }) }),
+    sideItem({ id: "activity", label: "Activity", tileEl: tile("history", "gray"), on: p.kind === "activity" || p.kind === "run", badge: running || 0, count: running ? undefined : ctl.runs.length || undefined, onclick: () => showControl({ kind: "activity" }) }));
+  const cats = [CTL_GROUPS, ctl.commands.some((c) => groupOf(c) === CTL_OTHER) ? [CTL_OTHER] : []].flat().map((g) => {
+    // A pinned command highlights its pin, not also its category.
+    const curGroup = p.kind === "category" ? p.id : p.kind === "command" && ctl.byKey.has(p.id) && !isPinned(p.id) ? groupOf(ctl.byKey.get(p.id)).id : "";
+    return sideItem({ id: g.id, label: g.label, tileEl: tile(g.icon, g.tint), count: commandsIn(g.id).filter((c) => !c.unavailable).length || undefined, on: curGroup === g.id, onclick: () => showControl({ kind: "category", id: g.id }) });
+  });
+  const pins = ctl.pins.filter((k) => ctl.byKey.has(k));
+  const pinned = pins.length ? [h("p", { class: "side-heading", text: "Pinned" }), h("ul", { class: "side-list", role: "list" }, pins.map((k) => {
+    const g = groupOf(ctl.byKey.get(k));
+    return sideItem({ id: "pin:" + k, label: cmdLabel(k), tileEl: tile(g.icon, g.tint), on: p.kind === "command" && p.id === k, onclick: () => openCommand(k) });
+  }))] : [];
+  nav.replaceChildren(top, ...pinned, h("p", { class: "side-heading", text: "Categories" }), h("ul", { class: "side-list", role: "list" }, cats));
+  const badge = $("#ctl-badge");
+  if (badge) { badge.hidden = !running; badge.textContent = String(running); }
+}
+
+// ---- navigation
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("result-expanded") && !modalOpen()) { e.stopPropagation(); toggleResultExpanded(false); }
+}, true);
+
+function showControl(page) {
+  if (document.body.classList.contains("result-expanded")) toggleResultExpanded(false);
+  if (state.view !== "control") { ctl.page = page; showView("control"); return; }
+  const filter = $("#ctl-filter");
+  if (page.kind !== "search" && filter && filter.value) { filter.value = ""; ctl.filter = ""; }
+  ctl.page = page;
+  ctl.current = page.kind === "command" ? page.id : "";
+  if (page.kind !== "command" && page.kind !== "run") ctl.active = "";
+  $(".ctl").dataset.page = page.kind;
+  renderSidebar();
+  const content = $("#ctl-content");
+  content.scrollTop = 0;
+  switch (page.kind) {
+    case "category": renderCategory(page.id); break;
+    case "command": renderCommandPage(page.id, page.prefill || {}); break;
+    case "activity": renderActivity(); break;
+    case "run": renderRunPage(page.id); break;
+    case "search": renderSearch(); break;
+    default: renderHome();
+  }
+}
+
+function backLink(label, page) {
+  return h("button", { type: "button", class: "back-link", onclick: () => showControl(page) }, icon("chevron-left"), label);
+}
+
+function pageHead(title, sub, extra = []) {
+  return h("header", { class: "page-head" },
+    h("div", { class: "page-titles" }, h("h1", { text: title }), sub ? h("p", { class: "page-sub", text: sub }) : null),
+    extra.length ? h("div", { class: "page-actions" }, extra) : null);
+}
+
+// ---- pages
+
+function greeting() {
+  const hr = new Date().getHours();
+  return hr < 5 ? "Good evening" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+}
+
+// fleetSentence sums up the fleet in one line, like a status headline.
+function fleetSentence() {
+  const d = ov.data;
+  if (!d) return "Checking on your fleet…";
+  const sm = d.summary;
+  if (!sm.total) return "No servers yet. Add your first one to get started.";
+  const down = sm.offline + sm.other;
+  const a = sm.alerts;
+  const parts = [];
+  if (!down) parts.push(sm.total === 1 ? "Your server is online." : "All " + sm.total + " servers are online.");
+  else parts.push(down + " of " + sm.total + " servers " + (down === 1 ? "needs" : "need") + " attention.");
+  if (!d.alerts_restricted) {
+    if (a.critical) parts.push(plural(a.critical, "critical alert") + ".");
+    else if (a.warning) parts.push(plural(a.warning, "warning") + ".");
+    else if (!down) parts.push("Nothing needs you right now.");
+  }
+  return parts.join(" ");
+}
+
+function glanceTiles() {
+  const d = ov.data;
+  if (!d || !d.summary.total) return null;
+  const sm = d.summary, a = sm.alerts;
+  const go = (status) => () => { showView("overview"); setOverviewStatus(status); };
+  const t = (label, value, iconName, tint, cls, onclick) => h("button", { type: "button", class: "glance", onclick },
+    tile(iconName, tint), h("span", { class: "glance-text" }, h("span", { class: "glance-val " + (cls || ""), text: String(value) }), h("span", { class: "glance-label", text: label })));
+  const alerts = d.alerts_restricted ? "—" : a.critical + a.warning + a.info;
+  return h("div", { class: "glance-row" },
+    t("Servers", sm.total, "server", "blue", "", go("all")),
+    t("Online", sm.online, "circle-check", "green", "", go("online")),
+    t("Need attention", sm.offline + sm.other, "wifi-off", (sm.offline + sm.other) ? "red" : "gray", (sm.offline + sm.other) ? "bad" : "", go("offline")),
+    t("Open alerts", alerts, "bell", a.critical ? "red" : a.warning ? "orange" : "gray", a.critical ? "bad" : "", go("alerts")));
+}
+
+function renderHome() {
+  const recent = ctl.runs.slice(0, 5);
+  const quick = CTL_QUICK.filter((q) => ctl.byKey.has(q.key));
+  const pins = ctl.pins.filter((k) => ctl.byKey.has(k));
+  if (!ov.data || Date.now() - ov.lastOk > 30000) loadOverview();
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    h("header", { class: "hello" },
+      h("p", { class: "hello-kicker", text: greeting() }),
+      h("h1", { text: fleetSentence() })),
+    glanceTiles(),
+    ctl.disabled ? callout("warn", "alert", h("p", { text: "Commands aren't available: " + ctl.disabled })) : null,
+    pins.length ? h("section", { class: "block" },
+      h("h2", { class: "block-title", text: "Pinned" }),
+      h("div", { class: "quick-grid compact" }, pins.map((k) => {
+        const g = groupOf(ctl.byKey.get(k));
+        return h("div", { class: "quick" }, h("button", { type: "button", class: "quick-main inline", onclick: () => openCommand(k) },
+          tile(g.icon, g.tint), h("span", { class: "quick-text" }, h("b", { text: cmdLabel(k) }), h("span", { class: "mono", text: "fleet " + k }))));
+      }))) : null,
+    h("section", { class: "block" },
+      h("h2", { class: "block-title", text: "Quick actions" }),
+      h("div", { class: "quick-grid" }, quick.map((q) => h("div", { class: "quick" },
+        h("button", { type: "button", class: "quick-main", onclick: () => openCommand(q.key, { flags: q.flags }) },
+          tile(q.icon, q.tint, "lg"),
+          h("span", { class: "quick-text" }, h("b", { text: cmdLabel(q.key) }), h("span", { text: q.desc }))),
+        q.now ? h("button", { type: "button", class: "quick-run", title: "Run now", "aria-label": "Run " + cmdLabel(q.key) + " now", onclick: () => openCommand(q.key, { flags: q.flags, run: true }) }, icon("play")) : null)))),
+    h("section", { class: "block" },
+      h("div", { class: "block-head" }, h("h2", { class: "block-title", text: "Recent activity" }),
+        ctl.runs.length ? h("button", { type: "button", class: "link-btn", onclick: () => showControl({ kind: "activity" }), text: "Show all" }) : null),
+      recent.length ? runList(recent) : h("div", { class: "group" }, h("p", { class: "empty-row", text: "Nothing yet. Commands you run will show up here." }))),
+    h("section", { class: "block" },
+      h("h2", { class: "block-title", text: "Browse" }),
+      h("div", { class: "group" }, CTL_GROUPS.map((g) => h("button", { type: "button", class: "g-row g-nav", onclick: () => showControl({ kind: "category", id: g.id }) },
+        tile(g.icon, g.tint),
+        h("span", { class: "g-text" }, h("span", { class: "g-title", text: g.label }), h("span", { class: "g-sub", text: g.desc })),
+        icon("chevron-right", "g-chev"))))),
+  ));
+}
+
+function commandRow(c) {
+  const key = ctlKey(c.path);
+  return h("button", { type: "button", class: "g-row g-nav" + (c.unavailable ? " dim" : ""), onclick: () => openCommand(key), title: c.unavailable ? "Needs a terminal: " + c.unavailable : null },
+    h("span", { class: "g-text" },
+      h("span", { class: "g-title" }, cmdLabel(c.path), c.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null, c.unavailable ? h("span", { class: "pill", text: "Terminal only" }) : null),
+      h("span", { class: "g-sub", text: c.short || "" })),
+    h("code", { class: "g-cli", text: key }),
+    icon("chevron-right", "g-chev"));
+}
+
+function renderCategory(id) {
+  const g = groupById(id);
+  const list = commandsIn(id);
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    backLink("Control", { kind: "home" }),
+    h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"), pageHead(g.label, g.desc)),
+    list.length ? h("div", { class: "group" }, list.map(commandRow)) : h("p", { class: "empty-row", text: "Loading…" }),
+  ));
+}
+
+function renderSearch() {
+  const q = ctl.filter.trim().toLowerCase();
+  const hits = ctl.commands.filter((c) => {
+    const key = ctlKey(c.path);
+    return key.includes(q) || cmdLabel(c.path).toLowerCase().includes(q) || (c.short || "").toLowerCase().includes(q);
+  });
+  const byGroup = new Map();
+  for (const c of hits) {
+    const g = groupOf(c);
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g).push(c);
+  }
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    pageHead("Results", hits.length ? plural(hits.length, "command") + " for “" + ctl.filter.trim() + "”" : "Nothing matches “" + ctl.filter.trim() + "”."),
+    ...[...byGroup.entries()].map(([g, cs]) => h("section", { class: "block" },
+      h("h2", { class: "block-title", text: g.label }),
+      h("div", { class: "group" }, cs.map(commandRow)))),
+  ));
+}
+
+// openCommand shows the form for `key`, prefilled with
+// { args: [values] | {name: value}, flags: {name: value}, run: bool }.
+async function openCommand(key, prefill = {}) {
+  await loadCommands();
+  if (!ctl.byKey.has(key)) { toast("Unknown command: fleet " + key, "error"); return; }
+  showControl({ kind: "command", id: key, prefill });
+}
+
+let ctlFieldSeq = 0;
+
+function gRow(labelText, control, { help = "", forId = "", cls = "" } = {}) {
+  return h("div", { class: "g-row g-field" + (cls ? " " + cls : "") },
+    h("div", { class: "g-text" },
+      h("label", { class: "g-title", for: forId || null, text: labelText }),
+      help ? h("span", { class: "g-sub", text: help }) : null),
+    h("div", { class: "g-control" }, control));
+}
+
+function switchControl(id, checked) {
+  const input = h("input", { id, type: "checkbox", role: "switch", checked });
+  return { input, el: h("span", { class: "switch" }, input, h("span", { class: "switch-track", "aria-hidden": "true" })) };
+}
+
+function selectControl(id, values, value, required) {
+  const sel = h("select", { id, class: "select-input" });
+  if (!required) sel.append(h("option", { value: "", text: "None" }));
+  else if (!values.includes(value)) sel.append(h("option", { value: "", text: "Choose…", disabled: true, selected: true }));
+  for (const v of values) sel.append(h("option", { value: v, text: v }));
+  if (value && values.includes(value)) sel.value = value;
+  return sel;
+}
+
+function renderCommandPage(key, prefill) {
+  const spec = ctl.byKey.get(key);
+  const g = groupOf(spec);
+  const head = h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"),
+    pageHead(cmdLabel(spec.path), spec.short && spec.short !== cmdLabel(spec.path) ? spec.short : ""));
+  const pinBtn = h("button", { type: "button", class: "pin-btn" + (isPinned(key) ? " on" : ""), "aria-pressed": String(isPinned(key)), title: "Pin to Overview" },
+    icon("star"), h("span", { text: isPinned(key) ? "Pinned" : "Pin" }));
+  pinBtn.addEventListener("click", () => {
+    togglePin(key);
+    pinBtn.classList.toggle("on", isPinned(key));
+    pinBtn.setAttribute("aria-pressed", String(isPinned(key)));
+    pinBtn.lastChild.textContent = isPinned(key) ? "Pinned" : "Pin";
+  });
+  const cli = h("div", { class: "cli-chip" }, h("code", { text: "fleet " + key }),
+    spec.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null,
+    spec.unavailable ? null : pinBtn);
+  const kids = [backLink(g.label, { kind: "category", id: g.id }), head, cli];
+  if (key === "ssh") {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const sel = selectControl(id, terminalServers().map((x) => x.name), "", true);
+    kids.push(h("div", { class: "group" }, gRow("Server", sel, { forId: id, help: "Direct-mode servers. The shell opens in the Terminal tab." })),
+      h("div", { class: "cmd-actions" }, h("button", { type: "button", class: "btn lg primary", onclick: () => { if (sel.value) openTerminal(sel.value); else sel.focus(); } }, icon("terminal"), "Open terminal")));
+    $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
+    return;
+  }
+  if (spec.unavailable) {
+    kids.push(h("div", { class: "group" }, h("div", { class: "g-row notice" }, tile("lock", "gray"),
+      h("div", { class: "g-text" },
+        h("span", { class: "g-title", text: "This one needs a terminal" }),
+        h("span", { class: "g-sub", text: capFirst(spec.unavailable) + "." })))));
+    if (spec.long) kids.push(aboutBlock(spec));
+    $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
+    return;
+  }
+
+  const fields = { args: [], flags: [], stdin: null, extra: null };
+  const argPrefill = prefill.args || [];
+  const flagPrefill = prefill.flags || {};
+  const details = [];
+  spec.args.forEach((a, i) => {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const pre = (Array.isArray(argPrefill) ? argPrefill[i] : argPrefill[a.name]) ?? "";
+    let input;
+    const isNewServer = spec.path[0] === "server" && spec.path[1] === "add";
+    if (a.server && !a.name.includes(":") && !isNewServer && state.servers.length) {
+      input = selectControl(id, state.servers.map((s) => s.name), pre, a.required);
+    } else if (CTL_CHOICES.has(a.name)) {
+      input = selectControl(id, a.suggest || a.name.split("|"), pre, a.required);
+    } else {
+      input = h("input", {
+        id, class: "text-input", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", value: pre,
+        placeholder: CTL_ARG_HINTS[a.name] || (a.variadic ? "Separate with spaces" : a.required ? "Required" : "Optional"),
+      });
+      if (/command|patterns|rule|url|path|file|local|remote|archive|item/i.test(a.name)) input.classList.add("mono");
+    }
+    fields.args.push({ spec: a, input });
+    details.push(gRow(humanArg(a, spec), input, { forId: id, help: a.variadic ? "One or more. Quote values that contain spaces." : "", cls: a.variadic || /command/.test(a.name) ? "wide" : "" }));
+  });
+
+  const optionRows = [];
+  for (const f of spec.flags) {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const pre = flagPrefill[f.name];
+    const help = capFirst(f.usage || "");
+    let row;
+    if (f.type === "bool") {
+      const sw = switchControl(id, pre !== undefined ? !!pre : f.default === "true");
+      fields.flags.push({ spec: f, input: sw.input });
+      row = gRow(humanFlag(f.name), sw.el, { help, forId: id, cls: "g-switch" });
+    } else {
+      let input;
+      const choices = CTL_FLAG_CHOICES[f.name];
+      if (choices && choices.length) input = selectControl(id, choices, pre !== undefined ? String(pre) : f.default || "", true);
+      else if (f.name === "server" && state.servers.length && f.type === "string") input = selectControl(id, state.servers.map((s) => s.name), pre || "", false);
+      else {
+        input = h("input", {
+          id, class: "text-input", spellcheck: "false", autocomplete: f.sensitive ? "new-password" : "off", autocapitalize: "off",
+          type: f.sensitive ? "password" : "text", value: pre !== undefined ? String(pre) : "",
+          placeholder: f.default ? f.default : f.type === "duration" ? "e.g. 30s, 5m, 1h" : f.type.endsWith("Slice") || f.type.endsWith("Array") ? "Comma separated" : f.required ? "Required" : "",
+        });
+        if (/path|key|file|dsn|cmd|command|dir|paths/.test(f.name)) input.classList.add("mono");
+        if (f.name === "server") input.setAttribute("list", serverDatalist());
+      }
+      fields.flags.push({ spec: f, input });
+      row = gRow(humanFlag(f.name), input, { help, forId: id });
+    }
+    row.title = "--" + f.name;
+    row.dataset.flag = f.name;
+    if (f.required) details.push(row);
+    else optionRows.push({ row, pre: pre !== undefined });
+  }
+
+  const form = h("form", { class: "cmd-form", autocomplete: "off" });
+  form.noValidate = true; // validation is ours (buildArgv), with clearer messages
+  if (details.length) form.append(h("section", { class: "block" }, h("div", { class: "group" }, details)));
+  if (optionRows.length) {
+    const openByDefault = optionRows.length <= 3 || optionRows.some((o) => o.pre);
+    form.append(h("details", { class: "block disclosure", open: openByDefault || null },
+      h("summary", { class: "disclosure-head" }, h("span", { text: "Options" }), h("span", { class: "disclosure-count", text: String(optionRows.length) }), icon("chevron-right", "disclosure-chev")),
+      h("div", { class: "group" }, optionRows.map((o) => o.row))));
+  }
+  if (spec.stdin) {
+    const id = "ctl-f-" + ++ctlFieldSeq;
+    const secret = spec.path[0] === "secret";
+    const input = secret
+      ? h("input", { id, class: "text-input", type: "password", autocomplete: "new-password", placeholder: "Value" })
+      : h("textarea", { id, class: "text-input mono stdin-box", rows: "7", spellcheck: "false", placeholder: "#!/bin/sh" });
+    fields.stdin = input;
+    form.append(h("section", { class: "block" },
+      h("h2", { class: "block-title", text: secret ? "Secret value" : "Script" }),
+      h("div", { class: "group" }, h("div", { class: "g-row g-field wide" }, h("div", { class: "g-control" }, input))),
+      h("p", { class: "block-foot", text: secret ? "Sent once to the command. Never shown again or kept by this page." : "Sent to the command as its input." })));
+  }
+  const extraId = "ctl-f-" + ++ctlFieldSeq;
+  fields.extra = h("input", { id: extraId, class: "text-input mono", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", placeholder: "--flag value 'quoted arg'" });
+  form.append(h("details", { class: "block disclosure subtle" },
+    h("summary", { class: "disclosure-head" }, h("span", { text: "Advanced" }), icon("chevron-right", "disclosure-chev")),
+    h("div", { class: "group" }, gRow("Extra arguments", fields.extra, { forId: extraId, help: "Added to the end, as typed. Nothing is expanded.", cls: "wide" }))));
+
+  const preview = h("code", { class: "cmd-preview-text" });
+  const copyBtn = h("button", { type: "button", class: "icon-btn sm", title: "Copy terminal command", "aria-label": "Copy terminal command" }, icon("copy"));
+  const err = h("p", { class: "form-error", role: "alert" });
+  const runBtn = h("button", { type: "submit", class: "btn lg " + (spec.destructive ? "danger-solid" : "primary") }, icon("play"), spec.destructive ? "Run…" : "Run");
+  form.append(
+    h("div", { class: "cmd-footer" },
+      h("div", { class: "cmd-preview", title: "The same thing in a terminal" }, h("span", { class: "prompt", text: "$" }), preview, copyBtn),
+      h("div", { class: "cmd-actions" }, err, h("span", { class: "kbd-hint" }, h("kbd", { text: MOD }), h("kbd", { text: "↵" })), runBtn)),
+  );
+
+  const build = () => buildArgv(spec, fields);
+  const refresh = () => {
+    try {
+      const { args } = build();
+      preview.textContent = "fleet " + [...spec.path, ...maskArgs(spec, args)].map(shellQuote).join(" ");
+    } catch {
+      preview.textContent = "fleet " + key + " …";
+    }
+    err.textContent = "";
+    for (const el of form.querySelectorAll("[aria-invalid]")) el.removeAttribute("aria-invalid");
+  };
+  form.addEventListener("input", refresh);
+  form.addEventListener("change", refresh);
+  form.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && modKey(e)) { e.preventDefault(); form.requestSubmit(); }
+  });
+  copyBtn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(preview.textContent); toast("Command copied", "success"); }
+    catch { toast("Couldn't copy to the clipboard", "error"); }
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    let req;
+    try { req = build(); } catch (ex) {
+      err.textContent = ex.message;
+      if (ex.field) { ex.field.setAttribute("aria-invalid", "true"); ex.field.focus(); }
+      return;
+    }
+    err.textContent = "";
+    if (spec.destructive) {
+      const ok = await confirmDialog({
+        title: cmdLabel(spec.path) + "?",
+        message: "This changes your fleet. Here's exactly what will run:",
+        extra: [h("pre", { class: "confirm-cmd", text: preview.textContent })],
+        okLabel: "Run", danger: true,
+      });
+      if (!ok) return;
+    }
+    runBtn.disabled = true;
+    try {
+      const run = await startRun(spec.path, req.args, req.stdin, { select: false });
+      if (run) showResult(run.id);
+    } finally { runBtn.disabled = false; }
+  });
+
+  const result = h("section", { class: "block", id: "ctl-result-slot" });
+  kids.push(form, result);
+  if (spec.long || spec.example) kids.push(aboutBlock(spec));
+  $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
+  refresh();
+  if (prefill.run) { delete prefill.run; form.requestSubmit(); }
+  else {
+    const first = form.querySelector(".g-control input:not([type=checkbox]), .g-control select, textarea");
+    if (first && !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches) && !first.value) first.focus();
+  }
+}
+
+function aboutBlock(spec) {
+  return h("details", { class: "block disclosure subtle" },
+    h("summary", { class: "disclosure-head" }, h("span", { text: "About this command" }), icon("chevron-right", "disclosure-chev")),
+    h("div", { class: "group about" },
+      spec.long ? h("pre", { class: "about-text", text: spec.long }) : null,
+      spec.example ? h("pre", { class: "about-text mono", text: spec.example }) : null));
+}
+
+function fieldError(message, field) {
+  const e = new Error(message);
+  e.field = field;
+  return e;
+}
+
+// buildArgv turns the form into { args, stdin }; it throws a readable error
+// for a missing or misplaced value.
+function buildArgv(spec, fields) {
+  const positional = [];
+  let gap = "";
+  for (const { spec: a, input } of fields.args) {
+    const raw = input.value;
+    const label = humanArg(a, spec);
+    if (raw.trim() === "") {
+      if (a.required) throw fieldError(label + " is required.", input);
+      gap = gap || label;
+      continue;
+    }
+    if (gap) throw fieldError("Fill in " + gap + " before " + label + ", or leave both empty.", input);
+    if (a.variadic) {
+      try { positional.push(...shellSplit(raw)); } catch (e) { throw fieldError(label + ": " + e.message + ".", input); }
+    } else positional.push(raw.trim());
+  }
+  const flags = [];
+  for (const { spec: f, input } of fields.flags) {
+    if (f.type === "bool") {
+      const def = f.default === "true";
+      if (input.checked !== def) flags.push(input.checked ? "--" + f.name : "--" + f.name + "=false");
+      continue;
+    }
+    const v = input.value;
+    if (v.trim() === "") {
+      if (f.required) throw fieldError(humanFlag(f.name) + " is required.", input);
+      continue;
+    }
+    if (f.default && v === f.default) continue;
+    if (f.type === "stringArray") for (const part of v.split(",")) { if (part.trim()) flags.push("--" + f.name + "=" + part.trim()); }
+    else flags.push("--" + f.name + "=" + (f.sensitive ? v : v.trim()));
+  }
+  let extra = [];
+  if (fields.extra && fields.extra.value.trim()) {
+    try { extra = shellSplit(fields.extra.value); } catch (e) { throw fieldError("Extra arguments: " + e.message + ".", fields.extra); }
+  }
+  // A positional value that starts with "-" would be read as a flag, so then
+  // all flags go first and "--" marks the rest as plain arguments.
+  const needsDash = positional.some((p) => p.startsWith("-")) && !extra.includes("--");
+  const args = needsDash ? [...flags, ...extra, "--", ...positional] : [...positional, ...flags, ...extra];
+  return { args, stdin: fields.stdin ? fields.stdin.value : "" };
+}
+
+function maskArgs(spec, args) {
+  const sens = new Set(spec.flags.filter((f) => f.sensitive).map((f) => f.name));
+  return args.map((a) => {
+    const m = /^--([^=]+)=/.exec(a);
+    return m && sens.has(m[1]) ? "--" + m[1] + "=••••" : a;
+  });
+}
+
+function serverDatalist() {
+  let dl = $("#ctl-servers");
+  if (!dl) { dl = h("datalist", { id: "ctl-servers" }); document.body.append(dl); }
+  dl.replaceChildren(...state.servers.map((s) => h("option", { value: s.name })));
+  return "ctl-servers";
+}
+
+// ---- activity
+
+function runIcon(run) {
+  if (run.state === "running") return h("span", { class: "run-ico running", "aria-hidden": "true" }, h("span", { class: "spinner sm" }));
+  const name = run.state === "ok" ? "check" : run.state === "cancelled" ? "pause" : "x";
+  return h("span", { class: "run-ico " + run.state, "aria-hidden": "true" }, icon(name));
+}
+
+function runList(runs) {
+  return h("div", { class: "group" }, runs.map((r) => h("button", {
+    type: "button", class: "g-row g-nav run-row", onclick: () => showControl({ kind: "run", id: r.id }),
+  },
+    runIcon(r),
+    h("span", { class: "g-text" },
+      h("span", { class: "g-title", text: cmdLabel(r.path) }),
+      h("span", { class: "g-sub mono", text: r.command.slice(1).join(" "), title: r.command.map(shellQuote).join(" ") })),
+    h("span", { class: "run-meta" }, h("span", { text: runStateLabel(r) }), h("span", { text: fmtRelative(r.started) + (r.state !== "running" ? " · " + runDuration(r) : "") })),
+    icon("chevron-right", "g-chev"))));
+}
+
+function filteredRuns() {
+  const q = ctl.actQuery.trim().toLowerCase();
+  return ctl.runs.filter((r) => {
+    if (ctl.actFilter === "running" && r.state !== "running") return false;
+    if (ctl.actFilter === "failed" && r.state !== "failed") return false;
+    if (ctl.actFilter === "done" && r.state !== "ok") return false;
+    return !q || cmdLabel(r.path).toLowerCase().includes(q) || r.command.join(" ").toLowerCase().includes(q);
+  });
+}
+
+function renderActivity() {
+  const clear = h("button", { type: "button", class: "btn", disabled: !ctl.runs.some((r) => r.state !== "running"), onclick: clearRuns }, "Clear");
+  const count = (st) => ctl.runs.filter((r) => st === "all" || (st === "done" ? r.state === "ok" : r.state === st)).length;
+  const seg = h("div", { class: "segmented", role: "radiogroup", "aria-label": "Show" }, [["all", "All"], ["running", "Running"], ["done", "Done"], ["failed", "Failed"]].map(([v, label]) =>
+    h("button", { type: "button", role: "radio", "aria-checked": String(ctl.actFilter === v), onclick: () => { ctl.actFilter = v; renderActivity(); } }, label, h("span", { class: "seg-count", text: String(count(v)) }))));
+  const search = h("label", { class: "field search-field act-search" }, icon("search"),
+    h("input", { type: "search", placeholder: "Filter", "aria-label": "Filter activity", value: ctl.actQuery, spellcheck: "false" }));
+  const input = search.querySelector("input");
+  input.addEventListener("input", debounce(() => {
+    ctl.actQuery = input.value;
+    const list = $("#act-list");
+    if (list) list.replaceChildren(activityBody());
+  }, 80));
+  $("#ctl-content").replaceChildren(h("div", { class: "page narrow" },
+    backLink("Control", { kind: "home" }),
+    pageHead("Activity", "Commands run from this window. The newest 60 are kept while it's open.", [clear]),
+    ctl.runs.length ? h("div", { class: "toolbar-row" }, seg, search) : null,
+    h("div", { id: "act-list" }, activityBody()),
+  ));
+}
+
+function activityBody() {
+  if (!ctl.runs.length) return h("div", { class: "empty-state" }, tile("history", "gray", "xl"), h("h3", { text: "No activity yet" }), h("p", { text: "Run something from Control or the Fleet tab and it will appear here." }));
+  const runs = filteredRuns();
+  return runs.length ? runList(runs) : h("div", { class: "group" }, h("p", { class: "empty-row", text: "Nothing matches." }));
+}
+
+function renderRunPage(id) {
+  const run = ctl.runs.find((r) => r.id === id);
+  if (!run) { showControl({ kind: "activity" }); return; }
+  $("#ctl-content").replaceChildren(h("div", { class: "page narrow" },
+    backLink("Activity", { kind: "activity" }),
+    pageHead(cmdLabel(run.path), fmtDateFull(run.started)),
+    h("section", { class: "block", id: "ctl-result-slot" }),
+    ctl.byKey.has(ctlKey(run.path)) ? h("button", { type: "button", class: "link-btn", onclick: () => openCommand(ctlKey(run.path)), text: "Open the " + cmdLabel(run.path).toLowerCase() + " form" }) : null,
+  ));
+  showResult(id);
+}
+
+// ---- result card (shared by the command and run pages)
+
+function showResult(id) {
+  const slot = $("#ctl-result-slot");
+  if (!slot) return;
+  ctl.active = id;
+  slot.replaceChildren(h("div", { class: "result" },
+    h("div", { class: "result-head" },
+      h("span", { class: "run-pill", id: "ctl-out-state", role: "status", "aria-live": "polite" }),
+      h("code", { class: "result-cmd", id: "ctl-out-cmd" }),
+      h("div", { class: "result-actions" },
+        h("div", { class: "segmented sm", id: "ctl-out-format", role: "radiogroup", "aria-label": "Output view", hidden: true },
+          h("button", { type: "button", role: "radio", "aria-checked": String(ctl.formatted), onclick: () => { ctl.formatted = true; renderTermFormatted(); } }, "Table"),
+          h("button", { type: "button", role: "radio", "aria-checked": String(!ctl.formatted), onclick: () => { ctl.formatted = false; renderTermFormatted(); } }, "Raw")),
+        h("button", { type: "button", class: "btn sm", id: "ctl-out-rerun", hidden: true, onclick: rerunActive }, icon("refresh"), "Run again"),
+        h("button", { type: "button", class: "btn sm danger", id: "ctl-out-cancel", hidden: true, onclick: cancelActiveRun }, "Stop"),
+        h("button", { type: "button", class: "icon-btn sm", title: "Copy output", "aria-label": "Copy output", onclick: copyActiveOutput }, icon("copy")),
+        h("button", { type: "button", class: "icon-btn sm", title: "Download output", "aria-label": "Download output", onclick: downloadActiveOutput }, icon("download")),
+        h("button", { type: "button", class: "icon-btn sm", id: "ctl-out-expand", title: "Full screen", "aria-label": "Full screen", "aria-pressed": "false", onclick: toggleResultExpanded }, icon("maximize")))),
+    h("p", { class: "result-note", id: "ctl-out-trunc", hidden: true, text: "Earlier output was dropped to keep memory bounded. The newest 4 MiB are shown." }),
+    h("pre", { class: "term", id: "ctl-term", tabindex: "0", "aria-label": "Output" }),
+    h("div", { class: "formatted", id: "ctl-formatted", hidden: true })));
+  renderRunHeader();
+  const run = ctl.runs.find((r) => r.id === id);
+  if (!ctl.out.has(id)) { renderTerm(); fetchRun(id); }
+  else {
+    renderTerm();
+    if (run && run.state === "running") streamRun(id);
+  }
+  requestAnimationFrame(() => slot.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" }));
+}
+
+// ---- runs
+
+async function startRun(path, args, stdin = "", { select = true, quiet = false } = {}) {
+  let res;
+  try {
+    const r = await fetch(api("/api/runs"), {
+      method: "POST",
+      headers: { "X-Fleet-Token": TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ path, args, stdin }),
+    });
+    if (!r.ok) throw await errorFrom(r);
+    res = await r.json();
+  } catch (err) {
+    toast(cmdLabel(path) + ": " + err.message, "error");
+    return null;
+  }
+  const run = res.run;
+  // Keep what is needed for "Run again", except runs fed from stdin: their
+  // input (often a secret) is never kept in the page.
+  if (!stdin) ctl.requests.set(run.id, { path, args });
+  if (quiet) ctl.quiet.add(run.id);
+  ctl.out.set(run.id, { chunks: [], lastSeq: 0 });
+  upsertRun(run);
+  if (select) showControl({ kind: "run", id: run.id });
+  else streamRun(run.id);
+  schedulePoll();
+  return run;
+}
+
+// runQuietly starts a command without switching views and resolves with its
+// final summary and output (used by overview buttons such as Ack).
+async function runQuietly(path, args) {
+  const run = await startRun(path, args, "", { select: false, quiet: true });
+  if (!run) return null;
+  const final = await new Promise((resolve) => {
+    const list = ctl.waiters.get(run.id) || [];
+    list.push(resolve);
+    ctl.waiters.set(run.id, list);
+    const known = ctl.runs.find((r) => r.id === run.id);
+    if (known && known.state !== "running") settleWaiters(known);
+  });
+  const o = ctl.out.get(run.id);
+  return { run: final, text: o ? o.chunks.map((c) => c.text).join("") : "" };
+}
+
+function settleWaiters(run) {
+  const list = ctl.waiters.get(run.id);
+  if (!list) return;
+  ctl.waiters.delete(run.id);
+  for (const fn of list) fn(run);
+}
+
+function upsertRun(run) {
+  const i = ctl.runs.findIndex((r) => r.id === run.id);
+  if (i >= 0) ctl.runs[i] = run;
+  else ctl.runs.unshift(run);
+  if (run.state !== "running") settleWaiters(run);
+  runsChanged();
+  if (run.id === ctl.active) renderRunHeader();
+}
+
+// runsChanged refreshes whatever shows the run list right now.
+function runsChanged() {
+  renderSidebar();
+  if (state.view !== "control") return;
+  const k = ctl.page.kind;
+  if (k === "activity") {
+    const list = $("#act-list");
+    if (list && document.activeElement && document.activeElement.closest && document.activeElement.closest(".act-search")) list.replaceChildren(activityBody());
+    else renderActivity();
+  }
+  else if (k === "home" && !$("#ctl-filter").value) renderHome();
+}
+
+function streamRun(id) {
+  if (ctl.streams.has(id)) return;
+  const o = ctl.out.get(id) || { chunks: [], lastSeq: 0 };
+  ctl.out.set(id, o);
+  const es = new EventSource(api("/api/runs/stream", { id, after: String(o.lastSeq) }).toString());
+  ctl.streams.set(id, es);
+  let finished = false;
+  es.addEventListener("chunk", (ev) => {
+    let c;
+    try { c = JSON.parse(ev.data); } catch { return; }
+    if (c.seq <= o.lastSeq) return;
+    o.lastSeq = c.seq;
+    o.chunks.push(c);
+    if (id === ctl.active) appendTerm(c);
+  });
+  es.addEventListener("status", (ev) => {
+    let run;
+    try { run = JSON.parse(ev.data); } catch { return; }
+    if (run.state !== "running") {
+      finished = true;
+      es.close();
+      ctl.streams.delete(id);
+    }
+    upsertRun(run);
+    if (run.state !== "running") {
+      if (id === ctl.active) renderTermFormatted();
+      onRunFinished(run);
+    }
+  });
+  es.onerror = () => {
+    es.close();
+    ctl.streams.delete(id);
+    if (finished) return;
+    // Reconnect from the last chunk we have, unless the run is gone.
+    setTimeout(() => {
+      const run = ctl.runs.find((r) => r.id === id);
+      if (run && run.state === "running") streamRun(id);
+      else if (run) fetchRun(id);
+    }, 1000);
+  };
+}
+
+function onRunFinished(run) {
+  // Commands that change servers, tags or alerts refresh what the other views show.
+  const top = run.path[0];
+  if (["server", "tag", "alerts", "agent", "sync-agent", "update"].includes(top)) {
+    if (top === "server") loadServers().catch(() => {});
+    loadOverview();
+  }
+  if (state.view !== "control" && !ctl.quiet.has(run.id)) {
+    const label = cmdLabel(run.path);
+    if (run.state === "ok") toast(label + " finished", "success");
+    else if (run.state === "failed") toast(label + " failed", "error", { action: { label: "Show", run: () => showControl({ kind: "run", id: run.id }) } });
+  }
+}
+
+async function fetchRun(id) {
+  try {
+    const d = await getJSON("/api/runs", { id });
+    const o = { chunks: d.output || [], lastSeq: d.output && d.output.length ? d.output[d.output.length - 1].seq : 0 };
+    ctl.out.set(id, o);
+    upsertRun(d.run);
+    if (id === ctl.active) renderTerm();
+    if (d.run.state === "running") streamRun(id);
+  } catch (err) {
+    if (err.status === 404) {
+      ctl.runs = ctl.runs.filter((r) => r.id !== id);
+      runsChanged();
+    }
+  }
+}
+
+async function loadRuns() {
+  try {
+    const d = await getJSON("/api/runs");
+    // Merge rather than replace: this list may have been fetched before a run
+    // this tab just started (keep it), or before a run finished that this
+    // tab already saw finish (keep the newer, finished state).
+    const local = new Map(ctl.runs.map((r) => [r.id, r]));
+    const fresh = (d.runs || []).map((r) => {
+      const known = local.get(r.id);
+      if (known && known.state !== "running" && r.state === "running") return known;
+      if (known && known.state === "running" && r.state !== "running" && !ctl.streams.has(r.id)) settleWaiters(r);
+      return r;
+    });
+    const ids = new Set(fresh.map((r) => r.id));
+    const pending = ctl.runs.filter((r) => !ids.has(r.id) && (ctl.streams.has(r.id) || ctl.waiters.has(r.id)));
+    for (const r of pending) ids.add(r.id);
+    const changed = JSON.stringify(ctl.runs.map((r) => [r.id, r.state])) !== JSON.stringify([...pending, ...fresh].map((r) => [r.id, r.state]));
+    ctl.runs = [...pending, ...fresh];
+    for (const id of [...ctl.out.keys()]) if (!ids.has(id)) ctl.out.delete(id);
+    if (changed) runsChanged();
+    else renderSidebar();
+    if (ctl.active) renderRunHeader();
+  } catch { /* the next poll retries */ }
+}
+
+function schedulePoll() {
+  clearTimeout(ctl.poll);
+  const busy = ctl.runs.some((r) => r.state === "running");
+  if (!busy) return;
+  ctl.poll = setTimeout(async () => {
+    if (!document.hidden) await loadRuns();
+    schedulePoll();
+  }, 2000);
+}
+
+function runDuration(run) {
+  const start = Date.parse(run.started);
+  const end = run.ended ? Date.parse(run.ended) : Date.now();
+  if (!start) return "";
+  const ms = Math.max(0, end - start);
+  if (ms < 1000) return Math.max(1, Math.round(ms)) + " ms";
+  return ms < 10000 ? (ms / 1000).toFixed(1) + " s" : fmtDuration(Math.round(ms / 1000));
+}
+
+function runStateLabel(run) {
+  switch (run.state) {
+    case "running": return "Running";
+    case "ok": return "Done";
+    case "cancelled": return "Stopped";
+    default: return run.exit_code >= 0 ? "Failed (exit " + run.exit_code + ")" : "Failed";
+  }
+}
+
+function renderRunHeader() {
+  const run = ctl.runs.find((r) => r.id === ctl.active);
+  const pill = $("#ctl-out-state");
+  if (!run || !pill) return;
+  $("#ctl-out-cmd").textContent = run.command.map(shellQuote).join(" ");
+  pill.className = "run-pill " + run.state;
+  pill.replaceChildren(runIcon(run), h("span", { text: runStateLabel(run) + (run.state === "running" ? "" : " · " + runDuration(run)) }));
+  $("#ctl-out-cancel").hidden = run.state !== "running";
+  $("#ctl-out-rerun").hidden = run.state === "running" || !ctl.requests.has(run.id);
+  $("#ctl-out-trunc").hidden = !run.truncated;
+}
+
+function appendTerm(c) {
+  const term = $("#ctl-term");
+  if (!term) return;
+  const placeholder = term.querySelector(":scope > .muted");
+  if (placeholder) placeholder.remove();
+  const stick = term.scrollHeight - term.scrollTop - term.clientHeight < 40;
+  const text = stripAnsi(c.text);
+  if (c.stream === "err") term.append(h("span", { class: "err", text }));
+  else term.append(document.createTextNode(text));
+  if (stick) term.scrollTop = term.scrollHeight;
+}
+
+function renderTerm() {
+  const term = $("#ctl-term");
+  if (!term) return;
+  const o = ctl.out.get(ctl.active);
+  term.replaceChildren();
+  $("#ctl-out-format").hidden = true;
+  if (!o || !o.chunks.length) {
+    const run = ctl.runs.find((r) => r.id === ctl.active);
+    term.append(h("span", { class: "muted", text: run && run.state === "running" ? "Waiting for output…" : "No output." }));
+    if (run && run.state !== "running") renderTermFormatted();
+    return;
+  }
+  // Merge consecutive same-stream chunks into one node each.
+  let buf = "", stream = "";
+  const flush = () => { if (!buf) return; if (stream === "err") term.append(h("span", { class: "err", text: buf })); else term.append(document.createTextNode(buf)); buf = ""; };
+  for (const c of o.chunks) {
+    if (c.stream !== stream) { flush(); stream = c.stream; }
+    buf += stripAnsi(c.text);
+  }
+  flush();
+  term.scrollTop = term.scrollHeight;
+  renderTermFormatted();
+}
+
+// renderTermFormatted shows JSON stdout of a finished run as a table or a
+// pretty-printed tree, with a Table / Raw switch.
+function renderTermFormatted() {
+  const run = ctl.runs.find((r) => r.id === ctl.active);
+  const seg = $("#ctl-out-format");
+  const view = $("#ctl-formatted");
+  const term = $("#ctl-term");
+  if (!seg || !view || !term) return;
+  view.hidden = true;
+  seg.hidden = true;
+  term.hidden = false;
+  if (!run || run.state === "running") return;
+  const o = ctl.out.get(run.id);
+  if (!o) return;
+  const stdout = o.chunks.filter((c) => c.stream !== "err").map((c) => c.text).join("").trim();
+  if (!stdout || !/^[[{]/.test(stdout)) return;
+  let data;
+  try { data = JSON.parse(stdout); } catch { return; }
+  view.replaceChildren(jsonView(data));
+  seg.hidden = false;
+  const [tBtn, rBtn] = $$("button", seg);
+  tBtn.setAttribute("aria-checked", String(ctl.formatted));
+  rBtn.setAttribute("aria-checked", String(!ctl.formatted));
+  view.hidden = !ctl.formatted;
+  term.hidden = ctl.formatted;
+  const errText = o.chunks.filter((c) => c.stream === "err").map((c) => c.text).join("").trim();
+  if (errText && ctl.formatted) view.prepend(h("pre", { class: "term term-err", text: stripAnsi(errText) }));
+}
+
+function scalarText(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function jsonView(data) {
+  const rows = Array.isArray(data) ? data : data && typeof data === "object" ? Object.values(data).find((v) => Array.isArray(v) && v.length && typeof v[0] === "object") : null;
+  if (Array.isArray(rows) && rows.length && rows.every((r) => r && typeof r === "object" && !Array.isArray(r))) {
+    const cols = [];
+    for (const r of rows.slice(0, 200)) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
+    const shown = cols.slice(0, 12);
+    return h("div", { class: "json-table-wrap" },
+      h("table", { class: "json-table" },
+        h("thead", null, h("tr", null, shown.map((c) => h("th", { scope: "col", text: capFirst(c.replace(/_/g, " ")) })))),
+        h("tbody", null, rows.slice(0, 1000).map((r) => h("tr", null, shown.map((c) => {
+          const v = r[c];
+          const t = scalarText(v);
+          return h("td", { class: typeof v === "number" ? "num" : t.length > 48 ? "long" : "", title: t.length > 60 ? t : null, text: t.length > 160 ? t.slice(0, 160) + "…" : t });
+        }))))),
+      rows.length > 1000 || cols.length > shown.length ? h("p", { class: "result-note", text: "Showing " + Math.min(rows.length, 1000) + " of " + rows.length + " rows" + (cols.length > shown.length ? " and " + shown.length + " of " + cols.length + " columns" : "") + ". Switch to Raw for everything." }) : null);
+  }
+  return h("pre", { class: "term light", text: JSON.stringify(data, null, 2) });
+}
+
+async function cancelActiveRun() {
+  const id = ctl.active;
+  try { await postJSON("/api/runs/cancel", { id }); }
+  catch (err) { toast(err.message, "error"); }
+}
+
+async function clearRuns() {
+  try {
+    await postJSON("/api/runs/clear");
+    await loadRuns();
+    runsChanged();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+function downloadActiveOutput() {
+  const run = ctl.runs.find((r) => r.id === ctl.active);
+  const o = ctl.out.get(ctl.active);
+  if (!run || !o) return;
+  const text = stripAnsi(o.chunks.map((c) => c.text).join(""));
+  const json = /^[[{]/.test(text.trim()) && (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const blob = new Blob([text], { type: json ? "application/json" : "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const stamp = (run.started || "").replace(/[:.]/g, "-").slice(0, 19);
+  const a = h("a", { href: url, download: "fleet-" + run.path.join("-") + "-" + stamp + (json ? ".json" : ".txt") });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function toggleResultExpanded(force) {
+  const card = $(".result");
+  if (!card) return;
+  const on = typeof force === "boolean" ? force : !card.classList.contains("expanded");
+  card.classList.toggle("expanded", on);
+  document.body.classList.toggle("result-expanded", on);
+  const btn = $("#ctl-out-expand");
+  if (btn) {
+    btn.setAttribute("aria-pressed", String(on));
+    btn.title = on ? "Exit full screen" : "Full screen";
+    btn.setAttribute("aria-label", btn.title);
+    setIcon(btn.querySelector("svg"), on ? "minimize" : "maximize");
+  }
+}
+
+function copyActiveOutput() {
+  const o = ctl.out.get(ctl.active);
+  const text = o ? stripAnsi(o.chunks.map((c) => c.text).join("")) : "";
+  navigator.clipboard.writeText(text).then(() => toast("Output copied", "success"), () => toast("Couldn't copy to the clipboard", "error"));
+}
+
+async function rerunActive() {
+  const req = ctl.requests.get(ctl.active);
+  if (!req) return;
+  const spec = ctl.byKey.get(ctlKey(req.path));
+  if (spec && spec.destructive) {
+    const ok = await confirmDialog({ title: "Run " + cmdLabel(req.path).toLowerCase() + " again?", message: "This changes your fleet.", okLabel: "Run again", danger: true });
+    if (!ok) return;
+  }
+  const run = await startRun(req.path, req.args, "", { select: false });
+  if (run) showResult(run.id);
+}
+
+// ---- overview integration
+
+function serverMenuItems(name, reachable) {
+  const go = (key, args = [name], flags, run) => () => openCommand(key, { args, flags, run });
+  const has = (k) => !ctl.byKey.size || ctl.byKey.has(k);
+  return [
+    { title: name },
+    { label: "Open terminal", icon: "terminal", disabled: !terminalServers().some((x) => x.name === name), run: () => openTerminal(name) },
+    "sep",
+    has("service list") && { label: "Services", icon: "layers", run: go("service list", [name], null, true) },
+    has("svc status") && { label: "Unit status…", icon: "list-checks", run: go("svc status") },
+    has("journal") && { label: "Journal…", icon: "scroll", run: go("journal") },
+    has("exec") && { label: "Run a command…", icon: "command", run: go("exec") },
+    "sep",
+    has("server metrics") && { label: "Live metrics", icon: "chart", run: go("server metrics", [name], null, true), disabled: !reachable },
+    has("doctor") && { label: "Health checklist", icon: "heart-pulse", run: go("doctor", [name], null, true) },
+    has("firewall status") && { label: "Firewall status", icon: "shield", run: go("firewall status", [name], null, true) },
+    has("port list") && { label: "Open ports", icon: "network", run: go("port list", [name], null, true) },
+    "sep",
+    has("server show") && { label: "Details", icon: "info", run: go("server show", [name], null, true) },
+    has("tag") && { label: "Edit tags…", icon: "tag", run: go("tag") },
+    has("server reconnect") && { label: "Reconnect…", icon: "plug", run: go("server reconnect") },
+    "sep",
+    has("server remove") && { label: "Remove…", icon: "trash", danger: true, run: go("server remove") },
+  ];
+}
+
+async function alertAction(al, kind) {
+  const path = kind === "ack" ? ["alerts", "ack"] : ["alerts", "suppress"];
+  const args = kind === "ack" ? [al.id] : [al.id, "--for=1h"];
+  const res = await runQuietly(path, args);
+  if (!res) return;
+  if (res.run.state === "ok") toast(kind === "ack" ? "Alert acknowledged" : "Alert snoozed for an hour", "success");
+  else toast((res.text.trim().split("\n").pop() || cmdLabel(path) + " failed"), "error");
+  loadOverview();
+}
+
+// ---- setup
+
+function showControlPage() {
+  // Coming back to the tab keeps a half-filled form as it was.
+  const kept = ctl.page.kind === "command" && $("#ctl-content").childElementCount;
+  loadCommands().then(() => { if (!kept) showControl(ctl.page); else renderSidebar(); });
+  loadRuns().then(schedulePoll);
+}
+
+function setupControl() {
+  const filter = $("#ctl-filter");
+  const apply = debounce(() => {
+    ctl.filter = filter.value;
+    if (filter.value.trim()) showControl({ kind: "search" });
+    else if (ctl.page.kind === "search") showControl({ kind: "home" });
+  }, 80);
+  filter.addEventListener("input", apply);
+  filter.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && filter.value) { e.stopPropagation(); filter.value = ""; ctl.filter = ""; showControl({ kind: "home" }); }
+    if (e.key === "Enter") {
+      const first = $("#ctl-content .g-row.g-nav:not(.dim)");
+      if (first) { e.preventDefault(); first.click(); }
+    }
+  });
+  const add = $("#ov-add-server");
+  if (add) add.addEventListener("click", () => openCommand("server add"));
+  // Learn the catalog early so menus and the palette can use it.
+  loadCommands();
+  loadRuns().then(schedulePoll);
+}
+
+// ----------------------------------------------------------------- terminal (interactive shells)
+//
+// Each tab is a `fleet ssh <server>` session the controller runs under a
+// pseudo-terminal (see internal/webui/terminal.go), so it carries the same
+// token, policy and audit as typing `fleet ssh` in a terminal. xterm.js
+// (vendored, MIT) draws it, preferably with its WebGL renderer.
+
+const termUI = {
+  loaded: null,
+  sessions: new Map(), // id -> { id, server, state, exitCode, xt, fit, host, es, lastSeq, sendQ, sending, title }
+  order: [],
+  active: "",
+  supported: true,
+  attached: false,
+  ro: null,
+};
+
+const TERM_THEME = {
+  background: "#1d1d1f", foreground: "#e5e5ea", cursor: "#0a84ff", cursorAccent: "#1d1d1f",
+  selectionBackground: "rgba(10, 132, 255, 0.38)",
+  black: "#1d1d1f", red: "#ff6b6b", green: "#32d74b", yellow: "#ffd60a", blue: "#409cff", magenta: "#bf5af2", cyan: "#64d2ff", white: "#d1d1d6",
+  brightBlack: "#8e8e93", brightRed: "#ff8a80", brightGreen: "#5ef08a", brightYellow: "#ffe066", brightBlue: "#6bb6ff", brightMagenta: "#da8fff", brightCyan: "#8be4ff", brightWhite: "#ffffff",
+};
+
+// xterm.js builds its colour and size rules as <style> elements. The page CSP
+// admits those only with this load's nonce, so tag every <style> this page
+// creates with it. Scripts stay 'self' only.
+(function installStyleNonce() {
+  const meta = document.querySelector('meta[name="fleet-style-nonce"]');
+  const nonce = meta ? meta.getAttribute("content") : "";
+  if (!nonce || nonce.startsWith("__")) return;
+  const create = document.createElement.bind(document);
+  document.createElement = function (tag, opts) {
+    const el = create(tag, opts);
+    if (String(tag).toLowerCase() === "style") el.nonce = nonce;
+    return el;
+  };
+})();
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("could not load " + src));
+    document.head.append(s);
+  });
+}
+
+function loadXterm() {
+  if (termUI.loaded) return termUI.loaded;
+  termUI.loaded = (async () => {
+    await new Promise((resolve, reject) => {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = "/vendor/xterm.css";
+      l.onload = resolve;
+      l.onerror = () => reject(new Error("could not load the terminal styles"));
+      document.head.append(l);
+    });
+    await loadScript("/vendor/xterm.js");
+    await loadScript("/vendor/xterm-addon-fit.js");
+    await loadScript("/vendor/xterm-addon-webgl.js").catch(() => {});
+  })();
+  termUI.loaded.catch(() => { termUI.loaded = null; });
+  return termUI.loaded;
+}
+
+function terminalServers() {
+  return state.servers.filter((s) => s.mode === "direct" || !s.mode);
+}
+
+// ---- view
+
+function renderTerminalTabs() {
+  const tabs = $("#term-tabs");
+  if (!tabs) return;
+  const seen = new Map();
+  tabs.replaceChildren(...termUI.order.map((id) => {
+    const t = termUI.sessions.get(id);
+    const on = id === termUI.active;
+    const n = (seen.get(t.server) || 0) + 1;
+    seen.set(t.server, n);
+    const label = n > 1 ? t.server + " " + n : t.server;
+    const btn = h("div", { class: "term-tab" + (on ? " on" : "") + (t.state !== "running" ? " ended" : ""), role: "tab", "aria-selected": String(on), tabindex: on ? "0" : "-1", title: t.title || t.server },
+      h("span", { class: "term-tab-dot", "aria-hidden": "true" }),
+      h("span", { class: "term-tab-label", text: label }),
+      h("button", { type: "button", class: "term-tab-close", "aria-label": "Close terminal on " + t.server, title: "Close", onclick: (e) => { e.stopPropagation(); closeTerminal(id); } }, icon("x")));
+    btn.addEventListener("click", () => activateTerminal(id));
+    btn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateTerminal(id); } });
+    return btn;
+  }));
+  const empty = !termUI.order.length;
+  $("#term-empty").hidden = !empty;
+  $("#term-stage").hidden = empty;
+  if (empty) renderTerminalEmpty();
+  const badge = $("#term-badge");
+  if (badge) {
+    const n = [...termUI.sessions.values()].filter((t) => t.state === "running").length;
+    badge.hidden = !n;
+    badge.textContent = String(n);
+  }
+}
+
+function renderTerminalEmpty() {
+  const box = $("#term-empty");
+  const servers = terminalServers();
+  const others = state.servers.filter((s) => !terminalServers().includes(s));
+  box.replaceChildren(h("div", { class: "term-empty-inner" },
+    tile("terminal", "indigo", "xl"),
+    h("h1", { text: "Open a terminal" }),
+    h("p", { text: termUI.supported
+      ? "A shell on any server, right here in the browser. It's fleet ssh underneath: same access token, same audit log."
+      : "Browser terminals need a Linux or macOS controller. Use fleet ssh in a terminal instead." }),
+    termUI.supported ? h("div", { class: "term-picks" }, servers.map((s) => h("button", {
+      type: "button", class: "term-pick" + (s.reachable ? "" : " offline"), title: s.reachable ? "Open a shell on " + s.name : s.name + " looked offline; try anyway",
+      onclick: () => openTerminal(s.name),
+    }, tile("server", s.reachable ? "blue" : "gray"), h("span", { class: "term-pick-text" }, h("b", { text: s.name }), h("span", { text: s.reachable ? (s.os || "online") : "offline" })), icon("chevron-right", "g-chev")))) : null,
+    termUI.supported && !servers.length ? h("p", { class: "muted", text: "No direct-mode servers yet." }) : null,
+    others.length ? h("p", { class: "term-note", text: plural(others.length, "reverse-mode server") + " can't open a terminal yet. Use Control → Run a command for those." }) : null));
+}
+
+async function showTerminalView() {
+  renderTerminalTabs();
+  if (!termUI.attached) {
+    termUI.attached = true;
+    // Re-attach to shells that are still running (e.g. after a page reload).
+    try {
+      const d = await getJSON("/api/term");
+      termUI.supported = d.supported !== false;
+      for (const s of d.sessions || []) {
+        if (s.state === "running" && !termUI.sessions.has(s.id)) await attachTerminal(s, { replay: true });
+      }
+    } catch { /* the view still works for new sessions */ }
+    renderTerminalTabs();
+  }
+  const t = termUI.sessions.get(termUI.active);
+  if (t) requestAnimationFrame(() => { fitTerminal(t); t.xt.focus(); });
+}
+
+function newTerminalMenu(anchor) {
+  const servers = terminalServers();
+  openMenu([
+    { title: "Open a terminal on" },
+    ...servers.map((s) => ({ label: s.name + (s.reachable ? "" : " (offline)"), icon: "server", run: () => openTerminal(s.name) })),
+    servers.length ? null : { label: "No direct-mode servers", icon: "info", disabled: true, run: () => {} },
+  ], { anchor, label: "New terminal" });
+}
+
+// ---- sessions
+
+async function openTerminal(server) {
+  if (state.view !== "terminal") showView("terminal");
+  try { await loadXterm(); } catch (err) { toast(err.message, "error"); return; }
+  const { xt, fit, host } = createXterm();
+  const dims = proposedSize(fit);
+  let res;
+  try {
+    res = await postJSON("/api/term/open", { server, cols: String(dims.cols), rows: String(dims.rows) });
+  } catch (err) {
+    host.remove();
+    xt.dispose();
+    toast("Terminal on " + server + ": " + err.message, "error");
+    return;
+  }
+  attachTerminal(res.session, { xt, fit, host });
+}
+
+function createXterm() {
+  const host = h("div", { class: "term-host" });
+  $("#term-stage").append(host);
+  const xt = new window.Terminal({
+    fontFamily: '"SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontSize: 13, lineHeight: 1.2, cursorBlink: true, cursorStyle: "bar", scrollback: 5000,
+    theme: TERM_THEME, allowTransparency: false, macOptionIsMeta: true, drawBoldTextInBrightColors: true,
+  });
+  const fit = new window.FitAddon.FitAddon();
+  xt.loadAddon(fit);
+  xt.open(host);
+  if (window.WebglAddon) {
+    try {
+      const gl = new window.WebglAddon.WebglAddon();
+      gl.onContextLoss(() => gl.dispose());
+      xt.loadAddon(gl);
+    } catch { /* fall back to the DOM renderer */ }
+  }
+  return { xt, fit, host };
+}
+
+function proposedSize(fit) {
+  try {
+    const d = fit.proposeDimensions();
+    if (d && d.cols > 1 && d.rows > 1) return d;
+  } catch { /* not laid out yet */ }
+  return { cols: 120, rows: 32 };
+}
+
+async function attachTerminal(summary, parts = {}) {
+  if (!parts.xt) {
+    await loadXterm();
+    Object.assign(parts, createXterm());
+  }
+  const t = {
+    id: summary.id, server: summary.server, state: summary.state, exitCode: summary.exit_code,
+    xt: parts.xt, fit: parts.fit, host: parts.host, es: null, lastSeq: 0, sendQ: "", sending: false, title: "",
+  };
+  termUI.sessions.set(t.id, t);
+  termUI.order.push(t.id);
+  t.xt.onData((data) => sendTerminalInput(t, data));
+  t.xt.onBinary((data) => sendTerminalInput(t, data));
+  t.xt.onResize(debounce(({ cols, rows }) => {
+    if (t.state === "running") postJSON("/api/term/resize", { id: t.id, cols: String(cols), rows: String(rows) }).catch(() => {});
+  }, 120));
+  t.xt.onTitleChange((title) => { t.title = title; renderTerminalTabs(); });
+  streamTerminal(t);
+  activateTerminal(t.id);
+}
+
+function streamTerminal(t) {
+  const es = new EventSource(api("/api/term/stream", { id: t.id, after: String(t.lastSeq) }).toString());
+  t.es = es;
+  es.addEventListener("data", (ev) => {
+    const seq = Number(ev.lastEventId) || 0;
+    if (seq && seq <= t.lastSeq) return;
+    t.lastSeq = seq || t.lastSeq;
+    const bin = atob(ev.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    t.xt.write(bytes);
+  });
+  es.addEventListener("exit", (ev) => {
+    es.close();
+    let sum = {};
+    try { sum = JSON.parse(ev.data); } catch { /* ignore */ }
+    endTerminal(t, sum);
+  });
+  // EventSource reconnects by itself and resumes from Last-Event-ID; only a
+  // session the server no longer knows ends here.
+  es.onerror = () => {
+    if (es.readyState !== EventSource.CLOSED) return;
+    getJSON("/api/term").then((d) => {
+      const s = (d.sessions || []).find((x) => x.id === t.id);
+      if (s && s.state === "running") setTimeout(() => streamTerminal(t), 1000);
+      else endTerminal(t, s || { exit_code: -1, error: "the session is gone" });
+    }).catch(() => setTimeout(() => streamTerminal(t), 2000));
+  };
+}
+
+function endTerminal(t, sum) {
+  if (t.state !== "running" && t.ended) return;
+  t.state = "exited";
+  t.exitCode = sum.exit_code ?? 0;
+  t.ended = true;
+  const code = t.exitCode;
+  t.xt.write("\r\n\x1b[2m[" + (sum.error ? sum.error : code === 0 ? "Session ended" : "Session ended with exit code " + code) + "]\x1b[0m\r\n");
+  const bar = h("div", { class: "term-ended" },
+    h("span", { text: code === 0 ? "This session has ended." : "This session ended with exit code " + code + "." }),
+    h("button", { type: "button", class: "btn sm", onclick: () => { closeTerminal(t.id); openTerminal(t.server); } }, icon("refresh"), "Reconnect"),
+    h("button", { type: "button", class: "btn sm ghost", onclick: () => closeTerminal(t.id) }, "Close"));
+  t.host.append(bar);
+  renderTerminalTabs();
+}
+
+// sendTerminalInput keeps keystrokes in order: one request at a time, with
+// anything typed meanwhile batched into the next.
+function sendTerminalInput(t, data) {
+  if (t.state !== "running") return;
+  t.sendQ += data;
+  if (t.sending) return;
+  const flush = async () => {
+    t.sending = true;
+    while (t.sendQ) {
+      const chunk = t.sendQ.slice(0, 16384);
+      t.sendQ = t.sendQ.slice(chunk.length);
+      try {
+        const r = await fetch(api("/api/term/input", { id: t.id }), {
+          method: "POST", headers: { "X-Fleet-Token": TOKEN, "Content-Type": "text/plain;charset=utf-8" }, body: chunk,
+        });
+        if (r.status === 409 || r.status === 404) { t.sendQ = ""; break; }
+      } catch { t.sendQ = ""; break; }
+    }
+    t.sending = false;
+  };
+  flush();
+}
+
+function activateTerminal(id) {
+  termUI.active = id;
+  for (const [sid, t] of termUI.sessions) t.host.hidden = sid !== id;
+  renderTerminalTabs();
+  const t = termUI.sessions.get(id);
+  if (t) requestAnimationFrame(() => { fitTerminal(t); t.xt.focus(); });
+}
+
+function fitTerminal(t) {
+  if (!t || t.host.hidden || state.view !== "terminal") return;
+  try { t.fit.fit(); } catch { /* not visible */ }
+}
+
+async function closeTerminal(id) {
+  const t = termUI.sessions.get(id);
+  if (!t) return;
+  if (t.es) t.es.close();
+  postJSON("/api/term/close", { id }).catch(() => {});
+  if (t.state === "running") setTimeout(() => postJSON("/api/term/close", { id }).catch(() => {}), 1500);
+  t.xt.dispose();
+  t.host.remove();
+  termUI.sessions.delete(id);
+  const i = termUI.order.indexOf(id);
+  termUI.order.splice(i, 1);
+  if (termUI.active === id) {
+    const next = termUI.order[Math.min(i, termUI.order.length - 1)];
+    if (next) activateTerminal(next);
+    else { termUI.active = ""; renderTerminalTabs(); }
+  } else renderTerminalTabs();
+}
+
+function setupTerminal() {
+  $("#term-new").addEventListener("click", (e) => newTerminalMenu(e.currentTarget));
+  termUI.ro = new ResizeObserver(debounce(() => fitTerminal(termUI.sessions.get(termUI.active)), 60));
+  termUI.ro.observe($("#term-stage"));
+  const tabs = $("#term-tabs");
+  tabs.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const i = termUI.order.indexOf(termUI.active);
+    const next = termUI.order[(i + (e.key === "ArrowRight" ? 1 : termUI.order.length - 1)) % termUI.order.length];
+    if (next) { e.preventDefault(); activateTerminal(next); $(".term-tab.on", tabs).focus(); }
+  });
+}
+
+function viewFromHash() {
+  const v = location.hash.replace(/^#/, "");
+  return VIEWS.includes(v) ? v : "overview";
 }
 
 init();
