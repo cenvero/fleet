@@ -79,7 +79,7 @@ jobs:
           fi
           rmdir .release 2>/dev/null || true
       - name: Upload release dist
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-dist
           path: dist
@@ -232,7 +232,7 @@ jobs:
           ./scripts/validate-winget-manifests.sh "${output}" "${x64_path}" "${arm64_path}"
           ./scripts/test-winget-manifests.sh
       - name: Upload WinGet manifest bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: winget-manifests-${{ github.ref_name }}
           path: winget/manifests
