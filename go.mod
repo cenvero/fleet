@@ -20,7 +20,7 @@ require (
 	golang.org/x/crypto v0.57.0
 	golang.org/x/mod v0.42.0
 	golang.org/x/sys v0.50.0
-	golang.org/x/term v0.46.0
+	golang.org/x/term v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/driver/postgres v1.6.3
