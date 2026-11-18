@@ -34,6 +34,8 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
+## [v2.7.0] — 2026-11-18 (stable)
+
 ### Added
 
 - **Control is a set of screens, not a command list.**
@@ -129,6 +131,125 @@ Omit sections that have no entries for that release.
   and fail closed unless the operator ticks `--yes` / `--confirm`. Commands that change
   things ask for confirmation in the browser first. Values of password and secret flags are
   masked in the run history, and stdin input is never kept.
+
+### Changed
+
+- **Automatic agent sync runs in the background helper** instead of being launched by
+  whichever command noticed it was due, and no longer prints a notice on the terminal.
+  `FLEET_AGENT_AUTOSYNC=off` now applies to the environment the helper starts from (then
+  `fleet helper restart`).
+
+- **Ordinary commands no longer print notices.** `fleet ssh`, `fleet exec` and every other
+  command used to print the update notice, the adjust-init hint and the passphrase-key
+  warning before their own output. These are now listed by `fleet errors` and by bare
+  `fleet`. `fleet status` gives a one-line count on stderr on a terminal. A command's own
+  errors are reported as before.
+- **`fleet fw enable --safe` no longer allows the agent port for you.** It refuses and names
+  `fleet fw allow <server> <port>/tcp` instead, unless `--force-i-have-console` is given.
+  Its JSON output now needs `--json`. `fleet firewall enable` reads ufw over `shell.exec`
+  before changing anything. A direct-mode record with no valid agent port refuses
+  tightening changes instead of assuming `default_agent_port`.
+- **`fleet file ui` shows the console panel on a terminal.** If a console already runs in
+  the background, it opens that one on the file manager.
+
+- Dependencies: `golang.org/x/crypto` 0.58.0, `golang.org/x/sys` 0.50.0, `golang.org/x/term`
+  0.47.0, `golang.org/x/mod` 0.42.0, `golang.org/x/sync` 0.24.0, `golang.org/x/text` 0.43.0
+  and `github.com/spf13/pflag` 1.1.0; CI actions `github/codeql-action` 4.38.3,
+  `actions/upload-artifact` 7.0.2 and `actions/download-artifact` 8.0.2.
+
+### Fixed
+
+- **The web console no longer flashes the file manager** while the Fleet tab (or any
+  other tab) loads or reloads.
+
+- **Background jobs:**
+  - on macOS and Windows, a job whose server name was typed with different case was
+    marked lost on its first network error;
+  - a slow launch could be marked lost before it started;
+  - an agent error after the command started deleted the job;
+  - a launch that may have run is kept and settled by the helper.
+- **Firewall, port and service calls no longer bring back a server removed while they
+  ran.**
+- **`fw enable --safe`** says the revert timer is armed, and how to cancel it, when the
+  enable step fails after arming it.
+- **`fleet console stop`** asks the console to stop, so it ends its runs and terminals;
+  on Windows, terminating it left them running.
+
+- **Background jobs:**
+  - a job whose output does not end in a newline (`printf done`) now finishes;
+  - two pollers that see a job fail send `job-failed` once, not twice;
+  - `job wait` and `job status` probe a few hundred bytes instead of re-reading up to
+    4 MiB of log;
+  - a job whose server was removed, or whose process is gone without a result (a reboot,
+    a kill), ends as `lost` instead of `running` forever (`job wait` exits 1);
+  - a job that leaves a child writing to its log still finishes;
+  - `job run` no longer holds the jobs lock while it launches.
+- **`fleet stop`, `fleet console stop` and `fleet helper restart` wait until the process
+  has let go of its lock**, so on Windows a `fleet start` or a restart right after no
+  longer finds the old one apparently still running.
+
+- **A removed server no longer comes back.** A connect, metrics collection or agent update
+  that was still running when the server was removed wrote its record back. These writes
+  now only update a record that still exists.
+- **A pooled connection's idle time counts time asleep**, so a connection that sat through a
+  laptop sleep is redialled instead of reused.
+- **`template apply` opens the template's ports before enabling its firewall**, and changes
+  services last, so a template that allows the agent port works on a fresh host.
+
+- **`fleet key rotate` no longer destroys stored secrets when it rolls back.** If verifying a
+  reverse agent or removing the old key failed after the secrets had been re-sealed, the
+  rollback restored the old key files but left every secret sealed under the new key, whose
+  files were gone. The rollback now re-seals them for whichever key it leaves on disk, keeps
+  the new key files if that fails, and reports failures instead of swallowing them.
+- **MySQL and MariaDB backends:** state lookups used the reserved word `key` unquoted
+  (`WHERE key = ?`, `ORDER BY key`), a syntax error there; it is now quoted for every dialect.
+- **`fleet database shift` moves the metric history** (the dashboard sparklines) as well as
+  state, latest metrics and events.
+- **The agent always answers `shell.exec` and every other request.** A reply over the 16 MiB
+  message limit (large output, or control bytes that JSON escaping expands) used to be dropped,
+  leaving the controller waiting; output is now trimmed to fit with the truncation marker, and
+  anything else that cannot be sent is answered with a `response_too_large` /
+  `response_encode_failed` error.
+- **`shell.exec` returns at its deadline** even when something it started keeps stdout open
+  (`server &`, a `setsid` child); `timed_out` is reported correctly. A plain `cmd &` now
+  returns about 2 s after the shell exits instead of holding the reply until the deadline.
+- **A handler panic no longer kills the agent** in reverse mode or in `shell.exec`; it is
+  logged and answered with an error.
+- **Firewall actions are matched without regard to case** in the agent.
+- **The daemon waits for its background loops** (metrics poller, update checker, job-log
+  pruner) when it stops, so nothing writes into the config dir after it has returned.
+- **Web file manager:**
+  - "New file" on a server, rename and same-pane move never overwrite an existing file
+    (hidden files included), and an upload named like an existing folder is refused instead
+    of landing inside it under a temporary name;
+  - rename and chmod *Undo* act on the folder where the change was made;
+  - the terminal retries WebGL after a lost GPU context instead of settling for a renderer
+    the page's CSP cannot colour;
+  - Ctrl-C lets in-flight requests finish.
+- **Terminal file manager (`fleet files`):**
+  - the editor no longer rewrites files on save: tabs and CRLF line endings round-trip
+    exactly, and a file it cannot hold exactly (control characters, a lone CR, invalid
+    UTF-8) opens read-only;
+  - a single Esc no longer discards unsaved edits;
+  - local saves are atomic, keep owner, group, mode and set-id bits, refuse a file that
+    changed since it was opened (or has other hard links, or may not be written), and write
+    nothing when the text is unchanged;
+  - a save that finishes after another file was opened no longer lands on it;
+  - new file, rename and duplicate check the real folder, so a hidden file that is not
+    shown is not overwritten.
+- **Uploads** refuse a file that shrank while being read, instead of sending stale bytes from
+  a reused buffer.
+- **`fleet autocomplete install`** (bash) no longer deletes the user's own rc lines on a
+  re-run.
+- **`fleet logs --server` / `--service`** filter the audit log on their own, not only together
+  with `--search`.
+- **Alerts are no longer recorded as notified** by a desktop notifier that is disabled; the
+  README and operations guide no longer advertise desktop notifications.
+- **Releases:** a pre-release tag such as `v3.0.0-rc1` can no longer be published to the
+  stable channel (any unrecognised pre-release suffix is refused before the build), and every
+  Pages deploy now publishes `/.well-known/security.txt`.
+- **Tests:** the suite passes on macOS (temp dirs under the `/var` symlink, LibreSSL without
+  BLAKE2b) and the timing-sensitive tests hold up on loaded CI runners.
 
 ### Security
 
@@ -249,125 +370,6 @@ Omit sections that have no entries for that release.
   as the "undo".
 - **A missing dedicated `secret.key` fails closed** instead of being silently replaced by a
   new random key while secrets sealed under it exist.
-
-### Fixed
-
-- **The web console no longer flashes the file manager** while the Fleet tab (or any
-  other tab) loads or reloads.
-
-- **Background jobs:**
-  - on macOS and Windows, a job whose server name was typed with different case was
-    marked lost on its first network error;
-  - a slow launch could be marked lost before it started;
-  - an agent error after the command started deleted the job;
-  - a launch that may have run is kept and settled by the helper.
-- **Firewall, port and service calls no longer bring back a server removed while they
-  ran.**
-- **`fw enable --safe`** says the revert timer is armed, and how to cancel it, when the
-  enable step fails after arming it.
-- **`fleet console stop`** asks the console to stop, so it ends its runs and terminals;
-  on Windows, terminating it left them running.
-
-- **Background jobs:**
-  - a job whose output does not end in a newline (`printf done`) now finishes;
-  - two pollers that see a job fail send `job-failed` once, not twice;
-  - `job wait` and `job status` probe a few hundred bytes instead of re-reading up to
-    4 MiB of log;
-  - a job whose server was removed, or whose process is gone without a result (a reboot,
-    a kill), ends as `lost` instead of `running` forever (`job wait` exits 1);
-  - a job that leaves a child writing to its log still finishes;
-  - `job run` no longer holds the jobs lock while it launches.
-- **`fleet stop`, `fleet console stop` and `fleet helper restart` wait until the process
-  has let go of its lock**, so on Windows a `fleet start` or a restart right after no
-  longer finds the old one apparently still running.
-
-- **A removed server no longer comes back.** A connect, metrics collection or agent update
-  that was still running when the server was removed wrote its record back. These writes
-  now only update a record that still exists.
-- **A pooled connection's idle time counts time asleep**, so a connection that sat through a
-  laptop sleep is redialled instead of reused.
-- **`template apply` opens the template's ports before enabling its firewall**, and changes
-  services last, so a template that allows the agent port works on a fresh host.
-
-- **`fleet key rotate` no longer destroys stored secrets when it rolls back.** If verifying a
-  reverse agent or removing the old key failed after the secrets had been re-sealed, the
-  rollback restored the old key files but left every secret sealed under the new key, whose
-  files were gone. The rollback now re-seals them for whichever key it leaves on disk, keeps
-  the new key files if that fails, and reports failures instead of swallowing them.
-- **MySQL and MariaDB backends:** state lookups used the reserved word `key` unquoted
-  (`WHERE key = ?`, `ORDER BY key`), a syntax error there; it is now quoted for every dialect.
-- **`fleet database shift` moves the metric history** (the dashboard sparklines) as well as
-  state, latest metrics and events.
-- **The agent always answers `shell.exec` and every other request.** A reply over the 16 MiB
-  message limit (large output, or control bytes that JSON escaping expands) used to be dropped,
-  leaving the controller waiting; output is now trimmed to fit with the truncation marker, and
-  anything else that cannot be sent is answered with a `response_too_large` /
-  `response_encode_failed` error.
-- **`shell.exec` returns at its deadline** even when something it started keeps stdout open
-  (`server &`, a `setsid` child); `timed_out` is reported correctly. A plain `cmd &` now
-  returns about 2 s after the shell exits instead of holding the reply until the deadline.
-- **A handler panic no longer kills the agent** in reverse mode or in `shell.exec`; it is
-  logged and answered with an error.
-- **Firewall actions are matched without regard to case** in the agent.
-- **The daemon waits for its background loops** (metrics poller, update checker, job-log
-  pruner) when it stops, so nothing writes into the config dir after it has returned.
-- **Web file manager:**
-  - "New file" on a server, rename and same-pane move never overwrite an existing file
-    (hidden files included), and an upload named like an existing folder is refused instead
-    of landing inside it under a temporary name;
-  - rename and chmod *Undo* act on the folder where the change was made;
-  - the terminal retries WebGL after a lost GPU context instead of settling for a renderer
-    the page's CSP cannot colour;
-  - Ctrl-C lets in-flight requests finish.
-- **Terminal file manager (`fleet files`):**
-  - the editor no longer rewrites files on save: tabs and CRLF line endings round-trip
-    exactly, and a file it cannot hold exactly (control characters, a lone CR, invalid
-    UTF-8) opens read-only;
-  - a single Esc no longer discards unsaved edits;
-  - local saves are atomic, keep owner, group, mode and set-id bits, refuse a file that
-    changed since it was opened (or has other hard links, or may not be written), and write
-    nothing when the text is unchanged;
-  - a save that finishes after another file was opened no longer lands on it;
-  - new file, rename and duplicate check the real folder, so a hidden file that is not
-    shown is not overwritten.
-- **Uploads** refuse a file that shrank while being read, instead of sending stale bytes from
-  a reused buffer.
-- **`fleet autocomplete install`** (bash) no longer deletes the user's own rc lines on a
-  re-run.
-- **`fleet logs --server` / `--service`** filter the audit log on their own, not only together
-  with `--search`.
-- **Alerts are no longer recorded as notified** by a desktop notifier that is disabled; the
-  README and operations guide no longer advertise desktop notifications.
-- **Releases:** a pre-release tag such as `v3.0.0-rc1` can no longer be published to the
-  stable channel (any unrecognised pre-release suffix is refused before the build), and every
-  Pages deploy now publishes `/.well-known/security.txt`.
-- **Tests:** the suite passes on macOS (temp dirs under the `/var` symlink, LibreSSL without
-  BLAKE2b) and the timing-sensitive tests hold up on loaded CI runners.
-
-### Changed
-
-- **Automatic agent sync runs in the background helper** instead of being launched by
-  whichever command noticed it was due, and no longer prints a notice on the terminal.
-  `FLEET_AGENT_AUTOSYNC=off` now applies to the environment the helper starts from (then
-  `fleet helper restart`).
-
-- **Ordinary commands no longer print notices.** `fleet ssh`, `fleet exec` and every other
-  command used to print the update notice, the adjust-init hint and the passphrase-key
-  warning before their own output. These are now listed by `fleet errors` and by bare
-  `fleet`. `fleet status` gives a one-line count on stderr on a terminal. A command's own
-  errors are reported as before.
-- **`fleet fw enable --safe` no longer allows the agent port for you.** It refuses and names
-  `fleet fw allow <server> <port>/tcp` instead, unless `--force-i-have-console` is given.
-  Its JSON output now needs `--json`. `fleet firewall enable` reads ufw over `shell.exec`
-  before changing anything. A direct-mode record with no valid agent port refuses
-  tightening changes instead of assuming `default_agent_port`.
-- **`fleet file ui` shows the console panel on a terminal.** If a console already runs in
-  the background, it opens that one on the file manager.
-
-- Dependencies: `golang.org/x/crypto` 0.58.0, `golang.org/x/sys` 0.50.0, `golang.org/x/term`
-  0.47.0, `golang.org/x/mod` 0.42.0, `golang.org/x/sync` 0.24.0, `golang.org/x/text` 0.43.0
-  and `github.com/spf13/pflag` 1.1.0; CI actions `github/codeql-action` 4.38.3,
-  `actions/upload-artifact` 7.0.2 and `actions/download-artifact` 8.0.2.
 
 ## [v2.6.1] — 2026-10-23 (stable)
 
