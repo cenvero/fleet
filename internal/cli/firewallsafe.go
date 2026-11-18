@@ -4,9 +4,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/logs"
+	"github.com/cenvero/fleet/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -17,29 +21,29 @@ import (
 //
 //	fleet fw status <server>
 //	fleet fw allow <server> <port>[/<proto>]
-//	fleet fw enable <server> --safe [--force-i-have-console] [--undo-after 60]
+//	fleet fw enable <server> --safe [--force-i-have-console] [--undo-after 60] [--json]
 //
-// Every tightening operation first injects an allow rule for the agent's OWN
-// management port (ServerRecord.Port) so the controller can never lock itself
-// out of the agent. `enable --safe` additionally refuses any ruleset that would
-// drop the agent port (unless --force-i-have-console) and wraps the apply in a
-// self-reverting systemd-run timer that reopens the host if something goes wrong.
+// `enable --safe` reads the host's rules first and refuses (naming the command
+// to run first, e.g. `fleet fw allow web-01 2222/tcp`) unless the agent stays
+// reachable, then arms a self-reverting timer before applying. The same
+// agent-lockout gate guards `fleet firewall enable|add` and `fleet port close`.
 //
-// The heavy lifting lives in core.FirewallEngine, which is driven here through a
-// closure over app.ExecCommand. That same engine is unit-tested with a fake exec.
+// The heavy lifting lives in core.FirewallEngine, which is driven here through
+// app.FirewallExec. That same engine is unit-tested with a fake exec.
 func newFirewallSafeCommand(configDir *string) *cobra.Command {
 	fwCmd := &cobra.Command{
 		Use:   "fw",
 		Short: "Agent-safe firewall control (never locks out the agent)",
-		Long: "Agent-safe firewall control. Unlike a raw firewall, `fleet fw` ALWAYS injects an\n" +
-			"allow rule for the agent's own management port before applying any tightening\n" +
-			"operation, so the controller can never lock itself out of the agent.\n\n" +
+		Long: "Agent-safe firewall control. Before any change that could block traffic, `fleet fw`\n" +
+			"reads the server's rules and refuses unless the agent stays reachable, naming the\n" +
+			"command to run first.\n\n" +
 			"  fleet fw status <server>               detect + normalize nft/iptables/firewalld/ufw\n" +
 			"  fleet fw allow <server> 443/tcp        open a port (defaults to tcp)\n" +
 			"  fleet fw enable <server> --safe        enable default-drop, guarded + auto-reverting\n\n" +
-			"`enable --safe` refuses a ruleset that would drop the agent port unless you pass\n" +
-			"--force-i-have-console, and schedules a self-reverting timer that reopens the host\n" +
-			"after --undo-after seconds in case the apply cuts the agent off.",
+			"In direct mode `enable --safe` needs the agent's port allowed first (`fleet fw allow\n" +
+			"<server> <port>/tcp`); in reverse mode it needs established/related and outgoing traffic\n" +
+			"kept. It then arms a timer that restores the previous firewall state after --undo-after\n" +
+			"seconds unless you cancel it, and prints the cancel command.",
 	}
 
 	fwCmd.AddCommand(newFirewallSafeStatusCommand(configDir))
@@ -48,8 +52,15 @@ func newFirewallSafeCommand(configDir *string) *cobra.Command {
 	return fwCmd
 }
 
+// addForceConsoleFlag registers the deliberate agent-lockout override.
+func addForceConsoleFlag(cmd *cobra.Command, target *bool) {
+	cmd.Flags().BoolVar(target, "force-i-have-console", false,
+		"DANGEROUS: skip the agent-lockout refusal. Only for a person with out-of-band console access to the server "+
+			"who accepts losing the agent; never for scripts or AI agents. Every use is audit-logged")
+}
+
 // newFirewallSafeEngine opens the app, loads the server, and returns a
-// FirewallEngine bound to the server's agent port and exec transport.
+// FirewallEngine bound to the server's agent link and exec transport.
 func newFirewallSafeEngine(configDir, server string) (*core.App, *core.FirewallEngine, error) {
 	app, err := openApp(configDir)
 	if err != nil {
@@ -60,44 +71,18 @@ func newFirewallSafeEngine(configDir, server string) (*core.App, *core.FirewallE
 		_ = app.Close()
 		return nil, nil, err
 	}
-	// Resolve the REAL agent port to guard. Guarding a guessed port is worse than
-	// useless here: if we inject an allow rule for the wrong port and then enable a
-	// default-drop firewall, the actual agent connection is dropped — the exact
-	// lockout this command exists to prevent. So resolve from the record's
-	// configured management port, then the controller-wide default
-	// (Config.Runtime.DefaultAgentPort), and if neither is set REFUSE rather than
-	// fall back to a guessed port. This keeps the agent-port-allow-FIRST invariant
-	// honest: we only ever allow-first the port the agent actually listens on.
-	agentPort := record.Port
-	if agentPort == 0 {
-		agentPort = app.Config.Runtime.DefaultAgentPort
-	}
-	if agentPort == 0 {
+	// Guard the REAL agent port, from the record: guarding a guessed port could
+	// allow the wrong one and drop the actual agent connection.
+	link, err := core.ResolveAgentLink(record)
+	if err != nil {
 		_ = app.Close()
-		return nil, nil, fmt.Errorf(
-			"cannot determine the agent port for %q: server record has no port and no controller default "+
-				"(runtime.default_agent_port) is set. Refusing to run an agent-safe firewall operation against a "+
-				"guessed port, which could lock out the agent. Set the server's port (fleet server edit) or the "+
-				"controller default and retry", server)
+		return nil, nil, fmt.Errorf("refusing an agent-safe firewall operation: %w", err)
 	}
 	engine := &core.FirewallEngine{
-		AgentPort: agentPort,
-		Exec: func(command string) (string, int, error) {
-			res, execErr := app.ExecCommand(server, command)
-			if execErr != nil {
-				return "", 0, execErr
-			}
-			// Surface stderr alongside stdout so status normalization and error
-			// messages see the full backend output.
-			out := res.Stdout
-			if res.Stderr != "" {
-				if out != "" {
-					out += "\n"
-				}
-				out += res.Stderr
-			}
-			return out, res.ExitCode, nil
-		},
+		AgentPort: link.Port,
+		Server:    link.Server,
+		Mode:      link.Mode,
+		Exec:      app.FirewallExec(server),
 	}
 	return app, engine, nil
 }
@@ -147,6 +132,14 @@ func newFirewallSafeAllowCommand(configDir *string) *cobra.Command {
 			if _, err := engine.AllowPort(backend, spec); err != nil {
 				return err
 			}
+			if err := app.AuditLog.Append(logs.AuditEntry{
+				Action:   "port.open",
+				Target:   fmt.Sprintf("%s/%s", args[0], spec),
+				Operator: app.Operator(),
+				Details:  fmt.Sprintf("fw allow backend=%s", backend),
+			}); err != nil {
+				return err
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "allowed %s on %q via %s\n", spec, args[0], backend)
 			return nil
 		},
@@ -157,15 +150,20 @@ func newFirewallSafeEnableCommand(configDir *string) *cobra.Command {
 	var safe bool
 	var forceConsole bool
 	var undoAfter int
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "enable <server> --safe",
 		Short: "Enable a default-drop firewall without locking out the agent",
-		Long: "Enable a default-drop firewall safely. Before applying, an allow rule for the\n" +
-			"agent's own management port is injected, the resulting ruleset is checked to\n" +
-			"confirm the agent stays reachable, and a self-reverting timer is scheduled so the\n" +
-			"host reopens automatically if the apply cuts the agent off.\n\n" +
-			"--safe is required as an explicit acknowledgement. Pass --force-i-have-console\n" +
-			"only when you have out-of-band console access and accept the lockout risk.",
+		Long: "Enable a default-drop firewall safely. fleet first reads the server's rules and refuses\n" +
+			"unless the agent stays reachable: in direct mode the agent's port must already be allowed\n" +
+			"(the refusal names `fleet fw allow <server> <port>/tcp`); in reverse mode established/related\n" +
+			"and outgoing traffic must be kept. For nft and iptables, established/related and loopback\n" +
+			"traffic are accepted before the drop policy.\n\n" +
+			"Before applying, a self-revert timer is armed. After --undo-after seconds it restores the\n" +
+			"previous firewall state unless you cancel it; nothing cancels it automatically. The output\n" +
+			"prints the exact cancel command.\n\n" +
+			"--safe is required as an explicit acknowledgement. --force-i-have-console skips the\n" +
+			"refusals; only a person with out-of-band console access should pass it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !safe {
@@ -176,6 +174,7 @@ func newFirewallSafeEnableCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
+			engine.BeforeOverride = app.AuditLockoutOverride
 			backend, err := engine.DetectBackend()
 			if err != nil {
 				return err
@@ -185,26 +184,71 @@ func newFirewallSafeEnableCommand(configDir *string) *cobra.Command {
 			}
 			result, err := engine.EnableSafe(backend, forceConsole, undoAfter)
 			if err != nil {
+				var refusal *core.AgentLockoutError
+				if errors.As(err, &refusal) {
+					if auditErr := app.AuditLockoutRefusal(refusal); auditErr != nil {
+						return fmt.Errorf("%w (and the refusal could not be audit-logged: %v)", err, auditErr)
+					}
+				}
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(),
-				"firewall enabled on %q via %s; agent port %d allowed first.\n",
-				args[0], result.Backend, result.AgentPort)
-			if result.UndoScheduled {
-				fmt.Fprintf(cmd.OutOrStdout(),
-					"self-revert timer armed: the host auto-reopens in %ds if the agent does not check back in. "+
-						"Cancel it once you've confirmed connectivity:\n  systemctl stop %s.timer %s.service\n",
-					result.UndoDelaySecs, result.RevertUnit, result.RevertUnit)
-			} else {
+			if err := app.AuditLog.Append(logs.AuditEntry{
+				Action:   "firewall.enable",
+				Target:   args[0],
+				Operator: app.Operator(),
+				Details: fmt.Sprintf("fw --safe backend=%s mode=%s undo_scheduled=%t revert=%s overrode=%d",
+					result.Backend, result.Mode, result.UndoScheduled, result.RevertID, len(result.Overrode)),
+			}); err != nil {
+				return err
+			}
+			for _, skipped := range result.Overrode {
+				fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: --force-i-have-console skipped a refusal: %s\n", skipped)
+			}
+			if !result.UndoScheduled {
 				fmt.Fprintf(cmd.ErrOrStderr(),
-					"WARNING: could not arm the self-revert timer (%s). If you lose the agent, you must recover via console.\n",
+					"WARNING: no self-revert timer is armed (%s). If you lose the agent, you must recover via console.\n",
 					result.UndoScheduleErr)
 			}
-			return writeJSON(cmd, result)
+			if asJSON {
+				return writeJSON(cmd, result)
+			}
+			writeEnableSafeSummary(cmd.OutOrStdout(), args[0], result)
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&safe, "safe", false, "required acknowledgement that this is a guarded, agent-safe enable")
-	cmd.Flags().BoolVar(&forceConsole, "force-i-have-console", false, "bypass the agent-port lockout refusal (only with out-of-band console access)")
-	cmd.Flags().IntVar(&undoAfter, "undo-after", 60, "seconds before the self-reverting timer reopens the host")
+	addForceConsoleFlag(cmd, &forceConsole)
+	cmd.Flags().IntVar(&undoAfter, "undo-after", 60, "seconds before the self-revert timer restores the previous firewall state unless cancelled")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the result as JSON instead of the summary")
 	return cmd
+}
+
+// writeEnableSafeSummary prints the human summary of `fw enable --safe`. It
+// states what actually happens: the timer fires unless the operator cancels it.
+func writeEnableSafeSummary(w io.Writer, server string, r core.EnableSafeResult) {
+	switch {
+	case r.Mode == transport.ModeReverse.String():
+		fmt.Fprintf(w, "firewall enabled on %s via %s. Reverse mode: the agent dials out, so no inbound port was opened; "+
+			"established/related traffic stays accepted.\n", server, r.Backend)
+	case r.AgentPortConfirmed:
+		fmt.Fprintf(w, "firewall enabled on %s via %s; agent port %d/tcp was already allowed.\n", server, r.Backend, r.AgentPort)
+	default:
+		fmt.Fprintf(w, "firewall enabled on %s via %s; agent port %d/tcp was allowed first (--force-i-have-console).\n", server, r.Backend, r.AgentPort)
+	}
+	if !r.UndoScheduled {
+		return
+	}
+	fmt.Fprintf(w, "Self-revert timer armed (%s): in %ds it restores %s's previous firewall state unless you cancel it. "+
+		"Nothing cancels it automatically.\n", r.RevertMethod, r.UndoDelaySecs, server)
+	if r.UndoCmd == "true" {
+		fmt.Fprintf(w, "  undo:   nothing to revert (the firewall was already in this state)\n")
+	} else {
+		fmt.Fprintf(w, "  undo:   %s\n", r.UndoCmd)
+	}
+	fmt.Fprintf(w, "  cancel: fleet exec %s '%s'\n", server, r.CancelCmd)
+	if r.Mode == transport.ModeReverse.String() {
+		fmt.Fprintf(w, "Cancel it once `fleet server reconnect %s` shows the agent still connected.\n", server)
+	} else {
+		fmt.Fprintf(w, "Cancel it once `fleet server reconnect %s` succeeds (it opens a fresh connection to the agent port).\n", server)
+	}
 }

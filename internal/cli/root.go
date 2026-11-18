@@ -1899,7 +1899,8 @@ func newPortCommand(configDir *string) *cobra.Command {
 	})
 	for _, action := range []string{"open", "close"} {
 		action := action
-		portCmd.AddCommand(&cobra.Command{
+		var forceConsole bool
+		c := &cobra.Command{
 			Use:   action + " <server> <port>",
 			Short: titleAction(action) + " a tracked port",
 			Args:  cobra.ExactArgs(2),
@@ -1913,9 +1914,15 @@ func newPortCommand(configDir *string) *cobra.Command {
 					return err
 				}
 				defer app.Close()
-				return app.SetPort(args[0], port, action == "open")
+				return app.SetPortGuarded(args[0], port, action == "open", core.FirewallGuardOptions{ForceIHaveConsole: forceConsole})
 			},
-		})
+		}
+		if action == "close" {
+			c.Long = "Close a port on the server's firewall. Closing the port fleet reaches a direct-mode\n" +
+				"agent through is refused: it would lock fleet out of the agent."
+			addForceConsoleFlag(c, &forceConsole)
+		}
+		portCmd.AddCommand(c)
 	}
 	return portCmd
 }
@@ -1941,7 +1948,8 @@ func newFirewallCommand(configDir *string) *cobra.Command {
 	})
 	for _, action := range []string{"enable", "disable"} {
 		action := action
-		firewallCmd.AddCommand(&cobra.Command{
+		var forceConsole bool
+		c := &cobra.Command{
 			Use:   action + " <server>",
 			Short: titleAction(action) + " a server firewall",
 			Args:  cobra.ExactArgs(1),
@@ -1951,23 +1959,37 @@ func newFirewallCommand(configDir *string) *cobra.Command {
 					return err
 				}
 				defer app.Close()
-				return app.SetFirewall(args[0], action == "enable")
+				return app.SetFirewallGuarded(args[0], action == "enable", core.FirewallGuardOptions{ForceIHaveConsole: forceConsole})
 			},
-		})
+		}
+		if action == "enable" {
+			c.Long = "Enable the server's firewall. fleet first reads the rules that will be in force and\n" +
+				"refuses unless the agent stays reachable: in direct mode the agent's port must be\n" +
+				"allowed (the error names the command to run first, e.g. `fleet port open web-01 2222`);\n" +
+				"in reverse mode established/related and outgoing traffic must stay allowed."
+			addForceConsoleFlag(c, &forceConsole)
+		}
+		firewallCmd.AddCommand(c)
 	}
-	firewallCmd.AddCommand(&cobra.Command{
+	var forceConsole bool
+	add := &cobra.Command{
 		Use:   "add <server> <rule>",
 		Short: "Add a firewall rule to the tracked state",
-		Args:  cobra.ExactArgs(2),
+		Long: "Add a ufw rule. Rules that would deny, reject or rate-limit the port fleet reaches a\n" +
+			"direct-mode agent through, and rules fleet cannot read, are refused. A rule that blocks\n" +
+			"by address without a port is allowed only once the agent port is allowed ahead of it.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)
 			if err != nil {
 				return err
 			}
 			defer app.Close()
-			return app.AddFirewallRule(args[0], args[1])
+			return app.AddFirewallRuleGuarded(args[0], args[1], core.FirewallGuardOptions{ForceIHaveConsole: forceConsole})
 		},
-	})
+	}
+	addForceConsoleFlag(add, &forceConsole)
+	firewallCmd.AddCommand(add)
 	return firewallCmd
 }
 

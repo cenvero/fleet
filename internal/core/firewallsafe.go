@@ -6,25 +6,43 @@ package core
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/cenvero/fleet/internal/transport"
 )
 
-// FL-029 — firewall-safe.
+// FL-029 — firewall-safe, and the agent-lockout gate.
 //
-// A SAFETY-CRITICAL, agent-safe firewall helper. The cardinal rule everywhere in
-// this file: before applying ANY rule that could tighten the policy (enable a
-// default-drop firewall, add a deny rule), we ALWAYS first inject an explicit
-// allow rule for the agent's OWN management port. Locking the controller out of
-// its own agent is unrecoverable without console access, so every code path that
-// could close the door first nails it open for the agent port.
+// SAFETY-CRITICAL. Locking the controller out of its own agent is unrecoverable
+// without console access, so the cardinal rule everywhere in this file is: a
+// change that could block traffic runs only after fleet has READ the host's
+// rules and confirmed the agent connection survives it. When it would not, or
+// when the state cannot be read, the change is refused (fail closed) with an
+// AgentLockoutError naming the exact command to run first. Only the deliberate
+// --force-i-have-console override goes past a refusal, and callers audit-log
+// every refusal and every override.
+//
+// What "survives" means depends on how the controller reaches the agent:
+//   - direct mode: the agent listens on ServerRecord.Port, which must stay
+//     allowed inbound (TCP) with no rule denying it;
+//   - reverse mode: the agent dials out, so no inbound port matters, but the
+//     input policy must keep established/related traffic (the replies on the
+//     agent's own outbound connection) and outgoing traffic must stay allowed
+//     so the agent can dial again after a disconnect.
+//
+// Two stacks share the gate: `fleet fw` (this file's FirewallEngine, four
+// backends over shell.exec) and the legacy `fleet firewall` / `fleet port`
+// RPCs (ufw on the agent), which App wires through the same decisions in
+// app.go.
 //
 // All remote commands are built from shell-quoted, validated values. The engine
-// logic is pure and exercised by firewallsafe_test.go through a fake exec
-// function (FirewallExec); it does not depend on *App.
+// logic is pure and exercised through a fake exec function (FirewallExec); it
+// does not depend on *App.
 
 // FirewallBackend identifies a detected/normalized host firewall engine.
 type FirewallBackend string
@@ -91,13 +109,31 @@ func ParsePortSpec(spec string) (PortSpec, error) {
 }
 
 // FirewallEngine is a pure, testable firewall driver bound to a single server's
-// agent port. It never depends on *App: callers pass an exec function.
+// agent. It never depends on *App: callers pass an exec function.
 type FirewallEngine struct {
-	// AgentPort is the management port that MUST stay reachable. Every tightening
-	// operation injects an allow rule for it first.
+	// AgentPort is the direct agent's listening port, which must stay reachable.
 	AgentPort int
 	// Exec runs a remote command. Required.
 	Exec FirewallExec
+	// Server names the server in refusals and remediation commands.
+	Server string
+	// Mode is how the controller reaches the agent. Anything but reverse is
+	// treated as direct.
+	Mode transport.Mode
+	// BeforeOverride, when set, runs before --force-i-have-console skips a
+	// refusal (callers audit-log it there). An error stops the change.
+	BeforeOverride func(*AgentLockoutError) error
+}
+
+func (e *FirewallEngine) link() AgentLink {
+	return AgentLink{Server: e.Server, Mode: e.Mode, Port: e.AgentPort}
+}
+
+func (e *FirewallEngine) mode() string {
+	if e.Mode == transport.ModeReverse {
+		return transport.ModeReverse.String()
+	}
+	return transport.ModeDirect.String()
 }
 
 // FirewallStatusReport is the normalized result of a status probe.
@@ -106,8 +142,9 @@ type FirewallStatusReport struct {
 	Active      bool            `json:"active"`
 	DefaultDrop bool            `json:"default_drop"`
 	AgentPort   int             `json:"agent_port"`
-	// AgentPortAllowed is true when an explicit allow rule for the agent port was
-	// observed in the live ruleset.
+	// AgentPortAllowed is true when the agent port is allowed, and not denied,
+	// in the rules `fleet fw enable` checks (for ufw, including rules pending
+	// while it is inactive).
 	AgentPortAllowed bool `json:"agent_port_allowed"`
 	// Raw is the (trimmed) backend-native ruleset dump, for the operator's eyes.
 	Raw string `json:"raw,omitempty"`
@@ -160,18 +197,39 @@ func (e *FirewallEngine) Status() (FirewallStatusReport, error) {
 	report.Raw = strings.TrimSpace(dump)
 	report.Active = backendActive(backend, dump)
 	report.DefaultDrop = backendDefaultDrop(backend, dump)
-	report.AgentPortAllowed = rulesetAllowsPort(dump, e.AgentPort)
+	st := parseGuardState(backend, dump, nil, e.AgentPort)
+	report.AgentPortAllowed = st.readErr == "" && st.agentAllowed && st.agentDenied == ""
 	return report, nil
 }
 
-// dumpRuleset returns the backend-native ruleset text used for normalization.
+// ufwDumpCommand reads, without changing anything, what ufw enforces now and
+// will enforce once enabled: status, the pending rule list (`ufw status` shows
+// no rules while ufw is inactive), the default policies, and whether
+// before.rules still accepts established/related traffic.
+const ufwDumpCommand = "ufw status verbose 2>&1; " +
+	"echo '" + guardMarker + "added'; ufw show added 2>&1; " +
+	"echo '" + guardMarker + "defaults'; grep -E '^DEFAULT_(INPUT|OUTPUT)_POLICY=' /etc/default/ufw 2>&1; " +
+	"echo '" + guardMarker + "before-rules'; grep -c -E -e '^-A ufw-before-input .*--(ct)?state RELATED,ESTABLISHED -j ACCEPT' /etc/ufw/before.rules 2>&1; " +
+	"true"
+
+// firewalldDumpCommand reads the running and permanent default zone when
+// firewalld runs, or the permanent zone offline when it is stopped (the daemon
+// is needed for firewall-cmd), plus whether the unit is enabled at boot.
+const firewalldDumpCommand = "if firewall-cmd --state >/dev/null 2>&1; then " +
+	"echo '" + guardMarker + "firewalld-running'; firewall-cmd --list-all 2>&1; " +
+	"echo '" + guardMarker + "permanent'; firewall-cmd --permanent --list-all 2>&1; " +
+	"else echo '" + guardMarker + "firewalld-stopped'; echo '" + guardMarker + "permanent'; firewall-offline-cmd --list-all 2>&1; fi; " +
+	"echo \"" + guardMarker + "unit $(systemctl is-enabled firewalld 2>&1)\""
+
+// dumpRuleset returns the backend-native, read-only state dump the gate and
+// the status report parse.
 func (e *FirewallEngine) dumpRuleset(backend FirewallBackend) (string, error) {
 	var cmd string
 	switch backend {
 	case FirewallBackendUFW:
-		cmd = "ufw status verbose 2>&1 || true"
+		cmd = ufwDumpCommand
 	case FirewallBackendFirewalld:
-		cmd = "firewall-cmd --list-all 2>&1; firewall-cmd --state 2>&1 || true"
+		cmd = firewalldDumpCommand
 	case FirewallBackendNftables:
 		cmd = "nft list ruleset 2>&1 || true"
 	case FirewallBackendIptables:
@@ -184,8 +242,8 @@ func (e *FirewallEngine) dumpRuleset(backend FirewallBackend) (string, error) {
 }
 
 // AllowPort builds and applies the backend-native command that opens a port for
-// the given protocol. Opening a port never reduces reachability, so it does not
-// require the agent-port guard — but the command is still fully shell-quoted.
+// the given protocol. Opening a port never reduces reachability, and none of
+// the commands replaces the policy (see allowPortCommand), so it needs no gate.
 func (e *FirewallEngine) AllowPort(backend FirewallBackend, spec PortSpec) (string, error) {
 	cmd, err := allowPortCommand(backend, spec)
 	if err != nil {
@@ -194,45 +252,66 @@ func (e *FirewallEngine) AllowPort(backend FirewallBackend, spec PortSpec) (stri
 	return e.run(cmd)
 }
 
+// Self-revert methods reported by the host when the timer is armed.
+const (
+	RevertMethodSystemd = "systemd-run"
+	RevertMethodSetsid  = "setsid"
+	revertArmedPrefix   = "fleet-fw-safe-revert:armed:"
+)
+
 // EnableSafeResult reports the outcome of a guarded `enable --safe`.
 type EnableSafeResult struct {
-	Backend         FirewallBackend `json:"backend"`
-	AgentPort       int             `json:"agent_port"`
-	AgentAllowCmd   string          `json:"agent_allow_cmd"`
-	EnableCmd       string          `json:"enable_cmd"`
-	UndoCmd         string          `json:"undo_cmd"`
-	UndoScheduled   bool            `json:"undo_scheduled"`
-	UndoDelaySecs   int             `json:"undo_delay_secs"`
-	UndoScheduleErr string          `json:"undo_schedule_err,omitempty"`
-	// RevertUnit is the systemd unit name of the armed self-revert timer (unique
-	// per invocation). The operator cancels the timer by stopping this unit's
-	// .timer/.service. Empty when the timer was not armed.
+	Backend   FirewallBackend `json:"backend"`
+	Mode      string          `json:"mode"`
+	AgentPort int             `json:"agent_port"`
+	// AgentPortConfirmed is true when the agent port was already allowed before
+	// anything changed (direct mode).
+	AgentPortConfirmed bool `json:"agent_port_confirmed"`
+	// AgentAllowCmd is the agent-port allow enable ran itself, which happens
+	// only under --force-i-have-console when the port was not confirmed.
+	AgentAllowCmd   string `json:"agent_allow_cmd,omitempty"`
+	EnableCmd       string `json:"enable_cmd"`
+	UndoCmd         string `json:"undo_cmd"`
+	UndoScheduled   bool   `json:"undo_scheduled"`
+	UndoDelaySecs   int    `json:"undo_delay_secs"`
+	UndoScheduleErr string `json:"undo_schedule_err,omitempty"`
+	// RevertMethod is how the host armed the self-revert: "systemd-run" or
+	// "setsid". RevertID names the timer: the systemd unit, or the setsid job's
+	// $0. CancelCmd, run on the server, cancels it. Nothing cancels it
+	// automatically.
+	RevertMethod string `json:"revert_method,omitempty"`
+	RevertID     string `json:"revert_id,omitempty"`
+	CancelCmd    string `json:"cancel_cmd,omitempty"`
+	// RevertUnit is the systemd unit of the timer, set only on the systemd-run
+	// path (the setsid path has no unit).
 	RevertUnit string `json:"revert_unit,omitempty"`
+	// Overrode lists the refusals --force-i-have-console skipped.
+	Overrode []string `json:"overrode,omitempty"`
 }
 
 // EnableSafe enables a default-drop firewall WITHOUT locking out the agent.
 //
-// Order of operations (all guarded, all shell-quoted):
-//  1. Inject an explicit allow rule for the agent's own management port. This
-//     ALWAYS runs first so the door is nailed open before any tightening.
-//  2. Refuse the operation unless either the agent port is now allowed, or the
-//     operator passed forceIHaveConsole (they accept lockout risk knowingly).
-//  3. Arm a self-reverting (dead-man) undo timer via systemd-run so a mistake
-//     auto-rolls-back after undoDelaySecs. This MUST be confirmed armed before
-//     the lockdown takes effect: if arming fails we fail CLOSED and do NOT apply
-//     the firewall (returning the arming error), so a host that cannot schedule
-//     the self-revert can never be locked down with no rollback.
-//  4. Only then apply the enable.
+// Order of operations:
+//  1. Read the host's state. Nothing has changed yet.
+//  2. The gate: refuse unless the agent connection survives (direct: the agent
+//     port is allowed and not denied; reverse: established/related traffic is
+//     kept and outgoing traffic allowed). The refusal names the command to run
+//     first (`fleet fw allow`). The state is read in full or the call refuses.
+//  3. Only under --force-i-have-console, with the agent port not confirmed,
+//     allow it now (idempotently) before anything tightens.
+//  4. Arm the self-reverting (dead-man) undo, built from the snapshot taken in
+//     step 1, and require the host to confirm which path armed it. If arming
+//     fails we fail CLOSED and do not apply the firewall.
+//  5. Only then apply the enable.
 //
-// forceIHaveConsole bypasses BOTH safety refusals — the lockout-verification
-// refusal (step 2) AND the dead-man-arming refusal (step 3) — because the
-// operator has asserted out-of-band console access to recover. The agent-port
-// allow is always injected regardless.
+// forceIHaveConsole skips the refusals in steps 2 and 4 because the operator
+// has asserted out-of-band console access; BeforeOverride runs first.
 func (e *FirewallEngine) EnableSafe(backend FirewallBackend, forceIHaveConsole bool, undoDelaySecs int) (EnableSafeResult, error) {
 	if e.Exec == nil {
 		return EnableSafeResult{}, fmt.Errorf("firewall engine: Exec is nil")
 	}
-	if e.AgentPort < 1 || e.AgentPort > 65535 {
+	reverse := e.Mode == transport.ModeReverse
+	if !reverse && (e.AgentPort < 1 || e.AgentPort > 65535) {
 		return EnableSafeResult{}, fmt.Errorf("refusing to enable firewall: agent port %d is invalid; cannot guarantee the agent stays reachable", e.AgentPort)
 	}
 	if backend == FirewallBackendUnknown {
@@ -241,96 +320,96 @@ func (e *FirewallEngine) EnableSafe(backend FirewallBackend, forceIHaveConsole b
 	if undoDelaySecs <= 0 {
 		undoDelaySecs = 60
 	}
-
-	result := EnableSafeResult{Backend: backend, AgentPort: e.AgentPort, UndoDelaySecs: undoDelaySecs}
-
-	// 1) ALWAYS allow the agent's own port first.
-	agentSpec := PortSpec{Port: e.AgentPort, Proto: ProtoTCP}
-	allowCmd, err := allowPortCommand(backend, agentSpec)
-	if err != nil {
-		return result, err
-	}
-	result.AgentAllowCmd = allowCmd
-	if _, err := e.run(allowCmd); err != nil {
-		return result, fmt.Errorf("failed to allow agent port %d before enabling firewall: %w", e.AgentPort, err)
+	result := EnableSafeResult{Backend: backend, Mode: e.mode(), UndoDelaySecs: undoDelaySecs}
+	if !reverse {
+		result.AgentPort = e.AgentPort
 	}
 
-	// 2) Verify the agent port is actually open now (unless forced).
-	//
-	// Fail CLOSED: this guard must never let a default-drop firewall through
-	// without a POSITIVE confirmation that the agent port survives. There are two
-	// ways the verification can fail to confirm that — and both must refuse:
-	//   a) the ruleset read errored, so we cannot see whether the port is allowed; or
-	//   b) the ruleset read succeeded but does not show the agent port allowed.
-	// Only --force-i-have-console (out-of-band console access) may bypass either.
-	if !forceIHaveConsole {
-		dump, derr := e.dumpRuleset(backend)
-		switch {
-		case derr != nil:
-			return result, fmt.Errorf(
-				"refusing to enable firewall: cannot verify the agent port %d is allowed (ruleset read failed: %v); "+
-					"refusing to enable a default-drop firewall that might lock out the agent. "+
-					"Re-run with --force-i-have-console only if you have out-of-band console access to recover",
-				e.AgentPort, derr)
-		case !rulesetAllowsPort(dump, e.AgentPort):
-			return result, fmt.Errorf(
-				"refusing to enable firewall: agent port %d does not appear to be allowed in the resulting ruleset, "+
-					"which would drop the agent connection. Re-run with --force-i-have-console only if you have out-of-band "+
-					"console access to recover", e.AgentPort)
+	// 1) Read the state before changing anything.
+	dump, derr := e.dumpRuleset(backend)
+	state := parseGuardState(backend, dump, derr, e.AgentPort)
+	result.AgentPortConfirmed = !reverse && state.readErr == "" && state.agentAllowed && state.agentDenied == ""
+
+	// 2) The gate.
+	if refusal := enableLockout(e.link(), state, FixFwAllowCommand(e.Server, e.AgentPort)); refusal != nil {
+		if err := e.overrideOrRefuse(forceIHaveConsole, refusal, &result); err != nil {
+			return result, err
 		}
 	}
 
-	// 3) Arm the self-reverting (dead-man) undo BEFORE applying, so even an apply
-	//    that cuts us off rolls back automatically.
-	//
-	// Fail CLOSED: the lockdown must NOT take effect unless the auto-revert is
-	// confirmed armed. If arming fails (the schedule command could not be built, or
-	// running it errored), applying the default-drop firewall anyway could lock the
-	// operator out permanently with no automatic rollback. So on an arm failure we
-	// refuse to enable and return the arming error — UNLESS the operator passed
-	// --force-i-have-console, in which case they have accepted the lockout risk and
-	// have out-of-band recovery. forceIHaveConsole is the ONLY bypass; without it,
-	// no firewall is applied when the dead-man cannot be armed.
-	undoCmd := disableCommand(backend)
+	// 3) The agent port is unconfirmed only under the override: allow it before
+	//    anything tightens. Skipped when it was confirmed, so an operator's
+	//    narrower allow (one source address, say) is never widened.
+	if !reverse && !result.AgentPortConfirmed {
+		allowCmd, err := allowPortCommand(backend, PortSpec{Port: e.AgentPort, Proto: ProtoTCP})
+		if err != nil {
+			return result, err
+		}
+		result.AgentAllowCmd = allowCmd
+		if _, err := e.run(allowCmd); err != nil {
+			return result, fmt.Errorf("failed to allow agent port %d before enabling firewall: %w", e.AgentPort, err)
+		}
+	}
+
+	// 4) Arm the self-revert BEFORE applying, so even an apply that cuts us off
+	//    rolls back on its own.
+	undoCmd := undoCommand(backend, state)
 	result.UndoCmd = undoCmd
-	scheduleCmd, revertUnit, scheduleErr := scheduleSelfRevertCommand(undoCmd, undoDelaySecs)
-	if scheduleErr != nil {
-		result.UndoScheduleErr = scheduleErr.Error()
-		if !forceIHaveConsole {
-			return result, fmt.Errorf(
-				"refusing to enable firewall: could not arm the auto-revert (dead-man) timer: %w; "+
-					"applying a default-drop firewall without a confirmed self-revert risks a permanent lockout. "+
-					"Re-run with --force-i-have-console only if you have out-of-band console access to recover",
-				scheduleErr)
-		}
-	} else {
-		result.RevertUnit = revertUnit
-		if _, err := e.run(scheduleCmd); err != nil {
-			result.UndoScheduleErr = err.Error()
-			if !forceIHaveConsole {
-				// Clear the unit we never actually armed so the result doesn't
-				// advertise a non-existent revert timer to the operator.
-				result.RevertUnit = ""
-				return result, fmt.Errorf(
-					"refusing to enable firewall: failed to arm the auto-revert (dead-man) timer (unit %s): %w; "+
-						"applying a default-drop firewall without a confirmed self-revert risks a permanent lockout. "+
-						"Re-run with --force-i-have-console only if you have out-of-band console access to recover",
-					revertUnit, err)
-			}
-		} else {
+	scheduleCmd, revertID, armErr := scheduleSelfRevertCommand(undoCmd, undoDelaySecs)
+	if armErr == nil {
+		out, err := e.run(scheduleCmd)
+		method := revertMethodFrom(out)
+		switch {
+		case err != nil:
+			armErr = err
+		case method == "":
+			armErr = fmt.Errorf("the host did not confirm the timer was armed (output: %s)", firstLine(out))
+		default:
 			result.UndoScheduled = true
+			result.RevertMethod = method
+			result.RevertID = revertID
+			result.CancelCmd = cancelRevertCommand(method, revertID)
+			if method == RevertMethodSystemd {
+				result.RevertUnit = revertID
+			}
+		}
+	}
+	if armErr != nil {
+		result.UndoScheduleErr = armErr.Error()
+		refusal := lockout("enable the firewall", fmt.Sprintf("the auto-revert (dead-man) timer could not be armed (%v), and a default-deny "+
+			"firewall without a confirmed self-revert risks a permanent lockout", armErr), "")
+		if err := e.overrideOrRefuse(forceIHaveConsole, refusal, &result); err != nil {
+			return result, err
 		}
 	}
 
-	// 4) Apply the enable. By this point the dead-man is confirmed armed
-	//    (result.UndoScheduled), or the operator explicitly accepted the lockout
-	//    risk with --force-i-have-console.
+	// 5) Apply. The dead-man is confirmed armed, or the operator explicitly
+	//    accepted the risk with --force-i-have-console.
 	enableCmd := enableCommand(backend)
 	result.EnableCmd = enableCmd
 	if _, err := e.run(enableCmd); err != nil {
 		return result, fmt.Errorf("enable firewall failed: %w", err)
 	}
 	return result, nil
+}
+
+// overrideOrRefuse returns the refusal unless force is set; with force it runs
+// BeforeOverride (the audit hook) and records what was skipped.
+func (e *FirewallEngine) overrideOrRefuse(force bool, refusal *AgentLockoutError, result *EnableSafeResult) error {
+	refusal.Server, refusal.Op = e.Server, "fw.enable"
+	if refusal.Server == "" {
+		refusal.Server = "<server>"
+	}
+	if !force {
+		return refusal
+	}
+	if e.BeforeOverride != nil {
+		if err := e.BeforeOverride(refusal); err != nil {
+			return fmt.Errorf("not using --force-i-have-console without an audit record: %w", err)
+		}
+	}
+	result.Overrode = append(result.Overrode, refusal.Reason)
+	return nil
 }
 
 // run executes a command and turns a non-zero exit into an error with stderr.
@@ -354,58 +433,94 @@ func (e *FirewallEngine) run(command string) (string, error) {
 
 // --- command builders (pure, shell-quoted) ---
 
-// allowPortCommand returns the backend-native command to allow a port/proto.
+// nftEnsureChain makes sure fleet's own input chain exists. Creating a base
+// chain without a policy gives it "accept"; re-adding an existing chain without
+// a policy leaves its policy unchanged.
+const nftEnsureChain = "nft add table inet fleet 2>/dev/null; " +
+	"nft add chain inet fleet input '{ type filter hook input priority 0 ; }' 2>/dev/null; "
+
+// nftEnsureRule inserts a rule into the fleet input chain unless the chain
+// already lists `match`.
+func nftEnsureRule(match, insert string) string {
+	return "{ nft list chain inet fleet input 2>/dev/null | grep -qF -- " + shellQuote(match) +
+		" || nft insert rule inet fleet input " + insert + "; }"
+}
+
+// iptablesEnsure inserts the INPUT rule `match -j ACCEPT`, tagged so the undo
+// can remove exactly it, unless the rule (tagged or not) already exists.
+func iptablesEnsure(match string) string {
+	plain := match + " -j ACCEPT"
+	tagged := match + " -m comment --comment " + fleetSafeTag + " -j ACCEPT"
+	return "{ iptables -C INPUT " + plain + " 2>/dev/null || iptables -C INPUT " + tagged +
+		" 2>/dev/null || iptables -I INPUT 1 " + tagged + "; }"
+}
+
+// fleetSafeTag marks the rules `enable --safe` adds, so its undo can delete
+// exactly those.
+const fleetSafeTag = "fleet-fw-safe"
+
+// allowPortCommand returns the backend-native, idempotent command to allow a
+// port/proto. None of them replaces the policy: in particular firewalld is not
+// `--reload`ed, because a reload swaps the running rules for the permanent
+// ones and drops any runtime-only allow (possibly the agent's).
 func allowPortCommand(backend FirewallBackend, spec PortSpec) (string, error) {
 	portProto := spec.String() // "443/tcp" — digits + known proto, safe but quoted below
+	proto, port := string(spec.Proto), strconv.Itoa(spec.Port)
 	switch backend {
 	case FirewallBackendUFW:
 		return "ufw allow " + shellQuote(portProto), nil
 	case FirewallBackendFirewalld:
-		return "firewall-cmd --permanent --add-port=" + shellQuote(portProto) + " && firewall-cmd --reload", nil
+		// firewall-cmd needs the daemon; while it is stopped, write the
+		// permanent config offline (it loads when firewalld starts).
+		return "if firewall-cmd --state >/dev/null 2>&1; then " +
+			"firewall-cmd --permanent --add-port=" + shellQuote(portProto) + " && firewall-cmd --add-port=" + shellQuote(portProto) + "; " +
+			"else firewall-offline-cmd --add-port=" + shellQuote(portProto) + "; fi", nil
 	case FirewallBackendNftables:
-		// Ensure an inet filter input chain exists, then insert (highest priority)
-		// an accept for the port so it precedes any drop policy.
-		return "nft add table inet fleet 2>/dev/null; " +
-			"nft add chain inet fleet input '{ type filter hook input priority 0 ; }' 2>/dev/null; " +
-			"nft insert rule inet fleet input " + shellQuote(string(spec.Proto)) +
-			" dport " + shellQuote(strconv.Itoa(spec.Port)) + " accept", nil
+		// Insert (highest priority) an accept so it precedes the drop policy.
+		return nftEnsureChain + nftEnsureRule(proto+" dport "+port+" accept",
+			shellQuote(proto)+" dport "+shellQuote(port)+" accept"), nil
 	case FirewallBackendIptables:
 		// Insert at the top of INPUT so the accept beats a later drop.
-		return "iptables -I INPUT 1 -p " + shellQuote(string(spec.Proto)) +
-			" --dport " + shellQuote(strconv.Itoa(spec.Port)) + " -j ACCEPT", nil
+		rule := "-p " + shellQuote(proto) + " --dport " + shellQuote(port) + " -j ACCEPT"
+		return "iptables -C INPUT " + rule + " 2>/dev/null || iptables -I INPUT 1 " + rule, nil
 	default:
 		return "", fmt.Errorf("unsupported firewall backend %q", backend)
 	}
 }
 
-// enableCommand returns the backend-native command to enable a default-drop policy.
+// enableCommand returns the backend-native command to enable a default-drop
+// policy. For nft and iptables it first accepts established/related traffic
+// (replies on connections the host opened, including a reverse agent's own)
+// and loopback, idempotently, and sets the drop policy only once both accepts
+// are in place. ufw and firewalld accept both in their stock rules.
 func enableCommand(backend FirewallBackend) string {
 	switch backend {
 	case FirewallBackendUFW:
-		// --force avoids the interactive y/n prompt; the agent-port allow already ran.
+		// --force avoids the interactive y/n prompt.
 		return "ufw --force enable"
 	case FirewallBackendFirewalld:
 		return "systemctl enable --now firewalld"
 	case FirewallBackendNftables:
-		// Set the input chain policy to drop (the agent accept rule precedes it).
-		// The chain was already created by allowPortCommand (step 1), so re-adding
-		// it with `nft add chain ... { ... policy drop ; }` fails "File exists" and
-		// makes enable return non-zero on every nftables host. Ensure the chain
-		// exists idempotently (add is a no-op-on-exists thanks to 2>/dev/null), then
-		// MODIFY the existing chain's policy with `nft chain ... { policy drop ; }`,
-		// which is idempotent whether or not the chain already had a policy.
-		return "nft add table inet fleet 2>/dev/null; " +
-			"nft add chain inet fleet input '{ type filter hook input priority 0 ; }' 2>/dev/null; " +
+		// `nft chain ... { policy drop ; }` MODIFIES the existing chain's policy;
+		// re-adding it with `nft add chain ... { ... policy drop ; }` would fail
+		// "File exists".
+		tag := "comment '\"" + fleetSafeTag + "\"'"
+		return nftEnsureChain +
+			nftEnsureRule(`iif "lo" accept`, "iif lo accept "+tag) + " && " +
+			nftEnsureRule("ct state established,related accept", "ct state established,related accept "+tag) + " && " +
 			"nft chain inet fleet input '{ policy drop ; }'"
 	case FirewallBackendIptables:
-		return "iptables -P INPUT DROP"
+		return iptablesEnsure("-i lo") + " && " +
+			iptablesEnsure("-m conntrack --ctstate ESTABLISHED,RELATED") + " && " +
+			"iptables -P INPUT DROP"
 	default:
 		return "true"
 	}
 }
 
-// disableCommand returns the backend-native UNDO that reopens the host. This is
-// what the self-revert timer runs, and what `enable --safe` schedules.
+// disableCommand returns the backend-native command that reopens the host. It
+// is the undo when fleet could not read what the host had before (only under
+// --force-i-have-console); otherwise undoCommand restores that state.
 func disableCommand(backend FirewallBackend) string {
 	switch backend {
 	case FirewallBackendUFW:
@@ -413,20 +528,87 @@ func disableCommand(backend FirewallBackend) string {
 	case FirewallBackendFirewalld:
 		return "systemctl stop firewalld"
 	case FirewallBackendNftables:
-		// Undo ONLY what EnableSafe added (the `inet fleet` table), never the whole
-		// host ruleset. First flip the fleet chain's policy back to accept so the
-		// host reopens immediately (idempotent; does not fail "File exists" the way a
-		// re-`add` would), then delete the fleet table outright to remove the drop
-		// policy and the agent-port rule we inserted. `delete table` also removes the
-		// chain, so the host returns to exactly its pre-EnableSafe state for every
-		// OTHER table. Both steps tolerate a missing table (2>/dev/null) so the undo
-		// is safe to run even if the table is already gone. We deliberately do NOT
-		// `nft flush ruleset` here — that would wipe every unrelated host firewall
-		// rule, not just fleet's.
+		// Undo ONLY fleet's `inet fleet` table, never the whole host ruleset:
+		// flip its policy back to accept first so the host reopens at once, then
+		// delete it. Both steps tolerate a missing table. We deliberately do NOT
+		// `nft flush ruleset` — that would wipe every unrelated host rule.
 		return "nft chain inet fleet input '{ policy accept ; }' 2>/dev/null; " +
 			"nft delete table inet fleet 2>/dev/null || true"
 	case FirewallBackendIptables:
 		return "iptables -P INPUT ACCEPT"
+	default:
+		return "true"
+	}
+}
+
+// nftDeleteTaggedRules deletes, by handle, the fleet input chain rules that
+// enableCommand tagged.
+const nftDeleteTaggedRules = "for h in $(nft -a list chain inet fleet input 2>/dev/null | " +
+	"sed -n 's/.*comment \"" + fleetSafeTag + "\".*# handle \\([0-9][0-9]*\\).*/\\1/p'); do " +
+	"nft delete rule inet fleet input handle \"$h\"; done"
+
+// undoCommand is what the self-revert runs: it reverses exactly what
+// enableCommand changes, using the state read before the change. It restores
+// the policy first, so the host reopens before anything else runs.
+//
+// What it cannot restore:
+//   - It never removes an allow rule, including an agent-port allow made under
+//     --force-i-have-console: removing an allow can only cut access, and the
+//     undo exists to restore it.
+//   - Changes anyone made between the enable and the undo are kept.
+//   - ufw: the undo only turns ufw back off; rules stay in its config.
+//   - firewalld: the undo restores the service's running/boot state only;
+//     zone changes stay.
+//   - nft and iptables: enable's changes are not persisted (nftables.conf,
+//     iptables-save or netfilter-persistent are left alone), so a reboot also
+//     drops them; ip6tables is never touched.
+//   - When the earlier state could not be read, it falls back to
+//     disableCommand, which reopens the host rather than restoring it.
+func undoCommand(backend FirewallBackend, st firewallGuardState) string {
+	if st.readErr != "" {
+		return disableCommand(backend)
+	}
+	switch backend {
+	case FirewallBackendUFW:
+		if st.active {
+			return "true" // ufw was already on: enable changed nothing to revert
+		}
+		return "ufw --force disable"
+	case FirewallBackendFirewalld:
+		switch {
+		case st.active && st.firewalldBootEnabled == triNo:
+			return "systemctl disable firewalld" // keep it running, as it was
+		case st.active:
+			return "true"
+		case st.firewalldBootEnabled == triYes:
+			return "systemctl stop firewalld"
+		default:
+			return "systemctl disable --now firewalld"
+		}
+	case FirewallBackendNftables:
+		switch {
+		case !st.nftTable:
+			return "nft delete table inet fleet 2>/dev/null || true"
+		case !st.nftChain:
+			return "nft flush chain inet fleet input 2>/dev/null; nft delete chain inet fleet input 2>/dev/null || true"
+		}
+		policy := "accept"
+		if st.nftPolicy == "drop" {
+			policy = "drop"
+		}
+		return "nft chain inet fleet input '{ policy " + policy + " ; }' 2>/dev/null; " + nftDeleteTaggedRules + "; true"
+	case FirewallBackendIptables:
+		policy := "ACCEPT"
+		if st.iptPolicy == "DROP" {
+			policy = "DROP"
+		}
+		var b strings.Builder
+		b.WriteString("iptables -P INPUT " + policy + "; ")
+		for _, match := range []string{"-m conntrack --ctstate ESTABLISHED,RELATED", "-i lo"} {
+			b.WriteString("while iptables -D INPUT " + match + " -m comment --comment " + fleetSafeTag + " -j ACCEPT 2>/dev/null; do :; done; ")
+		}
+		b.WriteString("true")
+		return b.String()
 	default:
 		return "true"
 	}
@@ -439,32 +621,29 @@ func disableCommand(backend FirewallBackend) string {
 // systemd-run fail "unit already exists" on the 2nd enable).
 var selfRevertSeq uint64
 
-// selfRevertUnitName returns a charset-safe, per-invocation-unique systemd unit
-// name for the self-revert timer. It uses only [a-z0-9-], so it is always a valid
-// systemd unit and needs no quoting (it is shell-quoted anyway).
+// selfRevertUnitName returns a charset-safe, per-invocation-unique name for the
+// self-revert timer: the systemd unit, or the setsid job's $0. It uses only
+// [a-z0-9-], so it is a valid systemd unit and safe in a pkill pattern.
 func selfRevertUnitName() string {
 	n := atomic.AddUint64(&selfRevertSeq, 1)
 	return fmt.Sprintf("fleet-fw-safe-revert-%d-%d-%d", os.Getpid(), time.Now().UnixNano(), n)
 }
 
 // scheduleSelfRevertCommand wraps an undo command in a one-shot self-reverting
-// timer so the host auto-reverts after delaySecs unless the operator cancels it.
-// This is the deadman: if `enable` cut us off, the timer fires and reopens the
-// host.
+// timer so the host reverts after delaySecs unless the operator cancels it.
+// This is the dead-man: if `enable` cut us off, the timer fires and reopens the
+// host. It fires just the same after a good enable unless cancelled.
 //
-// Two bugs are fixed here. (1) The unit name is now UNIQUE per invocation, so a
-// second `enable --safe` against the same host no longer fails "unit already
-// exists". (2) On hosts without systemd-run, we fall back to a detached
-// `setsid sh -c 'sleep N; <undo>'` loop so the self-revert safety net still arms,
-// mirroring core.BuildGuardArmCommand's schedule block.
+// systemd-run is preferred (it executes the argv directly; undoCmd is quoted as
+// one argument to `/bin/sh -c`). Without it, or when it fails, a detached
+// `setsid sh -c 'sleep N; <undo>' <id>` runs the undo; the id as $0 is what
+// cancelRevertCommand kills. The command prints which path armed the timer;
+// with neither tool it exits 1, since a backgrounded missing `setsid` would
+// still exit 0 and report a timer that does not exist.
 //
-// systemd-run executes the argv directly (no shell), so on the systemd path the
-// only injection surface is undoCmd, which we shell-quote as a single argument to
-// `/bin/sh -c`. The setsid fallback runs `sleep N; <undo>` as one quoted script.
-//
-// It returns the scheduling command AND the (unique) systemd unit name, so the
-// caller can tell the operator exactly which unit to stop to cancel the timer.
-func scheduleSelfRevertCommand(undoCmd string, delaySecs int) (cmd, unit string, err error) {
+// It returns the scheduling command and the revert id (the systemd unit name on
+// that path).
+func scheduleSelfRevertCommand(undoCmd string, delaySecs int) (cmd, id string, err error) {
 	if strings.TrimSpace(undoCmd) == "" {
 		return "", "", fmt.Errorf("empty undo command")
 	}
@@ -472,18 +651,584 @@ func scheduleSelfRevertCommand(undoCmd string, delaySecs int) (cmd, unit string,
 		delaySecs = 60
 	}
 	secs := strconv.Itoa(delaySecs)
-	onActive := shellQuote(secs + "s")
-	unit = selfRevertUnitName()
-	systemdPath := "systemd-run --on-active=" + onActive + " --unit=" + shellQuote(unit) +
-		" /bin/sh -c " + shellQuote(undoCmd)
-	// Detached fallback: a session-independent sleep loop that runs the undo once
-	// the delay elapses, fully detached from this SSH session's stdio.
-	fallback := "setsid sh -c " + shellQuote("sleep "+secs+"; "+undoCmd) +
+	id = selfRevertUnitName()
+	systemdPath := "systemd-run --on-active=" + shellQuote(secs+"s") + " --unit=" + shellQuote(id) +
+		" /bin/sh -c " + shellQuote(undoCmd) + " >/dev/null 2>&1"
+	setsidPath := "setsid sh -c " + shellQuote("sleep "+secs+"; "+undoCmd) + " " + shellQuote(id) +
 		" </dev/null >/dev/null 2>&1 &"
-	cmd = "if command -v systemd-run >/dev/null 2>&1; then " +
-		systemdPath + " >/dev/null 2>&1; else " +
-		fallback + " fi"
-	return cmd, unit, nil
+	cmd = "if command -v systemd-run >/dev/null 2>&1 && " + systemdPath + "; then " +
+		"echo " + shellQuote(revertArmedPrefix+RevertMethodSystemd) + "; " +
+		"elif command -v setsid >/dev/null 2>&1; then " + setsidPath + " " +
+		"echo " + shellQuote(revertArmedPrefix+RevertMethodSetsid) + "; " +
+		"else echo 'fleet-fw-safe-revert: neither systemd-run nor setsid is available' >&2; exit 1; fi"
+	return cmd, id, nil
+}
+
+// revertMethodFrom returns the arming path the schedule command reported, or
+// "" when it reported none.
+func revertMethodFrom(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		switch strings.TrimSpace(line) {
+		case revertArmedPrefix + RevertMethodSystemd:
+			return RevertMethodSystemd
+		case revertArmedPrefix + RevertMethodSetsid:
+			return RevertMethodSetsid
+		}
+	}
+	return ""
+}
+
+// cancelRevertCommand is the command, run on the server, that cancels an armed
+// self-revert. On the setsid path the bracket keeps pkill from matching the
+// shell that runs it.
+func cancelRevertCommand(method, id string) string {
+	if method == RevertMethodSetsid && id != "" {
+		return `pkill -f "[` + id[:1] + `]` + id[1:] + `"`
+	}
+	return "systemctl stop " + id + ".timer"
+}
+
+// --- the agent-lockout gate (pure) ---
+
+// AgentLink is how the controller reaches one server's agent: the facts the
+// lockout gate protects.
+type AgentLink struct {
+	Server string
+	Mode   transport.Mode
+	// Port is the agent's listening port (ServerRecord.Port). Only a direct
+	// agent listens; a reverse agent dials out and listens on nothing.
+	Port int
+}
+
+func (l AgentLink) reverse() bool { return l.Mode == transport.ModeReverse }
+
+// ResolveAgentLink returns the link the gate protects for a server record.
+// Every mode other than reverse is treated as direct, the stricter case. A
+// direct record must carry a real port: guarding a guessed one could allow the
+// wrong port and drop the real agent connection, so fleet refuses instead.
+func ResolveAgentLink(record ServerRecord) (AgentLink, error) {
+	link := AgentLink{Server: record.Name, Mode: record.Mode, Port: record.Port}
+	if link.reverse() {
+		return link, nil
+	}
+	if record.Port < 1 || record.Port > 65535 {
+		return link, fmt.Errorf("the server record for %q has no valid agent port (%d), so fleet cannot tell which port must stay open; "+
+			"set the record's port to the port the agent listens on and retry", record.Name, record.Port)
+	}
+	return link, nil
+}
+
+// AgentLockoutError is the gate's refusal of a firewall change that could cut
+// fleet off from a server's agent. Fix, when set, is the exact command that
+// makes the change safe: run it first, then retry.
+type AgentLockoutError struct {
+	Server string
+	// Op names the refused operation for the audit log: firewall.enable,
+	// firewall.rule.add, port.close or fw.enable.
+	Op string
+	// Change is what was refused, in words ("enable the firewall").
+	Change string
+	Reason string
+	Fix    string
+}
+
+func (e *AgentLockoutError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "refusing to %s on %s: %s", e.Change, e.Server, e.Reason)
+	if e.Fix != "" {
+		fmt.Fprintf(&b, ". Run this first, then retry: %s", e.Fix)
+	}
+	fmt.Fprintf(&b, ". Only a person with out-of-band console access to %s who accepts losing the agent may pass "+
+		"--force-i-have-console to skip this check; scripts and AI agents must not", e.Server)
+	return b.String()
+}
+
+// cliWord renders s as one argument of a shell command line shown to the
+// operator: bare when it is plainly safe, single-quoted otherwise.
+func cliWord(s string) string {
+	if s == "" {
+		return "<server>"
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-@:/", r)) {
+			return shellQuote(s)
+		}
+	}
+	return s
+}
+
+// FixPortOpenCommand is the remediation for the legacy (ufw RPC) path.
+func FixPortOpenCommand(server string, port int) string {
+	return fmt.Sprintf("fleet port open %s %d", cliWord(server), port)
+}
+
+// FixFwAllowCommand is the remediation for the `fleet fw` path.
+func FixFwAllowCommand(server string, port int) string {
+	return fmt.Sprintf("fleet fw allow %s %d/tcp", cliWord(server), port)
+}
+
+type triState int
+
+const (
+	triUnknown triState = iota
+	triYes
+	triNo
+)
+
+// firewallGuardState is what the gate read from a host before changing it.
+type firewallGuardState struct {
+	backend FirewallBackend
+	// readErr is set when the state could not be read. The gate then fails
+	// closed: nothing it cannot see is assumed safe.
+	readErr string
+	active  bool
+	// agentAllowed / agentDenied describe the agent port (TCP) in the rules that
+	// are, or will be once enabled, in force. agentDenied is the offending rule.
+	agentAllowed bool
+	agentDenied  string
+	// Reverse-mode facts.
+	keepsEstablished triState
+	outgoingBlocked  triState
+	// Snapshot for the undo.
+	firewalldBootEnabled triState
+	nftTable, nftChain   bool
+	nftPolicy            string // "accept" or "drop" when nftChain
+	iptPolicy            string // the INPUT policy, e.g. "ACCEPT"
+}
+
+func lockout(change, reason, fix string) *AgentLockoutError {
+	return &AgentLockoutError{Change: change, Reason: reason, Fix: fix}
+}
+
+// enableLockout decides whether turning on a default-deny inbound policy keeps
+// the agent reachable. fix is the command that allows the agent port.
+func enableLockout(link AgentLink, st firewallGuardState, fix string) *AgentLockoutError {
+	const change = "enable the firewall"
+	if st.readErr != "" {
+		return lockout(change, fmt.Sprintf("fleet could not read the %s state (%s), so it cannot confirm the agent stays reachable", st.backend, st.readErr), "")
+	}
+	if link.reverse() {
+		if st.keepsEstablished != triYes {
+			return lockout(change, fmt.Sprintf("fleet could not confirm %s keeps accepting established/related traffic, which carries the reverse agent's own "+
+				"outbound connection (for ufw, /etc/ufw/before.rules must keep its stock "+
+				"`-A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT` rule)", st.backend), "")
+		}
+		if st.outgoingBlocked != triNo {
+			fix := ""
+			if st.backend == FirewallBackendUFW {
+				fix = fmt.Sprintf("fleet exec %s 'ufw default allow outgoing'", cliWord(link.Server))
+			}
+			return lockout(change, "outgoing traffic would be blocked, or fleet could not read the outgoing policy, so the reverse agent "+
+				"could not dial the controller again after a disconnect", fix)
+		}
+		return nil
+	}
+	if st.agentDenied != "" {
+		return lockout(change, fmt.Sprintf("a rule blocks port %d/tcp, which fleet uses to reach the agent (%q); remove that rule on the server first", link.Port, st.agentDenied), "")
+	}
+	if !st.agentAllowed {
+		return lockout(change, fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is not allowed by the rules that would be in force, "+
+			"so enabling would lock fleet out", link.Port), fix)
+	}
+	return nil
+}
+
+// portCloseLockout refuses closing the direct agent's own port. No preparatory
+// command makes that safe while the agent listens there.
+func portCloseLockout(link AgentLink, port int) *AgentLockoutError {
+	if link.reverse() || port != link.Port {
+		return nil
+	}
+	return lockout(fmt.Sprintf("close port %d", port), fmt.Sprintf("fleet reaches the agent through port %d, so closing it would lock fleet out; "+
+		"no command makes that safe while the agent listens there", port), "")
+}
+
+// ruleImpact is what a ufw rule (the `fleet firewall add` grammar) can block.
+type ruleImpact int
+
+const (
+	ruleOpens         ruleImpact = iota // allow: only opens traffic
+	ruleBlocksOther                     // blocks only ports other than the agent's
+	ruleBlocksAgent                     // denies, rejects or limits the agent port
+	ruleBlocksBroadly                   // blocks by address with no port
+	ruleUnreadable                      // fleet cannot tell what it blocks
+)
+
+var (
+	rulePortSpec = regexp.MustCompile(`^[0-9]{1,5}(:[0-9]{1,5})?(,[0-9]{1,5}(:[0-9]{1,5})?)*(/(tcp|udp))?$`)
+	ruleAddress  = regexp.MustCompile(`^[0-9a-f.:]+(/[0-9]{1,3})?$`)
+)
+
+// classifyFirewallRule reads a ufw rule the way the controller must before
+// sending it: conservatively. Agents of other versions accept other grammars,
+// so anything outside the plain allow/deny/reject/limit forms is unreadable and
+// the gate refuses it. The second result explains an unreadable rule.
+func classifyFirewallRule(rule string, agentPort int) (ruleImpact, string) {
+	fields := strings.Fields(strings.ToLower(rule))
+	if len(fields) == 0 {
+		return ruleUnreadable, "the rule is empty"
+	}
+	switch fields[0] {
+	case "allow":
+		return ruleOpens, ""
+	case "deny", "reject", "limit":
+	default:
+		return ruleUnreadable, fmt.Sprintf("%q is not an allow, deny, reject or limit rule", fields[0])
+	}
+	udpOnly := false
+	var ports []string
+	for i := 1; i < len(fields); i++ {
+		f, prev := fields[i], fields[i-1]
+		switch {
+		case f == "in" || f == "from" || f == "to" || f == "any" || f == "port":
+		case f == "proto" && i+1 < len(fields) && (fields[i+1] == "tcp" || fields[i+1] == "udp"):
+			udpOnly = fields[i+1] == "udp"
+			i++
+		case rulePortSpec.MatchString(f) && (i == 1 || prev == "port" || prev == "in"):
+			ports = append(ports, f)
+		case ruleAddress.MatchString(f) && strings.ContainsAny(f, ".:") && (prev == "from" || prev == "to"):
+		default:
+			return ruleUnreadable, fmt.Sprintf("fleet does not understand %q in it", f)
+		}
+	}
+	if len(ports) == 0 {
+		return ruleBlocksBroadly, ""
+	}
+	for _, spec := range ports {
+		if portSpecCovers(spec, agentPort, udpOnly) {
+			return ruleBlocksAgent, ""
+		}
+	}
+	return ruleBlocksOther, ""
+}
+
+// portSpecCovers reports whether a ufw port spec (ports, ranges, lists, an
+// optional /proto) matches TCP traffic to port.
+func portSpecCovers(spec string, port int, udpOnly bool) bool {
+	list, proto, _ := strings.Cut(spec, "/")
+	if proto == "udp" || (proto == "" && udpOnly) {
+		return false
+	}
+	for _, part := range strings.Split(list, ",") {
+		lo, hi, isRange := strings.Cut(part, ":")
+		a, err := strconv.Atoi(lo)
+		if err != nil {
+			continue
+		}
+		b := a
+		if isRange {
+			if b, err = strconv.Atoi(hi); err != nil {
+				continue
+			}
+		}
+		if a <= port && port <= b {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleLockout decides whether adding rule keeps the agent reachable. st is
+// required only for ruleBlocksBroadly; fix is the command that allows the
+// agent port.
+func ruleLockout(link AgentLink, rule string, impact ruleImpact, why string, st *firewallGuardState, fix string) *AgentLockoutError {
+	change := fmt.Sprintf("add firewall rule %q", rule)
+	switch impact {
+	case ruleOpens, ruleBlocksOther:
+		return nil
+	case ruleUnreadable:
+		return lockout(change, "fleet cannot tell which traffic this rule blocks ("+why+"), so it cannot confirm the agent stays reachable", "")
+	case ruleBlocksAgent:
+		if link.reverse() {
+			return nil // a reverse agent listens on no port
+		}
+		return lockout(change, fmt.Sprintf("it would deny, reject or rate-limit port %d/tcp, which fleet uses to reach the agent; "+
+			"no command makes that safe while the agent listens there", link.Port), "")
+	}
+	// ruleBlocksBroadly: ufw appends the rule after the existing ones and the
+	// first match wins, so it is safe once the agent's traffic is accepted
+	// ahead of it.
+	if st == nil {
+		return lockout(change, "fleet did not read the firewall state", "")
+	}
+	if st.readErr != "" {
+		return lockout(change, fmt.Sprintf("it blocks traffic without naming a port, and fleet could not read the %s state (%s)", st.backend, st.readErr), "")
+	}
+	if link.reverse() {
+		if st.keepsEstablished != triYes {
+			return lockout(change, fmt.Sprintf("it blocks traffic without naming a port, and fleet could not confirm %s accepts established/related "+
+				"traffic (the reverse agent's own connection) ahead of it", st.backend), "")
+		}
+		return nil
+	}
+	if st.agentDenied != "" {
+		return lockout(change, fmt.Sprintf("a rule already blocks port %d/tcp, which fleet uses to reach the agent (%q)", link.Port, st.agentDenied), "")
+	}
+	if !st.agentAllowed {
+		return lockout(change, fmt.Sprintf("it blocks traffic without naming a port, and port %d/tcp (the agent's) is not allowed ahead of it, "+
+			"so it could cut fleet off from the agent", link.Port), fix)
+	}
+	return nil
+}
+
+// --- reading the host ---
+
+// guardMarker starts a section line in a probe dump ("#fleet-guard:<name> [text]").
+const guardMarker = "#fleet-guard:"
+
+// guardSections splits a probe dump at its marker lines. Text before the first
+// marker is under "". Text after a marker's name on the same line starts that
+// marker's section.
+func guardSections(dump string) map[string]string {
+	out := map[string]string{}
+	name := ""
+	var b strings.Builder
+	flush := func() {
+		out[name] += b.String()
+		b.Reset()
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(dump, "\r\n", "\n"), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), guardMarker); ok {
+			flush()
+			var value string
+			name, value, _ = strings.Cut(rest, " ")
+			if value = strings.TrimSpace(value); value != "" {
+				b.WriteString(value + "\n")
+			}
+			continue
+		}
+		b.WriteString(line + "\n")
+	}
+	flush()
+	return out
+}
+
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return "no output"
+}
+
+func hasLinePrefix(text, prefix string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseGuardState turns a backend's dump (dumpRuleset) into what the gate needs.
+func parseGuardState(backend FirewallBackend, dump string, readErr error, port int) firewallGuardState {
+	st := firewallGuardState{backend: backend}
+	if readErr != nil {
+		st.readErr = readErr.Error()
+		return st
+	}
+	switch backend {
+	case FirewallBackendUFW:
+		parseUFWGuard(&st, dump, port)
+	case FirewallBackendFirewalld:
+		parseFirewalldGuard(&st, dump, port)
+	case FirewallBackendNftables:
+		parseNftGuard(&st, dump, port)
+	case FirewallBackendIptables:
+		parseIptablesGuard(&st, dump, port)
+	default:
+		st.readErr = "no supported firewall backend was detected"
+	}
+	return st
+}
+
+// ufw prints only "Status: inactive" while it is off, so the rules that will be
+// in force once it is enabled come from `ufw show added`.
+func parseUFWGuard(st *firewallGuardState, dump string, port int) {
+	sec := guardSections(dump)
+	status := sec[""]
+	low := strings.ToLower(status)
+	if !hasLinePrefix(low, "status:") {
+		st.readErr = "ufw did not report its status: " + firstLine(status)
+		return
+	}
+	st.active = strings.Contains(low, "status: active")
+	added, haveAdded := sec["added"]
+	haveAdded = haveAdded && strings.Contains(strings.ToLower(added), "added user rules")
+	rules := ""
+	if st.active {
+		rules = status
+	}
+	if haveAdded {
+		rules += "\n" + added
+	} else if !st.active {
+		st.readErr = "ufw is inactive and `ufw show added` did not list its pending rules: " + firstLine(added)
+		return
+	}
+	st.agentAllowed = rulesetAllowsPort(rules, port)
+	st.agentDenied = rulesetDenyingLine(rules, port)
+
+	// Stock ufw accepts established/related traffic in /etc/ufw/before.rules,
+	// ahead of every user rule.
+	if n, err := strconv.Atoi(strings.TrimSpace(sec["before-rules"])); err == nil {
+		st.keepsEstablished = triNo
+		if n > 0 {
+			st.keepsEstablished = triYes
+		}
+	}
+	st.outgoingBlocked = ufwOutgoing(st.active, low, sec["defaults"])
+}
+
+// ufwOutgoing reads the outgoing default: from `ufw status verbose` while ufw
+// is active, otherwise from /etc/default/ufw (what enabling will apply).
+func ufwOutgoing(active bool, lowStatus, defaults string) triState {
+	if active {
+		for _, line := range strings.Split(lowStatus, "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "default:") {
+				continue
+			}
+			switch {
+			case strings.Contains(line, "allow (outgoing)"):
+				return triNo
+			case strings.Contains(line, "(outgoing)"):
+				return triYes
+			}
+		}
+	}
+	for _, line := range strings.Split(defaults, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "DEFAULT_OUTPUT_POLICY=")
+		if !ok {
+			continue
+		}
+		if strings.Trim(value, `"' `) == "ACCEPT" {
+			return triNo
+		}
+		return triYes
+	}
+	return triUnknown
+}
+
+// firewalld: when it is running, enable leaves the runtime rules alone and
+// enables the daemon at boot, so the agent port must be in both the runtime
+// and the permanent zone. When it is stopped, `systemctl enable --now` loads
+// the permanent zone, read offline.
+func parseFirewalldGuard(st *firewallGuardState, dump string, port int) {
+	sec := guardSections(dump)
+	runtime, running := sec["firewalld-running"]
+	_, stopped := sec["firewalld-stopped"]
+	permanent := sec["permanent"]
+	zone := func(label, text string) bool {
+		if !strings.Contains(strings.ToLower(text), "ports:") {
+			st.readErr = "firewalld did not list its " + label + " zone: " + firstLine(text)
+			return false
+		}
+		return true
+	}
+	switch {
+	case running:
+		if !zone("running", runtime) || !zone("permanent", permanent) {
+			return
+		}
+		st.active = true
+		st.agentAllowed = rulesetAllowsPort(runtime, port) && rulesetAllowsPort(permanent, port)
+		st.agentDenied = rulesetDenyingLine(runtime+"\n"+permanent, port)
+	case stopped:
+		if !zone("permanent", permanent) {
+			return
+		}
+		st.agentAllowed = rulesetAllowsPort(permanent, port)
+		st.agentDenied = rulesetDenyingLine(permanent, port)
+	default:
+		st.readErr = "fleet could not tell whether firewalld is running: " + firstLine(dump)
+		return
+	}
+	switch strings.TrimSpace(sec["unit"]) {
+	case "enabled":
+		st.firewalldBootEnabled = triYes
+	case "disabled":
+		st.firewalldBootEnabled = triNo
+	}
+	// firewalld accepts established/related traffic in every zone and does not
+	// filter outgoing traffic unless policies were configured.
+	st.keepsEstablished = triYes
+	st.outgoingBlocked = triNo
+}
+
+// nft: enable sets the policy of fleet's own `inet fleet` input chain only. An
+// accept in another table does not stop that chain dropping the packet, so the
+// agent port must be accepted in the fleet chain itself.
+func parseNftGuard(st *firewallGuardState, dump string, port int) {
+	for _, line := range strings.Split(strings.ToLower(dump), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "error:") || strings.Contains(line, "operation not permitted") ||
+			strings.Contains(line, "permission denied") || strings.Contains(line, "not found") {
+			st.readErr = "nft could not list the ruleset: " + line
+			return
+		}
+	}
+	table, ok := nftBlock(dump, "table inet fleet {")
+	st.nftTable = ok
+	chain, ok := nftBlock(table, "chain input {")
+	st.nftChain = st.nftTable && ok
+	if st.nftChain {
+		st.nftPolicy = "accept"
+		if strings.Contains(strings.ToLower(chain), "policy drop;") {
+			st.nftPolicy = "drop"
+		}
+		st.agentAllowed = rulesetAllowsPort(chain, port)
+		st.agentDenied = rulesetDenyingLine(chain, port)
+	}
+	st.active = st.nftPolicy == "drop"
+	// enableCommand accepts established/related and loopback before the drop.
+	st.keepsEstablished = triYes
+	st.outgoingBlocked = triNo
+}
+
+// nftBlock returns the body of the first `header` block in nft list output.
+func nftBlock(text, header string) (string, bool) {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != header {
+			continue
+		}
+		depth := 1
+		var body []string
+		for _, l := range lines[i+1:] {
+			depth += strings.Count(l, "{") - strings.Count(l, "}")
+			if depth <= 0 {
+				return strings.Join(body, "\n"), true
+			}
+			body = append(body, l)
+		}
+		return strings.Join(body, "\n"), true
+	}
+	return "", false
+}
+
+// iptables: enable changes the INPUT policy, so only INPUT's own rules count.
+func parseIptablesGuard(st *firewallGuardState, dump string, port int) {
+	var input []string
+	for _, line := range strings.Split(dump, "\n") {
+		line = strings.TrimSpace(line)
+		if policy, ok := strings.CutPrefix(line, "-P INPUT "); ok {
+			st.iptPolicy = strings.TrimSpace(policy)
+		}
+		if strings.HasPrefix(line, "-A INPUT ") {
+			input = append(input, line)
+		}
+	}
+	if st.iptPolicy == "" {
+		st.readErr = "iptables did not list the INPUT chain: " + firstLine(dump)
+		return
+	}
+	rules := strings.Join(input, "\n")
+	st.active = st.iptPolicy != "ACCEPT"
+	st.agentAllowed = rulesetAllowsPort(rules, port)
+	st.agentDenied = rulesetDenyingLine(rules, port)
+	// enableCommand accepts established/related and loopback before the drop.
+	st.keepsEstablished = triYes
+	st.outgoingBlocked = triNo
 }
 
 // --- normalization helpers (pure) ---
@@ -495,7 +1240,7 @@ func backendActive(backend FirewallBackend, dump string) bool {
 	case FirewallBackendUFW:
 		return strings.Contains(low, "status: active")
 	case FirewallBackendFirewalld:
-		return strings.Contains(low, "running")
+		return strings.Contains(low, guardMarker+"firewalld-running")
 	case FirewallBackendNftables:
 		return strings.Contains(low, "policy drop") || strings.Contains(low, "chain input")
 	case FirewallBackendIptables:
@@ -517,89 +1262,122 @@ func backendDefaultDrop(backend FirewallBackend, dump string) bool {
 		return strings.Contains(low, ":input drop") || strings.Contains(low, "-p input drop")
 	case FirewallBackendFirewalld:
 		// firewalld zones are deny-by-default when running.
-		return strings.Contains(low, "running")
+		return strings.Contains(low, guardMarker+"firewalld-running")
 	default:
 		return false
 	}
 }
 
-// rulesetAllowsPort reports whether the dumped ruleset appears to allow inbound
-// traffic to `port` on any protocol. It matches common backend forms but uses
-// WORD-BOUNDARY matching so that port N is never matched inside a longer number:
-// a bare substring scan would find "--dport 22" inside "--dport 2222 -j ACCEPT",
-// "22/tcp" inside "2222/tcp", and "ports: 22" inside "ports: 2222", producing a
-// FALSE positive that could let EnableSafe's lockout guard pass while the agent
-// port is actually blocked. This is SAFETY-CRITICAL: a wrong "allowed" here can
-// lock the controller out, so each port token must be bounded by a non-digit
-// (start/end of string or a non-digit neighbour).
-//
-// It remains permissive across the forms it recognizes — the caller still injects
-// the explicit allow rule regardless of what this returns — but the digit
-// boundaries make a longer-number false positive impossible.
-func rulesetAllowsPort(dump string, port int) bool {
-	if port < 1 {
-		return false
+// portPatterns are the backend forms a port appears in, as a prefix and
+// optional suffix around the exact port token. needsVerb pins a form that can
+// appear in any line (a bare number, a `port N` phrase) to a line whose action
+// verb gives it a meaning.
+var portPatterns = []struct {
+	prefix, suffix string
+	needsVerb      bool
+}{
+	{prefix: "dport ", suffix: " accept"},       // nft: "tcp dport 2222 accept"
+	{prefix: "--dport "},                        // iptables: "--dport 2222 -j ACCEPT"
+	{suffix: "/tcp"},                            // ufw / firewalld port form "2222/tcp"
+	{prefix: "port="},                           // firewalld: "port=2222"
+	{prefix: `port="`, suffix: `"`},             // firewalld rich rule: port port="2222"
+	{prefix: "ports: "},                         // firewalld: "ports: 2222 443" (the zone's allow-list)
+	{prefix: " ", suffix: " ", needsVerb: true}, // ufw column form "443  ALLOW ..."
+	{prefix: "allow ", needsVerb: true},         // `ufw show added`: "ufw allow 2222"
+	{prefix: "deny ", needsVerb: true},          // "ufw deny 2222"
+	{prefix: "reject ", needsVerb: true},        // "ufw reject 2222"
+	{prefix: "limit ", needsVerb: true},         // "ufw limit 2222"
+	{prefix: "port ", needsVerb: true},          // "to any port 2222"; nft "dport 2222 drop"
+}
+
+// udpPortToken matches a "<ports>/udp" token, which only concerns UDP.
+var udpPortToken = regexp.MustCompile(`[0-9][0-9:,]*/udp`)
+
+// tcpView drops from a lower-cased rule line what only concerns UDP: the agent
+// speaks TCP, so a UDP allow must not count as keeping it reachable (and a UDP
+// deny does not block it). It returns "" for a rule that matches only UDP.
+func tcpView(line string) string {
+	line = udpPortToken.ReplaceAllString(line, "")
+	if strings.Contains(line, "udp") && !strings.Contains(line, "tcp") {
+		return ""
 	}
-	low := strings.ToLower(dump)
-	p := strconv.Itoa(port)
-	// Each pattern is split into a prefix and an optional suffix that must surround
-	// the exact port token. containsPortToken enforces that the digits immediately
-	// before/after the port are non-digits (word boundary), so 22 != 2222.
-	patterns := []struct {
-		prefix, suffix string
-		// requireAllow restricts the match to a line whose ACTION is allow/accept.
-		// The bare space-delimited column form (" "+port+" ") matches the port
-		// anywhere on a line, so a whole-dump substring scan would FALSELY report
-		// the port as allowed when it merely appears inside a DENY/reject rule or
-		// a comment — weakening the fail-closed positive confirmation. Pinning that
-		// form to an allow-context line keeps a deny rule mentioning the port from
-		// satisfying "port is allowed". The other forms are either self-evident
-		// allow rules (nft "... accept", iptables "--dport ... -j ACCEPT") or only
-		// appear in allow-lists (firewalld "ports:"/"port="); the per-line deny
-		// skip below additionally guards those against a deny rule reusing the form.
-		requireAllow bool
-	}{
-		{prefix: "dport ", suffix: " accept"}, // nft: "tcp dport 2222 accept"
-		{prefix: "--dport ", suffix: ""},      // iptables: "--dport 2222 -j ACCEPT"
-		{prefix: "", suffix: "/tcp"},          // ufw / firewalld port form "2222/tcp"
-		{prefix: "", suffix: "/udp"},
-		{prefix: "port=", suffix: ""},                  // firewalld: "port=2222"
-		{prefix: "ports: ", suffix: ""},                // firewalld: "ports: 2222 443" (the zone's allow-list)
-		{prefix: " ", suffix: " ", requireAllow: true}, // ufw column form "443  ALLOW ..."
+	return line
+}
+
+// lineMentionsPort reports whether a lower-cased line names port p in one of
+// the portPatterns. hasVerb says whether the line carries an action verb.
+func lineMentionsPort(line, p string, hasVerb bool) bool {
+	for _, pat := range portPatterns {
+		if pat.needsVerb && !hasVerb {
+			continue
+		}
+		if containsPortToken(line, pat.prefix, p, pat.suffix) {
+			return true
+		}
 	}
-	// The iptables "--dport N" and firewalld "port=N" / "N/tcp" forms are emitted
-	// in BOTH accept and drop/reject rules, so confirm the matching line is not a
-	// deny rule before trusting it. We scan line-by-line so the allow/deny context
-	// is evaluated against the SAME rule the port appears in, not the whole dump.
-	for _, line := range strings.Split(low, "\n") {
-		if lineDeniesTraffic(line) {
-			continue // a deny/reject/drop rule never confirms "allowed"
-		}
-		lineAllows := lineAllowsTraffic(line)
-		for _, pat := range patterns {
-			if pat.requireAllow && !lineAllows {
-				continue
-			}
-			if containsPortToken(line, pat.prefix, p, pat.suffix) {
-				return true
-			}
-		}
-		// ufw prints "443/tcp ALLOW" or "443 ALLOW IN"; catch the leading-token form.
-		fields := strings.Fields(line)
-		if len(fields) > 0 {
-			token := strings.SplitN(fields[0], "/", 2)[0]
-			if token == p && lineAllows {
-				return true
-			}
+	// ufw prints "443/tcp ALLOW" or "443 ALLOW IN"; catch the leading-token form.
+	if fields := strings.Fields(line); hasVerb && len(fields) > 0 {
+		if strings.SplitN(fields[0], "/", 2)[0] == p {
+			return true
 		}
 	}
 	return false
 }
 
+// rulesetAllowsPort reports whether the dumped ruleset appears to allow inbound
+// TCP traffic to `port`. It matches common backend forms but uses WORD-BOUNDARY
+// matching so that port N is never matched inside a longer number: a bare
+// substring scan would find "--dport 22" inside "--dport 2222 -j ACCEPT",
+// "22/tcp" inside "2222/tcp", and "ports: 22" inside "ports: 2222", producing a
+// FALSE positive that could let the lockout gate pass while the agent port is
+// actually blocked. This is SAFETY-CRITICAL: a wrong "allowed" here can lock
+// the controller out, so each port token must be bounded by a non-digit.
+//
+// A deny/reject/drop line never confirms "allowed", even if it mentions the
+// port, and neither does a UDP-only rule. The gate also checks
+// rulesetDenyingLine, since an allow does not help while a deny matches first.
+func rulesetAllowsPort(dump string, port int) bool {
+	if port < 1 {
+		return false
+	}
+	p := strconv.Itoa(port)
+	for _, line := range strings.Split(strings.ToLower(dump), "\n") {
+		line = tcpView(line)
+		if line == "" || lineDeniesTraffic(line) {
+			continue
+		}
+		if lineMentionsPort(line, p, lineAllowsTraffic(line)) {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesetDenyingLine returns the first rule in dump that denies, rejects or
+// drops TCP traffic to port, or "" when none does. Any such rule fails the
+// gate: rule order differs between backends (firewalld evaluates denies
+// first), so a deny is never assumed to be shadowed by an allow.
+func rulesetDenyingLine(dump string, port int) string {
+	if port < 1 {
+		return ""
+	}
+	p := strconv.Itoa(port)
+	for _, raw := range strings.Split(dump, "\n") {
+		line := tcpView(strings.ToLower(raw))
+		if line == "" || !lineDeniesTraffic(line) {
+			continue
+		}
+		if lineMentionsPort(line, p, true) {
+			return strings.TrimSpace(raw)
+		}
+	}
+	return ""
+}
+
 // lineDeniesTraffic reports whether a (lower-cased) ruleset line is a
 // deny/reject/drop rule. Such a line must never be read as confirming a port is
 // allowed, even if it mentions the port — that would weaken the fail-closed
-// positive confirmation EnableSafe relies on.
+// positive confirmation the gate relies on.
 func lineDeniesTraffic(line string) bool {
 	for _, verb := range []string{"deny", "reject", "drop"} {
 		if strings.Contains(line, verb) {
@@ -611,8 +1389,8 @@ func lineDeniesTraffic(line string) bool {
 
 // lineAllowsTraffic reports whether a (lower-cased) ruleset line carries an
 // allow/accept action verb. Used to pin the ambiguous port forms (bare column
-// form, firewalld "ports:" list) to an actual allow rule rather than any line
-// that happens to contain the port.
+// form, `port N` phrases) to an actual allow rule rather than any line that
+// happens to contain the port.
 func lineAllowsTraffic(line string) bool {
 	for _, verb := range []string{"allow", "accept"} {
 		if strings.Contains(line, verb) {

@@ -19,7 +19,10 @@ import (
 )
 
 func TestApplyTemplateExecutesLiveChanges(t *testing.T) {
-	t.Parallel()
+	// Not parallel: the template enables the firewall, which the agent-lockout
+	// gate allows only once the agent port is allowed. The fake ufw on PATH
+	// (t.Setenv) reports 2222/tcp among the pending rules.
+	newFakeUFW(t).set("Status: inactive\n", "ufw allow 2222/tcp\n")
 
 	configDir := filepath.Join(t.TempDir(), "fleet")
 	if _, err := Initialize(InitOptions{

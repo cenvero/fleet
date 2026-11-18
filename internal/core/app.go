@@ -933,10 +933,24 @@ func (a *App) ListPorts(serverName string) ([]int, error) {
 	return server.OpenPorts, nil
 }
 
+// SetPort opens or closes a port through the agent. Closing the direct agent's
+// own port is refused by the agent-lockout gate (see SetPortGuarded).
 func (a *App) SetPort(serverName string, port int, open bool) error {
+	return a.SetPortGuarded(serverName, port, open, FirewallGuardOptions{})
+}
+
+// SetPortGuarded is SetPort with the agent-lockout override.
+func (a *App) SetPortGuarded(serverName string, port int, open bool, opts FirewallGuardOptions) error {
 	server, err := a.GetServer(serverName)
 	if err != nil {
 		return err
+	}
+	if !open {
+		if err := a.firewallGate(server, "port.close", fmt.Sprintf("close port %d", port), opts, func(link AgentLink) *AgentLockoutError {
+			return portCloseLockout(link, port)
+		}); err != nil {
+			return err
+		}
 	}
 
 	response, err := a.callRPC(server, proto.Envelope{
@@ -1003,10 +1017,26 @@ func (a *App) FirewallStatus(serverName string) (FirewallState, error) {
 	return server.Firewall, nil
 }
 
+// SetFirewall enables or disables the server's firewall through the agent.
+// Enabling goes through the agent-lockout gate (see SetFirewallGuarded).
 func (a *App) SetFirewall(serverName string, enabled bool) error {
+	return a.SetFirewallGuarded(serverName, enabled, FirewallGuardOptions{})
+}
+
+// SetFirewallGuarded is SetFirewall with the agent-lockout override. Before
+// enabling it reads ufw's rules (including the ones pending while ufw is off)
+// and refuses unless the agent connection survives.
+func (a *App) SetFirewallGuarded(serverName string, enabled bool, opts FirewallGuardOptions) error {
 	server, err := a.GetServer(serverName)
 	if err != nil {
 		return err
+	}
+	if enabled {
+		if err := a.firewallGate(server, "firewall.enable", "enable the firewall", opts, func(link AgentLink) *AgentLockoutError {
+			return enableLockout(link, a.ufwGuardState(link), FixPortOpenCommand(link.Server, link.Port))
+		}); err != nil {
+			return err
+		}
 	}
 
 	actionName := "firewall.disable"
@@ -1041,9 +1071,31 @@ func (a *App) SetFirewall(serverName string, enabled bool) error {
 	})
 }
 
+// AddFirewallRule adds a ufw rule through the agent. Rules that could block the
+// agent connection are refused by the agent-lockout gate (see
+// AddFirewallRuleGuarded).
 func (a *App) AddFirewallRule(serverName, rule string) error {
+	return a.AddFirewallRuleGuarded(serverName, rule, FirewallGuardOptions{})
+}
+
+// AddFirewallRuleGuarded is AddFirewallRule with the agent-lockout override.
+// Allow rules and rules on other ports pass without reading the host; a rule
+// on the agent port, or one fleet cannot read, is refused; a broad block
+// passes only once the agent port is allowed ahead of it.
+func (a *App) AddFirewallRuleGuarded(serverName, rule string, opts FirewallGuardOptions) error {
 	server, err := a.GetServer(serverName)
 	if err != nil {
+		return err
+	}
+	if err := a.firewallGate(server, "firewall.rule.add", fmt.Sprintf("add firewall rule %q", rule), opts, func(link AgentLink) *AgentLockoutError {
+		impact, why := classifyFirewallRule(rule, link.Port)
+		var st *firewallGuardState
+		if impact == ruleBlocksBroadly {
+			read := a.ufwGuardState(link)
+			st = &read
+		}
+		return ruleLockout(link, rule, impact, why, st, FixPortOpenCommand(link.Server, link.Port))
+	}); err != nil {
 		return err
 	}
 
@@ -1075,6 +1127,94 @@ func (a *App) AddFirewallRule(serverName, rule string) error {
 		Operator: a.operator(),
 		Details:  rule,
 	})
+}
+
+// FirewallGuardOptions carries the deliberate override for the agent-lockout
+// gate. The zero value never overrides.
+type FirewallGuardOptions struct {
+	// ForceIHaveConsole skips a lockout refusal. Only a person with out-of-band
+	// console access to the server should set it; every use is audit-logged.
+	ForceIHaveConsole bool
+}
+
+// firewallGate runs the agent-lockout gate for one change to server. decide
+// returns the refusal, if any. A refusal is audit-logged and returned unless
+// opts overrides it; an override is audit-logged first, and without that
+// record the change does not go ahead.
+func (a *App) firewallGate(server ServerRecord, op, change string, opts FirewallGuardOptions, decide func(AgentLink) *AgentLockoutError) error {
+	var refusal *AgentLockoutError
+	if link, err := ResolveAgentLink(server); err != nil {
+		refusal = &AgentLockoutError{Reason: err.Error()}
+	} else {
+		refusal = decide(link)
+	}
+	if refusal == nil {
+		return nil
+	}
+	refusal.Server, refusal.Op = server.Name, op
+	if refusal.Change == "" {
+		refusal.Change = change
+	}
+	if !opts.ForceIHaveConsole {
+		if err := a.AuditLockoutRefusal(refusal); err != nil {
+			return fmt.Errorf("%w (and the refusal could not be audit-logged: %v)", refusal, err)
+		}
+		return refusal
+	}
+	if err := a.AuditLockoutOverride(refusal); err != nil {
+		return fmt.Errorf("not using --force-i-have-console without an audit record: %w", err)
+	}
+	return nil
+}
+
+// AuditLockoutRefusal records a refusal by the agent-lockout gate.
+func (a *App) AuditLockoutRefusal(refusal *AgentLockoutError) error {
+	return a.AuditLog.Append(logs.AuditEntry{
+		Action:   "firewall.lockout.refused",
+		Target:   refusal.Server,
+		Operator: a.operator(),
+		Details:  fmt.Sprintf("op=%s reason=%q", refusal.Op, refusal.Reason),
+	})
+}
+
+// AuditLockoutOverride records a --force-i-have-console use and the refusal it
+// skipped.
+func (a *App) AuditLockoutOverride(refusal *AgentLockoutError) error {
+	return a.AuditLog.Append(logs.AuditEntry{
+		Action:   "firewall.lockout.override",
+		Target:   refusal.Server,
+		Operator: a.operator(),
+		Details:  fmt.Sprintf("op=%s override=force-i-have-console skipped=%q", refusal.Op, refusal.Reason),
+	})
+}
+
+// FirewallExec runs firewall commands on serverName over shell.exec, with
+// stderr appended to stdout so ruleset parsing and error messages see the
+// backend's whole output.
+func (a *App) FirewallExec(serverName string) FirewallExec {
+	return func(command string) (string, int, error) {
+		res, err := a.ExecCommand(serverName, command)
+		if err != nil {
+			return "", 0, err
+		}
+		out := res.Stdout
+		if res.Stderr != "" {
+			if out != "" {
+				out += "\n"
+			}
+			out += res.Stderr
+		}
+		return out, res.ExitCode, nil
+	}
+}
+
+// ufwGuardState reads, without changing anything, the ufw state the agent's
+// firewall manager drives. The firewall RPC's status shows no rules while ufw
+// is inactive, so this uses the fw engine's read-only probe over shell.exec.
+func (a *App) ufwGuardState(link AgentLink) firewallGuardState {
+	engine := &FirewallEngine{AgentPort: link.Port, Server: link.Server, Mode: link.Mode, Exec: a.FirewallExec(link.Server)}
+	dump, err := engine.dumpRuleset(FirewallBackendUFW)
+	return parseGuardState(FirewallBackendUFW, dump, err, link.Port)
 }
 
 type ExecServerResult struct {

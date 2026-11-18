@@ -122,14 +122,17 @@ func TestAllowPortCommandsShellQuoted(t *testing.T) {
 	}
 }
 
-// TestEnableSafeAllowsAgentPortFirst is the safety-critical invariant: the agent
-// port allow MUST be issued before the enable command.
-func TestEnableSafeAllowsAgentPortFirst(t *testing.T) {
+// TestEnableSafeConfirmsAgentPortBeforeEnable is the safety-critical invariant:
+// the agent port must be confirmed allowed, from the host's own ruleset, before
+// the enable command runs. A confirmed allow is not re-inserted, so an
+// operator's narrower allow is never widened.
+func TestEnableSafeConfirmsAgentPortBeforeEnable(t *testing.T) {
 	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
-		// After the allow, the ruleset dump must report the agent port open so the
-		// lockout guard passes.
 		if strings.Contains(cmd, "iptables -S") {
-			return "-A INPUT -p tcp --dport 2222 -j ACCEPT", 0, nil
+			return "-P INPUT ACCEPT\n-A INPUT -p tcp --dport 2222 -j ACCEPT", 0, nil
+		}
+		if strings.Contains(cmd, "systemd-run") {
+			return "fleet-fw-safe-revert:armed:systemd-run", 0, nil
 		}
 		return "", 0, nil
 	}}
@@ -138,22 +141,17 @@ func TestEnableSafeAllowsAgentPortFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnableSafe: %v", err)
 	}
-	allowIdx := fake.indexOf("--dport '2222' -j ACCEPT")
-	enableIdx := fake.indexOf("iptables -P INPUT DROP")
-	if allowIdx < 0 {
-		t.Fatalf("agent port allow never issued; calls=%v", fake.calls)
+	readIdx := fake.indexOf("iptables -S")
+	armIdx := fake.indexOf("systemd-run --on-active='60s'")
+	enableIdx := fake.indexOf("&& iptables -P INPUT DROP")
+	if readIdx != 0 || armIdx < 0 || enableIdx < 0 || !(readIdx < armIdx && armIdx < enableIdx) {
+		t.Fatalf("want read, then arm, then enable; got read=%d arm=%d enable=%d calls=%v", readIdx, armIdx, enableIdx, fake.calls)
 	}
-	if enableIdx < 0 {
-		t.Fatalf("enable never issued; calls=%v", fake.calls)
+	if fake.sawSubstring("iptables -I INPUT 1 -p 'tcp' --dport '2222'") {
+		t.Errorf("a confirmed agent allow must not be re-inserted; calls=%v", fake.calls)
 	}
-	if allowIdx >= enableIdx {
-		t.Fatalf("agent allow (idx %d) must precede enable (idx %d)", allowIdx, enableIdx)
-	}
-	if !res.UndoScheduled {
-		t.Errorf("expected self-revert timer to be scheduled")
-	}
-	if !fake.sawSubstring("systemd-run --on-active='60s'") {
-		t.Errorf("expected systemd-run self-revert command, calls=%v", fake.calls)
+	if !res.AgentPortConfirmed || !res.UndoScheduled {
+		t.Errorf("expected a confirmed agent port and an armed self-revert; got %+v", res)
 	}
 }
 
@@ -177,9 +175,10 @@ func TestEnableSafeRefusesLockout(t *testing.T) {
 	if fake.sawSubstring("iptables -P INPUT DROP") {
 		t.Errorf("enable must NOT run when lockout is refused; calls=%v", fake.calls)
 	}
-	// The agent-port allow should still have been attempted first.
-	if !fake.sawSubstring("--dport '2222' -j ACCEPT") {
-		t.Errorf("agent port allow should run even when refusing; calls=%v", fake.calls)
+	// The gate runs before anything changes: the refusal names the allow to
+	// run first instead of running it.
+	if fake.sawSubstring("--dport '2222' -j ACCEPT") || !strings.Contains(err.Error(), "fleet fw allow") {
+		t.Errorf("a refusal must change nothing and name `fleet fw allow`; err=%v calls=%v", err, fake.calls)
 	}
 }
 
@@ -208,7 +207,7 @@ func TestEnableSafeForceBypassesLockout(t *testing.T) {
 // TestEnableSafeFailsClosedOnDumpError: if the ruleset dump ERRORS we cannot
 // verify the agent port survives, so EnableSafe must refuse (fail CLOSED) and
 // must NOT enable a default-drop firewall — otherwise a transient read failure
-// could lock out the controller. The agent-port allow is still attempted first.
+// could lock out the controller. Nothing changes before the refusal.
 func TestEnableSafeFailsClosedOnDumpError(t *testing.T) {
 	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
 		if strings.Contains(cmd, "iptables -S") {
@@ -227,8 +226,8 @@ func TestEnableSafeFailsClosedOnDumpError(t *testing.T) {
 	if fake.sawSubstring("iptables -P INPUT DROP") {
 		t.Errorf("enable must NOT run when the dump fails; calls=%v", fake.calls)
 	}
-	if !fake.sawSubstring("--dport '2222' -j ACCEPT") {
-		t.Errorf("agent port allow should still run first; calls=%v", fake.calls)
+	if len(fake.calls) != 1 {
+		t.Errorf("only the failed read may run before the refusal; calls=%v", fake.calls)
 	}
 }
 
@@ -257,14 +256,13 @@ func TestEnableSafeForceBypassesDumpError(t *testing.T) {
 // TestEnableSafeFailsClosedWhenArmingRevertFails: the auto-revert (dead-man)
 // timer is the safety net that auto-rolls-back a lockout. If ARMING it fails,
 // EnableSafe must fail CLOSED — it must NOT apply the default-drop firewall (a
-// permanent lockout with no rollback) and must return the arming error. The
-// agent-port allow still runs first.
+// permanent lockout with no rollback) and must return the arming error.
 func TestEnableSafeFailsClosedWhenArmingRevertFails(t *testing.T) {
 	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
 		// Agent port is confirmed open so the lockout guard (step 2) passes; the
 		// only failure is arming the self-revert.
 		if strings.Contains(cmd, "iptables -S") {
-			return "-A INPUT -p tcp --dport 2222 -j ACCEPT", 0, nil
+			return "-P INPUT ACCEPT\n-A INPUT -p tcp --dport 2222 -j ACCEPT", 0, nil
 		}
 		// Fail the self-revert scheduling command (unique unit name, so match on
 		// the systemd-run wrapper substring rather than an exact string).
@@ -295,10 +293,6 @@ func TestEnableSafeFailsClosedWhenArmingRevertFails(t *testing.T) {
 	}
 	if res.UndoScheduleErr == "" {
 		t.Errorf("UndoScheduleErr should record why arming failed")
-	}
-	// The agent-port allow must still have been attempted first.
-	if !fake.sawSubstring("--dport '2222' -j ACCEPT") {
-		t.Errorf("agent port allow should still run first; calls=%v", fake.calls)
 	}
 }
 
@@ -342,11 +336,20 @@ func TestEnableSafeRejectsBadAgentPort(t *testing.T) {
 	}
 }
 
+// Under --force-i-have-console the engine allows the agent port itself; if
+// that allow fails, nothing may tighten.
 func TestEnableSafeAbortsIfAgentAllowFails(t *testing.T) {
-	allowCmd := "iptables -I INPUT 1 -p 'tcp' --dport '2222' -j ACCEPT"
-	fake := &fakeFirewall{failCmds: map[string]bool{allowCmd: true}}
+	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
+		if strings.Contains(cmd, "iptables -S") {
+			return "-P INPUT ACCEPT", 0, nil
+		}
+		if strings.Contains(cmd, "iptables -I INPUT 1 -p 'tcp' --dport '2222'") {
+			return "iptables: Permission denied", 1, nil
+		}
+		return "", 0, nil
+	}}
 	eng := &FirewallEngine{AgentPort: 2222, Exec: fake.exec}
-	_, err := eng.EnableSafe(FirewallBackendIptables, false, 60)
+	_, err := eng.EnableSafe(FirewallBackendIptables, true, 60)
 	if err == nil {
 		t.Fatalf("expected EnableSafe to abort when the agent allow fails")
 	}
