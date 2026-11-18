@@ -15,6 +15,7 @@ import (
 	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/pkg/proto"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var (
@@ -266,6 +267,85 @@ func TestEditorUnrepresentableOpensReadOnly(t *testing.T) {
 				t.Fatalf("read-only file was rewritten: %q", got)
 			}
 		})
+	}
+}
+
+// TestEditorReadOnlyFrameFits: the read-only status and the discard warning
+// are long; the editor frame must still be exactly the screen, with no line
+// wider than it.
+func TestEditorReadOnlyFrameFits(t *testing.T) {
+	t.Parallel()
+	fits := func(t *testing.T, m filesModel, what string) {
+		t.Helper()
+		lines := frameLines(m.View())
+		if len(lines) != m.height {
+			t.Fatalf("%dx%d %s: frame has %d lines, want %d", m.width, m.height, what, len(lines), m.height)
+		}
+		for i, ln := range lines {
+			if w := lipgloss.Width(ln); w > m.width {
+				t.Fatalf("%dx%d %s: line %d is %d wide", m.width, m.height, what, i, w)
+			}
+		}
+	}
+	// No status: the hints stay (cut to fit on a narrow screen), in both modes.
+	for _, dim := range [][2]int{{32, 14}, {40, 16}, {60, 20}, {80, 24}, {120, 40}} {
+		m := sampleFilesModel(dim[0], dim[1])
+		m.overlay = overlayEditor
+		m.editor = &editorState{active: true, path: "/x/a.txt", name: "a.txt"}
+		mm, _ := m.onEditorLoaded(editorLoadedMsg{path: "/x/a.txt", name: "a.txt", content: "one\n"})
+		m = mm.(filesModel)
+		if m.editor.status != "" {
+			t.Fatalf("status %q on a fresh open", m.editor.status)
+		}
+		for _, mode := range []string{"viewer", "edit"} {
+			if mode == "edit" {
+				m, _ = sendKey(m, keyTab)
+			}
+			fits(t, m, "no status, "+mode)
+			if !strings.Contains(m.View(), "view/edit") {
+				t.Fatalf("%dx%d %s: hints missing with no status", dim[0], dim[1], mode)
+			}
+		}
+	}
+	for _, dim := range [][2]int{{32, 14}, {60, 20}, {80, 24}, {120, 40}, {220, 60}} {
+		m := sampleFilesModel(dim[0], dim[1])
+		m.overlay = overlayEditor
+		m.editor = &editorState{active: true, path: "/x/a.txt", name: "a.txt"}
+		mm, _ := m.onEditorLoaded(editorLoadedMsg{path: "/x/a.txt", name: "a.txt", content: "one\n"})
+		m = mm.(filesModel)
+		m, _ = sendKey(m, keyTab)
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+		m, _ = sendKey(m, keyEsc)
+		if m.editor.status != discardWarning {
+			t.Fatalf("status %q", m.editor.status)
+		}
+		fits(t, m, "discard warning")
+	}
+	for _, dim := range [][2]int{{32, 14}, {60, 20}, {80, 24}, {120, 40}, {220, 60}} {
+		for _, source := range []string{"", "web-01"} {
+			m := sampleFilesModel(dim[0], dim[1])
+			m.overlay = overlayEditor
+			m.editor = &editorState{active: true, source: source, path: "/x/a.txt", name: "a.txt"}
+			mm, _ := m.onEditorLoaded(editorLoadedMsg{source: source, path: "/x/a.txt", name: "a.txt", content: "a\rb\n"})
+			m = mm.(filesModel)
+			if m.editor.readOnly == "" {
+				t.Fatal("expected a read-only open")
+			}
+			for _, k := range []tea.KeyMsg{{}, keyTab} {
+				if k.Type == keyTab.Type {
+					m, _ = sendKey(m, k)
+				}
+				lines := frameLines(m.View())
+				if len(lines) != dim[1] {
+					t.Fatalf("%v %q: frame has %d lines, want %d", dim, source, len(lines), dim[1])
+				}
+				for i, ln := range lines {
+					if w := lipgloss.Width(ln); w > dim[0] {
+						t.Fatalf("%v %q: line %d is %d wide", dim, source, i, w)
+					}
+				}
+			}
+		}
 	}
 }
 

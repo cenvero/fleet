@@ -2134,6 +2134,11 @@ func (m filesModel) renderEditor() string {
 	for _, h := range hints {
 		parts = append(parts, fmKeyChip.Render(h.k)+" "+fmHintLabel.Render(h.v))
 	}
+	// On a narrow screen the hints that do not fit are dropped from the end
+	// (they are also in the help).
+	for len(parts) > 0 && lipgloss.Width(strings.Join(parts, "  ")) > bw {
+		parts = parts[:len(parts)-1]
+	}
 	footLeft := strings.Join(parts, "  ")
 	statusTxt := fmSanitize(ed.status)
 	statusSty := fmStatusSty
@@ -2145,16 +2150,18 @@ func (m filesModel) renderEditor() string {
 	case strings.HasPrefix(statusTxt, "read-only"):
 		statusSty = lipgloss.NewStyle().Foreground(fmWarnC)
 	}
-	// Give the status whatever the hints leave over; messages that explain a
-	// refusal are long.
+	// The status gets whatever the hints leave over. Messages that explain a
+	// refusal or warn about unsaved edits are long; when one does not fit
+	// beside the hints, it takes the whole line (the hints are also in the
+	// help), so the footer never wraps and grows the frame.
 	statusW := bw - lipgloss.Width(footLeft) - 1
-	if statusW < bw/2 {
-		statusW = bw / 2
+	if statusTxt != "" && lipgloss.Width(statusTxt) > statusW {
+		footLeft, statusW = "", bw
 	}
 	footRight := statusSty.Render(fmFit(statusTxt, statusW))
 	fgap := bw - lipgloss.Width(footLeft) - lipgloss.Width(footRight)
-	if fgap < 1 {
-		fgap = 1
+	if fgap < 0 {
+		fgap = 0
 	}
 	footer := footLeft + strings.Repeat(" ", fgap) + footRight
 
