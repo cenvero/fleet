@@ -328,6 +328,10 @@ func TestWindowsAgentDeliveryPreservesObservedVersionUntilReconnect(t *testing.T
 		Mode:               transport.ModeDirect,
 		HostKeyPath:        filepath.Join(t.TempDir(), "windows_agent_host_key"),
 		AuthorizedKeysPath: filepath.Join(configDir, "keys", "id_ed25519.pub"),
+		// The live agent is still the old binary: it says so in hello, and
+		// keeps saying so until it restarts. (In-process, its version would
+		// otherwise be this test's v1.2.3.)
+		ReportedVersion: "v1.2.2",
 		Updater: fakeAgentUpdater{result: proto.UpdateApplyResult{
 			Channel:           "stable",
 			CurrentVersion:    "v1.2.2",
@@ -387,6 +391,9 @@ func TestWindowsAgentDeliveryPreservesObservedVersionUntilReconnect(t *testing.T
 		t.Fatal("successful binary delivery did not record agent update time")
 	}
 
+	// The operator restarts the service: the new binary now answers.
+	app.DisconnectPooledSessions()
+	windowsAgent.ReportedVersion = "v1.2.3"
 	session, hello, err := app.openDirectSession(server, false)
 	if err != nil {
 		t.Fatalf("reconnect after activation: %v", err)

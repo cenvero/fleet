@@ -62,17 +62,18 @@ func (a *App) collectMetricsContext(ctx context.Context, serverName string, reco
 	}
 	snapshot = boundSnapshotText(snapshot)
 
-	// Re-read the record: the call may have redialled and recorded a fresh
-	// hello (agent version, capabilities), which saving the copy read before
-	// the call would silently revert. A successful poll is also a sighting.
-	if current, gerr := a.GetServer(serverName); gerr == nil {
-		server = current
-	}
-	server.Metrics = snapshot
-	server.Observed.Reachable = true
-	server.Observed.LastSeen = time.Now().UTC()
-	server.Observed.LastError = ""
-	if err := a.SaveServer(server); err != nil {
+	// Update the record as it is now: the call may have redialled and recorded
+	// a fresh hello (agent version, capabilities), which saving the copy read
+	// before the call would silently revert, and the server may have been
+	// removed while the poll was in flight, which saving would undo. A
+	// successful poll is also a sighting.
+	if err := a.updateExistingServer(serverName, func(s *ServerRecord) bool {
+		s.Metrics = snapshot
+		s.Observed.Reachable = true
+		s.Observed.LastSeen = time.Now().UTC()
+		s.Observed.LastError = ""
+		return true
+	}); err != nil {
 		return proto.MetricsSnapshot{}, err
 	}
 	if err := a.persistMetricsSnapshot(serverName, snapshot); err != nil {

@@ -444,20 +444,26 @@ func (a *App) applyAgentUpdate(ctx context.Context, server ServerRecord) FleetUp
 	}
 
 	if strings.TrimSpace(applied.Version) != "" {
-		if applied.Applied {
-			server.Agent.UpdatedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		record := func(s *ServerRecord) {
+			if applied.Applied {
+				s.Agent.UpdatedAt = now
+			}
+			// A replacement without a managed restart is only delivered, not yet
+			// observed live. Preserve the prior observed version until reconnect.
+			if !applied.Applied || applied.RestartScheduled {
+				s.Observed.AgentVersion = applied.Version
+				s.Observed.LastSeen = now
+				s.Observed.LastError = ""
+			}
+			if s.Agent.ServiceName == "" && applied.ServiceName != "" {
+				s.Agent.ServiceName = applied.ServiceName
+			}
 		}
-		// A replacement without a managed restart is only delivered, not yet
-		// observed live. Preserve the prior observed version until reconnect.
-		if !applied.Applied || applied.RestartScheduled {
-			server.Observed.AgentVersion = applied.Version
-			server.Observed.LastSeen = time.Now().UTC()
-			server.Observed.LastError = ""
-		}
-		if server.Agent.ServiceName == "" && applied.ServiceName != "" {
-			server.Agent.ServiceName = applied.ServiceName
-		}
-		_ = a.SaveServer(server)
+		record(&server) // the result below reports from this copy
+		// Save onto the record as it is now, never a stale copy, and never
+		// bring back a server removed while the update ran.
+		_ = a.updateExistingServer(server.Name, func(s *ServerRecord) bool { record(s); return true })
 	}
 
 	details := fmt.Sprintf("version=%s applied=%t restart=%t", applied.Version, applied.Applied, applied.RestartScheduled)

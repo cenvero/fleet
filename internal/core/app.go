@@ -402,6 +402,42 @@ func (a *App) SaveServer(server ServerRecord) error {
 	return a.writeServerFile(server)
 }
 
+// errServerGone is returned by updateExistingServer when the record was
+// removed before the update could be applied.
+var errServerGone = errors.New("the server was removed")
+
+// serverRecordsLockPath orders background record updates against a removal,
+// across fleet processes (a daemon polling while the CLI removes a server).
+func (a *App) serverRecordsLockPath() string {
+	return filepath.Join(a.ConfigDir, "servers", ".records.lock")
+}
+
+// updateExistingServer applies mutate to the record as it is on disk now and
+// saves it, but only while the server still exists, and only if mutate
+// reports a change. Background writers (connection observations, metrics
+// polls, agent updates) use it instead of saving a copy they read earlier:
+// that copy may be stale, so saving it would revert an edit made since, and
+// if the server was removed meanwhile, saving it would bring the server back.
+func (a *App) updateExistingServer(name string, mutate func(*ServerRecord) bool) error {
+	if err := validateSafeName(name); err != nil {
+		return err
+	}
+	return withAdvisoryFileLock(a.serverRecordsLockPath(), func() error {
+		path := filepath.Join(a.ConfigDir, "servers", name+".toml")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return errServerGone
+		}
+		current, err := a.GetServer(name)
+		if err != nil {
+			return err
+		}
+		if !mutate(&current) {
+			return nil
+		}
+		return a.SaveServer(current)
+	})
+}
+
 func (a *App) writeServerFile(server ServerRecord) error {
 	// The name becomes a path under servers/, so it must be a safe name. A
 	// record from an import file or an older store must not be able to write
@@ -555,7 +591,9 @@ func (a *App) RemoveServerWithOptions(name string, opts RemoveOptions) error {
 		}
 	}
 	path := filepath.Join(a.ConfigDir, "servers", name+".toml")
-	if err := os.Remove(path); err != nil {
+	// Under the records lock, so a background update in flight (a metrics
+	// poll, a reconnect) cannot write the record back after it is removed.
+	if err := withAdvisoryFileLock(a.serverRecordsLockPath(), func() error { return os.Remove(path) }); err != nil {
 		return fmt.Errorf("remove server %s: %w", name, err)
 	}
 
@@ -1344,14 +1382,26 @@ func (a *App) noteServerSeen(server ServerRecord) {
 	if fresh(server) {
 		return
 	}
-	current, err := a.GetServer(server.Name)
-	if err != nil || fresh(current) {
-		return
-	}
-	current.Observed.Reachable = true
-	current.Observed.LastSeen = time.Now().UTC()
-	current.Observed.LastError = ""
-	_ = a.SaveServer(current)
+	_ = a.updateExistingServer(server.Name, func(current *ServerRecord) bool {
+		if fresh(*current) {
+			return false
+		}
+		current.Observed.Reachable = true
+		current.Observed.LastSeen = time.Now().UTC()
+		current.Observed.LastError = ""
+		return true
+	})
+}
+
+// noteServerUnreachable records a failed connection attempt on the server's
+// current record (never on a stale copy, never bringing back a removed one).
+func (a *App) noteServerUnreachable(name string, cause string) {
+	_ = a.updateExistingServer(name, func(s *ServerRecord) bool {
+		s.Observed.Reachable = false
+		s.Observed.LastSeen = time.Now().UTC()
+		s.Observed.LastError = cause
+		return true
+	})
 }
 
 func (a *App) callRPCContextRaw(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
@@ -1502,10 +1552,7 @@ func (a *App) openDirectSessionWithKey(server ServerRecord, privateKeyPath strin
 
 func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server ServerRecord, privateKeyPath string, acceptNewHostKey bool) (*transport.Session, proto.HelloPayload, error) {
 	if server.Mode != transport.ModeDirect {
-		server.Observed.Reachable = false
-		server.Observed.LastSeen = time.Now().UTC()
-		server.Observed.LastError = fmt.Sprintf("mode %s is not implemented yet for live direct actions", server.Mode)
-		_ = a.SaveServer(server)
+		a.noteServerUnreachable(server.Name, fmt.Sprintf("mode %s is not implemented yet for live direct actions", server.Mode))
 		return nil, proto.HelloPayload{}, fmt.Errorf("server %q is configured for %s mode; only direct mode is implemented right now", server.Name, server.Mode)
 	}
 
@@ -1527,20 +1574,14 @@ func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server Server
 
 	session, err := connector.DialContext(ctx, target)
 	if err != nil {
-		server.Observed.Reachable = false
-		server.Observed.LastSeen = time.Now().UTC()
-		server.Observed.LastError = err.Error()
-		_ = a.SaveServer(server)
+		a.noteServerUnreachable(server.Name, err.Error())
 		return nil, proto.HelloPayload{}, err
 	}
 
 	hello, err := session.Hello(ctx, a.Config.InstanceID)
 	if err != nil {
 		_ = session.Close()
-		server.Observed.Reachable = false
-		server.Observed.LastSeen = time.Now().UTC()
-		server.Observed.LastError = err.Error()
-		_ = a.SaveServer(server)
+		a.noteServerUnreachable(server.Name, err.Error())
 		return nil, proto.HelloPayload{}, err
 	}
 
@@ -1557,7 +1598,12 @@ func (a *App) openDirectSessionWithKeyContext(ctx context.Context, server Server
 		FileRoot:           hello.FileRoot,
 		HostKeyFingerprint: session.HostKeyFingerprint,
 	}
-	_ = a.SaveServer(server)
+	observed, capabilities := server.Observed, server.Capabilities
+	_ = a.updateExistingServer(server.Name, func(s *ServerRecord) bool {
+		s.Capabilities = capabilities
+		s.Observed = observed
+		return true
+	})
 
 	// Inside the daemon an out-of-date agent goes to agent auto-sync. Otherwise
 	// auto-update it only when the policy permits it: notify_only and disabled

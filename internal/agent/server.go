@@ -103,6 +103,11 @@ type Server struct {
 	MetricsQueue             MetricsQueue
 	Updater                  Updater
 	FileManager              FileManager
+	// ReportedVersion, when set, is the agent version reported in hello
+	// instead of this build's. Like the managers above it is an injection
+	// point: in-process tests use it to stand in for an agent of another
+	// version. Empty (always, in a real agent) means version.Version.
+	ReportedVersion string
 
 	// shellExec runs a shell.exec request; nil means runShellExec. Tests set it.
 	shellExec func(context.Context, proto.ExecPayload) (proto.ExecResult, error)
@@ -493,6 +498,9 @@ func (s Server) serveRPC(channel ssh.Channel) {
 		switch lowerAction {
 		case "hello", "inventory":
 			hello := Hello(s.Mode)
+			if s.ReportedVersion != "" {
+				hello.AgentVersion = s.ReportedVersion
+			}
 			hello.ControllerID = controllerIDFromPayload(request.Payload)
 			_ = encode(proto.Envelope{
 				Type:            proto.EnvelopeTypeResponse,
