@@ -34,6 +34,35 @@ fleet daemon    # run it in the foreground (for systemd, launchd, a container, o
   reports it as running when its control address answers, but `fleet stop` asks you to stop it
   yourself.
 
+## Web Console and Notices
+
+```bash
+fleet console               # the web console in your browser (alias: fleet web)
+fleet console --background  # keep it running after the terminal closes
+fleet console open          # open the background console (--files: on the file manager)
+fleet console status        # {"running": true, "address": "http://127.0.0.1:9445/", ...}
+fleet console stop
+fleet errors                # what needs attention, and the command that fixes each item
+```
+
+- `fleet console` is the localhost web UI with every view (Fleet, Files, Control,
+  Terminal); `fleet file ui` is the same console on the file manager with Control and
+  Terminal opt-in. On a terminal it shows a panel: open it in the browser, show the access
+  link, keep it running in the background, or stop it. It has nothing to do with
+  `fleet start`, which runs the controller daemon.
+- A background console is one `fleet console serve` process per config dir, holding
+  `data/console.lock`; its address and limits are in `data/console.json` and its launch key in
+  `data/console.key` (both `0600`), and its output goes to `data/console.log`. It stops after an
+  hour without use and 8 hours at most (30 minutes and 1 hour with Control or Terminal on),
+  and on SIGTERM. `fleet console stop` signals only the process holding that lock whose
+  command line is `console serve`. It is refused under `--token` / `FLEET_TOKEN`.
+- Commands no longer print notices (an available update, a pending `adjust-init`, a
+  passphrase-protected key, a failed background agent sync, reverse servers waiting for the
+  daemon) before their output. `fleet errors` lists them with their fixes (`--json` for
+  scripts); bare `fleet` lists them after the help and `fleet status` prints a count on
+  stderr. They are worked out from the controller's state each time, so each disappears once
+  fixed. Scoped tokens cannot run `fleet errors`, because the list names servers fleet-wide.
+
 ## Servers
 
 Add, inspect, reconnect, or remove servers:
@@ -146,8 +175,11 @@ fleet exec web-01 "./deploy.sh" --idempotency-key v3-2026-06-11   # cached resul
 ```
 
 `--json` emits a structured result; `--timeout` aborts a hung command (reported as `timed_out`,
-whichever side notices the deadline first); `--retry`/`--backoff` retry transport failures;
-`--dry-run` previews; `--propagate-exit` returns the remote exit code; and
+whichever side notices the deadline first); `--retry`/`--backoff` retry failures that
+certainly never reached the server (it could not be reached, the SSH handshake failed, a
+reverse agent was not connected, the daemon was busy) and never a command that ran or might
+have: if the connection drops while the command runs, exec fails with "may have run; check
+before retrying" instead of running it again; `--dry-run` previews; `--propagate-exit` returns the remote exit code; and
 `--idempotency-key KEY` returns the cached result for `KEY` instead of re-running.
 A command that starts something in the background (`./server &`) returns about 2 seconds
 after its shell exits; the background process keeps running, but output it writes after

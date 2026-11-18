@@ -329,14 +329,51 @@ header) to change a pane's source.
 ## Web GUI
 
 ```bash
-fleet file ui                        # prints http://127.0.0.1:9445/?t=<token>
+fleet console                        # the web console: Fleet, Files, Control, Terminal
+fleet file ui                        # the same console on the file manager (Control/Terminal off)
 fleet file ui --addr 127.0.0.1:9000
 fleet file ui --control --terminal   # also run commands and open shells from the browser
+fleet console --background           # keep it running after the terminal closes
+fleet console open --files           # open the background console (on the file manager)
+fleet console status                 # where it runs and when it stops
+fleet console stop
 ```
 
-The *Control* and *Terminal* views are **off unless you start the UI with
-`--control` / `--terminal`**: with either on, whoever holds the session token can act
-on the whole fleet with this invocation's authority (see *Security* below).
+`fleet console` (alias `fleet web`) starts the web UI with every view on;
+`fleet file ui` starts the same console on the file manager, where the *Control* and
+*Terminal* views are **off unless you add `--control` / `--terminal`**. With either on,
+whoever holds the session token can act on the whole fleet with this invocation's
+authority (see *Security* below).
+
+On a terminal both show a panel instead of a bare URL: **1** opens the console in your
+browser, **2** shows the access link (it carries the session token: keep it private),
+**3** keeps it running in the background and returns to the shell, **4** stops it. In a
+script or a pipe they print the link and serve until interrupted, as before.
+
+The browser is opened with a **one-time code** (`/?c=…`, usable once, within 30
+seconds), never the session token: a process's arguments are visible to every account
+on the machine, and the token in a browser's command line could be read by another
+local user. A link that was already used makes the page say so; if you did not open it
+twice, run `fleet console stop`.
+
+A console **in the background** is a separate `fleet console serve` process, one per
+controller:
+
+- It keeps its session token in memory. `data/console.json` (address, limits, views)
+  and `data/console.key` (a launch key that only lets `fleet console open` ask for a
+  one-time code) are owner-only, beside the controller's own keys.
+- Choosing **3** hands the token over, so tabs you already opened keep working; it asks
+  whether to keep Control and Terminal on (default no). `fleet console --background`
+  keeps them only with `--control` / `--terminal`.
+- It stops after **an hour without use** and **8 hours** at most — **30 minutes** and
+  **1 hour** with Control or Terminal on. The page's own refreshes and streams are not
+  use. Running `fleet console` or `fleet file ui` again reaches it instead of starting
+  another.
+- It cannot be started or opened under `--token` / `FLEET_TOKEN`: it acts with the
+  controller's full authority, and keeping a token for it would leave that token in a
+  long-running process.
+
+`fleet start` is unrelated: it runs the controller daemon.
 
 A premium browser file manager served by the controller. It binds **loopback
 only**, requires the per-process token on every request, rejects non-loopback

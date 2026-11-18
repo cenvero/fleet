@@ -36,6 +36,33 @@ Omit sections that have no entries for that release.
 
 ### Added
 
+- **`fleet console` (alias `fleet web`): the web console.** It opens the localhost web UI
+  with every view: Fleet, Files, Control and Terminal. Turn views off with
+  `--control=false` / `--terminal=false`. On a terminal it shows a panel instead of a bare
+  URL, with four choices:
+  - open it in your browser;
+  - show the access link;
+  - keep it running in the background and return to the shell;
+  - stop it.
+
+  A background console (also `fleet console --background`) is reached with
+  `fleet console open [--files] [--print]`, `fleet console status` and `fleet console stop`,
+  or by running `fleet console` again. It stops by itself after an hour unused and after
+  8 hours at most. With Control or Terminal on, those are 30 minutes and an hour, and it
+  keeps them in the background only if you say so. `fleet file ui` and
+  `fleet filemanager ui` run the same console on the file manager, with Control and
+  Terminal still opt-in. `fleet start` still runs the controller daemon.
+- **`fleet errors` (also `fleet issues`, `fleet notices`; `--json`)** lists what needs
+  attention, with the command that fixes each item:
+  - an available update;
+  - a pending `fleet adjust-init`;
+  - a passphrase-protected controller key;
+  - servers the last automatic agent sync could not update;
+  - reverse-mode servers waiting for a daemon that is not running.
+
+  Items are worked out from the controller's state each time, so each one goes away once
+  its cause is fixed.
+
 - **Web UI redesign.** A calmer, Apple-style look across Files, Fleet and Control: one blue
   accent, the system font, larger titles, softer corners, frosted toolbar, menus and
   dialogs, switches for on/off options, sentence-case labels, and matching light and dark
@@ -72,6 +99,41 @@ Omit sections that have no entries for that release.
 
 ### Security
 
+- **The browser is opened with a one-time code, never the session token.** Opening the UI
+  ran `open`/`xdg-open http://…/?t=<token>`, and a process's arguments can be read by every
+  account on the machine. With Control or Terminal on, another local user could take the
+  token and act on the fleet. The link now carries a code that works once, within
+  30 seconds; a used one makes the page say so.
+- **A background console keeps its session token in memory only.** Its data directory holds
+  its address and a launch key (both `0600`); the key only lets `fleet console open` ask for
+  a one-time code. It is refused under `--token`/`FLEET_TOKEN`. It is found by its lock,
+  never by a port answering. `fleet console stop` and `fleet stop` each signal only their
+  own kind of process.
+- **Firewall changes that would lock fleet out of the agent are refused**, with the command
+  to run first:
+  - `fleet firewall enable` and `fleet fw enable` refuse unless the agent's port is allowed
+    in direct mode, or established/related and outgoing traffic stay allowed in reverse
+    mode;
+  - `fleet firewall add` refuses deny/reject/limit rules on the agent port, and rules
+    fleet cannot read;
+  - `fleet port close` refuses to close the direct agent's port;
+  - `fleet template apply` goes through the same checks.
+
+  `--force-i-have-console` skips the check, for someone with console access to the
+  server. Every refusal and override is audit-logged. `fleet fw enable` also accepts
+  established/related and loopback traffic before it drops anything. Its undo restores
+  what was there before, and `fleet fw allow` no longer reloads firewalld, which dropped
+  runtime-only allows.
+- **A command is never sent twice when it may already have run.** When a pooled connection
+  dropped while waiting for a reply, the controller re-sent the request on a fresh one, so
+  a command, a service restart or a firewall change could run twice. Now only requests that
+  never reached the server, or that only read, are sent again. Anything else fails with
+  "may have run; check before retrying". `fleet exec --retry` retries only failures that
+  certainly never reached the server, as its help always said, including through the
+  daemon. A connection quiet for 10 s is probed before a command goes out on it.
+- **`fleet config import` refuses unsafe server names** (`../x`, path separators) instead of
+  writing outside `servers/`. Saving and loading a server record check the name too.
+
 - **The web UI's Control and Terminal views are off by default.** With either on, whoever
   holds the UI's session token can act on the whole fleet with the authority of the
   `fleet file ui` invocation, so the plain file manager no longer hands that out. Start the
@@ -103,6 +165,14 @@ Omit sections that have no entries for that release.
   new random key while secrets sealed under it exist.
 
 ### Fixed
+
+- **A removed server no longer comes back.** A connect, metrics collection or agent update
+  that was still running when the server was removed wrote its record back. These writes
+  now only update a record that still exists.
+- **A pooled connection's idle time counts time asleep**, so a connection that sat through a
+  laptop sleep is redialled instead of reused.
+- **`template apply` opens the template's ports before enabling its firewall**, and changes
+  services last, so a template that allows the agent port works on a fresh host.
 
 - **`fleet key rotate` no longer destroys stored secrets when it rolls back.** If verifying a
   reverse agent or removing the old key failed after the secrets had been re-sealed, the
@@ -160,6 +230,19 @@ Omit sections that have no entries for that release.
   BLAKE2b) and the timing-sensitive tests hold up on loaded CI runners.
 
 ### Changed
+
+- **Ordinary commands no longer print notices.** `fleet ssh`, `fleet exec` and every other
+  command used to print the update notice, the adjust-init hint and the passphrase-key
+  warning before their own output. These are now listed by `fleet errors` and by bare
+  `fleet`. `fleet status` gives a one-line count on stderr on a terminal. A command's own
+  errors are reported as before.
+- **`fleet fw enable --safe` no longer allows the agent port for you.** It refuses and names
+  `fleet fw allow <server> <port>/tcp` instead, unless `--force-i-have-console` is given.
+  Its JSON output now needs `--json`. `fleet firewall enable` reads ufw over `shell.exec`
+  before changing anything. A direct-mode record with no valid agent port refuses
+  tightening changes instead of assuming `default_agent_port`.
+- **`fleet file ui` shows the console panel on a terminal.** If a console already runs in
+  the background, it opens that one on the file manager.
 
 - Dependencies: `golang.org/x/crypto` 0.58.0, `golang.org/x/sys` 0.50.0, `golang.org/x/term`
   0.47.0, `golang.org/x/mod` 0.42.0, `golang.org/x/sync` 0.24.0, `golang.org/x/text` 0.43.0
