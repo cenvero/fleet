@@ -2378,24 +2378,29 @@ async function actRename(p) {
     validate: nameValidator(p, item.name),
   });
   if (name === null || name === item.name) return;
-  if (!(await renameItem(p, item.name, name))) return;
+  // Undo must act where the rename happened, even if the pane has moved on to
+  // another folder (or server) by the time it is clicked.
+  const at = { server: p.server, dir: p.path, style: p.pathStyle };
+  if (!(await renameItem(p, item.name, name, at))) return;
   toast("Renamed to “" + name + "”", "success", {
-    action: { label: "Undo", run: async () => { if (await renameItem(p, name, item.name)) toast("Rename undone", "success"); } },
+    action: { label: "Undo", run: async () => { if (await renameItem(p, name, item.name, at)) toast("Rename undone", "success"); } },
   });
 }
 
-async function renameItem(p, from, to) {
+async function renameItem(p, from, to, at) {
   try {
-    await postJSON("/api/mv", { server: p.server, from: joinPath(p.path, from, p.pathStyle), name: to });
+    await postJSON("/api/mv", { server: at.server, from: joinPath(at.dir, from, at.style), name: to });
   } catch (e) {
-    toast("Rename failed: " + friendlyError(e, p.server), "error");
+    toast("Rename failed: " + friendlyError(e, at.server), "error");
     return false;
   }
-  p.sel.clear();
-  await loadListing(p, { keepScroll: true, focusName: to, quiet: true });
-  const i = vis(p).index.get(to);
-  if (i !== undefined) selectOnly(p, i);
-  refreshPanesAt(p.server, p.path, p.pathStyle);
+  if (p.server === at.server && p.path === at.dir) {
+    p.sel.clear();
+    await loadListing(p, { keepScroll: true, focusName: to, quiet: true });
+    const i = vis(p).index.get(to);
+    if (i !== undefined) selectOnly(p, i);
+  }
+  refreshPanesAt(at.server, at.dir, at.style);
   return true;
 }
 
@@ -2563,15 +2568,18 @@ async function actChmod(p, item) {
     validate: (v) => (/^[0-7]{3,4}$/.test(v.trim()) ? "" : "Use 3 or 4 octal digits, e.g. 644"),
   });
   if (mode === null) return;
+  // Pin the target now: Undo must restore this item, not whatever has the same
+  // name in the folder the pane shows when Undo is clicked.
+  const server = p.server, path = fullPath(p, item), dir = p.path, style = p.pathStyle;
   try {
-    await postJSON("/api/chmod", { server: p.server, path: fullPath(p, item), mode: mode.trim() });
+    await postJSON("/api/chmod", { server, path, mode: mode.trim() });
   } catch (e) {
-    toast("Permissions failed: " + friendlyError(e, p.server), "error");
+    toast("Permissions failed: " + friendlyError(e, server), "error");
     return;
   }
   toast("Set " + item.name + " to " + mode.trim(), "success", { action: cur !== mode.trim() ? { label: "Undo", run: async () => {
-    try { await postJSON("/api/chmod", { server: p.server, path: fullPath(p, item), mode: cur }); toast("Restored " + cur, "success"); loadListing(p, { keepScroll: true, quiet: true }); }
-    catch (e) { toast("Undo failed: " + friendlyError(e, p.server), "error"); }
+    try { await postJSON("/api/chmod", { server, path, mode: cur }); toast("Restored " + cur, "success"); refreshPanesAt(server, dir, style); }
+    catch (e) { toast("Undo failed: " + friendlyError(e, server), "error"); }
   } } : null });
   loadListing(p, { keepScroll: true, quiet: true });
 }
@@ -6254,14 +6262,24 @@ function createXterm() {
   const fit = new window.FitAddon.FitAddon();
   xt.loadAddon(fit);
   xt.open(host);
-  if (window.WebglAddon) {
-    try {
-      const gl = new window.WebglAddon.WebglAddon();
-      gl.onContextLoss(() => gl.dispose());
-      xt.loadAddon(gl);
-    } catch { /* fall back to the DOM renderer */ }
-  }
+  attachWebgl(xt, 3);
   return { xt, fit, host };
+}
+
+// attachWebgl draws the terminal with WebGL. A lost GPU context is usually
+// transient (a GPU reset, a tab coming back from the background), so instead
+// of settling for the DOM renderer, whose inline true-colour styles this
+// page's CSP blocks, try a fresh WebGL renderer a few times first.
+function attachWebgl(xt, retries) {
+  if (!window.WebglAddon) return;
+  try {
+    const gl = new window.WebglAddon.WebglAddon();
+    gl.onContextLoss(() => {
+      gl.dispose();
+      if (retries > 0) setTimeout(() => attachWebgl(xt, retries - 1), 500);
+    });
+    xt.loadAddon(gl);
+  } catch { /* the DOM renderer draws it */ }
 }
 
 function proposedSize(fit) {
