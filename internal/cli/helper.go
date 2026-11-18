@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/spf13/cobra"
 )
 
@@ -190,6 +191,11 @@ func newHelperRestartCommand(configDir *string) *cobra.Command {
 	}
 }
 
+// helperText makes status text safe for a terminal: task messages and errors
+// can carry text from a server (a probe error), which must not reach the
+// operator's terminal as escape sequences.
+func helperText(s string) string { return safetext.Bound(safetext.Terminal(s, false), 400) }
+
 func printHelperState(w io.Writer, s core.HelperState) {
 	st := s.Status
 	switch {
@@ -214,11 +220,11 @@ func printHelperState(w io.Writer, s core.HelperState) {
 	default:
 		fmt.Fprintln(w, "Background helper: not running (the next fleet command starts it)")
 		if !st.StoppedAt.IsZero() && st.StopReason != "" {
-			fmt.Fprintf(w, "Last stopped:      %s: %s\n", helperTime(st.StoppedAt), st.StopReason)
+			fmt.Fprintf(w, "Last stopped:      %s: %s\n", helperTime(st.StoppedAt), helperText(st.StopReason))
 		}
 	}
 	if st.LastLaunchError != "" && st.LastLaunchErrorAt.After(st.StartedAt) {
-		fmt.Fprintf(w, "Last start failed: %s: %s\n", helperTime(st.LastLaunchErrorAt), st.LastLaunchError)
+		fmt.Fprintf(w, "Last start failed: %s: %s\n", helperTime(st.LastLaunchErrorAt), helperText(st.LastLaunchError))
 	}
 	fmt.Fprintf(w, "Log:               %s\n", s.LogPath)
 	fmt.Fprintf(w, "Status file:       %s\n\n", s.StatusPath)
@@ -260,12 +266,12 @@ func printHelperState(w io.Writer, s core.HelperState) {
 		if ts.LastResult != "" {
 			result = ts.LastResult
 			if ts.LastMessage != "" {
-				result += ": " + ts.LastMessage
+				result += ": " + helperText(ts.LastMessage)
 			}
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", name, shortDuration(interval), last, next, result)
 		if ts.LastError != "" {
-			failures = append(failures, fmt.Sprintf("  %s (%s): %s", name, helperTime(ts.LastErrorAt), ts.LastError))
+			failures = append(failures, fmt.Sprintf("  %s (%s): %s", helperText(name), helperTime(ts.LastErrorAt), helperText(ts.LastError)))
 		}
 	}
 	_ = tw.Flush()

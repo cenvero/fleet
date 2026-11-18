@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -52,6 +53,20 @@ func processLooksLikeDaemon(pid int) (bool, string) {
 // lock the process holds.
 func processLooksLikeFleet(pid int, words ...string) (bool, string) {
 	if runtime.GOOS != "linux" {
+		// No procfs: ask ps for the command line (macOS, the BSDs). A pid
+		// file left by a process that died, now naming an unrelated
+		// process, must not get that process signalled.
+		out, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output() // #nosec G204 -- fixed program, integer pid
+		line := strings.TrimSpace(string(out))
+		if err != nil || line == "" {
+			return true, "" // ps unavailable or the process just exited: the lock is the guard
+		}
+		args := strings.Fields(line)
+		for _, w := range words {
+			if !slices.Contains(args[1:], w) {
+				return false, fmt.Sprintf("its command line (%q) is not a fleet %s", line, strings.Join(words, " "))
+			}
+		}
 		return true, ""
 	}
 	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline") // #nosec G304 -- procfs path built from an integer pid
