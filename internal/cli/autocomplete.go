@@ -250,10 +250,16 @@ func dirIsWritable(dir string) bool {
 	return true
 }
 
-// removeMarkedBlock strips a `# <marker>` comment line plus the lines that follow
-// it up to the next blank line (the shape appendOnce writes), collapsing the
-// surrounding blank lines. It preserves the file's existing mode. Returns whether
-// anything was removed.
+// removeMarkedBlock strips a `# <marker>` comment line plus the fleet lines that
+// follow it (the shape appendOnce writes), collapsing the surrounding blank
+// lines. It preserves the file's existing mode. Returns whether anything was
+// removed.
+//
+// The marker line must match exactly: "cenvero-fleet:completion" is a prefix of
+// the current "cenvero-fleet:completion-file" marker, and a substring match
+// used to strip the current block on every re-install. Only the lines Fleet
+// wrote are removed (each one mentions fleet), never the operator's own lines
+// that happen to follow without a blank line in between.
 func removeMarkedBlock(path, marker string) (bool, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- the operator's own shell rc file
 	if err != nil {
@@ -266,18 +272,22 @@ func removeMarkedBlock(path, marker string) (bool, error) {
 	out := make([]string, 0, len(lines))
 	removed := false
 	for i := 0; i < len(lines); i++ {
-		if strings.Contains(lines[i], marker) {
+		if strings.TrimSpace(lines[i]) == "# "+marker {
 			removed = true
 			// Drop any blank line we just appended before the block.
 			for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 				out = out[:len(out)-1]
 			}
-			// Skip the marker line and following non-blank lines.
+			// Skip the marker line and the fleet lines that belong to it.
 			i++
-			for i < len(lines) && strings.TrimSpace(lines[i]) != "" {
+			for i < len(lines) && strings.TrimSpace(lines[i]) != "" && strings.Contains(lines[i], "fleet") {
 				i++
 			}
-			// i now points at a blank line (or EOF); the loop's i++ skips it too.
+			// A blank line that ended the block goes with it; anything else
+			// (an operator's own line) is kept.
+			if i < len(lines) && strings.TrimSpace(lines[i]) != "" {
+				i--
+			}
 			continue
 		}
 		out = append(out, lines[i])
@@ -285,6 +295,11 @@ func removeMarkedBlock(path, marker string) (bool, error) {
 	if !removed {
 		return false, nil
 	}
+	result := strings.Join(out, "\n")
+	// Keep the file newline-terminated, so a later append starts on its own line.
+	if strings.HasSuffix(string(data), "\n") && result != "" && !strings.HasSuffix(result, "\n") {
+		result += "\n"
+	}
 	// WriteFile keeps an existing file's mode (perm applies only on create).
-	return true, os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o600) // #nosec G306,G703 -- existing rc keeps its mode; 0600 only applies if newly created
+	return true, os.WriteFile(path, []byte(result), 0o600) // #nosec G306,G703 -- existing rc keeps its mode; 0600 only applies if newly created
 }
