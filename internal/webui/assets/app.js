@@ -27,10 +27,11 @@ function metaContent(name) {
 }
 const URL_PARAMS = new URLSearchParams(location.search);
 const LAUNCH_STATE = URL_PARAMS.has("c") ? metaContent("fleet-launch-state") || "used" : "";
+const LAUNCH_FAILED = LAUNCH_STATE === "used" || LAUNCH_STATE === "reset";
 const TOKEN =
   URL_PARAMS.get("t") ||
   metaContent("fleet-launch-token") ||
-  (LAUNCH_STATE === "used" ? "" : sessionStorage.getItem("fleet_token")) ||
+  (LAUNCH_FAILED ? "" : sessionStorage.getItem("fleet_token")) ||
   "";
 if (TOKEN) sessionStorage.setItem("fleet_token", TOKEN);
 
@@ -4792,10 +4793,19 @@ async function loadServers() {
 }
 
 function init() {
+  const reopen = "Open the console again: choose 1 in the terminal running `fleet console` (or `fleet file ui`), or run `fleet console open` if it runs in the background.";
+  if (LAUNCH_STATE === "reset") {
+    try { sessionStorage.removeItem("fleet_token"); } catch { /* ignore */ }
+    showTakeover("This link was used twice, so the console reset its access", [
+      "Links that open the console work once. This one had already been used — if not by you, then by something else on this computer that saw it — so the console replaced its access token and every copy handed out with that link stopped working.",
+      reopen,
+    ]);
+    return;
+  }
   if (LAUNCH_STATE === "used") {
-    showTakeover("This link was already used or has expired", [
-      "Links that open the console work once, for 30 seconds. Run `fleet console open` (or start `fleet console` again) for a new one.",
-      "If you did not open this link twice, another account on this computer may have used it: run `fleet console stop`.",
+    showTakeover("This link has expired", [
+      "Links that open the console work once, within 30 seconds of being made.",
+      reopen,
     ]);
     return;
   }

@@ -56,6 +56,7 @@ const (
 	consoleLaunchKeyBytes         = 32
 	consoleLogRotateBytes         = 1 << 20
 	consoleStopTimeout            = 10 * time.Second
+	consoleClaimWait              = 2 * time.Second
 	consoleStateFile              = "console.json"
 	consoleKeyFile                = "console.key"
 	consoleLockFile               = "console.lock"
@@ -121,14 +122,23 @@ func ClaimConsole(configDir string) (*ConsoleInstance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open console lock %s: %w", lockPath, err)
 	}
-	acquired, err := tryAdvisoryFileLock(lock)
-	if err != nil {
-		_ = lock.Close()
-		return nil, fmt.Errorf("acquire console lock %s: %w", lockPath, err)
-	}
-	if !acquired {
-		_ = lock.Close()
-		return nil, ErrConsoleRunning
+	// Another fleet command checking whether a console runs takes the lock
+	// for an instant; wait a little for it rather than mistake it for one.
+	deadline := time.Now().Add(consoleClaimWait)
+	for {
+		acquired, err := tryAdvisoryFileLock(lock)
+		if err != nil {
+			_ = lock.Close()
+			return nil, fmt.Errorf("acquire console lock %s: %w", lockPath, err)
+		}
+		if acquired {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			_ = lock.Close()
+			return nil, ErrConsoleRunning
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	// Whatever a console that died without cleaning up left behind is stale.
 	removeConsoleFiles(configDir)
@@ -255,6 +265,9 @@ type ConsoleStartOptions struct {
 	// replaces, so browser tabs it opened keep working. It is passed on the
 	// new process's standard input, never its command line or environment.
 	HandoverToken string
+	// ExtraFiles are passed to the new process from fd 3 on (Unix): the
+	// listening socket of a console moving to the background.
+	ExtraFiles []*os.File
 	// Executable defaults to this binary; Env to this process's environment
 	// without FLEET_TOKEN.
 	Executable string
@@ -306,6 +319,7 @@ func StartConsole(opts ConsoleStartOptions) (ConsoleState, error) {
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	cmd.ExtraFiles = opts.ExtraFiles
 	cmd.SysProcAttr = detachedProcAttr()
 	err = cmd.Start()
 	_ = logFile.Close()
@@ -323,6 +337,10 @@ func StartConsole(opts ConsoleStartOptions) (ConsoleState, error) {
 	for {
 		select {
 		case err := <-exited:
+			// Lost a race with another start: report the console that won.
+			if st := ReadConsole(configDir); st.Running && !st.Starting {
+				return st, ErrConsoleRunning
+			}
 			status := "exited"
 			if err != nil {
 				status = err.Error()

@@ -46,10 +46,24 @@ func TestLaunchCodeWorksOnce(t *testing.T) {
 	if !strings.Contains(page, tokenMeta) || !strings.Contains(page, `name="fleet-launch-state" content="ok"`) {
 		t.Fatal("a fresh launch code did not open the page with the token")
 	}
+	// Presented again, the code was used by two parties: the token it gave
+	// out is replaced, so whoever raced the browser holds nothing.
+	oldToken := s.Token()
 	page = getPage(t, ts.URL, "?c="+code)
-	if strings.Contains(page, s.Token()) || !strings.Contains(page, `name="fleet-launch-state" content="used"`) {
-		t.Fatal("a used launch code opened the page again, or was not reported as used")
+	if strings.Contains(page, oldToken) || !strings.Contains(page, `name="fleet-launch-state" content="reset"`) {
+		t.Fatal("a reused launch code opened the page again, or was not reported")
 	}
+	if s.Token() == oldToken || s.Token() == "" {
+		t.Fatal("a reused launch code did not replace the session token")
+	}
+	if code, _ := consoleGet(t, ts.URL+"/api/servers?t="+oldToken); code != http.StatusUnauthorized {
+		t.Fatalf("the token handed out with the reused code still works: %d", code)
+	}
+	if code, _ := consoleGet(t, ts.URL+"/api/servers?t="+s.Token()); code != http.StatusOK {
+		t.Fatalf("the new token does not work: %d", code)
+	}
+	tokenMeta = `name="fleet-launch-token" content="` + s.Token() + `"`
+	_ = tokenMeta
 	if page := getPage(t, ts.URL, "?c=not-a-code"); strings.Contains(page, s.Token()) {
 		t.Fatal("an unknown code opened the page")
 	}
@@ -218,4 +232,15 @@ func TestSetTokenAcceptsOnlyGeneratedTokens(t *testing.T) {
 	if err := s.SetToken(good); err != nil || s.Token() != good {
 		t.Fatalf("SetToken(valid) = %v", err)
 	}
+}
+
+func consoleGet(t *testing.T, u string) (int, string) {
+	t.Helper()
+	res, err := http.Get(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
 }

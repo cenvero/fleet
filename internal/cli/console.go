@@ -147,6 +147,9 @@ func runConsole(cmd *cobra.Command, configDir string, o consoleOptions) error {
 		}
 		control, terminal := o.control && o.controlSet, o.terminal && o.terminalSet
 		st, err := core.StartConsole(core.ConsoleStartOptions{ConfigDir: configDir, Args: consoleServeArgs(o.addr, control, terminal)})
+		if errors.Is(err, core.ErrConsoleRunning) && st.Running {
+			return attachConsole(cmd, configDir, st, o) // another start won the race
+		}
 		if err != nil {
 			return err
 		}
@@ -328,6 +331,13 @@ func runForegroundConsole(cmd *cobra.Command, configDir string, o consoleOptions
 
 	out := cmd.OutOrStdout()
 	lines := readLines(os.Stdin)
+	reset := make(chan struct{}, 1)
+	srv.SetOnTokenReset(func() {
+		select {
+		case reset <- struct{}{}:
+		default:
+		}
+	})
 	status := ""
 	if strings.EqualFold(o.open, "yes") {
 		time.Sleep(300 * time.Millisecond)
@@ -345,6 +355,10 @@ func runForegroundConsole(cmd *cobra.Command, configDir string, o consoleOptions
 			return finish()
 		case err := <-served:
 			return err
+		case <-reset:
+			status = "⚠  A link to this console was used twice — if not by you, then by another account on this computer\n" +
+				"   that saw it — so the console replaced its access token. Choose 1 to open it again."
+			continue
 		case l, ok := <-lines:
 			if !ok {
 				fmt.Fprintln(out, "\nStopping the console…")
@@ -373,19 +387,48 @@ func runForegroundConsole(cmd *cobra.Command, configDir string, o consoleOptions
 					return finish()
 				}
 			}
+			args := consoleServeArgs(listener.Addr().String(), o.control && keep, o.terminal && keep)
+			// Hand the listening socket itself to the background console,
+			// with the session token, so the port is never free in between:
+			// were it, another account on this machine could bind it and
+			// collect the token from the tabs reconnecting to it. Both serve
+			// the socket for a moment; then this one stops.
+			if sock, ferr := listenerFile(listener); ferr == nil {
+				st, err := core.StartConsole(core.ConsoleStartOptions{
+					ConfigDir:     configDir,
+					Args:          append(args, "--listen-fd", "3"),
+					HandoverToken: srv.Token(),
+					ExtraFiles:    []*os.File{sock},
+				})
+				_ = sock.Close()
+				if err != nil {
+					status = fmt.Sprintf("Could not keep it running in the background (%v); it is still running here.", err)
+					continue
+				}
+				if err := finish(); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "\nThe console now runs in the background at %s (pid %d); tabs you opened keep working.\n", st.Address, st.PID)
+				describeBackgroundConsole(out, st)
+				return nil
+			}
+			// No way to pass the socket (Windows): stop here first, then start
+			// one with its own token, so a token that could be collected
+			// while the port is free is worthless, and open a fresh tab.
 			if err := finish(); err != nil {
 				return err
 			}
-			st, err := core.StartConsole(core.ConsoleStartOptions{
-				ConfigDir:     configDir,
-				Args:          consoleServeArgs(listener.Addr().String(), o.control && keep, o.terminal && keep),
-				HandoverToken: srv.Token(),
-			})
+			st, err := core.StartConsole(core.ConsoleStartOptions{ConfigDir: configDir, Args: args})
 			if err != nil {
 				return fmt.Errorf("the console stopped, but could not keep running in the background: %w", err)
 			}
-			fmt.Fprintf(out, "\nThe console now runs in the background at %s (pid %d); tabs you opened keep working.\n", st.Address, st.PID)
+			fmt.Fprintf(out, "\nThe console now runs in the background at %s (pid %d).\n", st.Address, st.PID)
 			describeBackgroundConsole(out, st)
+			if err := openBackgroundConsole(cmd, configDir, st, o.view, false); err != nil {
+				fmt.Fprintf(out, "Tabs you opened before need a new link: %v\n", err)
+			} else {
+				fmt.Fprintln(out, "Opened it in a new tab; tabs you opened before need this new one.")
+			}
 			return nil
 		case "4", "q", "s", "stop", "quit", "exit":
 			fmt.Fprintln(out, "Stopping the console…")
@@ -685,6 +728,7 @@ func newConsoleStopCommand(configDir *string) *cobra.Command {
 func newConsoleServeCommand(configDir *string) *cobra.Command {
 	var addr string
 	var control, terminal, tokenStdin bool
+	var listenFD int
 	cmd := &cobra.Command{
 		Use:    "serve",
 		Short:  "Serve the console in the background (started by `fleet console --background`)",
@@ -723,7 +767,15 @@ func newConsoleServeCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			srv.SetLaunchKey(key)
-			listener, err := listenWithRetry(addr, 5*time.Second)
+			srv.SetOnTokenReset(func() {
+				fmt.Fprintln(cmd.ErrOrStderr(), "a launch link was used twice; the session token was replaced (another account on this computer may have seen the link)")
+			})
+			var listener net.Listener
+			if listenFD > 0 {
+				listener, err = inheritedListener(listenFD)
+			} else {
+				listener, err = listenWithRetry(addr, 5*time.Second)
+			}
 			if err != nil {
 				return err
 			}
@@ -750,6 +802,7 @@ func newConsoleServeCommand(configDir *string) *cobra.Command {
 	cmd.Flags().BoolVar(&control, "control", false, "include the Control view")
 	cmd.Flags().BoolVar(&terminal, "terminal", false, "include the Terminal view")
 	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read the session token to keep from standard input")
+	cmd.Flags().IntVar(&listenFD, "listen-fd", 0, "serve on the loopback socket inherited as this file descriptor")
 	return cmd
 }
 
@@ -800,6 +853,35 @@ func readHandoverToken(r io.Reader) (string, error) {
 	case <-time.After(5 * time.Second):
 		return "", errors.New("timed out reading the session token from standard input")
 	}
+}
+
+// listenerFile returns a duplicate of l's socket to pass to a child process.
+// It fails where the OS has no such handover (Windows).
+func listenerFile(l net.Listener) (*os.File, error) {
+	tl, ok := l.(*net.TCPListener)
+	if !ok {
+		return nil, errors.New("not a TCP listener")
+	}
+	return tl.File()
+}
+
+// inheritedListener turns the socket a parent console handed over on fd into
+// a listener, and checks it is a loopback one.
+func inheritedListener(fd int) (net.Listener, error) {
+	f := os.NewFile(uintptr(fd), "console-listener") // #nosec G115 -- a small fd number from our own parent
+	if f == nil {
+		return nil, fmt.Errorf("no file descriptor %d", fd)
+	}
+	defer f.Close()
+	l, err := net.FileListener(f)
+	if err != nil {
+		return nil, fmt.Errorf("use the handed-over socket: %w", err)
+	}
+	if addr, ok := l.Addr().(*net.TCPAddr); !ok || !addr.IP.IsLoopback() {
+		_ = l.Close()
+		return nil, fmt.Errorf("the handed-over socket %s is not a loopback TCP socket", l.Addr())
+	}
+	return l, nil
 }
 
 // listenWithRetry binds addr, waiting up to wait for it to come free: when a

@@ -36,7 +36,19 @@ const (
 type launchCodes struct {
 	mu    sync.Mutex
 	codes map[[32]byte]time.Time // sha256(code) -> expiry
+	// spent remembers redeemed codes for their lifetime: one presented again
+	// was used by two parties, so the session token is replaced.
+	spent map[[32]byte]time.Time
 }
+
+// What redeeming a launch code found.
+type launchOutcome int
+
+const (
+	launchInvalid  launchOutcome = iota // unknown or expired
+	launchRedeemed                      // valid; it is now spent
+	launchReused                        // already spent: the session token was replaced
+)
 
 // NewLaunchCode returns a one-time code that opens the UI with this
 // server's session token, valid for launchCodeTTL.
@@ -64,23 +76,66 @@ func (s *Server) NewLaunchCode() (string, error) {
 	return code, nil
 }
 
-// redeemLaunchCode consumes code, reporting whether it was valid and unused.
-// Codes are looked up by their hash, so the lookup reveals nothing about a
-// valid code's bytes.
-func (s *Server) redeemLaunchCode(code string) bool {
+// redeemLaunchCode consumes code. Codes are looked up by their hash, so the
+// lookup reveals nothing about a valid code's bytes.
+//
+// A code presented a second time within its lifetime was used by two
+// parties: the browser it was opened for and something else on this machine
+// that read it from the browser's command line (or the other way round).
+// Whoever came first holds the session token, so it is replaced: the copy
+// handed out stops working, and the operator, who sees "this link was
+// already used", opens the console again with a fresh code.
+func (s *Server) redeemLaunchCode(code string) launchOutcome {
 	if code == "" || len(code) > 128 {
-		return false
+		return launchInvalid
 	}
 	key := sha256.Sum256([]byte(code))
+	now := time.Now()
 	s.launch.mu.Lock()
 	defer s.launch.mu.Unlock()
+	if s.launch.spent == nil {
+		s.launch.spent = map[[32]byte]time.Time{}
+	}
+	for k, exp := range s.launch.spent {
+		if now.After(exp) {
+			delete(s.launch.spent, k)
+		}
+	}
+	if _, reused := s.launch.spent[key]; reused {
+		s.rotateToken()
+		return launchReused
+	}
 	exp, ok := s.launch.codes[key]
 	if !ok {
-		return false
+		return launchInvalid
 	}
 	delete(s.launch.codes, key)
-	return time.Now().Before(exp)
+	if now.After(exp) {
+		return launchInvalid
+	}
+	s.launch.spent[key] = exp
+	return launchRedeemed
 }
+
+// rotateToken replaces the session token with a fresh one: every page and
+// link that carried the old one stops working.
+func (s *Server) rotateToken() {
+	token, err := randomToken()
+	if err != nil {
+		// Without randomness, do not keep serving a token that leaked.
+		token = ""
+	}
+	s.tokenMu.Lock()
+	s.token = token
+	s.tokenMu.Unlock()
+	if s.onTokenReset != nil {
+		s.onTokenReset()
+	}
+}
+
+// SetOnTokenReset runs fn after a reused launch code replaced the session
+// token (the console tells its operator, or its log).
+func (s *Server) SetOnTokenReset(fn func()) { s.onTokenReset = fn }
 
 // LaunchURL is the address that opens the UI in a browser without the
 // session token: base is the server's root URL ("http://127.0.0.1:9445/")

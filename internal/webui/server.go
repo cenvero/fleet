@@ -41,9 +41,12 @@ const DefaultAddr = "127.0.0.1:9445"
 
 // Server is the localhost web file manager.
 type Server struct {
-	app   *core.App
-	token string
-	hub   *progressHub
+	app *core.App
+	// token is the session token; tokenMu guards it, since a reused launch
+	// code replaces it while requests are being checked (see launch.go).
+	tokenMu sync.RWMutex
+	token   string
+	hub     *progressHub
 	// files is the remote read surface used for streaming downloads and
 	// previews (the App itself outside tests).
 	files remoteFiles
@@ -69,8 +72,9 @@ type Server struct {
 	// launch holds the one-time codes that open the UI without putting the
 	// session token on a browser's command line; launchKey lets another
 	// local process ask for one (see launch.go).
-	launch    launchCodes
-	launchKey string
+	launch       launchCodes
+	launchKey    string
+	onTokenReset func()
 	// activity records when someone last used the UI (see IdleFor).
 	activity activity
 }
@@ -89,7 +93,11 @@ func New(app *core.App) (*Server, error) {
 }
 
 // Token returns the per-process access token.
-func (s *Server) Token() string { return s.token }
+func (s *Server) Token() string {
+	s.tokenMu.RLock()
+	defer s.tokenMu.RUnlock()
+	return s.token
+}
 
 // SetToken replaces the session token with one handed over from the
 // process that served this UI before (so pages it opened keep working when
@@ -102,7 +110,9 @@ func (s *Server) SetToken(token string) error {
 	if _, err := hex.DecodeString(token); err != nil {
 		return errors.New("session token is not hex")
 	}
+	s.tokenMu.Lock()
 	s.token = token
+	s.tokenMu.Unlock()
 	return nil
 }
 
@@ -150,7 +160,7 @@ func BaseURL(l net.Listener) string { return fmt.Sprintf("http://%s/", l.Addr())
 // TokenURL is the address that opens the UI with the session token in it.
 // It is for showing to the operator; open a browser with a launch code
 // instead (see NewLaunchCode), so the token is not on its command line.
-func (s *Server) TokenURL(l net.Listener) string { return BaseURL(l) + "?t=" + s.token }
+func (s *Server) TokenURL(l net.Listener) string { return BaseURL(l) + "?t=" + s.Token() }
 
 // Serve serves the UI on listener until ctx is done, then lets requests in
 // flight finish and stops what the browser started (command runs,
@@ -391,7 +401,7 @@ func (s *Server) tokenOK(r *http.Request) bool {
 	if provided == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) == 1
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(s.Token())) == 1
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -419,10 +429,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// says so instead of quietly reusing a stored token.
 	launchToken, launchState := "", ""
 	if code := r.URL.Query().Get("c"); code != "" {
-		if s.redeemLaunchCode(code) {
-			launchToken, launchState = s.token, "ok"
+		switch s.redeemLaunchCode(code) {
+		case launchRedeemed:
+			launchToken, launchState = s.Token(), "ok"
 			s.markUsed()
-		} else {
+		case launchReused:
+			launchState = "reset"
+		default:
 			launchState = "used"
 		}
 	} else if s.tokenOK(r) {

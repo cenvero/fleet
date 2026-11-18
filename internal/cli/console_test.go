@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -93,9 +94,6 @@ func TestBackgroundConsoleLifecycle(t *testing.T) {
 		t.Fatalf("opening the link: %d, token in page: %v", code, m != nil)
 	}
 	token := m[1]
-	if _, again := consoleTestGet(t, strings.TrimSuffix(link, "#files")); launchTokenRE.MatchString(again) {
-		t.Fatal("the one-time link worked twice")
-	}
 	if code, _ := consoleTestGet(t, st.Address+"api/servers?t="+token); code != http.StatusOK {
 		t.Fatalf("the token from the link: %d", code)
 	}
@@ -115,6 +113,15 @@ func TestBackgroundConsoleLifecycle(t *testing.T) {
 		if info.Mode().Perm()&0o077 != 0 && runtimeIsUnix() {
 			t.Fatalf("%s is readable by others: %v", name, info.Mode())
 		}
+	}
+
+	// Opened a second time, the link has been used by two parties: it opens
+	// nothing and the token it handed out stops working.
+	if _, again := consoleTestGet(t, strings.TrimSuffix(link, "#files")); launchTokenRE.MatchString(again) {
+		t.Fatal("the one-time link worked twice")
+	}
+	if code, _ := consoleTestGet(t, st.Address+"api/servers?t="+token); code != http.StatusUnauthorized {
+		t.Fatalf("the token from a reused link still works: %d", code)
 	}
 
 	out, err = runFleetIn(t, configDir, "console", "stop")
@@ -236,3 +243,41 @@ func TestConsoleLimitsStopIt(t *testing.T) {
 }
 
 func runtimeIsUnix() bool { return os.PathSeparator == '/' }
+
+// Moving a console to the background hands over the listening socket itself,
+// so the port is never free for another account to bind and collect the
+// token from reconnecting tabs. The parent keeps holding the port here the
+// whole time: the child can only be serving it through the inherited socket.
+func TestBackgroundConsoleInheritsTheListeningSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot hand a listening socket to a child; there the token is replaced instead")
+	}
+	configDir := newServerCommandTestConfig(t)
+	t.Setenv("FLEET_TEST_CLI_MAIN", "1")
+	t.Cleanup(func() { _, _ = core.StopConsole(configDir, 0) })
+	l, err := webui.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	sock, err := listenerFile(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.Repeat("6b", 32)
+	st, err := core.StartConsole(core.ConsoleStartOptions{
+		ConfigDir: configDir, Args: append(consoleServeArgs(l.Addr().String(), false, false), "--listen-fd", "3"),
+		HandoverToken: token, ExtraFiles: []*os.File{sock},
+	})
+	_ = sock.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Address != webui.BaseURL(l) {
+		t.Fatalf("the background console serves %s, want the handed-over %s", st.Address, webui.BaseURL(l))
+	}
+	_ = l.Close() // the foreground one stops; the socket stays open in the child
+	if code, _ := consoleTestGet(t, st.Address+"api/servers?t="+token); code != http.StatusOK {
+		t.Fatalf("after the handover: %d", code)
+	}
+}
