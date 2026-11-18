@@ -274,6 +274,64 @@ fleet port close web-01 443
 
 On unsupported platforms, the agent returns typed unsupported-capability errors instead of pretending success.
 
+### Agent-lockout check
+
+Every command that can block traffic first reads the server's rules and refuses if the change would
+cut fleet off from the agent. The check covers `firewall enable`, `firewall add`, `port close`, the
+firewall settings in `template apply`, and `fw enable --safe`. The refusal names the command to run
+first, and both the refusal and any override are written to the audit log:
+
+```bash
+fleet firewall enable web-01
+# refusing to enable the firewall on web-01: port 2222/tcp, which fleet uses to reach the agent,
+# is not allowed by the rules that would be in force ... Run this first, then retry: fleet port open web-01 2222
+fleet port open web-01 2222
+fleet firewall enable web-01
+```
+
+- **Direct mode:** the agent's port (the server record's `port`) must be allowed for TCP, and no rule
+  may deny it. For ufw, fleet also reads the rules waiting in `ufw show added`, because `ufw status`
+  lists no rules while ufw is off.
+  - `port close` on the agent port is refused.
+  - `firewall add` refuses deny, reject or limit rules on the agent port, and any rule it can't read.
+  - A rule that blocks by address with no port (`deny from 203.0.113.0/24`) goes through only once
+    the agent port is allowed ahead of it.
+- **Reverse mode:** the agent dials out and listens on no port. Enabling must keep established/related
+  traffic accepted (ufw's stock `before.rules` does) and outgoing traffic allowed.
+- **Fail closed:** if fleet can't read the state, it refuses.
+- **Override:** `--force-i-have-console` skips the refusal. It is only for a person with out-of-band
+  console access who accepts losing the agent, never for scripts or AI agents.
+
+`fleet fw` drives nftables, iptables, firewalld or ufw directly:
+
+```bash
+fleet fw status web-01
+fleet fw allow web-01 2222/tcp
+fleet fw enable web-01 --safe            # human summary; add --json for JSON only
+```
+
+`fw enable --safe` runs the same check, so in direct mode the refusal names
+`fleet fw allow web-01 2222/tcp`.
+
+- **nftables and iptables:** established/related and loopback traffic are accepted before the drop
+  policy.
+- **firewalld:** can be enabled from a stopped state. The agent port is read from the offline permanent
+  config, and `fw allow` writes it there with `firewall-offline-cmd`. `fw allow` never runs
+  `firewall-cmd --reload`.
+- **Self-revert timer:** armed before the change, using `systemd-run`, or `setsid` where systemd isn't
+  available.
+  - After `--undo-after` seconds (default 60) it restores the earlier state unless you cancel it.
+  - Nothing cancels it automatically. The summary prints the cancel command, for example
+    `fleet exec web-01 'systemctl stop fleet-fw-safe-revert-….timer'`.
+  - Cancel it once `fleet server reconnect web-01` succeeds.
+- **What the undo restores:** the policy and the rules that enable added. It never removes allow rules.
+- **What it can't restore:**
+  - changes made by anyone else in the meantime;
+  - ufw rules, which stay in ufw's config;
+  - firewalld zone changes;
+  - ip6tables, which fleet doesn't touch.
+- **Persistence:** nftables and iptables changes aren't persisted, so a reboot also drops them.
+
 ## Tags and Groups
 
 Label servers with `key=value` tags and target the matching set with `--group`:
