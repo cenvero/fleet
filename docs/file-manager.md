@@ -347,8 +347,10 @@ authority (see *Security* below).
 
 On a terminal both show a panel instead of a bare URL: **1** opens the console in your
 browser, **2** shows the access link (it carries the session token: keep it private),
-**3** keeps it running in the background and returns to the shell, **4** stops it. In a
-script or a pipe they print the link and serve until interrupted, as before.
+**3** keeps it running in the background and returns to the shell, **4** stops it. When
+a console already runs in the background, the panel has the same numbers: **2** then
+shows a one-time link, **3** leaves it running and **4** stops it. In a script or a pipe
+they print the link and serve until interrupted, as before.
 
 The browser is opened with a **one-time code** (`/?c=…`, usable once, within 30
 seconds), never the session token: a process's arguments are visible to every account
@@ -418,24 +420,36 @@ the transfers dock. The same secure transfer engine runs underneath.
   *Browse* opens that server in a file pane; *Manage* opens a menu of per-server actions
   (services, unit status, journal, run a command, live metrics, health checklist,
   firewall, open ports, definition, tags, reconnect, remove). *Add server* opens the
-  `server add` form, and each open alert has *Ack* and *Snooze 1h*. When the UI is
+  *Add server* wizard, and each open alert has *Ack* and *Snooze 1h*. When the UI is
   started with `--token`, the overview is authorized like `fleet server list`,
   `fleet alerts` and `fleet tag`.
-- **Control** (the *Control* tab, with `--control`): fleet commands, from the browser, laid out like
-  System Settings. *Overview* opens with a one-line summary of the fleet ("All 4 servers
-  are online.") and at-a-glance tiles. Star any command to pin it to the Overview and the
-  sidebar. A sidebar lists *Overview*, *Activity*, your pinned commands and the categories (Servers,
-  Services & Logs, Run & Automate, Files, Monitoring, Network & Security, Updates,
-  Controller), and search finds any command by its plain-language name or its CLI name
-  (also from the `Ctrl/Cmd+K` palette). Each command opens a form built from its own
-  arguments and flags: servers and fixed choices are pop-up menus, on/off flags are
-  switches, the rest of the options sit behind an *Options* disclosure, and the
-  equivalent terminal command is shown (copyable) above *Run*. *Overview* has quick
-  actions and recent activity. Output streams live into a result card; JSON output can
-  be shown as a table, and output can be copied, downloaded or opened full screen. Runs can
-  be stopped (interrupt, then kill after 5 s) and run again, and *Activity* (filter by
-  state or text) keeps the newest 60 with 4 MiB of output each. Up to 8 commands
-  run at once.
+- **Control** (the *Control* tab, with `--control`): Fleet's settings and tools as
+  screens, laid out like System Settings. *Overview* opens with a one-line summary of the
+  fleet ("All 4 servers are online."), at-a-glance tiles, quick actions and recent
+  activity. A sidebar lists *Overview*, *Activity*, your pinned pages and the categories
+  (Servers, Services & Logs, Run & Automate, Files, Monitoring, Network & Security,
+  Updates, Controller), and search finds any page by its plain-language name or its
+  command name (also from the `Ctrl/Cmd+K` palette).
+  - *Servers* lists your servers straight away (status, address, mode, system, agent
+    version, last seen). Each has its own page with its details, usage and one-click
+    actions: services, run a command, files, terminal, live usage, health checklist,
+    firewall, open ports, tags, reconnect and remove.
+  - *Add server* is a wizard: the server (name, address, direct or reverse), the agent
+    (install it now, the sign-in user and port, Fleet's key, a key file or a password,
+    sudo, the agent port), a review, then progress and the result. If the agent install
+    fails, it offers to remove the half-added server and go back to the form. A reverse
+    server prints a one-time join secret, so the wizard gives you the terminal command
+    for it instead.
+  - A page that only reads (agent versions, health, jobs, logs…) loads its data as soon
+    as it opens, as tables where it can, with *Refresh* to load it again. A page that
+    changes something has a button named for what it does and shows how it went, with
+    the output underneath. Servers and fixed choices are pop-up menus, on/off settings
+    are switches, and the less common ones sit behind *Options* and *Advanced*.
+  - The command behind a page is under *Show the command* (copyable). Runs can be
+    stopped (interrupt, then kill after 5 s) and run again, and *Activity* keeps the
+    newest 60 you ran, with 4 MiB of output each; data a page loads by itself stays out
+    of it. Up to 8 commands run at once. Star a page to pin it to the Overview and the
+    sidebar.
 
 - **Terminal** (the *Terminal* tab, with `--terminal`): interactive shells on direct-mode servers, in tabs,
   drawn by xterm.js (vendored; WebGL when available). Open one from the tab, a server card

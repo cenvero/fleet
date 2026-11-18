@@ -54,7 +54,7 @@ func writeNotices(w io.Writer, notices []core.Notice) {
 		fmt.Fprintln(w, "Nothing needs attention.")
 		return
 	}
-	fmt.Fprintf(w, "%s need attention:\n", plural(len(notices), "thing"))
+	fmt.Fprintf(w, "%s attention:\n", needs(len(notices)))
 	for _, n := range notices {
 		mark := "•"
 		switch n.Severity {
@@ -82,8 +82,16 @@ func printNoticeSummary(cmd *cobra.Command, configDir string) {
 		return
 	}
 	if n := len(core.CollectNotices(configDir)); n > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s need attention — run `fleet errors` to see them and how to fix them.\n", plural(n, "thing"))
+		fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s attention — run `fleet errors` to see what and how to fix it.\n", needs(n))
 	}
+}
+
+// needs reads "1 thing needs" or "3 things need".
+func needs(n int) string {
+	if n == 1 {
+		return "1 thing needs"
+	}
+	return plural(n, "thing") + " need"
 }
 
 func plural(n int, word string) string {

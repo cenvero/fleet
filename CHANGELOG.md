@@ -75,6 +75,9 @@ Omit sections that have no entries for that release.
   - keep it running in the background and return to the shell;
   - stop it.
 
+  When a console already runs in the background, the panel keeps the same numbers: 2 shows
+  a one-time link, 3 leaves it running and 4 stops it.
+
   A background console (also `fleet console --background`) is reached with
   `fleet console open [--files] [--print]`, `fleet console status` and `fleet console stop`,
   or by running `fleet console` again. It stops by itself after an hour unused and after
