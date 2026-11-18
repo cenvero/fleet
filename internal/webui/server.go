@@ -75,6 +75,7 @@ type Server struct {
 	launch       launchCodes
 	launchKey    string
 	onTokenReset func()
+	shutdownFn   func()
 	// activity records when someone last used the UI (see IdleFor).
 	activity activity
 }
@@ -271,6 +272,7 @@ func (s *Server) routes() http.Handler {
 	// Launch codes for `fleet console open`: authenticated by the launch key,
 	// not the session token (see launch.go).
 	mux.HandleFunc("/api/launch-code", s.handleLaunchCode)
+	mux.HandleFunc("/api/shutdown", s.handleShutdown)
 	return securityHeaders(s.trackActivity(gzipHandler(mux)))
 }
 

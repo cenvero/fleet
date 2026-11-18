@@ -244,3 +244,56 @@ func consoleGet(t *testing.T, u string) (int, string) {
 	body, _ := io.ReadAll(res.Body)
 	return res.StatusCode, string(body)
 }
+
+// A background console can be asked to stop by a process holding its launch
+// key (so it ends its runs and terminals cleanly), and by nothing else.
+func TestShutdownEndpointNeedsTheLaunchKey(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	u, _ := url.Parse(ts.URL)
+	origin := "http://" + u.Host
+	stopped := make(chan struct{}, 1)
+	s.SetLaunchKey("k3y")
+	s.SetShutdown(func() { stopped <- struct{}{} })
+	post := func(key, origin string) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/shutdown", nil)
+		if key != "" {
+			req.Header.Set("X-Fleet-Launch-Key", key)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	for _, tc := range []struct {
+		key, origin string
+		want        int
+	}{
+		{"", origin, http.StatusUnauthorized},
+		{s.Token(), origin, http.StatusUnauthorized},
+		{"k3y", "", http.StatusForbidden},
+		{"k3y", "http://evil.example", http.StatusForbidden},
+	} {
+		if got := post(tc.key, tc.origin); got != tc.want {
+			t.Fatalf("key %q origin %q: %d, want %d", tc.key, tc.origin, got, tc.want)
+		}
+	}
+	select {
+	case <-stopped:
+		t.Fatal("stopped without the launch key")
+	default:
+	}
+	if got := post("k3y", origin); got != http.StatusOK {
+		t.Fatalf("with the key: %d", got)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the console was not asked to stop")
+	}
+}

@@ -576,7 +576,7 @@ func attachConsole(cmd *cobra.Command, configDir string, st core.ConsoleState, o
 		case "1", "o", "open":
 			status = openedStatus(openBackgroundConsole(cmd, configDir, st, o.view, false))
 		case "2", "s", "stop":
-			res, err := core.StopConsole(configDir, 0)
+			res, err := stopBackgroundConsole(configDir)
 			if err != nil {
 				return err
 			}
@@ -618,41 +618,35 @@ func openBackgroundConsole(cmd *cobra.Command, configDir string, st core.Console
 	return nil
 }
 
+// stopBackgroundConsole stops the background console: first by asking it
+// (with the launch key) so it ends the runs and terminals it started, then,
+// if it has not exited in time, by signalling it (core.StopConsole).
+func stopBackgroundConsole(configDir string) (core.ConsoleStopResult, error) {
+	st := core.ReadConsole(configDir)
+	if st.Running && !st.Starting {
+		if key, err := core.ReadConsoleLaunchKey(configDir); err == nil {
+			if _, err := consolePost(st.Address, key, "/api/shutdown"); err == nil {
+				deadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(deadline) {
+					if !core.ReadConsole(configDir).Running {
+						return core.ConsoleStopResult{WasRunning: true, PID: st.PID}, nil
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+		}
+	}
+	return core.StopConsole(configDir, 0)
+}
+
 // requestLaunchCode gets a launch code from the console at address. The
 // address comes from the console's own state file and must be loopback; the
 // request never goes through a proxy or follows a redirect, since it
 // carries the launch key.
 func requestLaunchCode(address, key string) (string, error) {
-	u, err := url.Parse(address)
-	if err != nil || u.Scheme != "http" || u.Host == "" {
-		return "", fmt.Errorf("the console's recorded address %q is not usable", address)
-	}
-	host, _, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		return "", fmt.Errorf("the console's recorded address %q is not usable", address)
-	}
-	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		return "", fmt.Errorf("the console's recorded address %q is not loopback; refusing to send it the launch key", address)
-	}
-	client := &http.Client{
-		Timeout:       5 * time.Second,
-		Transport:     &http.Transport{Proxy: nil},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	req, err := http.NewRequest(http.MethodPost, "http://"+u.Host+"/api/launch-code", nil)
+	body, err := consolePost(address, key, "/api/launch-code")
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("X-Fleet-Launch-Key", key)
-	req.Header.Set("Origin", "http://"+u.Host)
-	res, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("reach the background console: %w", err)
-	}
-	defer res.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-	if res.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("the background console refused to open (%s: %s)", res.Status, strings.TrimSpace(string(body)))
 	}
 	var out struct {
 		Code string `json:"code"`
@@ -661,6 +655,43 @@ func requestLaunchCode(address, key string) (string, error) {
 		return "", errors.New("the background console sent an unexpected answer")
 	}
 	return out.Code, nil
+}
+
+// consolePost sends an authenticated request to a background console's
+// launch-key endpoint and returns the answer's body.
+func consolePost(address, key, path string) ([]byte, error) {
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return nil, fmt.Errorf("the console's recorded address %q is not usable", address)
+	}
+	host, _, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return nil, fmt.Errorf("the console's recorded address %q is not usable", address)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return nil, fmt.Errorf("the console's recorded address %q is not loopback; refusing to send it the launch key", address)
+	}
+	client := &http.Client{
+		Timeout:       5 * time.Second,
+		Transport:     &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://"+u.Host+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Fleet-Launch-Key", key)
+	req.Header.Set("Origin", "http://"+u.Host)
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reach the background console: %w", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the background console refused (%s: %s)", res.Status, strings.TrimSpace(string(body)))
+	}
+	return body, nil
 }
 
 func newConsoleStatusCommand(configDir *string) *cobra.Command {
@@ -714,7 +745,7 @@ func newConsoleStopCommand(configDir *string) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
-			res, err := core.StopConsole(*configDir, 0)
+			res, err := stopBackgroundConsole(*configDir)
 			if err != nil {
 				return err
 			}
@@ -791,6 +822,10 @@ func newConsoleServeCommand(configDir *string) *cobra.Command {
 			}
 			ctx, stop := consoleSignalContext()
 			defer stop()
+			srv.SetShutdown(func() {
+				fmt.Fprintln(cmd.ErrOrStderr(), "console asked to stop (fleet console stop)")
+				stop()
+			})
 			go watchConsoleLimits(ctx, stop, srv, idle, state.StopsBy, cmd.ErrOrStderr())
 			fmt.Fprintf(cmd.ErrOrStderr(), "console serving at %s (pid %d); stops after %s unused or at %s\n", state.Address, os.Getpid(), idle, state.StopsBy.Format(time.RFC3339))
 			err = srv.Serve(ctx, listener, nil)

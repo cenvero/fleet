@@ -159,26 +159,7 @@ func (s *Server) SetLaunchKey(key string) { s.launchKey = key }
 // launch key. It has the same loopback, Host and Origin checks as every
 // other mutation.
 func (s *Server) handleLaunchCode(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRequest(r) {
-		http.Error(w, "forbidden: loopback only", http.StatusForbidden)
-		return
-	}
-	if !hostHeaderOK(r) {
-		http.Error(w, "forbidden: bad host header", http.StatusForbidden)
-		return
-	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !originLoopback(r) || !originMatchesHost(r) {
-		http.Error(w, "forbidden: bad origin", http.StatusForbidden)
-		return
-	}
-	provided := r.Header.Get("X-Fleet-Launch-Key")
-	if s.launchKey == "" || provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchKey)) != 1 {
-		http.Error(w, "unauthorized: missing or bad launch key", http.StatusUnauthorized)
+	if !s.launchKeyRequestOK(w, r) {
 		return
 	}
 	code, err := s.NewLaunchCode()
@@ -187,6 +168,54 @@ func (s *Server) handleLaunchCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"code": code})
+}
+
+// SetShutdown lets a process holding the launch key ask this server to stop
+// (POST /api/shutdown): `fleet console stop` stops a background console that
+// way, so the runs and terminals it started are ended cleanly, which a
+// terminated process (on Windows, the only other way) cannot do.
+func (s *Server) SetShutdown(fn func()) { s.shutdownFn = fn }
+
+// handleShutdown answers POST /api/shutdown for a caller holding the launch
+// key, with the same checks as /api/launch-code.
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if !s.launchKeyRequestOK(w, r) {
+		return
+	}
+	if s.shutdownFn == nil {
+		http.Error(w, "this console cannot be stopped this way", http.StatusNotImplemented)
+		return
+	}
+	writeJSON(w, map[string]bool{"stopping": true})
+	go s.shutdownFn()
+}
+
+// launchKeyRequestOK applies the checks every launch-key endpoint shares and
+// answers the request itself when one fails.
+func (s *Server) launchKeyRequestOK(w http.ResponseWriter, r *http.Request) bool {
+	if !isLoopbackRequest(r) {
+		http.Error(w, "forbidden: loopback only", http.StatusForbidden)
+		return false
+	}
+	if !hostHeaderOK(r) {
+		http.Error(w, "forbidden: bad host header", http.StatusForbidden)
+		return false
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	if !originLoopback(r) || !originMatchesHost(r) {
+		http.Error(w, "forbidden: bad origin", http.StatusForbidden)
+		return false
+	}
+	provided := r.Header.Get("X-Fleet-Launch-Key")
+	if s.launchKey == "" || provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchKey)) != 1 {
+		http.Error(w, "unauthorized: missing or bad launch key", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // activity tracks requests a person made, for a console that stops itself
@@ -233,7 +262,7 @@ func (s *Server) countsAsUse(r *http.Request) bool {
 	switch {
 	case passivePaths[r.URL.Path]:
 		return false
-	case r.URL.Path == "/api/launch-code":
+	case r.URL.Path == "/api/launch-code" || r.URL.Path == "/api/shutdown":
 		provided := r.Header.Get("X-Fleet-Launch-Key")
 		return s.launchKey != "" && provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchKey)) == 1
 	case strings.HasPrefix(r.URL.Path, "/api/"):
