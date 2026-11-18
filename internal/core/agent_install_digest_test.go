@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -320,7 +321,6 @@ while [ "$#" -gt 0 ]; do
 done
 src="`+serveDir+`/${url##*/}"
 [ -f "$src" ] || exit 8
-if [ -n "${FLEET_TEST_WGET_DELAY:-}" ]; then sleep "$FLEET_TEST_WGET_DELAY"; fi
 cat "$src" > "$out"
 `)
 	write("curl", "#!/bin/sh\nexit 7\n")
@@ -388,11 +388,23 @@ func requirePOSIXShell(t *testing.T) {
 	}
 }
 
-// haveTool reports whether the local system can compute a digest with the
-// given command, so a test can run only where the tool behaves like on a
-// typical target.
-func haveTool(args ...string) bool {
-	return exec.Command(args[0], append(args[1:], "/dev/null")...).Run() == nil // #nosec G204 -- fixed test tool names
+// haveTool reports whether a target that looks its commands up on path can
+// compute a digest with the given command, so a test runs only where the tool
+// it will really run behaves like on a typical target. It runs the command the
+// way shellTargetRunner does, through /bin/sh with PATH set to path, rather
+// than on the test process's own PATH, where another build of the tool may come
+// first: on macOS, Homebrew's OpenSSL knows -blake2b512 and /usr/bin's
+// LibreSSL does not.
+func haveTool(path string, args ...string) bool {
+	cmd := exec.Command("/bin/sh", append([]string{"-c", `"$@" /dev/null`, "sh"}, args...)...) // #nosec G204 -- fixed test tool names
+	cmd.Env = append(os.Environ(), "PATH="+path)
+	return cmd.Run() == nil
+}
+
+// haveBLAKE2bTool reports whether a target with the given PATH has one of the
+// tools the fetch command can compute a BLAKE2b-512 digest with.
+func haveBLAKE2bTool(path string) bool {
+	return haveTool(path, "b2sum") || haveTool(path, "openssl", "dgst", "-blake2b512") || haveTool(path, "python3", "-c", "import hashlib")
 }
 
 func TestAgentFetchCommandReportsDigestsWithEachTool(t *testing.T) {
@@ -430,14 +442,18 @@ func TestAgentFetchCommandReportsDigestsWithEachTool(t *testing.T) {
 		{"all", nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			path := fakeTargetTools(t, serveDir, tc.broken...) + ":/usr/bin:/bin"
 			for _, need := range tc.needs {
-				if !haveTool(need...) {
-					t.Skipf("%v is not available here", need)
+				if !haveTool(path, need...) {
+					t.Skipf("%v is not available on the target's PATH here", need)
 				}
+			}
+			if !haveBLAKE2bTool(path) {
+				t.Skip("no BLAKE2b-512 tool on the target's PATH here")
 			}
 			stage := t.TempDir()
 			archivePath := filepath.Join(stage, "agent-release.tar.gz")
-			runner := &shellTargetRunner{path: fakeTargetTools(t, serveDir, tc.broken...) + ":/usr/bin:/bin"}
+			runner := &shellTargetRunner{path: path}
 			out, err := runner.Output(context.Background(), buildRemoteAgentFetchCommand("https://example.com/a.tar.gz", int64(len(archive)), archivePath), 4<<10)
 			if err != nil {
 				t.Fatal(err)
@@ -504,23 +520,70 @@ func TestAgentFetchCommandRefusesAnOversizedDownload(t *testing.T) {
 // TestRemoteAgentDownloadCommandEndsWithTheDownload: the command's output ends
 // as soon as the download does. The deadline watchdog's sleep used to keep it
 // open for up to a second more, which an SSH session waits out.
+//
+// Here the watchdog's one-second sleep lasts half a minute and the download
+// ends only once that sleep has begun, so a sleep that held the output open
+// would hold it far longer than a loaded machine can slow the command down,
+// and the bounds below can leave room for such a machine.
 func TestRemoteAgentDownloadCommandEndsWithTheDownload(t *testing.T) {
 	requirePOSIXShell(t)
 	serveDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(serveDir, "payload"), []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c", buildRemoteAgentDownloadCommand("https://example.com/payload", 1<<20))
-	cmd.Env = append(os.Environ(), "PATH="+fakeTargetTools(t, serveDir)+":/usr/bin:/bin")
-	// Give the watchdog time to start its sleep before the download ends.
-	cmd.Env = append(cmd.Env, "FLEET_TEST_WGET_DELAY=0.2")
+	realSleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skipf("no sleep command here: %v", err)
+	}
+	tools := fakeTargetTools(t, serveDir)
+	sleeping := filepath.Join(t.TempDir(), "watchdog-sleeping")
+	hooks := t.TempDir()
+	for name, script := range map[string]string{
+		// The watchdog's sleep, which records its PID.
+		"sleep": "#!/bin/sh\necho \"$$\" > \"$FLEET_TEST_WATCHDOG_SLEEPING\"\nexec " + shellQuote(realSleep) + " 30\n",
+		// The download, which ends only once the watchdog sleeps.
+		"wget": "#!/bin/sh\ni=0\nwhile [ ! -s \"$FLEET_TEST_WATCHDOG_SLEEPING\" ] && [ \"$i\" -lt 400 ]; do\n" +
+			"  i=$((i + 1))\n  " + shellQuote(realSleep) + " 0.05\ndone\nexec " + shellQuote(filepath.Join(tools, "wget")) + " \"$@\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(hooks, name), []byte(script), 0o755); err != nil { // #nosec G306 -- test stand-in for a target command
+			t.Fatal(err)
+		}
+	}
+	// The command never waits for the watchdog's sleep, so end it here. It
+	// outlives the test by far, so the PID is still the sleep's.
+	t.Cleanup(func() {
+		data, err := os.ReadFile(sleeping)
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
+	// A command that waited for the stretched sleep would take its whole
+	// deadline of them; stop it long before that.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", buildRemoteAgentDownloadCommand("https://example.com/payload", 1<<20))
+	cmd.Env = append(os.Environ(), "PATH="+hooks+":"+tools+":/usr/bin:/bin", "FLEET_TEST_WATCHDOG_SLEEPING="+sleeping)
+	// A sleep holding the output would hold it past the command's exit.
+	cmd.WaitDelay = 5 * time.Second
 	started := time.Now()
 	out, err := cmd.Output()
+	elapsed := time.Since(started)
+	if _, serr := os.Stat(sleeping); serr != nil {
+		t.Fatalf("the watchdog never started its sleep: %v", serr)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("the output stayed open for %s after a quick download (err %v)", elapsed, err)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("the output stayed open after the command exited (%s)", elapsed)
+	}
 	if err != nil || string(out) != "payload" {
 		t.Fatalf("out = %q, err = %v", out, err)
-	}
-	if elapsed := time.Since(started); elapsed > 900*time.Millisecond {
-		t.Fatalf("the output stayed open for %s after a quick download", elapsed)
 	}
 }
 
@@ -666,14 +729,15 @@ func agentTestArchiveNamed(t *testing.T, name string, content []byte) []byte {
 
 func TestAcquireVerifiedAgentReleaseKeepsTheArchiveOnTheTarget(t *testing.T) {
 	requirePOSIXShell(t)
-	if !haveTool("b2sum") && !haveTool("openssl", "dgst", "-blake2b512") && !haveTool("python3", "-c", "import hashlib") {
-		t.Skip("no BLAKE2b-512 tool here")
-	}
 	target := agentLinuxTargets[0]
 	manifest, archive, signature, pubText, binary := digestReleaseFixture(t, target, "")
+	path := fakeTargetTools(t, serveRelease(t, manifest, archive, signature)) + ":/usr/bin:/bin"
+	if !haveBLAKE2bTool(path) {
+		t.Skip("no BLAKE2b-512 tool on the target's PATH here")
+	}
 	stage := t.TempDir()
 	dest := filepath.Join(stage, "agent.bin")
-	runner := &shellTargetRunner{path: fakeTargetTools(t, serveRelease(t, manifest, archive, signature)) + ":/usr/bin:/bin"}
+	runner := &shellTargetRunner{path: path}
 
 	got, staged, err := acquireVerifiedAgentRelease(context.Background(), runner, BootstrapAgentRelease{Version: "v1.2.3", DestinationPath: dest}, stage, pubText)
 	if err != nil {
@@ -818,12 +882,12 @@ func TestSSHBootstrapInstallsAReleaseVerifiedOnTheTarget(t *testing.T) {
 		{name: "tampered download, target without hash tools", serve: tamperedDir, broken: []string{"b2sum", "openssl", "python3", "sha256sum", "shasum"}, wantErr: "signature verification failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if len(tc.broken) == 0 && !haveTool("b2sum") && !haveTool("openssl", "dgst", "-blake2b512") && !haveTool("python3", "-c", "import hashlib") {
-				t.Skip("no BLAKE2b-512 tool here")
+			path := fakeTargetTools(t, tc.serve, tc.broken...) + ":/usr/bin:/bin"
+			if len(tc.broken) == 0 && !haveBLAKE2bTool(path) {
+				t.Skip("no BLAKE2b-512 tool on the target's PATH here")
 			}
 			stage := filepath.Join(t.TempDir(), "cenvero-0123456789abcdef")
 			installed := filepath.Join(t.TempDir(), "installed-agent")
-			path := fakeTargetTools(t, tc.serve, tc.broken...) + ":/usr/bin:/bin"
 			stats := &shellSSHStats{}
 			clientConn, serverDone := startBootstrapTestSSHServer(t, serveShellOverSSH(t, path, stats))
 			executor := sshBootstrapExecutor{

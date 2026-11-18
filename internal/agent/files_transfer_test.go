@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenvero/fleet/internal/testutil"
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
@@ -385,7 +386,7 @@ func TestFinalizeAbortDiscardsUpload(t *testing.T) {
 func TestPutWritesAtomicallyAndVerifies(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := testutil.CanonicalTempDir(t)
 	dest := filepath.Join(dir, "small.txt")
 	m := NewFileManager()
 	data := []byte("small file")
@@ -510,7 +511,7 @@ func TestCopyOnAgent(t *testing.T) {
 func TestTreeListsRecursivelyWithoutFollowingSymlinks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	root := t.TempDir()
+	root := testutil.CanonicalTempDir(t)
 	outside := t.TempDir()
 	for _, p := range []string{"a/b/c.txt", "a/d.txt", ".hidden/x", "top.txt"} {
 		full := filepath.Join(root, filepath.FromSlash(p))

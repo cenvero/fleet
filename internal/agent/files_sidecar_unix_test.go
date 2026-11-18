@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/cenvero/fleet/internal/testutil"
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
@@ -52,7 +53,7 @@ func TestOpenWriteIgnoresSidecarOwnedByAnotherUser(t *testing.T) {
 		t.Skip("needs root to create a file owned by another user")
 	}
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := testutil.CanonicalTempDir(t)
 	if err := os.Chmod(dir, 0o1777); err != nil { // a shared, world-writable directory
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestOpenWriteReusesOnlyPrivateSidecars(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := testutil.CanonicalTempDir(t)
 			dest := filepath.Join(dir, "out.bin")
 			const id = "tid-variant"
 			planted := dest + ".fleet-" + id + ".part"
@@ -172,7 +173,7 @@ func TestOpenWriteReusesOnlyPrivateSidecars(t *testing.T) {
 	}
 
 	t.Run("private sidecar resumes", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := testutil.CanonicalTempDir(t)
 		dest := filepath.Join(dir, "out.bin")
 		const id = "tid-own"
 		own := dest + ".fleet-" + id + ".part"

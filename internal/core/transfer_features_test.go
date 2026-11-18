@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cenvero/fleet/internal/agent"
+	"github.com/cenvero/fleet/internal/testutil"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/pkg/proto"
 )
@@ -252,7 +253,7 @@ func TestUploadResumeTrustsAgentRecords(t *testing.T) {
 func TestUploadIntoExistingDirectory(t *testing.T) {
 	t.Parallel()
 	rig := quietRig(t)
-	parent := t.TempDir()
+	parent := testutil.CanonicalTempDir(t)
 	dir := filepath.Join(parent, "existing")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)

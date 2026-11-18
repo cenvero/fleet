@@ -361,8 +361,6 @@ dd if=/dev/zero of="$out" bs=1024 count=8 2>/dev/null
 
 func TestRemoteAgentDownloadCommandAppliesSharedDeadline(t *testing.T) {
 	binDir := t.TempDir()
-	curlMarker := filepath.Join(t.TempDir(), "curl-called")
-	tmpMarker := filepath.Join(t.TempDir(), "target-temp-path")
 	wgetScript := `#!/bin/sh
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-O" ]; then
@@ -381,25 +379,41 @@ exec sleep 10
 	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(curlScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c", buildRemoteAgentDownloadCommandWithTimeout("https://example.com/trickle", 1<<20, 1))
-	cmd.Env = append(os.Environ(), "PATH="+binDir+":/usr/bin:/bin", "CURL_MARKER="+curlMarker, "RECORD_PATH="+tmpMarker)
-	started := time.Now()
-	if output, err := cmd.CombinedOutput(); err == nil {
-		t.Fatalf("trickling target download unexpectedly succeeded: %q", output)
+	// The deadline runs from before wget starts. On a loaded machine wget may
+	// not have recorded its temp file when a one-second deadline ends, which
+	// leaves no interrupted download to check, so such an attempt is repeated
+	// with a longer deadline. Every other check applies to every attempt.
+	for _, deadline := range []int{1, 2, 4} {
+		markers := t.TempDir()
+		curlMarker := filepath.Join(markers, "curl-called")
+		tmpMarker := filepath.Join(markers, "target-temp-path")
+		cmd := exec.Command("/bin/sh", "-c", buildRemoteAgentDownloadCommandWithTimeout("https://example.com/trickle", 1<<20, deadline))
+		cmd.Env = append(os.Environ(), "PATH="+binDir+":/usr/bin:/bin", "CURL_MARKER="+curlMarker, "RECORD_PATH="+tmpMarker)
+		started := time.Now()
+		if output, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("trickling target download unexpectedly succeeded: %q", output)
+		}
+		limit := time.Duration(deadline+3) * time.Second
+		if elapsed := time.Since(started); elapsed > limit {
+			t.Fatalf("shared target download deadline of %ds took %s, want <= %s", deadline, elapsed, limit)
+		}
+		if _, err := os.Stat(curlMarker); !os.IsNotExist(err) {
+			t.Fatalf("curl fallback ran after the shared deadline, stat error=%v", err)
+		}
+		tmpPath, err := os.ReadFile(tmpMarker)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && len(tmpPath) == 0) {
+			t.Logf("wget had not recorded its temp file within the %ds deadline; retrying with a longer one", deadline)
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read recorded target temp path: %v", err)
+		}
+		if _, err := os.Stat(string(tmpPath)); !os.IsNotExist(err) {
+			t.Fatalf("interrupted target temp file was not removed, stat error=%v", err)
+		}
+		return
 	}
-	if elapsed := time.Since(started); elapsed > 4*time.Second {
-		t.Fatalf("shared target download deadline took %s, want <= 4s", elapsed)
-	}
-	if _, err := os.Stat(curlMarker); !os.IsNotExist(err) {
-		t.Fatalf("curl fallback ran after the shared deadline, stat error=%v", err)
-	}
-	tmpPath, err := os.ReadFile(tmpMarker)
-	if err != nil {
-		t.Fatalf("read recorded target temp path: %v", err)
-	}
-	if _, err := os.Stat(string(tmpPath)); !os.IsNotExist(err) {
-		t.Fatalf("interrupted target temp file was not removed, stat error=%v", err)
-	}
+	t.Fatal("wget never recorded its temp file within the shared target download deadline")
 }
 
 func TestAutoInstallReleaseDefersArtifactDownloadToSSHExecutor(t *testing.T) {
