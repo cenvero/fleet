@@ -487,7 +487,10 @@ func (s Server) serveRPC(channel ssh.Channel) {
 			return
 		}
 
-		switch strings.ToLower(request.Action) {
+		// Actions are matched without regard to case. Every decision below uses
+		// lowerAction; replies echo request.Action as sent.
+		lowerAction := strings.ToLower(request.Action)
+		switch lowerAction {
 		case "hello", "inventory":
 			hello := Hello(s.Mode)
 			hello.ControllerID = controllerIDFromPayload(request.Payload)
@@ -680,7 +683,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 				Payload:         info,
 			})
 		case "firewall.enable", "firewall.disable":
-			info, err := s.firewallManager().Enable(context.Background(), request.Action == "firewall.enable")
+			info, err := s.firewallManager().Enable(context.Background(), lowerAction == "firewall.enable")
 			if err != nil {
 				_ = encode(errorEnvelope(request, err))
 				continue
