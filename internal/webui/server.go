@@ -421,9 +421,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if code := r.URL.Query().Get("c"); code != "" {
 		if s.redeemLaunchCode(code) {
 			launchToken, launchState = s.token, "ok"
+			s.markUsed()
 		} else {
 			launchState = "used"
 		}
+	} else if s.tokenOK(r) {
+		s.markUsed()
 	}
 	page := bytes.Replace(indexHTML, []byte(styleNoncePlaceholder), []byte(nonce), 1)
 	page = bytes.Replace(page, []byte(launchTokenPlaceholder), []byte(launchToken), 1)

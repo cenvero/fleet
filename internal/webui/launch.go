@@ -155,19 +155,39 @@ var passivePaths = map[string]bool{
 
 func (s *Server) trackActivity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/" || passivePaths[r.URL.Path] {
+		if !s.countsAsUse(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		s.activity.inFlight.Add(1)
 		defer func() {
-			s.activity.last.Store(time.Now().UnixNano())
+			s.markUsed()
 			s.activity.inFlight.Add(-1)
 		}()
-		s.activity.last.Store(time.Now().UnixNano())
+		s.markUsed()
 		next.ServeHTTP(w, r)
 	})
 }
+
+// countsAsUse reports whether r is something a person did with this
+// session's credentials. Only those keep a background console alive: a
+// request without the token (any local process, or a web page aiming at
+// 127.0.0.1) must not be able to hold it open. Loading the page itself
+// counts in handleIndex, once a launch code or the token is checked.
+func (s *Server) countsAsUse(r *http.Request) bool {
+	switch {
+	case passivePaths[r.URL.Path]:
+		return false
+	case r.URL.Path == "/api/launch-code":
+		provided := r.Header.Get("X-Fleet-Launch-Key")
+		return s.launchKey != "" && provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchKey)) == 1
+	case strings.HasPrefix(r.URL.Path, "/api/"):
+		return s.tokenOK(r)
+	}
+	return false
+}
+
+func (s *Server) markUsed() { s.activity.last.Store(time.Now().UnixNano()) }
 
 // IdleFor reports how long it has been since someone last used the UI
 // (zero while a request of theirs, such as an upload, is still running).

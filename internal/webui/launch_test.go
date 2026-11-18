@@ -165,6 +165,24 @@ func TestIdleIgnoresThePagesOwnRequests(t *testing.T) {
 	if got := s.IdleFor(); got < 59*time.Minute {
 		t.Fatalf("the page's own requests counted as use (idle %s)", got)
 	}
+	// Requests without this session's credentials are not use either: any
+	// local process could otherwise hold a background console open.
+	for _, p := range []string{"/api/servers", "/api/servers?t=" + strings.Repeat("0", 64), "/", "/?c=not-a-code"} {
+		res, err := http.Get(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+	}
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/launch-code", nil)
+	req.Header.Set("X-Fleet-Launch-Key", "wrong")
+	if res, err := http.DefaultClient.Do(req); err == nil {
+		res.Body.Close()
+	}
+	if got := s.IdleFor(); got < 59*time.Minute {
+		t.Fatalf("requests without credentials counted as use (idle %s)", got)
+	}
+
 	res, err := http.Get(ts.URL + "/api/servers?t=" + s.Token())
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +190,19 @@ func TestIdleIgnoresThePagesOwnRequests(t *testing.T) {
 	res.Body.Close()
 	if got := s.IdleFor(); got > time.Minute {
 		t.Fatalf("a request a person made did not count as use (idle %s)", got)
+	}
+
+	// Opening the page with a launch code counts.
+	s.activity.last.Store(old)
+	code, err := s.NewLaunchCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page := getPage(t, ts.URL, "?c="+code); !strings.Contains(page, s.Token()) {
+		t.Fatal("launch code did not open the page")
+	}
+	if got := s.IdleFor(); got > time.Minute {
+		t.Fatalf("opening the page with a launch code did not count as use (idle %s)", got)
 	}
 }
 
