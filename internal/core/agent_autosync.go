@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,15 +26,18 @@ import (
 // is turned off only explicitly (`fleet sync-agent auto off`, or
 // `updates.agent_auto_sync = false`). Two things start a run:
 //
-//   - any `fleet` command, when the last run started more than
-//     AgentAutoSyncInterval ago: the command claims the slot and launches a
-//     detached `fleet sync-agent --background`, so it never waits on the sync;
+//   - the background helper (helper.go), whose "agent-sync" task checks every
+//     few minutes whether the last run started more than
+//     AgentAutoSyncInterval ago, claims the slot and runs it; it leaves the
+//     work to the daemon while one runs;
 //   - the daemon (`fleet start`), which checks the same schedule itself and also
 //     syncs an agent that connects running an older version.
 //
 // Both share data/agent-sync.json, so between them a fleet is synced about once
 // an hour no matter how it is used. A run lock (data/agent-sync.lock) keeps the
-// background, daemon and manual runs from ever updating agents at the same time.
+// helper, daemon and manual runs from ever updating agents at the same time.
+// (Older releases launched `fleet sync-agent --background` from every command
+// instead; that entry point still works.)
 
 // AgentAutoSyncInterval is how often agents are synced automatically.
 const AgentAutoSyncInterval = time.Hour
@@ -108,8 +110,9 @@ type AgentSyncState struct {
 	// due AgentAutoSyncInterval after it.
 	LastStartedAt  time.Time `json:"last_started_at"`
 	LastFinishedAt time.Time `json:"last_finished_at,omitempty"`
-	// LastTrigger is what started the last run: "cli", "daemon", "connect" or
-	// "manual".
+	// LastTrigger is what started the last run: "helper", "daemon",
+	// "connect", "manual", or "cli" (`fleet sync-agent --background`, which
+	// older releases started from every command).
 	LastTrigger     string   `json:"last_trigger,omitempty"`
 	LastSynced      int      `json:"last_synced"`
 	LastUpToDate    int      `json:"last_up_to_date"`
@@ -253,8 +256,8 @@ func acquireAgentSyncLock(ctx context.Context, configDir string, wait bool, onWa
 
 // AgentSyncOptions controls RunAgentSync.
 type AgentSyncOptions struct {
-	// Trigger is recorded in the state and audit log: "manual", "cli",
-	// "daemon" or "connect".
+	// Trigger is recorded in the state and audit log: "manual", "helper",
+	// "cli", "daemon" or "connect".
 	Trigger string
 	// Auto applies the automatic-run rules: refuse when auto-sync is off, and
 	// touch only agents known to be older than the controller (skipping
@@ -476,65 +479,40 @@ func SetAgentAutoSync(configDir string, on bool) error {
 	return SaveConfig(path, cfg)
 }
 
-// BackgroundAgentSyncArgs is the command line a background sync runs with. It
-// carries no credentials.
-func BackgroundAgentSyncArgs(configDir string) []string {
-	return []string{"--config-dir", configDir, "sync-agent", "--background"}
-}
-
-// StartBackgroundAgentSync launches `fleet sync-agent --background` detached
-// from the terminal, appending its output to AgentSyncLogPath, and returns
-// without waiting for it. The invoking operator's FLEET_TOKEN is not passed on.
-func StartBackgroundAgentSync(configDir string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locate the fleet binary: %w", err)
-	}
-	logFile, _, err := openRotatingLog(AgentSyncLogPath(configDir), agentSyncLogRotateBytes)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()                                           // the child holds its own descriptor
-	cmd := exec.Command(exe, BackgroundAgentSyncArgs(configDir)...) // #nosec G204 -- this binary with fixed, credential-free arguments
-	cmd.Dir = configDir
-	cmd.Env = daemonEnv(os.Environ())
-	cmd.Stdin = nil
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = detachedProcAttr()
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("launch background agent sync: %w", err)
-	}
-	// Reap the child if this process outlives it (a long dashboard session);
-	// otherwise it is simply re-parented when this process exits.
-	go func() { _ = cmd.Wait() }()
-	return nil
-}
-
 // RunBackgroundAgentSync is the body of `fleet sync-agent --background`: one
-// automatic run with timestamped progress written to out (the sync log).
+// automatic run with timestamped progress written to out (the sync log). The
+// background helper runs the same thing (helperAgentSync); this entry point is
+// kept for older releases, which started it from every command.
 func (a *App) RunBackgroundAgentSync(ctx context.Context, out io.Writer) error {
+	_, _, err := a.runAutomaticAgentSync(ctx, out, "cli")
+	return err
+}
+
+// runAutomaticAgentSync is one automatic, full-fleet run with timestamped
+// progress written to out. A run that does not happen because auto-sync is off
+// or another sync holds the lock is not an error: skipped then says why.
+func (a *App) runAutomaticAgentSync(ctx context.Context, out io.Writer, trigger string) (result FleetSyncAgentResult, skipped string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, agentAutoSyncRunTimeout)
 	defer cancel()
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(out, "%s "+format+"\n", append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
 	}
-	logf("agent auto-sync started (controller %s, pid %d)", version.Canonical(version.Version), os.Getpid())
-	result, err := a.RunAgentSync(ctx, nil, AgentSyncOptions{
-		Trigger:  "cli",
+	logf("agent auto-sync started (controller %s, pid %d, %s)", version.Canonical(version.Version), os.Getpid(), trigger)
+	result, err = a.RunAgentSync(ctx, nil, AgentSyncOptions{
+		Trigger:  trigger,
 		Auto:     true,
 		Progress: agentSyncProgressLogger(logf),
 	})
 	switch {
 	case errors.Is(err, ErrAgentSyncBusy), errors.Is(err, ErrAgentAutoSyncOff):
 		logf("agent auto-sync skipped: %v", err)
-		return nil
+		return result, err.Error(), nil
 	case err != nil:
 		logf("agent auto-sync failed: %v", err)
-		return err
+		return result, "", err
 	}
 	logf("agent auto-sync done: %d updated/delivered, %d up to date, %d failed", result.Synced, result.AlreadyUpToDate, result.Failed)
-	return nil
+	return result, "", nil
 }
 
 func agentSyncProgressLogger(logf func(string, ...any)) func(SyncAgentProgress) {

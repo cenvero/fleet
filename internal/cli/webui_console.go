@@ -40,6 +40,7 @@ var webUnavailable = map[string]string{ // #nosec G101 -- command names and refu
 	"init":           "it sets up the controller this UI is already running from. Run it in a terminal",
 	"recover":        "it re-attaches the controller this UI is running from. Run it in a terminal",
 	"self-uninstall": "it removes the controller this UI is running from. Run it in a terminal",
+	"helper restart": "it restarts the controller's background helper. Run it in a terminal",
 
 	// The browser must never be able to read or plant the controller's keys,
 	// tokens or secrets (see internal/webui/protect.go), nor loosen the

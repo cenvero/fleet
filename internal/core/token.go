@@ -373,6 +373,9 @@ var commandMutationClassifications = map[string]bool{
 	"run": true, "guard": true, "confirm": true, "revert": true,
 	"doctor": false, "job run": true, "job status": false, "job wait": false,
 	"job logs": false, "jobs": false,
+	// The background helper: `helper status` only reads; `helper restart` and
+	// the hidden `__helper` itself are controller management.
+	"helper status": false, "helper restart": true, "__helper": true,
 	"cmd-policy set": true, "cmd-policy show": false,
 	"health":    false,
 	"fw status": false, "fw allow": true, "fw enable": true,

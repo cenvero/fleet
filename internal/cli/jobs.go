@@ -113,11 +113,14 @@ func newJobRunCommand(configDir *string) *cobra.Command {
 			if err := enforceCmdPolicy(*configDir, command, false); err != nil {
 				return err
 			}
-			store := core.NewJobStore(*configDir)
-			rec, err := store.Start(appExec(app), args[0], command, name)
+			rec, err := app.Jobs().Start(appExec(app), args[0], command, name)
 			if err != nil {
 				return err
 			}
+			// The background helper tracks the job from here; make sure one is
+			// up (the pre-run check may have raced a helper that was exiting
+			// after an upgrade). Under a token this does nothing, as ever.
+			ensureHelper(cmd, *configDir, "")
 			if asJSON {
 				return writeJSON(cmd, rec)
 			}

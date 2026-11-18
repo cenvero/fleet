@@ -187,7 +187,7 @@ func NewRootCommand() *cobra.Command {
 			if err := preRun(cmd, args); err != nil {
 				return err
 			}
-			maybeStartBackgroundAgentSync(cmd, configDir, tokenID)
+			ensureHelper(cmd, configDir, tokenID)
 			return nil
 		},
 		// Runs only after a command's RunE succeeded (cobra skips it on error).
@@ -262,6 +262,8 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newDoctorCommand(&configDir))
 	root.AddCommand(newJobCommand(&configDir))
 	root.AddCommand(newJobsListCommand(&configDir))
+	root.AddCommand(newHelperCommand(&configDir))
+	root.AddCommand(newHelperRunCommand(&configDir))
 	root.AddCommand(newCmdPolicyCommand(&configDir))
 	root.AddCommand(newHealthCommand(&configDir))
 	root.AddCommand(newFirewallSafeCommand(&configDir))
