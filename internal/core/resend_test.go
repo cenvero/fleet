@@ -19,6 +19,27 @@ import (
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
+// cuttableConn is the agent's end of a connection that can be cut the way a
+// network drop cuts it: once cut, nothing it writes gets through, so a reply
+// to the request in hand is lost. (The in-memory pipe alone may still deliver
+// a write made just after it is closed.)
+type cuttableConn struct {
+	net.Conn
+	gone *atomic.Bool
+}
+
+func (c cuttableConn) Write(p []byte) (int, error) {
+	if c.gone.Load() {
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(p)
+}
+
+func (c cuttableConn) cut() {
+	c.gone.Store(true)
+	_ = c.Conn.Close()
+}
+
 // dropAfterFirewall is a firewall that does its work and then cuts the
 // connection before the agent can reply, as a network drop would.
 type dropAfterFirewall struct {
@@ -62,12 +83,12 @@ func (c dropOnceCollector) Collect(context.Context) (proto.MetricsSnapshot, erro
 func TestPooledCallIsNotResentAfterItMayHaveRun(t *testing.T) {
 	app := newImportTestApp(t)
 	var mu sync.Mutex
-	var conns []net.Conn
+	var conns []cuttableConn
 	dropAll := func() {
 		mu.Lock()
 		defer mu.Unlock()
 		for _, c := range conns {
-			_ = c.Close()
+			c.cut()
 		}
 	}
 	var enables, collects atomic.Int32
@@ -80,10 +101,11 @@ func TestPooledCallIsNotResentAfterItMayHaveRun(t *testing.T) {
 	}
 	app.NetworkDialContext = func(_ context.Context, _, address string) (net.Conn, error) {
 		client, server := testutil.NewBufferedConnPair("127.0.0.1:50200", address)
+		cc := cuttableConn{Conn: server, gone: &atomic.Bool{}}
 		mu.Lock()
-		conns = append(conns, server)
+		conns = append(conns, cc)
 		mu.Unlock()
-		go func() { _ = srv.ServeConn(server) }()
+		go func() { _ = srv.ServeConn(cc) }()
 		return client, nil
 	}
 	t.Cleanup(app.DisconnectPooledSessions)
