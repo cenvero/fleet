@@ -114,6 +114,47 @@ Omit sections that have no entries for that release.
 
 ### Security
 
+- **The firewall lockout check parses rules instead of searching them for the port
+  number.** Text matching was fooled both ways:
+  - A deny on a range (`ufw deny 2000:3000/tcp`) or on an address with no port, ahead of
+    the agent-port allow, went unnoticed. `fleet firewall enable` would go ahead, and the
+    first-match deny cut the agent off for good.
+  - An allow that does not admit the controller still counted:
+    - `ufw allow out 2222/tcp`
+    - `ufw route allow …`
+    - an allow from one host or on one interface
+    - an iptables ACCEPT for one source
+    - firewalld `source-ports`
+
+  ufw (read from `ufw show added`), iptables, nftables and firewalld rules are now read
+  in evaluation order. Anything fleet cannot read counts as possibly blocking. With
+  firewalld, the port must be allowed in every active zone.
+- **`--force-i-have-console` is refused under any `--token`/`FLEET_TOKEN`**, with an
+  audit entry. The web console's Control view no longer offers or accepts it.
+- **Web console:**
+  - Moving a console to the background hands the listening socket itself to the new
+    process (Linux, macOS), so the port is never free for another account to bind and
+    collect the token from reconnecting tabs. Windows gets a fresh token instead.
+  - A one-time link used a second time replaces the session token, so whoever raced the
+    browser to it holds nothing. The page says the link was used twice.
+- **Background jobs:**
+  - The wrapper's pid is recorded, and liveness is checked on that process only.
+  - A completion marker counts only once the wrapper has exited, so a job (or whoever
+    can influence its output) cannot forge "done, exit 0", and a decoy process cannot
+    keep a dead job "alive".
+- **Before signalling a pid** from a pid or state file, `fleet stop`, `fleet console stop`
+  and the helper's stop check the process's command line (`ps` on macOS and the BSDs) or
+  image (Windows) on every OS, not only on Linux.
+- **Server text is cleaned of terminal escape sequences** in firewall errors and in
+  `fleet helper status`.
+- Dependencies:
+  - `gopkg.in/yaml.v3` (archived upstream) is replaced by its maintained continuation
+    `go.yaml.in/yaml/v3`;
+  - gopsutil moves from v3 (superseded) to v4;
+  - `golang.org/x/crypto` 0.59.0 clears GO-2026-5932.
+
+  `govulncheck` reports no vulnerabilities in any required module.
+
 - **The browser is opened with a one-time code, never the session token.** Opening the UI
   ran `open`/`xdg-open http://…/?t=<token>`, and a process's arguments can be read by every
   account on the machine. With Control or Terminal on, another local user could take the
@@ -180,6 +221,19 @@ Omit sections that have no entries for that release.
   new random key while secrets sealed under it exist.
 
 ### Fixed
+
+- **Background jobs:**
+  - on macOS and Windows, a job whose server name was typed with different case was
+    marked lost on its first network error;
+  - a slow launch could be marked lost before it started;
+  - an agent error after the command started deleted the job;
+  - a launch that may have run is kept and settled by the helper.
+- **Firewall, port and service calls no longer bring back a server removed while they
+  ran.**
+- **`fw enable --safe`** says the revert timer is armed, and how to cancel it, when the
+  enable step fails after arming it.
+- **`fleet console stop`** asks the console to stop, so it ends its runs and terminals;
+  on Windows, terminating it left them running.
 
 - **Background jobs:**
   - a job whose output does not end in a newline (`printf done`) now finishes;
