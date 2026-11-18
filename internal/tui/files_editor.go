@@ -481,9 +481,16 @@ func saveFileFromEdit(app *core.App, source, full string, content, base []byte, 
 // edit through a link changes the file it points to and leaves the link in
 // place. The resolved entry is then inspected without following links, its
 // bytes are hashed and compared with base, and content is written to a
-// sidecar in the same folder that is renamed over it with the file's mode.
-// A file that is missing, no longer regular, or has different bytes is left
-// alone and the save is refused.
+// sidecar in the same folder that is renamed over it with the file's owner,
+// group and mode. A file that is missing, no longer regular, or has
+// different bytes is left alone and the save is refused.
+//
+// Replacing a file is not writing it, so the save is also refused where an
+// ordinary write would have been, or where the replacement would differ in
+// more than content: a file the user may not write, one with other hard
+// links (they would keep the old text), or one whose owner cannot be kept.
+// Extended attributes and ACLs are not carried over. Saving unchanged text
+// writes nothing.
 func saveLocalEdit(full string, content, base []byte) error {
 	const keep = "; your text is still here — copy what you need, then reopen the file"
 	target, err := filepath.EvalSymlinks(full)
@@ -526,9 +533,21 @@ func saveLocalEdit(full string, content, base []byte) error {
 	if !os.SameFile(before, opened) || sha256Hex(current) != sha256Hex(base) {
 		return errors.New("the file changed on disk since you opened it" + keep)
 	}
+	if bytes.Equal(content, base) {
+		return nil // nothing to change: leave the file (and its inode) alone
+	}
+	if n := localLinkCount(before); n > 1 {
+		return fmt.Errorf("the file has %d hard links and replacing it would split them apart, so it was left unchanged — edit it in $EDITOR", n)
+	}
+	if err := checkLocalWritable(root, name); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return errors.New("you may not write this file; nothing was saved")
+		}
+		return err
+	}
 
-	perm := before.Mode().Perm()
-	out, err := core.CreateAtomicLocalFile(target, perm)
+	mode := before.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	out, err := core.CreateAtomicLocalFile(target, mode.Perm())
 	if err != nil {
 		return err
 	}
@@ -536,7 +555,10 @@ func saveLocalEdit(full string, content, base []byte) error {
 	if _, err := out.File().Write(content); err != nil {
 		return err
 	}
-	if err := out.File().Chmod(perm); err != nil {
+	if err := keepLocalOwner(out.File(), before); err != nil {
+		return fmt.Errorf("cannot give the saved file its owner and group (%v), so it was left unchanged — edit it in $EDITOR", err)
+	}
+	if err := out.File().Chmod(mode); err != nil {
 		return err
 	}
 	return out.Commit()

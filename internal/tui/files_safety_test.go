@@ -329,6 +329,44 @@ func TestEditorEscAfterToggleNeedsSecondPress(t *testing.T) {
 func TestLocalEditSaveIsAtomicAndChecked(t *testing.T) {
 	t.Parallel()
 
+	t.Run("read-only file", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			t.Skip("root may write a read-only file")
+		}
+		dir := t.TempDir()
+		p := filepath.Join(dir, "ro.txt")
+		if err := os.WriteFile(p, []byte("v1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		err := saveFileFromEdit(nil, "", p, []byte("v2\n"), []byte("v1\n"), false)
+		if err == nil || !strings.Contains(err.Error(), "may not write") {
+			t.Fatalf("saving a read-only file should be refused like a write, got %v", err)
+		}
+		if got, _ := os.ReadFile(p); string(got) != "v1\n" {
+			t.Fatalf("read-only file replaced: %q", got)
+		}
+	})
+
+	t.Run("unchanged save writes nothing", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "same.txt")
+		if err := os.WriteFile(p, []byte("same\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.Stat(p)
+		if err := saveFileFromEdit(nil, "", p, []byte("same\n"), []byte("same\n"), false); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		after, _ := os.Stat(p)
+		if !os.SameFile(before, after) {
+			t.Fatal("saving unchanged text replaced the file")
+		}
+	})
+
 	t.Run("atomic replace keeps mode", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
