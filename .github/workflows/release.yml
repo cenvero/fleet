@@ -27,6 +27,16 @@ jobs:
             echo "::error::release tag commit is not an ancestor of origin/main"
             exit 1
           }
+      # Before anything is built or published: the tag must map to a known
+      # channel, so a pre-release tag can never reach the stable manifest.
+      - name: Require a known release channel
+        run: |
+          set -euo pipefail
+          channel="$(./scripts/release-channel.sh "${GITHUB_REF_NAME}")" || {
+            echo "::error::${GITHUB_REF_NAME} does not map to a release channel (see scripts/release-channel.sh)"
+            exit 1
+          }
+          echo "Release channel: ${channel}"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
@@ -116,10 +126,9 @@ jobs:
       - name: Select channel
         id: channel
         run: |
-          if [[ "${GITHUB_REF_NAME}" =~ -alpha\. ]]; then echo "value=alpha" >>"${GITHUB_OUTPUT}"
-          elif [[ "${GITHUB_REF_NAME}" =~ -(beta|rc)\. ]]; then echo "value=beta" >>"${GITHUB_OUTPUT}"
-          else echo "value=stable" >>"${GITHUB_OUTPUT}"
-          fi
+          set -euo pipefail
+          # One rule for every channel decision (also checked before the build).
+          echo "value=$(./scripts/release-channel.sh "${GITHUB_REF_NAME}")" >>"${GITHUB_OUTPUT}"
       - name: Install minisign
         run: |
           sudo apt-get update -qq

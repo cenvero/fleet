@@ -2,6 +2,44 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Release channel selection: a pre-release tag must never map to stable.
+while read -r tag want; do
+  got="$("${ROOT_DIR}/scripts/release-channel.sh" "${tag}" 2>/dev/null || echo refused)"
+  if [ "${got}" != "${want}" ]; then
+    echo "release-channel.sh ${tag}: got ${got}, want ${want}" >&2
+    exit 1
+  fi
+done <<'TAGS'
+v2.6.1 stable
+v10.0.0 stable
+v3.0.0-rc1 beta
+v3.0.0-rc.1 beta
+v3.0.0-beta.2 beta
+v3.0.0-beta2 beta
+v3.0.0-alpha.1 alpha
+v3.0.0-alpha1 alpha
+v3.0.0-preview.1 refused
+v3.0.0-rc refused
+v3.0.0-RC.1 refused
+2.6.1 refused
+v2.6 refused
+v02.6.1 refused
+TAGS
+# Every place that picks a channel must use the shared rule.
+grep -q 'scripts/release-channel.sh "${GITHUB_REF_NAME}"' "${ROOT_DIR}/.github/workflows/release.yml"
+if grep -qE '=~ -(alpha|\(beta)' "${ROOT_DIR}/.github/workflows/release.yml"; then
+  echo "release.yml still classifies channels with its own regex" >&2
+  exit 1
+fi
+# Every Pages deploy must publish public/.well-known/ (security.txt).
+for wf in ci.yml pages.yml pages-sync.yml; do
+  grep -q 'include-hidden-files: true' "${ROOT_DIR}/.github/workflows/${wf}" || {
+    echo "${wf}: the Pages upload drops public/.well-known/ (set include-hidden-files: true)" >&2
+    exit 1
+  }
+done
+
 "${ROOT_DIR}/scripts/test-winget-publishing.sh"
 "${ROOT_DIR}/scripts/test-winget-manifests.sh"
 TMP_DIR="$(mktemp -d)"
