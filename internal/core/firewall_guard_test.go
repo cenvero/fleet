@@ -256,6 +256,33 @@ func TestFirewallGuardTemplateApply(t *testing.T) {
 	}
 }
 
+// A template that opens the agent port and enables the firewall works on a
+// fresh host: its ports are opened before the firewall is enabled, so the
+// lockout check sees the agent port allowed. Services come last, so a
+// refused template has touched nothing else.
+func TestFirewallGuardTemplateOpensPortsBeforeEnabling(t *testing.T) {
+	ufw := newFakeUFW(t) // inactive ufw, no pending rules
+	manager := &fakeFirewallManager{status: proto.FirewallInfo{Enabled: false}}
+	manager.onSetPort = func(port int, open bool) {
+		if port == 2222 && open {
+			ufw.set("Status: inactive\n", "ufw allow 2222\n")
+		}
+	}
+	app := directFirewallHarness(t, manager)
+	body := "name = \"web\"\n[firewall]\nenabled = true\nopen_ports = [2222, 80]\n"
+	if err := os.WriteFile(filepath.Join(app.ConfigDir, "templates", "web.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ApplyTemplate("loopback", "web.toml"); err != nil {
+		t.Fatalf("template that allows the agent port was refused: %v", err)
+	}
+	enable := slices.Index(manager.actions, "enable:true")
+	open := slices.Index(manager.actions, "port:2222:true")
+	if enable < 0 || open < 0 || open > enable {
+		t.Fatalf("actions = %v; want the agent port opened before the firewall is enabled", manager.actions)
+	}
+}
+
 // fakeReverseUFW is an in-process reverse-mode agent: it answers the firewall
 // RPCs and the probe's shell.exec from fields the test sets.
 type fakeReverseUFW struct {

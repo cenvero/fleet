@@ -121,6 +121,9 @@ func TestLiveFirewallAndPortManagement(t *testing.T) {
 type fakeFirewallManager struct {
 	status  proto.FirewallInfo
 	actions []string
+	// onSetPort, when set, runs after SetPort (tests use it to mirror the
+	// change into a fake ufw).
+	onSetPort func(port int, open bool)
 }
 
 func (f *fakeFirewallManager) Status(context.Context) (proto.FirewallInfo, error) {
@@ -147,6 +150,9 @@ func (f *fakeFirewallManager) ListOpenPorts(context.Context) ([]int, error) {
 
 func (f *fakeFirewallManager) SetPort(_ context.Context, port int, open bool) (proto.FirewallInfo, error) {
 	f.actions = append(f.actions, fmt.Sprintf("port:%d:%t", port, open))
+	if f.onSetPort != nil {
+		defer f.onSetPort(port, open)
+	}
 	if open && !slices.Contains(f.status.OpenPorts, port) {
 		f.status.OpenPorts = append(f.status.OpenPorts, port)
 		slices.Sort(f.status.OpenPorts)

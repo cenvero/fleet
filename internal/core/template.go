@@ -75,22 +75,10 @@ func (a *App) ApplyTemplate(serverName, templateName string) error {
 		return err
 	}
 
-	for _, service := range tpl.Services {
-		if err := a.AddService(serverName, service.Name, service.LogPath, service.Critical); err != nil {
-			return err
-		}
-		if action := strings.TrimSpace(service.Action); action != "" {
-			if err := a.ControlService(serverName, service.Name, action); err != nil {
-				return err
-			}
-		}
-	}
-
-	if tpl.Firewall.Enabled != nil {
-		if err := a.SetFirewall(serverName, *tpl.Firewall.Enabled); err != nil {
-			return err
-		}
-	}
+	// Firewall first, and within it ports, then rules, then enabling: the
+	// agent-lockout gate then sees the ports the template opens (a template
+	// that allows the agent port can enable the firewall on a fresh host),
+	// and a refusal stops the template before any service was touched.
 	for _, port := range tpl.Firewall.OpenPorts {
 		if err := a.SetPort(serverName, port, true); err != nil {
 			return err
@@ -99,6 +87,22 @@ func (a *App) ApplyTemplate(serverName, templateName string) error {
 	for _, rule := range tpl.Firewall.Rules {
 		if err := a.AddFirewallRule(serverName, rule); err != nil {
 			return err
+		}
+	}
+	if tpl.Firewall.Enabled != nil {
+		if err := a.SetFirewall(serverName, *tpl.Firewall.Enabled); err != nil {
+			return err
+		}
+	}
+
+	for _, service := range tpl.Services {
+		if err := a.AddService(serverName, service.Name, service.LogPath, service.Critical); err != nil {
+			return err
+		}
+		if action := strings.TrimSpace(service.Action); action != "" {
+			if err := a.ControlService(serverName, service.Name, action); err != nil {
+				return err
+			}
 		}
 	}
 
