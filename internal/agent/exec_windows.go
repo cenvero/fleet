@@ -20,6 +20,10 @@ import (
 const (
 	defaultExecTimeoutWindows = 10 * time.Minute
 	maxExecOutputBytesWindows = 16 << 20
+	// execWaitDelay bounds how long Wait keeps collecting output after the
+	// command shell has exited (see exec.go): a process it started, or one
+	// taskkill's tree walk missed, can hold stdout open indefinitely.
+	execWaitDelay = 2 * time.Second
 )
 
 type windowsCappedBuffer struct {
@@ -65,6 +69,7 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	var stdout, stderr windowsCappedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	cmd.WaitDelay = execWaitDelay
 	if err := cmd.Start(); err != nil {
 		return proto.ExecResult{}, err
 	}
@@ -89,9 +94,14 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	close(waitDone)
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		switch {
+		case errors.As(err, &exitErr):
 			exitCode = exitErr.ExitCode()
-		} else {
+		case errors.Is(err, exec.ErrWaitDelay):
+			// Exited 0 with its output still held open by a leftover process;
+			// the pipes were closed after execWaitDelay. The result stands.
+		default:
 			return proto.ExecResult{}, err
 		}
 	}

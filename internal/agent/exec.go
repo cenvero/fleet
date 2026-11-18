@@ -8,8 +8,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,18 @@ import (
 // effective limit; if a Timeout is ever added to the payload, honor it (capped)
 // before falling back to this default.
 const defaultExecTimeout = 600 * time.Second
+
+// execWaitDelay bounds how long Wait keeps collecting a command's output after
+// the shell has exited, whether on its own or killed at the deadline. A process
+// the command started can keep stdout or stderr open: a plain `server &`, or a
+// child that left the process group with setsid, which the deadline kill of
+// that group cannot reach. Wait used to block until that process exited,
+// holding the reply (well past the deadline) and one of the exec slots. After
+// the delay the pipes are closed and the command is reported as it stands.
+//
+// The delay must stay well inside the 5 seconds a controller waits for the
+// reply after it cancels a request, or the controller gives up the channel.
+const execWaitDelay = 2 * time.Second
 
 // maxExecOutputBytes caps how much stdout (and, separately, stderr) is buffered
 // in memory for one command. A command that streams gigabytes to stdout must not
@@ -110,6 +123,7 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	// Setpgid puts the shell and everything it spawns in a new process group so we
 	// can signal the whole tree at once on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = execWaitDelay
 
 	if len(payload.Env) > 0 {
 		env, err := execEnvironment(payload.Env)
@@ -131,28 +145,52 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 	// Watchdog: on timeout (or caller cancellation) kill the whole process group.
 	// SIGKILL to -pgid reaches every descendant, defeating attempts to survive by
 	// double-forking. waitDone stops the watchdog once the command exits normally.
+	//
+	// mu orders the kill against Wait returning, so the result knows whether the
+	// kill happened while Wait was still pending.
 	waitDone := make(chan struct{})
-	var killed atomic.Bool
+	var (
+		mu          sync.Mutex
+		finished    bool // Wait has returned
+		killed      bool // the watchdog killed the group while Wait was pending
+		shellExited bool // ...and the shell itself had already exited by then
+	)
 	go func() {
 		select {
 		case <-runCtx.Done():
-			if cmd.Process != nil {
-				killed.Store(true)
-				// Negative pid => signal the entire process group.
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			mu.Lock()
+			defer mu.Unlock()
+			if finished || cmd.Process == nil {
+				return
 			}
+			// A shell that has exited and been reaped reports ErrProcessDone;
+			// one still running, or exiting right now, does not.
+			shellExited = errors.Is(cmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone)
+			killed = true
+			// Negative pid => signal the entire process group.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		case <-waitDone:
 		}
 	}()
 
 	err := cmd.Wait()
+	mu.Lock()
+	finished = true
+	wasKilled, shellHadExited := killed, shellExited
+	mu.Unlock()
 	close(waitDone)
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		switch {
+		case errors.As(err, &exitErr):
 			exitCode = exitErr.ExitCode()
-		} else {
+		case errors.Is(err, exec.ErrWaitDelay):
+			// The shell exited 0, but something it started still held stdout or
+			// stderr open after execWaitDelay, so the pipes were closed. The
+			// shell's own result stands.
+		default:
 			return proto.ExecResult{}, err
 		}
 	}
@@ -160,13 +198,21 @@ func runShellExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecRes
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 		ExitCode: exitCode,
-		TimedOut: execKilledByDeadline(runCtx, killed.Load(), exitCode),
+		TimedOut: execKilledByDeadline(runCtx, wasKilled, shellHadExited, exitCode),
 	}, nil
 }
 
-// execKilledByDeadline reports whether the watchdog killed the command because
-// its deadline (the request's, or defaultExecTimeout) expired — as opposed to a
-// caller cancellation, or a command that exited on its own as the timer fired.
-func execKilledByDeadline(runCtx context.Context, killed bool, exitCode int) bool {
-	return killed && exitCode == -1 && errors.Is(runCtx.Err(), context.DeadlineExceeded)
+// execKilledByDeadline reports whether the command was ended by its deadline
+// (the request's, or defaultExecTimeout), as opposed to a caller cancellation
+// or a command that finished on its own. The watchdog must have killed the
+// process group while Wait was still pending, on an expired deadline, and
+// either the shell died of that kill (exit -1) or it had already exited and the
+// reply was still waiting on output a leftover process held open. A shell that
+// exits on its own as the timer fires keeps its own exit status and is not a
+// timeout.
+func execKilledByDeadline(runCtx context.Context, killed, shellHadExited bool, exitCode int) bool {
+	if !killed || !errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	return exitCode == -1 || shellHadExited
 }
