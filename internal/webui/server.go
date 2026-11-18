@@ -113,7 +113,12 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// Serve returns as soon as Shutdown starts, but Shutdown is what lets
+	// in-flight requests (a save, an upload, a download) finish; shutdownDone
+	// lets ListenAndServe wait for it instead of exiting under them.
+	shutdownDone := make(chan struct{})
 	go func() { // #nosec G118 -- server-lifecycle shutdown, not a request-scoped context
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -131,6 +136,9 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 		}()
 	}
 	err = srv.Serve(listener)
+	if err == http.ErrServerClosed {
+		<-shutdownDone // let in-flight requests drain (bounded by the timeout above)
+	}
 	if s.console != nil {
 		// Interrupt every command still running from the browser and give it
 		// a moment to exit cleanly before this process does.
@@ -566,6 +574,34 @@ func (s *Server) nameOnlyPath(server, dir, name string) (string, error) {
 		return "", fmt.Errorf("dir must be an absolute path")
 	}
 	return style.Join(clean, name), nil
+}
+
+// remoteEntry looks name up in a remote directory. The listing includes hidden
+// files and honours the target's case sensitivity, so a dotfile the browser is
+// not showing, or `README` vs `readme` on a case-insensitive server, counts.
+func (s *Server) remoteEntry(server, dir, name string) (proto.FileEntry, bool, error) {
+	style, err := s.targetPathStyle(server)
+	if err != nil {
+		return proto.FileEntry{}, false, err
+	}
+	list, err := s.app.ListRemoteDirHidden(server, style.Clean(dir), true)
+	if err != nil {
+		return proto.FileEntry{}, false, err
+	}
+	fold := list.CaseInsensitive != nil && *list.CaseInsensitive
+	for _, e := range list.Entries {
+		if e.Name == name || (fold && strings.EqualFold(e.Name, name)) {
+			return e, true, nil
+		}
+	}
+	return proto.FileEntry{}, false, nil
+}
+
+func existsMessage(e proto.FileEntry) string {
+	if e.IsDir {
+		return fmt.Sprintf("a folder named %q already exists there", e.Name)
+	}
+	return fmt.Sprintf("%q already exists there", e.Name)
 }
 
 // listCacheTTL is deliberately short: it exists only to collapse the burst of
@@ -1005,6 +1041,16 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	remotePath := style.Join(dir, name)
+	// Uploading over a file replaces it (the browser asks first), but a folder
+	// of that name would make the transfer land inside it under the spool
+	// file's temporary name, so that is refused.
+	if entry, exists, err := s.remoteEntry(server, dir, name); err != nil {
+		writeError(w, err)
+		return
+	} else if exists && entry.IsDir {
+		writeJSONStatus(w, http.StatusConflict, map[string]string{"error": existsMessage(entry), "code": "exists"})
+		return
+	}
 
 	// Spool the browser upload to a controller-side temp file (size-capped), then
 	// run the chunked/parallel/resumable transfer from there to the agent.
@@ -1282,6 +1328,17 @@ func (s *Server) handleTouch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
+	// The agent's upload replaces an existing file (and retries inside an
+	// existing directory), so "New file" must check first, against the full
+	// listing: the browser's view may hide dotfiles, and `.env` must not be
+	// emptied just because it is not on screen.
+	if entry, exists, err := s.remoteEntry(server, r.URL.Query().Get("dir"), r.URL.Query().Get("name")); err != nil {
+		writeError(w, err)
+		return
+	} else if exists {
+		writeJSONStatus(w, http.StatusConflict, map[string]string{"error": existsMessage(entry), "code": "exists"})
+		return
+	}
 	tmp, err := os.CreateTemp("", "fleet-webui-touch-*")
 	if err != nil {
 		writeError(w, err)
@@ -1473,12 +1530,38 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
+		// os.Rename replaces an existing file at the destination, so a rename or
+		// drag onto an existing name would silently destroy it. Refuse unless it
+		// is the source itself (a case-only rename on a case-insensitive disk).
+		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
+		if dst, err := os.Lstat(ct); err == nil { // #nosec G703 -- same operator-selected local path as the rename below
+			// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
+			if src, serr := os.Lstat(cf); serr != nil || !os.SameFile(src, dst) { // #nosec G703 -- same operator-selected local path as the rename below
+				writeJSONStatus(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf("%q already exists there", filepath.Base(ct)), "code": "exists"})
+				return
+			}
+		}
 		// codeql[go/path-injection] web file manager: loopback-only, per-process token, same-origin POST; protected controller paths are refused by cleanLocal/cleanLocalWrite before this, and acting on operator-chosen local paths is its purpose
 		if err := os.Rename(cf, ct); err != nil { // #nosec G703 -- localhost-only same-origin file manager intentionally accepts the operator-selected absolute local path
 			writeError(w, err)
 			return
 		}
 		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+	// The agent's rename replaces an existing destination too. The full listing
+	// (hidden files included) decides; the only allowed match is the source
+	// itself, which is what a case-only rename finds on a case-insensitive server.
+	style, err := s.targetPathStyle(server)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if entry, exists, err := s.remoteEntry(server, style.Dir(to), style.Base(to)); err != nil {
+		writeError(w, err)
+		return
+	} else if exists && !(style.Clean(style.Dir(from)) == style.Clean(style.Dir(to)) && entry.Name == style.Base(from)) {
+		writeJSONStatus(w, http.StatusConflict, map[string]string{"error": existsMessage(entry), "code": "exists"})
 		return
 	}
 	if err := s.app.RemoteRename(server, from, to); err != nil {
