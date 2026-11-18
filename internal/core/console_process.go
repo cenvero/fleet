@@ -370,15 +370,19 @@ func StopConsole(configDir string, timeout time.Duration) (ConsoleStopResult, er
 	if err := terminateProcess(st.PID); err != nil {
 		return result, fmt.Errorf("stop the background console (pid %d): %w", st.PID, err)
 	}
+	// Wait for the lock, not just the process: on Windows a terminated
+	// process lets go of its handles (and so the lock) a moment after it is
+	// gone, and until then the console still looks like it is running.
 	deadline := time.Now().Add(timeout)
-	for processAlive(st.PID) && consoleLockHeld(configDir) {
+	for consoleLockHeld(configDir) {
 		if time.Now().After(deadline) {
-			return result, fmt.Errorf("the background console (pid %d) did not exit within %s", st.PID, timeout)
+			if processAlive(st.PID) {
+				return result, fmt.Errorf("the background console (pid %d) did not exit within %s", st.PID, timeout)
+			}
+			return result, fmt.Errorf("the background console (pid %d) exited, but the console lock is still held after %s", st.PID, timeout)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	if !consoleLockHeld(configDir) {
-		removeConsoleFiles(configDir) // Windows ends it without a chance to clean up
-	}
+	removeConsoleFiles(configDir) // Windows ends it without a chance to clean up
 	return result, nil
 }

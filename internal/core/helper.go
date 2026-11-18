@@ -536,8 +536,11 @@ func StopHelper(configDir string, timeout time.Duration) (bool, error) {
 	if err := terminateProcess(pid); err != nil {
 		return false, fmt.Errorf("stop the background helper (pid %d): %w", pid, err)
 	}
+	// Wait for the lock, not just the process: on Windows a terminated
+	// process lets go of its handles (the lock, its executable) a moment after
+	// it is gone, and a restart or an upgrade must not run into them.
 	deadline := time.Now().Add(timeout)
-	for processAlive(pid) && HelperRunning(configDir) {
+	for HelperRunning(configDir) {
 		if !time.Now().Before(deadline) {
 			return true, fmt.Errorf("the background helper (pid %d) did not exit within %s", pid, timeout)
 		}

@@ -466,7 +466,10 @@ func StopDaemon(configDir, controlAddress string, timeout time.Duration) (Daemon
 	defer cancel()
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
-	for processAlive(pid) && daemonLockHeld(configDir) {
+	// Wait for the lock, not just the process: on Windows a terminated
+	// process lets go of its handles a moment after it is gone, and a
+	// `fleet start` right after must not find the lock still held.
+	for daemonLockHeld(configDir) {
 		select {
 		case <-ctx.Done():
 			return result, fmt.Errorf("fleet daemon (pid %d) did not exit within %s; it is still running", pid, timeout)
