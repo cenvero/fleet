@@ -382,9 +382,18 @@ fleet port open web-01 2222
 fleet firewall enable web-01
 ```
 
-- **Direct mode:** the agent's port (the server record's `port`) must be allowed for TCP, and no rule
-  may deny it. For ufw, fleet also reads the rules waiting in `ufw show added`, because `ufw status`
-  lists no rules while ufw is off.
+- **Direct mode:** the agent's port (the server record's `port`) must be allowed for inbound TCP from
+  anywhere, ahead of any rule that may block it. fleet parses the rules in the order the firewall
+  applies them: ufw's from `ufw show added` (active or not), iptables' `INPUT` chain, the nftables
+  chain fleet manages, and firewalld's zones (every active zone when it runs).
+  - **Counts as blocking:**
+    - a deny, reject or limit on the port, or on a range or list including it;
+    - a block of all traffic from an address or on an interface;
+    - a jump to another chain;
+    - a service name fleet does not resolve;
+    - any line it cannot read.
+  - **Not enough:** an allow only from some sources, only on one interface, only outbound or for
+    forwarding. The refusal names that rule.
   - `port close` on the agent port is refused.
   - `firewall add` refuses deny, reject or limit rules on the agent port, and any rule it can't read.
   - Some agent versions accept rules that block by address without naming a port; the current agent
@@ -393,7 +402,8 @@ fleet firewall enable web-01
   traffic accepted (ufw's stock `before.rules` does) and outgoing traffic allowed.
 - **Fail closed:** if fleet can't read the state, it refuses.
 - **Override:** `--force-i-have-console` skips the refusal. It is only for a person with out-of-band
-  console access who accepts losing the agent, never for scripts or AI agents.
+  console access who accepts losing the agent, never for scripts or AI agents. Under any `--token` /
+  `FLEET_TOKEN` it is refused, and the web console's Control view does not offer or accept it.
 
 `fleet fw` drives nftables, iptables, firewalld or ufw directly:
 
