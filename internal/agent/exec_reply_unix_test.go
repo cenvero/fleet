@@ -54,12 +54,18 @@ func TestShellExecReplyFitsEnvelopeLimit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Each case moves ~16 MiB through capture, JSON encoding, the codec
+			// and decoding. That is quick in a normal build but takes tens of
+			// seconds under the race detector on a small CI runner, so the cases
+			// run side by side with a deadline sized for that, not for speed:
+			// what is asserted is that a decodable reply comes back at all.
+			t.Parallel()
 			session, counted := startRPCAgent(t, Server{})
 			resp := callAgent(t, session, proto.Envelope{
 				RequestID: "exec-1",
 				Action:    "shell.exec",
 				Payload:   proto.ExecPayload{Command: tc.command},
-			}, 20*time.Second)
+			}, 4*time.Minute)
 			if resp.Error != nil {
 				t.Fatalf("shell.exec error = %+v, want the trimmed output", resp.Error)
 			}
