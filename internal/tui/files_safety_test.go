@@ -4,13 +4,16 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/pkg/proto"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -550,4 +553,231 @@ func TestEditorLateSaveIgnoredAfterReopen(t *testing.T) {
 			t.Fatalf("the earlier session's save was overwritten: %q", got)
 		}
 	})
+}
+
+// runOne runs a command and returns its message.
+func runOne(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		return nil
+	}
+	return cmd()
+}
+
+// TestRenameRefusesHiddenTarget: renaming onto a name that exists but is not
+// listed (hidden files off) must not replace the existing file.
+func TestRenameRefusesHiddenTarget(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := localPaneModel(dir, "a.txt") // .env is hidden from the listing
+	m = m.openRenamePrompt(0)
+	m.promptValue = ".env"
+	mm, cmd := m.submitPrompt()
+	m = mm.(filesModel)
+	if msg := runOne(t, cmd); msg != nil {
+		mm, _ = m.Update(msg)
+		m = mm.(filesModel)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, ".env")); string(got) != "SECRET=1\n" {
+		t.Fatalf("rename replaced the hidden .env: %q", got)
+	}
+	if !strings.Contains(m.status, "already exists") {
+		t.Fatalf("status should say the name is taken, got %q", m.status)
+	}
+}
+
+// TestRenameCaseOnlyStillWorks: on a case-insensitive filesystem the target
+// "A.txt" resolves to the source "a.txt"; that is a rename, not a clobber.
+func TestRenameCaseOnlyStillWorks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := localPaneModel(dir, "a.txt")
+	m = m.openRenamePrompt(0)
+	m.promptValue = "A.txt"
+	mm, cmd := m.submitPrompt()
+	m = mm.(filesModel)
+	msg, ok := runOne(t, cmd).(fileOpDoneMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("case-only rename failed: %#v (status %q)", msg, m.status)
+	}
+	names, _ := os.ReadDir(dir)
+	if len(names) != 1 || names[0].Name() != "A.txt" {
+		t.Fatalf("after rename: %v", names)
+	}
+}
+
+// TestDuplicateRefusesUnlistedName: Duplicate picked its "<name> copy" name
+// from the filtered listing, so an existing copy hidden by the filter was
+// replaced.
+func TestDuplicateRefusesUnlistedName(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a copy.txt"), []byte("KEEP\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := localPaneModel(dir, "a.txt", "a copy.txt")
+	m.left.filter = "a.txt" // matches a.txt only
+	m.reapplyPane(0)
+	m.left.index = 1
+	if it := m.focusedItem(0); it.name != "a.txt" {
+		t.Fatalf("focused %q", it.name)
+	}
+	mm, cmd := m.duplicateFocused(0)
+	m = mm.(filesModel)
+	msg := runOne(t, cmd)
+	if done, ok := msg.(fileOpDoneMsg); !ok || done.err != nil {
+		t.Fatalf("duplicate: %#v", msg)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "a copy.txt")); string(got) != "KEEP\n" {
+		t.Fatalf("duplicate replaced the existing 'a copy.txt': %q", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "a copy 2.txt")); err != nil || string(got) != "A\n" {
+		t.Fatalf("expected the copy at 'a copy 2.txt': %q, %v", got, err)
+	}
+}
+
+// fakeLookup stands in for an agent's file.stat and file.list. Like the real
+// agent, every failed stat looks the same, and the listing leaves out
+// dotfiles unless asked for them.
+type fakeLookup struct {
+	dirs            map[string][]string
+	caseInsensitive bool
+	listErr         error
+}
+
+func (f *fakeLookup) match(a, b string) bool {
+	return a == b || (f.caseInsensitive && strings.EqualFold(a, b))
+}
+
+func (f *fakeLookup) StatRemoteFile(_, p string) (proto.FileStatResult, error) {
+	for _, n := range f.dirs[path.Dir(p)] {
+		if f.match(n, path.Base(p)) {
+			return proto.FileStatResult{Entry: proto.FileEntry{Name: path.Base(p), Path: p}}, nil
+		}
+	}
+	return proto.FileStatResult{}, errors.New("stat_failed: lstat " + p + ": no such file or directory")
+}
+
+func (f *fakeLookup) ListRemoteDirHidden(_, dir string, showHidden bool) (proto.FileListResult, error) {
+	if f.listErr != nil {
+		return proto.FileListResult{}, f.listErr
+	}
+	res := proto.FileListResult{Path: dir}
+	for _, n := range f.dirs[dir] {
+		if showHidden || !strings.HasPrefix(n, ".") {
+			res.Entries = append(res.Entries, proto.FileEntry{Name: n, Path: path.Join(dir, n)})
+		}
+	}
+	return res, nil
+}
+
+// TestRemoteCreateRefusesUnlistedName drives N, new folder and rename on a
+// remote pane whose listing hides the existing name. The controller is nil:
+// had any of them gone ahead to upload, mkdir or rename, the command would
+// panic instead of returning the refusal.
+func TestRemoteCreateRefusesUnlistedName(t *testing.T) {
+	// Not parallel: it swaps the package-level lookupFor.
+	fake := &fakeLookup{dirs: map[string][]string{"/srv": {".env", ".cache", "app.conf"}}}
+	prev := lookupFor
+	lookupFor = func(*core.App) remoteLookup { return fake }
+	t.Cleanup(func() { lookupFor = prev })
+
+	base := sampleFilesModel(120, 40)
+	base.right.cwd, base.right.listedCwd = "/srv", "/srv"
+	base.right.pathStyle = core.TargetPathPOSIX
+	base.right.allItems = []fileItem{{name: "app.conf"}} // hidden files off
+	base.reapplyPane(1)
+	base.right.index = 1
+	base.focus = 1
+
+	run := func(t *testing.T, m filesModel, cmd tea.Cmd) (msg tea.Msg) {
+		t.Helper()
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("the operation went ahead instead of refusing: %v", p)
+			}
+		}()
+		return runOne(t, cmd)
+	}
+	for _, tc := range []struct {
+		name  string
+		open  func(filesModel) filesModel
+		value string
+	}{
+		{"new file over .env", func(m filesModel) filesModel { return m.openNewFilePrompt(1) }, ".env"},
+		{"new folder over .cache", func(m filesModel) filesModel { return m.openNewFolderPrompt(1) }, ".cache"},
+		{"rename onto .env", func(m filesModel) filesModel { return m.openRenamePrompt(1) }, ".env"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.open(base)
+			m.promptValue = tc.value
+			mm, cmd := m.submitPrompt()
+			m = mm.(filesModel)
+			msg := run(t, m, cmd)
+			done, ok := msg.(fileOpDoneMsg)
+			var taken *nameTakenError
+			if !ok || !errors.As(done.err, &taken) {
+				t.Fatalf("want a name-taken refusal, got %#v", msg)
+			}
+			mm, _ = m.Update(done)
+			m = mm.(filesModel)
+			if !strings.Contains(m.status, tc.value+" already exists") {
+				t.Fatalf("status %q", m.status)
+			}
+		})
+	}
+}
+
+// TestRemoteNameChecks covers the remote check's edges directly.
+func TestRemoteNameChecks(t *testing.T) {
+	t.Parallel()
+	const srv = "web-01"
+	posix := core.TargetPathPOSIX
+
+	free := &fakeLookup{dirs: map[string][]string{"/srv": {".env"}}}
+	if err := ensureNameFree(free, srv, posix, "/srv", "new.txt", ""); err != nil {
+		t.Fatalf("a free name was refused: %v", err)
+	}
+
+	broken := &fakeLookup{listErr: errors.New("list_failed: permission denied")}
+	err := ensureNameFree(broken, srv, posix, "/srv", "new.txt", "")
+	var taken *nameTakenError
+	if err == nil || errors.As(err, &taken) || !strings.Contains(err.Error(), "could not check") {
+		t.Fatalf("a failed listing must refuse as unchecked, got %v", err)
+	}
+
+	ci := &fakeLookup{dirs: map[string][]string{"/srv": {"Readme.md", "a.txt"}}, caseInsensitive: true}
+	if err := ensureNameFree(ci, srv, posix, "/srv", "README.md", ""); !errors.As(err, &taken) {
+		t.Fatalf("a name the server folds onto an existing one must be refused, got %v", err)
+	}
+	if err := ensureNameFree(ci, srv, posix, "/srv", "A.txt", "a.txt"); err != nil {
+		t.Fatalf("a case-only rename was refused: %v", err)
+	}
+
+	// The fake's stat cannot split a Windows path, so the listing decides.
+	win := &fakeLookup{dirs: map[string][]string{`C:\app`: {"Config.ini"}}}
+	if err := ensureNameFree(win, srv, core.TargetPathWindows, `C:\app`, "config.INI", ""); !errors.As(err, &taken) {
+		t.Fatalf("Windows targets compare names without case, got %v", err)
+	}
+
+	dup := &fakeLookup{dirs: map[string][]string{"/srv": {"a.txt", ".a.txt", "a copy.txt"}}}
+	if got, err := pickDuplicateName(dup, srv, posix, "/srv", "a.txt"); err != nil || got != "a copy 2.txt" {
+		t.Fatalf("duplicate name = %q, %v; want \"a copy 2.txt\"", got, err)
+	}
+	dupCI := &fakeLookup{dirs: map[string][]string{"/srv": {"a.txt", "A Copy.txt"}}, caseInsensitive: true}
+	if got, err := pickDuplicateName(dupCI, srv, posix, "/srv", "a.txt"); err != nil || got != "a copy 2.txt" {
+		t.Fatalf("duplicate name on a case-insensitive server = %q, %v", got, err)
+	}
 }

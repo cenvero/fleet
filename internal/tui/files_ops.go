@@ -639,6 +639,11 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 	}
 	app := m.app
 	source, remote := pane.source, pane.remote
+	// The listing check below gives instant feedback for visible names; the
+	// command re-checks against the directory itself (hidden and filtered-out
+	// entries included) right before it acts.
+	look := lookupFor(app)
+	style, cwd := pane.pathStyle, pane.cwd
 	switch m.prompt {
 	case promptNewFolder:
 		if m.nameExists(side, name) {
@@ -650,11 +655,13 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 		pane := m.paneRef(side)
 		pane.focusName = name
 		return m, func() tea.Msg {
-			var err error
-			if remote {
-				err = app.RemoteMkdir(source, target)
-			} else {
-				err = os.Mkdir(target, 0o750)
+			err := ensureNameFree(look, source, style, cwd, name, "")
+			if err == nil {
+				if remote {
+					err = app.RemoteMkdir(source, target)
+				} else {
+					err = os.Mkdir(target, 0o750)
+				}
 			}
 			return fileOpDoneMsg{side: side, verb: "created folder", what: name, err: err}
 		}
@@ -667,7 +674,11 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 		m.status = "creating file " + name + "…"
 		m.paneRef(side).focusName = name
 		return m, func() tea.Msg {
-			return fileOpDoneMsg{side: side, verb: "created file", what: name, err: createEmptyFile(app, source, remote, target)}
+			err := ensureNameFree(look, source, style, cwd, name, "")
+			if err == nil {
+				err = createEmptyFile(app, source, remote, target)
+			}
+			return fileOpDoneMsg{side: side, verb: "created file", what: name, err: err}
 		}
 	case promptRename:
 		if name == m.promptItem.name {
@@ -677,16 +688,19 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 			m.setStatus(levelWarn, name+" already exists here — pick another name")
 			return m, nil
 		}
-		from := joinPath(pane.cwd, m.promptItem.name, pane.pathStyle)
+		oldName := m.promptItem.name
+		from := joinPath(pane.cwd, oldName, pane.pathStyle)
 		to := joinPath(pane.cwd, name, pane.pathStyle)
 		m.status = "renaming to " + name + "…"
 		m.paneRef(side).focusName = name
 		return m, func() tea.Msg {
-			var err error
-			if remote {
-				err = app.RemoteRename(source, from, to)
-			} else {
-				err = os.Rename(from, to)
+			err := ensureNameFree(look, source, style, cwd, name, oldName)
+			if err == nil {
+				if remote {
+					err = app.RemoteRename(source, from, to)
+				} else {
+					err = os.Rename(from, to)
+				}
 			}
 			return fileOpDoneMsg{side: side, verb: "renamed to", what: name, err: err}
 		}
@@ -697,7 +711,8 @@ func (m filesModel) submitPrompt() (tea.Model, tea.Cmd) {
 }
 
 // nameExists reports whether the pane's current listing already has name
-// (case-insensitively on Windows targets).
+// (case-insensitively on Windows targets). The listing may leave out hidden
+// entries, so a false here is only a hint; see ensureNameFree.
 func (m filesModel) nameExists(side int, name string) bool {
 	pane := m.paneRefConst(side)
 	for _, it := range pane.allItems {

@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -248,6 +249,10 @@ func (m filesModel) onChecksumDone(msg checksumDoneMsg) (tea.Model, tea.Cmd) {
 // duplicateFocused copies the focused file or directory to a uniquely-named
 // sibling in the same pane. Directory copies preserve hidden and empty entries
 // and refuse symlinks through the core recursive transfer policy.
+//
+// The copy's name is chosen off the UI thread against the directory itself:
+// the pane's entries leave out hidden and filtered-out names, and the copy
+// would replace (or, remotely, land inside) whatever already had the name.
 func (m filesModel) duplicateFocused(side int) (tea.Model, tea.Cmd) {
 	pane := m.paneRefConst(side)
 	it := m.focusedItem(side)
@@ -255,28 +260,21 @@ func (m filesModel) duplicateFocused(side int) (tea.Model, tea.Cmd) {
 		m.status = "select an item to duplicate"
 		return m, nil
 	}
-	existing := make(map[string]bool, len(pane.entries))
-	for _, e := range pane.entries {
-		key := e.name
-		if pane.pathStyle.IsWindows() {
-			key = strings.ToLower(key)
-		}
-		existing[key] = true
-	}
-	dupName := duplicateName(it.name, existing, pane.pathStyle)
-	if err := core.ValidateTargetPathComponent(pane.pathStyle, dupName); err != nil {
-		m.status = "duplicate failed: " + err.Error()
-		return m, nil
-	}
-	src := joinPath(pane.cwd, it.name, pane.pathStyle)
-	dst := joinPath(pane.cwd, dupName, pane.pathStyle)
 	app := m.app
-	source := pane.source
-	isDir := it.isDir
+	look := lookupFor(app)
+	source, style, cwd := pane.source, pane.pathStyle, pane.cwd
+	name, isDir := it.name, it.isDir
 	m.status = "duplicating " + it.name + "…"
-	m.paneRef(side).focusName = dupName
 	return m, func() tea.Msg {
-		var err error
+		dupName, err := pickDuplicateName(look, source, style, cwd, name)
+		if err == nil {
+			err = core.ValidateTargetPathComponent(style, dupName)
+		}
+		if err != nil {
+			return fileOpDoneMsg{side: side, verb: "duplicated", what: name, err: err}
+		}
+		src := joinPath(cwd, name, style)
+		dst := joinPath(cwd, dupName, style)
 		if source == "" {
 			if isDir {
 				err = core.CopyLocalTreeAtomic(src, dst)
@@ -288,7 +286,7 @@ func (m filesModel) duplicateFocused(side int) (tea.Model, tea.Cmd) {
 		} else {
 			_, err = app.CopyFile(source, src, source, dst, core.FileTransferOptions{}, nil)
 		}
-		return fileOpDoneMsg{side: side, verb: "duplicated", what: dupName, err: err}
+		return fileOpDoneMsg{side: side, verb: "duplicated", what: dupName, focus: dupName, err: err}
 	}
 }
 
@@ -349,14 +347,20 @@ func copyLocalFile(src, dst string) error {
 // change shows immediately.
 func (m filesModel) onFileOpDone(msg fileOpDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		switch msg.verb {
-		case "created folder", "created file", "renamed to":
+		var taken *nameTakenError
+		switch {
+		case errors.As(msg.err, &taken):
+			m.setStatus(levelWarn, taken.Error()+" — nothing was changed")
+		case msg.verb == "created folder", msg.verb == "created file", msg.verb == "renamed to":
 			m.setStatus(levelError, fmt.Sprintf("could not %s %s: %v", failVerb(msg.verb), msg.what, msg.err))
 		default:
 			m.setStatus(levelError, msg.verb+" failed: "+msg.err.Error())
 		}
 		m.paneRef(msg.side).focusName = ""
 		return m, nil
+	}
+	if msg.focus != "" {
+		m.paneRef(msg.side).focusName = msg.focus
 	}
 	m.setStatus(levelOK, msg.verb+" "+msg.what)
 	return m, m.reload(msg.side)

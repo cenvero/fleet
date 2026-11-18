@@ -491,10 +491,11 @@ type statusExpireMsg struct{ seq int }
 // fileOpDoneMsg carries the result of an asynchronous file operation (compress,
 // extract, duplicate) so the pane can refresh and report status off the UI loop.
 type fileOpDoneMsg struct {
-	side int
-	verb string // human label for the status line ("compressed", "extracted", …)
-	what string // the affected name
-	err  error
+	side  int
+	verb  string // human label for the status line ("compressed", "extracted", …)
+	what  string // the affected name
+	focus string // entry to put the cursor on after the refresh ("" = leave it)
+	err   error
 }
 
 // checksumDoneMsg carries an asynchronous SHA-256 computation result. The hash is
