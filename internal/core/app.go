@@ -317,6 +317,9 @@ func (a *App) ListServers() ([]ServerRecord, error) {
 }
 
 func (a *App) GetServer(name string) (ServerRecord, error) {
+	if err := validateSafeName(name); err != nil {
+		return ServerRecord{}, fmt.Errorf("server %q not found — server names are letters, digits, hyphens, underscores and dots", name)
+	}
 	path := filepath.Join(a.ConfigDir, "servers", name+".toml")
 	a.serverMu.RLock()
 	var server ServerRecord
@@ -400,6 +403,12 @@ func (a *App) SaveServer(server ServerRecord) error {
 }
 
 func (a *App) writeServerFile(server ServerRecord) error {
+	// The name becomes a path under servers/, so it must be a safe name. A
+	// record from an import file or an older store must not be able to write
+	// "../config.toml" or any other file in the config dir.
+	if err := validateSafeName(server.Name); err != nil {
+		return fmt.Errorf("server name: %w", err)
+	}
 	dir := filepath.Join(a.ConfigDir, "servers")
 	path := filepath.Join(dir, server.Name+".toml")
 	a.serverMu.Lock()
@@ -1233,6 +1242,19 @@ func (a *App) Export() (ConfigExport, error) {
 }
 
 func (a *App) Import(export ConfigExport) error {
+	// Check every server record before writing anything, so a bad export is
+	// refused as a whole instead of half-applied (config saved, then a
+	// failure on the third server).
+	seen := make(map[string]bool, len(export.Servers))
+	for _, server := range export.Servers {
+		if err := validateSafeName(server.Name); err != nil {
+			return fmt.Errorf("import refused: server name: %w", err)
+		}
+		if seen[server.Name] {
+			return fmt.Errorf("import refused: server %q appears twice", server.Name)
+		}
+		seen[server.Name] = true
+	}
 	export.Config.ConfigDir = a.ConfigDir
 	if err := SaveConfig(ConfigPath(a.ConfigDir), export.Config); err != nil {
 		return err
