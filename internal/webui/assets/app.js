@@ -3824,6 +3824,7 @@ async function loadOverview() {
   ov.loading = false;
   renderOverview();
   renderAlertBadge();
+  refreshServerPages();
 }
 
 function scheduleOverview() {
@@ -4864,10 +4865,15 @@ function init() {
     if (busy || (editor.open && editor.dirty)) { e.preventDefault(); e.returnValue = ""; }
   });
 
+  // Every view starts hidden. Show the one asked for straight away, so no
+  // other view (the file manager was the visible one) flashes while the
+  // server list loads; the file manager and terminal need that list, so they
+  // are shown (or shown again) once it has arrived.
   const initialView = viewFromHash();
   state.view = initialView;
+  if (initialView !== "files") showView(initialView);
   loadServers().then(() => {
-    showView(initialView);
+    if (state.view === "files" || state.view === "terminal") showView(state.view);
     if (initialView !== "overview") loadOverview(); // fills the alert badge
   });
 }
@@ -4997,6 +5003,10 @@ const ctl = {
   actQuery: "",
 };
 
+// userRuns are the runs the operator started: a page's own background runs
+// (the data behind a list or a status) stay out of Activity.
+function userRuns() { return ctl.runs.filter((r) => !r.background); }
+
 function isPinned(key) { return ctl.pins.includes(key); }
 function togglePin(key) {
   ctl.pins = isPinned(key) ? ctl.pins.filter((k) => k !== key) : [...ctl.pins, key];
@@ -5110,13 +5120,13 @@ function renderSidebar() {
   const nav = $("#ctl-nav");
   if (!nav) return;
   const p = ctl.page;
-  const running = ctl.runs.filter((r) => r.state === "running").length;
+  const running = userRuns().filter((r) => r.state === "running").length;
   const top = h("ul", { class: "side-list", role: "list" },
     sideItem({ id: "home", label: "Overview", tileEl: tile("home", "blue"), on: p.kind === "home", onclick: () => showControl({ kind: "home" }) }),
-    sideItem({ id: "activity", label: "Activity", tileEl: tile("history", "gray"), on: p.kind === "activity" || p.kind === "run", badge: running || 0, count: running ? undefined : ctl.runs.length || undefined, onclick: () => showControl({ kind: "activity" }) }));
+    sideItem({ id: "activity", label: "Activity", tileEl: tile("history", "gray"), on: p.kind === "activity" || p.kind === "run", badge: running || 0, count: running ? undefined : userRuns().length || undefined, onclick: () => showControl({ kind: "activity" }) }));
   const cats = [CTL_GROUPS, ctl.commands.some((c) => groupOf(c) === CTL_OTHER) ? [CTL_OTHER] : []].flat().map((g) => {
     // A pinned command highlights its pin, not also its category.
-    const curGroup = p.kind === "category" ? p.id : p.kind === "command" && ctl.byKey.has(p.id) && !isPinned(p.id) ? groupOf(ctl.byKey.get(p.id)).id : "";
+    const curGroup = p.kind === "category" ? p.id : p.kind === "server" || p.kind === "add-server" ? "servers" : p.kind === "command" && ctl.byKey.has(p.id) && !isPinned(p.id) ? groupOf(ctl.byKey.get(p.id)).id : "";
     return sideItem({ id: g.id, label: g.label, tileEl: tile(g.icon, g.tint), count: commandsIn(g.id).filter((c) => !c.unavailable).length || undefined, on: curGroup === g.id, onclick: () => showControl({ kind: "category", id: g.id }) });
   });
   const pins = ctl.pins.filter((k) => ctl.byKey.has(k));
@@ -5148,7 +5158,9 @@ function showControl(page) {
   const content = $("#ctl-content");
   content.scrollTop = 0;
   switch (page.kind) {
-    case "category": renderCategory(page.id); break;
+    case "category": if (page.id === "servers") renderServersPage(); else renderCategory(page.id); break;
+    case "server": renderServerPage(page.id); break;
+    case "add-server": renderAddServer(page.prefill || {}); break;
     case "command": renderCommandPage(page.id, page.prefill || {}); break;
     case "activity": renderActivity(); break;
     case "run": renderRunPage(page.id); break;
@@ -5209,7 +5221,7 @@ function glanceTiles() {
 }
 
 function renderHome() {
-  const recent = ctl.runs.slice(0, 5);
+  const recent = userRuns().slice(0, 5);
   // Terminal-only commands (credential and controller-state ones) never get a
   // quick action, even if one is listed above.
   const quick = CTL_QUICK.filter((q) => { const c = ctl.byKey.get(q.key); return c && !c.unavailable; });
@@ -5233,11 +5245,10 @@ function renderHome() {
       h("div", { class: "quick-grid" }, quick.map((q) => h("div", { class: "quick" },
         h("button", { type: "button", class: "quick-main", onclick: () => openCommand(q.key, { flags: q.flags }) },
           tile(q.icon, q.tint, "lg"),
-          h("span", { class: "quick-text" }, h("b", { text: cmdLabel(q.key) }), h("span", { text: q.desc }))),
-        q.now ? h("button", { type: "button", class: "quick-run", title: "Run now", "aria-label": "Run " + cmdLabel(q.key) + " now", onclick: () => openCommand(q.key, { flags: q.flags, run: true }) }, icon("play")) : null)))),
+          h("span", { class: "quick-text" }, h("b", { text: cmdLabel(q.key) }), h("span", { text: q.desc }))))))),
     h("section", { class: "block" },
       h("div", { class: "block-head" }, h("h2", { class: "block-title", text: "Recent activity" }),
-        ctl.runs.length ? h("button", { type: "button", class: "link-btn", onclick: () => showControl({ kind: "activity" }), text: "Show all" }) : null),
+        userRuns().length ? h("button", { type: "button", class: "link-btn", onclick: () => showControl({ kind: "activity" }), text: "Show all" }) : null),
       recent.length ? runList(recent) : h("div", { class: "group" }, h("p", { class: "empty-row", text: "Nothing yet. Commands you run will show up here." }))),
     h("section", { class: "block" },
       h("h2", { class: "block-title", text: "Browse" }),
@@ -5293,6 +5304,12 @@ function renderSearch() {
 async function openCommand(key, prefill = {}) {
   await loadCommands();
   if (!ctl.byKey.has(key)) { toast("Unknown command: fleet " + key, "error"); return; }
+  // Adding a server has its own wizard, wherever it is started from.
+  if (key === "server add" && !ctl.byKey.get(key).unavailable) {
+    const a = Array.isArray(prefill.args) ? prefill.args : [];
+    showControl({ kind: "add-server", prefill: { name: a[0] || "", address: a[1] || "" } });
+    return;
+  }
   showControl({ kind: "command", id: key, prefill });
 }
 
@@ -5323,8 +5340,7 @@ function selectControl(id, values, value, required) {
 function renderCommandPage(key, prefill) {
   const spec = ctl.byKey.get(key);
   const g = groupOf(spec);
-  const head = h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"),
-    pageHead(cmdLabel(spec.path), spec.short && spec.short !== cmdLabel(spec.path) ? spec.short : ""));
+  const mode = cmdMode(spec);
   const pinBtn = h("button", { type: "button", class: "pin-btn" + (isPinned(key) ? " on" : ""), "aria-pressed": String(isPinned(key)), title: "Pin to Overview" },
     icon("star"), h("span", { text: isPinned(key) ? "Pinned" : "Pin" }));
   pinBtn.addEventListener("click", () => {
@@ -5333,10 +5349,9 @@ function renderCommandPage(key, prefill) {
     pinBtn.setAttribute("aria-pressed", String(isPinned(key)));
     pinBtn.lastChild.textContent = isPinned(key) ? "Pinned" : "Pin";
   });
-  const cli = h("div", { class: "cli-chip" }, h("code", { text: "fleet " + key }),
-    spec.destructive ? h("span", { class: "pill warn", text: "Changes things" }) : null,
-    spec.unavailable ? null : pinBtn);
-  const kids = [backLink(g.label, { kind: "category", id: g.id }), head, cli];
+  const head = h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"),
+    pageHead(cmdLabel(spec.path), spec.short && spec.short !== cmdLabel(spec.path) ? spec.short : "", spec.unavailable ? [] : [pinBtn]));
+  const kids = [backLink(g.label, { kind: "category", id: g.id }), head];
   if (key === "ssh") {
     const id = "ctl-f-" + ++ctlFieldSeq;
     const sel = selectControl(id, terminalServers().map((x) => x.name), "", true);
@@ -5416,12 +5431,12 @@ function renderCommandPage(key, prefill) {
   form.noValidate = true; // validation is ours (buildArgv), with clearer messages
   if (details.length) form.append(h("section", { class: "block" }, h("div", { class: "group" }, details)));
   if (optionRows.length) {
-    const openByDefault = optionRows.length <= 3 || optionRows.some((o) => o.pre);
+    const openByDefault = optionRows.some((o) => o.pre) || (cmdMode(spec) === "action" && optionRows.length <= 3);
     form.append(h("details", { class: "block disclosure", open: openByDefault || null },
       h("summary", { class: "disclosure-head" }, h("span", { text: "Options" }), h("span", { class: "disclosure-count", text: String(optionRows.length) }), icon("chevron-right", "disclosure-chev")),
       h("div", { class: "group" }, optionRows.map((o) => o.row))));
   }
-  if (spec.stdin) {
+  if (spec.stdin && !STDIN_FOR_PASSWORD.has(key)) {
     const id = "ctl-f-" + ++ctlFieldSeq;
     const secret = spec.path[0] === "secret";
     const input = secret
@@ -5442,12 +5457,16 @@ function renderCommandPage(key, prefill) {
   const preview = h("code", { class: "cmd-preview-text" });
   const copyBtn = h("button", { type: "button", class: "icon-btn sm", title: "Copy terminal command", "aria-label": "Copy terminal command" }, icon("copy"));
   const err = h("p", { class: "form-error", role: "alert" });
-  const runBtn = h("button", { type: "submit", class: "btn lg " + (spec.destructive ? "danger-solid" : "primary") }, icon("play"), spec.destructive ? "Run…" : "Run");
+  const label = mode === "view" ? "Refresh" : mode === "lookup" ? "Show" : cmdLabel(spec.path) + (spec.destructive ? "…" : "");
+  const runBtn = h("button", { type: "submit", class: "btn lg " + (spec.destructive ? "danger-solid" : "primary") },
+    icon(mode === "view" ? "refresh" : mode === "lookup" ? "eye" : spec.destructive ? "alert" : "check"), label);
   form.append(
     h("div", { class: "cmd-footer" },
-      h("div", { class: "cmd-preview", title: "The same thing in a terminal" }, h("span", { class: "prompt", text: "$" }), preview, copyBtn),
       h("div", { class: "cmd-actions" }, err, h("span", { class: "kbd-hint" }, h("kbd", { text: MOD }), h("kbd", { text: "↵" })), runBtn)),
   );
+  const cmdDetails = h("details", { class: "block disclosure subtle" },
+    h("summary", { class: "disclosure-head" }, h("span", { text: "Show the command" }), icon("chevron-right", "disclosure-chev")),
+    h("div", { class: "cmd-preview", title: "The same thing in a terminal" }, h("span", { class: "prompt", text: "$" }), preview, copyBtn));
 
   const build = () => buildArgv(spec, fields);
   const refresh = () => {
@@ -5481,25 +5500,32 @@ function renderCommandPage(key, prefill) {
     if (spec.destructive) {
       const ok = await confirmDialog({
         title: cmdLabel(spec.path) + "?",
-        message: "This changes your fleet. Here's exactly what will run:",
-        extra: [h("pre", { class: "confirm-cmd", text: preview.textContent })],
-        okLabel: "Run", danger: true,
+        message: "This changes your fleet and can't be undone from here.",
+        extra: [h("details", { class: "disclosure subtle" }, h("summary", { class: "disclosure-head" }, h("span", { text: "Show the command" }), icon("chevron-right", "disclosure-chev")), h("pre", { class: "confirm-cmd", text: preview.textContent }))],
+        okLabel: cmdLabel(spec.path), danger: true,
       });
       if (!ok) return;
     }
+    // Pages that show data ask for it as JSON when the command can give it,
+    // so it renders as a table rather than as text.
+    if (mode !== "action" && spec.flags.some((f) => f.name === "json" && f.type === "bool") && !req.args.includes("--json") && !req.args.includes("--json=false")) {
+      req.args = req.args.includes("--") ? [...req.args.slice(0, req.args.indexOf("--")), "--json", ...req.args.slice(req.args.indexOf("--"))] : [...req.args, "--json"];
+    }
     runBtn.disabled = true;
-    try {
-      const run = await startRun(spec.path, req.args, req.stdin, { select: false });
-      if (run) showResult(run.id);
-    } finally { runBtn.disabled = false; }
+    try { await runInline(spec, req, mode, result); }
+    finally { runBtn.disabled = false; }
   });
 
   const result = h("section", { class: "block", id: "ctl-result-slot" });
-  kids.push(form, result);
+  kids.push(form, result, cmdDetails);
   if (spec.long || spec.example) kids.push(aboutBlock(spec));
   $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, kids));
   refresh();
-  if (prefill.run) { delete prefill.run; form.requestSubmit(); }
+  // A page that only reads shows its data straight away: with nothing to
+  // fill in, or with what to look at already picked (a server's Services).
+  const filled = fields.args.every(({ spec: a, input }) => !a.required || input.value.trim()) &&
+    fields.flags.every(({ spec: f, input }) => !f.required || (f.type === "bool" || input.value.trim()));
+  if (prefill.run || ((mode === "view" || mode === "lookup") && filled)) { delete prefill.run; form.requestSubmit(); }
   else {
     const first = form.querySelector(".g-control input:not([type=checkbox]), .g-control select, textarea");
     if (first && !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches) && !first.value) first.focus();
@@ -5539,6 +5565,7 @@ function buildArgv(spec, fields) {
     } else positional.push(raw.trim());
   }
   const flags = [];
+  let stdinPassword = "";
   for (const { spec: f, input } of fields.flags) {
     if (f.type === "bool") {
       const def = f.default === "true";
@@ -5551,6 +5578,12 @@ function buildArgv(spec, fields) {
       continue;
     }
     if (f.default && v === f.default) continue;
+    if (f.name === "login-password" && STDIN_FOR_PASSWORD.has(ctlKey(spec.path))) {
+      // Never a process argument: sent on stdin instead.
+      flags.push("--login-password-stdin");
+      stdinPassword = v + "\n";
+      continue;
+    }
     if (f.type === "stringArray") for (const part of v.split(",")) { if (part.trim()) flags.push("--" + f.name + "=" + part.trim()); }
     else flags.push("--" + f.name + "=" + (f.sensitive ? v : v.trim()));
   }
@@ -5562,7 +5595,7 @@ function buildArgv(spec, fields) {
   // all flags go first and "--" marks the rest as plain arguments.
   const needsDash = positional.some((p) => p.startsWith("-")) && !extra.includes("--");
   const args = needsDash ? [...flags, ...extra, "--", ...positional] : [...positional, ...flags, ...extra];
-  return { args, stdin: fields.stdin ? fields.stdin.value : "" };
+  return { args, stdin: stdinPassword || (fields.stdin ? fields.stdin.value : "") };
 }
 
 function maskArgs(spec, args) {
@@ -5602,7 +5635,7 @@ function runList(runs) {
 
 function filteredRuns() {
   const q = ctl.actQuery.trim().toLowerCase();
-  return ctl.runs.filter((r) => {
+  return userRuns().filter((r) => {
     if (ctl.actFilter === "running" && r.state !== "running") return false;
     if (ctl.actFilter === "failed" && r.state !== "failed") return false;
     if (ctl.actFilter === "done" && r.state !== "ok") return false;
@@ -5611,8 +5644,8 @@ function filteredRuns() {
 }
 
 function renderActivity() {
-  const clear = h("button", { type: "button", class: "btn", disabled: !ctl.runs.some((r) => r.state !== "running"), onclick: clearRuns }, "Clear");
-  const count = (st) => ctl.runs.filter((r) => st === "all" || (st === "done" ? r.state === "ok" : r.state === st)).length;
+  const clear = h("button", { type: "button", class: "btn", disabled: !userRuns().some((r) => r.state !== "running"), onclick: clearRuns }, "Clear");
+  const count = (st) => userRuns().filter((r) => st === "all" || (st === "done" ? r.state === "ok" : r.state === st)).length;
   const seg = h("div", { class: "segmented", role: "radiogroup", "aria-label": "Show" }, [["all", "All"], ["running", "Running"], ["done", "Done"], ["failed", "Failed"]].map(([v, label]) =>
     h("button", { type: "button", role: "radio", "aria-checked": String(ctl.actFilter === v), onclick: () => { ctl.actFilter = v; renderActivity(); } }, label, h("span", { class: "seg-count", text: String(count(v)) }))));
   const search = h("label", { class: "field search-field act-search" }, icon("search"),
@@ -5626,13 +5659,13 @@ function renderActivity() {
   $("#ctl-content").replaceChildren(h("div", { class: "page narrow" },
     backLink("Control", { kind: "home" }),
     pageHead("Activity", "Commands run from this window. The newest 60 are kept while it's open.", [clear]),
-    ctl.runs.length ? h("div", { class: "toolbar-row" }, seg, search) : null,
+    userRuns().length ? h("div", { class: "toolbar-row" }, seg, search) : null,
     h("div", { id: "act-list" }, activityBody()),
   ));
 }
 
 function activityBody() {
-  if (!ctl.runs.length) return h("div", { class: "empty-state" }, tile("history", "gray", "xl"), h("h3", { text: "No activity yet" }), h("p", { text: "Run something from Control or the Fleet tab and it will appear here." }));
+  if (!userRuns().length) return h("div", { class: "empty-state" }, tile("history", "gray", "xl"), h("h3", { text: "No activity yet" }), h("p", { text: "Run something from Control or the Fleet tab and it will appear here." }));
   const runs = filteredRuns();
   return runs.length ? runList(runs) : h("div", { class: "group" }, h("p", { class: "empty-row", text: "Nothing matches." }));
 }
@@ -5683,13 +5716,13 @@ function showResult(id) {
 
 // ---- runs
 
-async function startRun(path, args, stdin = "", { select = true, quiet = false } = {}) {
+async function startRun(path, args, stdin = "", { select = true, quiet = false, background = false } = {}) {
   let res;
   try {
     const r = await fetch(api("/api/runs"), {
       method: "POST",
       headers: { "X-Fleet-Token": TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify({ path, args, stdin }),
+      body: JSON.stringify({ path, args, stdin, background }),
     });
     if (!r.ok) throw await errorFrom(r);
     res = await r.json();
@@ -6080,6 +6113,464 @@ async function alertAction(al, kind) {
   if (res.run.state === "ok") toast(kind === "ack" ? "Alert acknowledged" : "Alert snoozed for an hour", "success");
   else toast((res.text.trim().split("\n").pop() || cmdLabel(path) + " failed"), "error");
   loadOverview();
+}
+
+// ---- task screens
+//
+// Control is for getting things done, not for typing commands. A command
+// that only reads runs as soon as its page opens and shows its result as a
+// table or a list ("view"), or as soon as you pick what to look at, such as
+// a server ("lookup"). One that changes something gets a button named for
+// what it does and says how it went ("action"). Servers have their own list,
+// a page per server and an add-server wizard. The command behind a page is
+// one click away, under "Show the command", for anyone who wants it.
+
+// server add and server remove take the SSH login password on stdin
+// (--login-password-stdin): it must never be a process argument.
+const STDIN_FOR_PASSWORD = new Set(["server add", "server remove"]);
+
+function cmdMode(spec) {
+  const key = ctlKey(spec.path);
+  const needs = spec.args.some((a) => a.required) || spec.flags.some((f) => f.required) || (spec.stdin && !STDIN_FOR_PASSWORD.has(key));
+  if (!spec.mutating && !spec.destructive) return needs ? "lookup" : "view";
+  return "action";
+}
+
+function waitRun(id) {
+  return new Promise((resolve) => {
+    const list = ctl.waiters.get(id) || [];
+    list.push(resolve);
+    ctl.waiters.set(id, list);
+    const known = ctl.runs.find((r) => r.id === id);
+    if (known && known.state !== "running") settleWaiters(known);
+  });
+}
+
+function runText(id, stream) {
+  const o = ctl.out.get(id);
+  if (!o) return "";
+  return stripAnsi(o.chunks.filter((c) => !stream || c.stream === stream).map((c) => c.text).join(""));
+}
+
+function lastLines(text, n) {
+  return text.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-n).join("\n");
+}
+
+function parseJSONOutput(text) {
+  const t = text.trim();
+  if (!t || (t[0] !== "{" && t[0] !== "[")) return undefined;
+  try { return JSON.parse(t); } catch { return undefined; }
+}
+
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+
+function cellText(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (typeof v === "string" && ISO_RE.test(v)) return v.startsWith("0001-") ? "—" : fmtRelative(v);
+  if (typeof v === "object") return Array.isArray(v) ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ") : JSON.stringify(v);
+  return String(v);
+}
+
+function headLabel(k) {
+  return capFirst(k.replace(/_/g, " ").replace(/\bid\b/g, "ID").replace(/\bpid\b/g, "PID").replace(/\bos\b/g, "OS"));
+}
+
+// dataTable renders rows of objects as a table.
+function dataTable(rows) {
+  const cols = [];
+  for (const r of rows.slice(0, 200)) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
+  const shown = cols.slice(0, 10);
+  return h("div", { class: "json-table-wrap" },
+    h("table", { class: "json-table" },
+      h("thead", null, h("tr", null, shown.map((c) => h("th", { scope: "col", text: headLabel(c) })))),
+      h("tbody", null, rows.slice(0, 1000).map((r) => h("tr", null, shown.map((c) => {
+        const v = r[c];
+        const t = cellText(v);
+        return h("td", { class: typeof v === "number" ? "num" : t.length > 48 ? "long" : "", title: typeof v === "string" && ISO_RE.test(v) ? fmtDateFull(v) : t.length > 60 ? t : null, text: t.length > 160 ? t.slice(0, 160) + "…" : t });
+      }))))),
+    rows.length > 1000 || cols.length > shown.length ? h("p", { class: "result-note", text: "Showing " + Math.min(rows.length, 1000) + " of " + rows.length + " rows" + (cols.length > shown.length ? " and " + shown.length + " of " + cols.length + " columns" : "") + "." }) : null);
+}
+
+// dataView renders a command's JSON result for reading: rows as a table, an
+// object as labelled values (its lists as tables below).
+function dataView(data, depth = 0) {
+  if (Array.isArray(data)) {
+    if (!data.length) return h("p", { class: "empty-row", text: "None." });
+    if (data.every((r) => r && typeof r === "object" && !Array.isArray(r))) return dataTable(data);
+    return h("div", { class: "group" }, data.map((x) => h("div", { class: "g-row" }, h("span", { class: "g-title", text: cellText(x) }))));
+  }
+  if (data && typeof data === "object") {
+    const scalars = [], lists = [];
+    for (const [k, v] of Object.entries(data)) {
+      if (v && typeof v === "object" && (Array.isArray(v) ? v.some((x) => x && typeof x === "object") : depth < 1 && Object.keys(v).length > 3)) lists.push([k, v]);
+      else scalars.push([k, v]);
+    }
+    return h("div", { class: "data-view" },
+      scalars.length ? h("dl", { class: "kv" }, scalars.flatMap(([k, v]) => [h("dt", { text: headLabel(k) }), h("dd", { text: cellText(v) })])) : null,
+      lists.map(([k, v]) => h("section", { class: "block" }, h("h3", { class: "kv-title", text: headLabel(k) }), dataView(v, depth + 1))));
+  }
+  return h("p", { class: "inline-msg", text: cellText(data) });
+}
+
+function outputDisclosure(text, label = "Output") {
+  return h("details", { class: "block disclosure subtle" },
+    h("summary", { class: "disclosure-head" }, h("span", { text: label }), icon("chevron-right", "disclosure-chev")),
+    h("pre", { class: "term light inline-out", tabindex: "0", text }));
+}
+
+// runInline starts a command for a page and shows the outcome in slot.
+async function runInline(spec, req, mode, slot, onDone) {
+  const working = mode === "action" ? "Working…" : "Loading…";
+  const live = h("pre", { class: "term light inline-live", hidden: true });
+  slot.replaceChildren(h("div", { class: "inline-working", role: "status" }, h("span", { class: "spinner sm" }), h("span", { text: working })), live);
+  const run = await startRun(spec.path, req.args, req.stdin, { select: false, quiet: true, background: mode !== "action" });
+  if (!run) { slot.replaceChildren(callout("danger", "circle-x", h("p", { class: "inline-msg", text: "It could not start." }))); return null; }
+  let timer = 0;
+  if (mode === "action") {
+    timer = setInterval(() => {
+      const t = runText(run.id);
+      if (t.trim()) { live.hidden = false; live.textContent = t.length > 6000 ? "…" + t.slice(-6000) : t; live.scrollTop = live.scrollHeight; }
+    }, 400);
+  }
+  const final = await waitRun(run.id);
+  clearInterval(timer);
+  if (!slot.isConnected) return final;
+  slot.replaceChildren(inlineResult(mode, final, runText(run.id, "out"), runText(run.id)));
+  if (onDone) onDone(final);
+  return final;
+}
+
+// parseTextTable reads the aligned tables many commands print (a header of
+// capitalised column names, columns separated by two or more spaces) into
+// rows, or returns null when the text is not one.
+function parseTextTable(text) {
+  const lines = text.split("\n").filter((l) => l.trim());
+  if (lines.length < 2) return null;
+  const head = lines[0];
+  if (!/^[A-Z][A-Z0-9 /_().-]*$/.test(head.trim()) || !/\S {2,}\S/.test(head)) return null;
+  const starts = [];
+  head.replace(/(^|\s{2,})(\S)/g, (m, sp, ch, off) => { starts.push(off + sp.length); return m; });
+  if (starts.length < 2) return null;
+  const names = starts.map((st, i) => head.slice(st, starts[i + 1]).trim());
+  const rows = [];
+  for (const line of lines.slice(1)) {
+    const row = {};
+    names.forEach((n, i) => { row[n.toLowerCase()] = line.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : undefined).trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function inlineResult(mode, run, out, all) {
+  if (run.state !== "ok") {
+    const msg = run.state === "cancelled" ? "Stopped." : lastLines(all, 6) || run.error || "It did not work.";
+    return h("div", { class: "inline-result" }, callout("danger", "circle-x", h("p", { class: "inline-msg", text: msg })), all.trim() ? outputDisclosure(all, "Full output") : null);
+  }
+  const parsed = parseJSONOutput(out);
+  if (mode === "action") {
+    if (parsed !== undefined) return h("div", { class: "inline-result" }, callout("ok", "circle-check", h("p", { class: "inline-msg", text: "Done." })), dataView(parsed));
+    const lines = out.split("\n").filter((l) => l.trim()).length;
+    if (lines <= 4) return h("div", { class: "inline-result" }, callout("ok", "circle-check", h("p", { class: "inline-msg", text: lastLines(out || all, 4) || "Done." })));
+    return h("div", { class: "inline-result" }, callout("ok", "circle-check", h("p", { class: "inline-msg", text: "Done." })), h("pre", { class: "term light inline-out", tabindex: "0", text: out }));
+  }
+  if (parsed !== undefined) return h("div", { class: "inline-result" }, dataView(parsed));
+  if (!out.trim()) return h("div", { class: "inline-result" }, h("p", { class: "empty-row", text: "Nothing to show." }));
+  const table = parseTextTable(out);
+  if (table) return h("div", { class: "inline-result" }, dataTable(table));
+  return h("div", { class: "inline-result" }, h("pre", { class: "term light inline-out", tabindex: "0", text: out }));
+}
+
+// ---- servers
+
+function serverRows() {
+  return ov.data ? ov.data.servers.slice().sort((a, b) => a.name.localeCompare(b.name)) : [];
+}
+
+function serverRow(s) {
+  const statusCls = s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other";
+  const more = h("button", {
+    class: "icon-btn sm more-btn", type: "button", "aria-haspopup": "menu", "aria-label": "Manage " + s.name, title: "Manage " + s.name,
+    onclick: (e) => { e.stopPropagation(); openMenu(serverMenuItems(s.name, s.reachable), { anchor: more, label: "Manage " + s.name }); },
+  }, icon("more"));
+  const open = () => showControl({ kind: "server", id: s.name });
+  return h("tr", { class: "srv-row", tabindex: "0", onclick: open, onkeydown: (e) => { if (e.key === "Enter") open(); }, dataset: { server: s.name } },
+    h("td", null, h("div", { class: "srv-name" }, h("b", { text: s.name }), s.node && s.node !== s.name ? h("span", { class: "srv-node", text: s.node }) : null)),
+    h("td", null, h("span", { class: "srv-status " + statusCls }, h("span", { class: "dot " + statusCls }), statusLabel(s.status))),
+    h("td", { class: "mono", text: s.address || "—" }),
+    h("td", { text: s.mode === "direct" ? "Direct" : s.mode === "reverse" ? "Reverse" : s.mode || "—" }),
+    h("td", { text: s.os ? s.os + (s.arch ? "/" + s.arch : "") : "—" }),
+    h("td", { class: "mono", text: s.agent_version || "—" }),
+    h("td", { title: s.last_seen ? fmtDateFull(s.last_seen) : null, text: s.last_seen ? fmtRelative(s.last_seen) : "Never" }),
+    h("td", { class: "srv-more" }, more));
+}
+
+function renderServersPage() {
+  const g = groupById("servers");
+  if (!ov.data && !ov.loading) loadOverview();
+  const rows = serverRows();
+  const online = rows.filter((s) => s.status === "online").length;
+  const add = h("button", { type: "button", class: "btn primary", onclick: () => showControl({ kind: "add-server" }) }, icon("plus"), "Add server");
+  const refresh = h("button", { type: "button", class: "btn", onclick: () => loadOverview() }, icon("refresh"), "Refresh");
+  let body;
+  if (!ov.data) body = ov.error ? callout("danger", "alert", h("p", { text: "Couldn't load your servers: " + friendlyError(ov.error) })) : h("div", { class: "inline-working" }, h("span", { class: "spinner sm" }), h("span", { text: "Loading servers…" }));
+  else if (!rows.length) body = h("div", { class: "empty-state" }, tile("server", "blue", "xl"), h("h3", { text: "No servers yet" }), h("p", { text: "Add the first machine you want to manage." }), h("button", { type: "button", class: "btn primary lg", onclick: () => showControl({ kind: "add-server" }) }, icon("plus"), "Add server"));
+  else body = h("div", { class: "ov-table-wrap srv-table-wrap" }, h("table", { class: "ov-table srv-table" },
+    h("thead", null, h("tr", null, ["Name", "Status", "Address", "Mode", "System", "Agent", "Last seen", ""].map((t) => h("th", { scope: "col", text: t })))),
+    h("tbody", null, rows.map(serverRow))));
+  const tools = commandsIn("servers").filter((c) => !["server add", "server list"].includes(ctlKey(c.path)));
+  $("#ctl-content").replaceChildren(h("div", { class: "page" },
+    backLink("Control", { kind: "home" }),
+    h("div", { class: "page-hero" }, tile(g.icon, g.tint, "xl"), pageHead("Servers", rows.length ? plural(rows.length, "server") + " · " + online + " online" : g.desc, [refresh, add])),
+    body,
+    tools.length ? h("details", { class: "block disclosure subtle" },
+      h("summary", { class: "disclosure-head" }, h("span", { text: "More server tools" }), h("span", { class: "disclosure-count", text: String(tools.length) }), icon("chevron-right", "disclosure-chev")),
+      h("div", { class: "group" }, tools.map(commandRow))) : null));
+}
+
+function renderServerPage(name) {
+  if (!ov.data && !ov.loading) loadOverview();
+  const s = serverRows().find((x) => x.name === name);
+  const back = backLink("Servers", { kind: "category", id: "servers" });
+  if (!s) {
+    $("#ctl-content").replaceChildren(h("div", { class: "page narrow" }, back,
+      ov.data ? callout("warn", "alert", h("p", { text: name + " is not one of your servers any more." })) : h("div", { class: "inline-working" }, h("span", { class: "spinner sm" }), h("span", { text: "Loading…" }))));
+    return;
+  }
+  const statusCls = s.status === "online" ? "online" : s.status === "offline" ? "offline" : "other";
+  const has = (k) => ctl.byKey.has(k) && !ctl.byKey.get(k).unavailable;
+  const act = (iconName, label, run, { off = false, danger = false, why = "" } = {}) => h("button", {
+    type: "button", class: "srv-action" + (danger ? " danger" : ""), disabled: off, title: off ? why : null, onclick: run,
+  }, icon(iconName), h("span", { text: label }));
+  const go = (k, extra = {}) => () => openCommand(k, { args: [name], ...extra });
+  const actions = [
+    has("service list") && act("layers", "Services", go("service list")),
+    has("exec") && act("command", "Run a command", go("exec")),
+    act("folder", "Files", () => openServerInFiles(name), { off: !s.reachable, why: name + " is not reachable" }),
+    act("terminal", "Terminal", () => openTerminal(name), { off: s.mode !== "direct", why: "Shells open on direct-mode servers" }),
+    has("server metrics") && act("chart", "Live usage", go("server metrics"), { off: !s.reachable, why: name + " is not reachable" }),
+    has("doctor") && act("heart-pulse", "Health checklist", go("doctor")),
+    has("fw status") && act("shield", "Firewall", go("fw status")),
+    has("port list") && act("network", "Open ports", go("port list")),
+    has("tag") && act("tag", "Tags", go("tag")),
+    has("server reconnect") && act("plug", "Reconnect", go("server reconnect")),
+    has("server remove") && act("trash", "Remove", go("server remove"), { danger: true }),
+  ].filter(Boolean);
+  const m = s.metrics || {};
+  const tags = Object.entries(s.tags || {}).sort(([x], [y]) => x.localeCompare(y));
+  const facts = [
+    ["Status", h("span", { class: "srv-status " + statusCls }, h("span", { class: "dot " + statusCls }), statusLabel(s.status))],
+    ["Address", s.address || "—"], ["Connection", s.mode === "direct" ? "Direct (Fleet connects to the agent)" : s.mode === "reverse" ? "Reverse (the agent connects to Fleet)" : s.mode],
+    ["System", s.os ? s.os + (s.arch ? "/" + s.arch : "") : "—"], ["Host name", s.node || "—"], ["Agent", s.agent_version || "—"],
+    ["Last seen", s.last_seen ? fmtRelative(s.last_seen) + " (" + fmtDateFull(s.last_seen) + ")" : "Never"],
+  ];
+  $("#ctl-content").replaceChildren(h("div", { class: "page" }, back,
+    h("div", { class: "page-hero" }, tile("server", "blue", "xl"), pageHead(s.name, [s.address, s.os, s.mode].filter(Boolean).join(" · "),
+      [h("button", { type: "button", class: "btn", onclick: () => loadOverview() }, icon("refresh"), "Refresh")])),
+    s.last_error ? callout("warn", "alert", h("p", { text: s.last_error })) : null,
+    h("div", { class: "srv-detail" + (s.metrics ? " with-rings" : "") },
+      h("dl", { class: "kv" }, facts.flatMap(([k, v]) => [h("dt", { text: k }), h("dd", null, v)])),
+      s.metrics ? h("div", { class: "rings" }, ring("CPU", m.cpu_percent), ring("Memory", m.memory_percent), ring("Disk", m.disk_percent)) : null),
+    tags.length ? h("div", { class: "tags" }, tags.map(([k, v]) => h("span", { class: "tag" }, h("b", { text: k }), "=" + v))) : null,
+    h("section", { class: "block" }, h("h2", { class: "block-title", text: "Manage" }), h("div", { class: "srv-actions" }, actions))));
+}
+
+// Re-render a servers page when the fleet overview data changes.
+function refreshServerPages() {
+  if (state.view !== "control") return;
+  const p = ctl.page;
+  if (p.kind === "category" && p.id === "servers") renderServersPage();
+  else if (p.kind === "server") renderServerPage(p.id);
+}
+
+// ---- add a server (a wizard over `fleet server add`)
+
+const SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+
+function renderAddServer(prefill = {}) {
+  const w = {
+    step: 1,
+    name: prefill.name || "", address: prefill.address || "", mode: "direct",
+    install: true, user: "root", sshPort: "22", auth: "fleet", keyPath: "", password: "", sudo: false, agentPort: "",
+  };
+  const content = $("#ctl-content");
+  const steps = ["Server", "Agent", "Review"];
+  const stepper = () => h("ol", { class: "wiz-steps", "aria-label": "Steps" }, steps.map((label, i) => {
+    const n = i + 1;
+    return h("li", { class: n === w.step ? "on" : n < w.step ? "done" : "", "aria-current": n === w.step ? "step" : null },
+      h("span", { class: "wiz-num", text: n < w.step ? "✓" : String(n) }), h("span", { text: label }));
+  }));
+  const field = (label, input, help = "") => {
+    const id = input.id || "wiz-" + ++ctlFieldSeq;
+    input.id = id;
+    return gRow(label, input, { forId: id, help });
+  };
+  const text = (value, attrs = {}) => h("input", { class: "text-input", type: "text", spellcheck: "false", autocomplete: "off", autocapitalize: "off", value, ...attrs });
+  const err = h("p", { class: "form-error", role: "alert" });
+  const nav = (back, nextLabel, onNext, { primaryCls = "primary" } = {}) => h("div", { class: "wiz-nav" },
+    back ? h("button", { type: "button", class: "btn lg", onclick: back }, icon("chevron-left"), "Back") : h("span"),
+    h("div", { class: "cmd-actions" }, err, h("button", { type: "submit", class: "btn lg " + primaryCls }, nextLabel, icon("chevron-right"))));
+  const page = (kids, onSubmit) => {
+    err.textContent = "";
+    const form = h("form", { class: "wiz-form", autocomplete: "off" }, kids);
+    form.noValidate = true;
+    form.addEventListener("submit", (e) => { e.preventDefault(); onSubmit(); });
+    content.replaceChildren(h("div", { class: "page narrow" },
+      backLink("Servers", { kind: "category", id: "servers" }),
+      h("div", { class: "page-hero" }, tile("plus", "blue", "xl"), pageHead("Add a server", "Fleet registers the machine and installs its agent, so you can manage it from here.")),
+      stepper(), form));
+    const first = form.querySelector("input:not([type=checkbox]):not([type=radio]), select");
+    if (first && !first.value) first.focus();
+  };
+  const fail = (msg, input) => { err.textContent = msg; if (input) { input.setAttribute("aria-invalid", "true"); input.focus(); } };
+
+  const stepServer = () => {
+    const name = text(w.name, { placeholder: "web-01", maxlength: "63" });
+    const address = text(w.address, { placeholder: "203.0.113.10 or web-01.example.com" });
+    const choice = (value, title, sub) => h("label", { class: "wiz-choice" + (w.mode === value ? " on" : "") },
+      h("input", { type: "radio", name: "wiz-mode", value, checked: w.mode === value || null, onchange: () => { w.mode = value; w.name = name.value; w.address = address.value; stepServer(); } }),
+      h("span", { class: "wiz-choice-text" }, h("b", { text: title }), h("span", { text: sub })));
+    const reverseNote = w.mode === "reverse" ? callout("warn", "info",
+      h("p", { text: "Add a reverse-mode server in a terminal. Fleet shows a one-time join secret for the server, and the web console keeps no secrets in its history:" }),
+      h("pre", { class: "confirm-cmd", text: "fleet server add " + (name.value.trim() || "<name>") + " --mode reverse" })) : null;
+    page([
+      h("section", { class: "block" }, h("div", { class: "group" },
+        field("Name", name, "How the server appears in Fleet: letters, digits, dots, hyphens and underscores."),
+        field("Address", address, "Its IP address or host name, as this machine reaches it."))),
+      h("section", { class: "block" }, h("h2", { class: "block-title", text: "How Fleet connects" }), h("div", { class: "wiz-choices" },
+        choice("direct", "Direct", "Fleet connects to the server's agent. The usual choice."),
+        choice("reverse", "Reverse", "The server connects out to Fleet, for machines Fleet can't reach (behind NAT)."))),
+      reverseNote,
+      nav(null, "Next", null),
+    ], () => {
+      w.name = name.value.trim(); w.address = address.value.trim();
+      if (w.mode !== "direct") return fail("Add a reverse-mode server in a terminal (see above).");
+      if (!w.name) return fail("Give the server a name.", name);
+      if (!SERVER_NAME_RE.test(w.name) || w.name.includes("..")) return fail("Use letters, digits, dots, hyphens and underscores (up to 63), starting with a letter or digit.", name);
+      if (serverRows().some((s) => s.name === w.name)) return fail("You already have a server called " + w.name + ".", name);
+      if (!w.address) return fail("Enter the server's address.", address);
+      if (/\s/.test(w.address)) return fail("The address can't contain spaces.", address);
+      w.step = 2; stepAgent();
+    });
+  };
+
+  const stepAgent = () => {
+    const install = switchControl("wiz-install", w.install);
+    const user = text(w.user, { placeholder: "root" });
+    const sshPort = text(w.sshPort, { inputmode: "numeric", placeholder: "22" });
+    const keyPath = text(w.keyPath, { class: "text-input mono", placeholder: "~/.ssh/id_ed25519" });
+    const password = h("input", { class: "text-input", type: "password", autocomplete: "new-password", value: w.password });
+    const sudo = switchControl("wiz-sudo", w.sudo);
+    const agentPort = text(w.agentPort, { inputmode: "numeric", placeholder: "2222 (Fleet's default)" });
+    const keep = () => {
+      w.install = install.input.checked; w.user = user.value.trim(); w.sshPort = sshPort.value.trim(); w.keyPath = keyPath.value.trim();
+      w.password = password.value; w.sudo = sudo.input.checked; w.agentPort = agentPort.value.trim();
+    };
+    const authSeg = h("div", { class: "segmented", role: "radiogroup", "aria-label": "Sign in with" },
+      [["fleet", "Fleet's key"], ["key", "A key file"], ["password", "Password"]].map(([v, label]) => h("button", {
+        type: "button", role: "radio", "aria-checked": String(w.auth === v), onclick: () => { keep(); w.auth = v; stepAgent(); },
+      }, label)));
+    install.input.addEventListener("change", () => { keep(); stepAgent(); });
+    const login = w.install ? [
+      h("section", { class: "block" }, h("h2", { class: "block-title", text: "Sign in over SSH" }), h("div", { class: "group" },
+        field("User", user, "An account that can install software. With another user than root, turn on sudo."),
+        field("SSH port", sshPort),
+        gRow("Sign in with", authSeg, { help: w.auth === "fleet" ? "This controller's own key, already in that user's authorized_keys." : w.auth === "key" ? "A private key file on this machine." : "Sent once to the installer, never shown again or kept by this page." }),
+        w.auth === "key" ? field("Key file", keyPath) : null,
+        w.auth === "password" ? field("Password", password) : null,
+        gRow("Use sudo", sudo.el, { forId: "wiz-sudo", cls: "g-switch", help: "Run the install with sudo." }))),
+    ] : [callout("info", "info", h("p", { text: "Fleet will only register the server. Install the agent on it yourself; the server's page then shows how." }))];
+    page([
+      h("section", { class: "block" }, h("div", { class: "group" },
+        gRow("Install the agent now", install.el, { forId: "wiz-install", cls: "g-switch", help: "Fleet signs in over SSH, installs its agent and connects to it." }))),
+      ...login,
+      h("section", { class: "block" }, h("div", { class: "group" }, field("Agent port", agentPort, "The port the agent listens on. Use one your firewall allows from this machine."))),
+      nav(() => { keep(); w.step = 1; stepServer(); }, "Next", null),
+    ], () => {
+      keep();
+      const port = (v) => /^\d+$/.test(v) && +v >= 1 && +v <= 65535;
+      if (w.agentPort && !port(w.agentPort)) return fail("The agent port is a number from 1 to 65535.", agentPort);
+      if (w.install) {
+        if (!w.user) return fail("Enter the user to sign in as.", user);
+        if (!port(w.sshPort)) return fail("The SSH port is a number from 1 to 65535.", sshPort);
+        if (w.agentPort && w.agentPort === w.sshPort) return fail("The agent needs its own port, not the SSH port.", agentPort);
+        if (w.auth === "key" && !w.keyPath) return fail("Enter the key file.", keyPath);
+        if (w.auth === "password" && !w.password) return fail("Enter the password.", password);
+      }
+      w.step = 3; stepReview();
+    });
+  };
+
+  const request = () => {
+    const args = [w.name, w.address, "--mode=direct"];
+    let stdin = "";
+    if (w.agentPort) args.push("--port=" + w.agentPort);
+    if (!w.install) args.push("--no-agent");
+    else {
+      args.push("--login-user=" + w.user);
+      if (w.sshPort !== "22") args.push("--login-port=" + w.sshPort);
+      if (w.auth === "key") args.push("--login-key=" + w.keyPath);
+      if (w.auth === "password") { args.push("--login-password-stdin"); stdin = w.password + "\n"; }
+      if (w.sudo) args.push("--sudo");
+    }
+    return { args, stdin };
+  };
+
+  const stepReview = () => {
+    const rows = [
+      ["Name", w.name], ["Address", w.address], ["Connection", "Direct"],
+      ["Agent", w.install ? "Install now over SSH" : "Register only, install it later"],
+      ...(w.install ? [["Sign in as", w.user + " on port " + w.sshPort + (w.sudo ? ", with sudo" : "")],
+        ["With", w.auth === "fleet" ? "Fleet's key" : w.auth === "key" ? w.keyPath : "A password"]] : []),
+      ["Agent port", w.agentPort || "Fleet's default"],
+    ];
+    const req = request();
+    const shown = ["fleet", "server", "add", ...req.args].map(shellQuote).join(" ");
+    page([
+      h("section", { class: "block" }, h("dl", { class: "kv wide" }, rows.flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { text: v })]))),
+      h("details", { class: "block disclosure subtle" },
+        h("summary", { class: "disclosure-head" }, h("span", { text: "Show the command" }), icon("chevron-right", "disclosure-chev")),
+        h("pre", { class: "confirm-cmd", text: shown })),
+      nav(() => { w.step = 2; stepAgent(); }, "Add server", null),
+    ], () => stepRun());
+  };
+
+  const stepRun = async () => {
+    const slot = h("section", { class: "block" });
+    const done = h("div", { class: "wiz-nav", hidden: true });
+    content.replaceChildren(h("div", { class: "page narrow" },
+      backLink("Servers", { kind: "category", id: "servers" }),
+      h("div", { class: "page-hero" }, tile("plus", "blue", "xl"), pageHead("Adding " + w.name, w.install ? "Signing in, installing the agent and connecting. This takes a minute." : "Registering the server.")),
+      slot, done));
+    const spec = ctl.byKey.get("server add");
+    const req = request();
+    w.password = ""; // sent once; not kept in the page
+    const final = await runInline(spec, req, "action", slot);
+    await loadOverview();
+    done.hidden = false;
+    const added = serverRows().some((s) => s.name === w.name);
+    if (final && final.state === "ok") {
+      done.replaceChildren(h("span"), h("div", { class: "cmd-actions" },
+        h("button", { type: "button", class: "btn lg", onclick: () => renderAddServer() }, icon("plus"), "Add another"),
+        h("button", { type: "button", class: "btn lg primary", onclick: () => showControl({ kind: "server", id: w.name }) }, "Open " + w.name, icon("chevron-right"))));
+    } else if (added) {
+      // The install failed after the server was registered: offer to undo
+      // the registration and fix the details, or keep it and look at it.
+      done.replaceChildren(
+        h("button", { type: "button", class: "btn lg", onclick: () => showControl({ kind: "server", id: w.name }) }, "Keep it and open " + w.name),
+        h("div", { class: "cmd-actions" }, h("button", { type: "button", class: "btn lg primary", onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          const res = await runQuietly(["server", "remove"], [w.name, "--force"]);
+          await loadOverview();
+          if (res && res.run.state === "ok") { w.step = 2; stepAgent(); }
+          else toast("Couldn't remove " + w.name + ": " + (lastLines(res ? res.text : "", 2) || "unknown error"), "error");
+        } }, icon("chevron-left"), "Remove it and edit the details")));
+    } else {
+      done.replaceChildren(h("button", { type: "button", class: "btn lg", onclick: () => { w.step = 2; stepAgent(); } }, icon("chevron-left"), "Edit the details"), h("span"));
+    }
+  };
+
+  stepServer();
 }
 
 // ---- setup

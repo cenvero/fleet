@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/spf13/cobra"
 )
 
 // The agent-lockout override is for a person at the server's console. A
@@ -56,5 +57,49 @@ func TestForceIHaveConsoleNotAvailableFromTheWebUI(t *testing.T) {
 	}
 	if _, err := launch(context.Background(), []string{"firewall", "enable"}, []string{"web"}); err != nil {
 		t.Fatalf("plain firewall enable refused: %v", err)
+	}
+}
+
+// The SSH login password never goes on a command line from the browser: the
+// launcher refuses --login-password, and server add reads it from stdin
+// with --login-password-stdin.
+func TestLoginPasswordOnlyThroughStdinFromTheWebUI(t *testing.T) {
+	root := NewRootCommand()
+	catalog := webConsoleCatalog(root)
+	launch := webConsoleLauncher(root, t.TempDir(), "", catalog)
+	for _, args := range [][]string{{"web", "10.0.0.5", "--login-password", "hunter2"}, {"web", "10.0.0.5", "--login-password=hunter2"}} {
+		if _, err := launch(context.Background(), []string{"server", "add"}, args); err == nil || !strings.Contains(err.Error(), "--login-password-stdin") {
+			t.Fatalf("%v: err = %v, want refused", args, err)
+		}
+	}
+	for _, spec := range catalog {
+		if strings.Join(spec.Path, " ") == "server add" && !spec.Stdin {
+			t.Fatal("server add does not take stdin in the web UI")
+		}
+	}
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("login-password-stdin", true, "")
+	_ = cmd.Flags().Set("login-password-stdin", "true")
+	cmd.SetIn(strings.NewReader("s3cret pass\nignored\n"))
+	if pw, err := loginPasswordFromStdin(cmd, ""); err != nil || pw != "s3cret pass" {
+		t.Fatalf("stdin password = %q, %v", pw, err)
+	}
+	if _, err := loginPasswordFromStdin(cmd, "also-a-flag"); err == nil {
+		t.Fatal("both --login-password and --login-password-stdin accepted")
+	}
+}
+
+// A reverse-mode add prints a join secret, so the browser cannot start one.
+func TestReverseServerAddRefusedFromTheWebUI(t *testing.T) {
+	root := NewRootCommand()
+	catalog := webConsoleCatalog(root)
+	launch := webConsoleLauncher(root, t.TempDir(), "", catalog)
+	for _, args := range [][]string{{"edge", "x", "--mode=reverse"}, {"edge", "x", "--mode", "reverse"}, {"edge", "x", "--mode=per-node"}} {
+		if _, err := launch(context.Background(), []string{"server", "add"}, args); err == nil || !strings.Contains(err.Error(), "terminal") {
+			t.Fatalf("%v: err = %v, want refused", args, err)
+		}
+	}
+	if _, err := launch(context.Background(), []string{"server", "add"}, []string{"web", "10.0.0.5", "--mode=direct", "--no-agent"}); err != nil {
+		t.Fatalf("direct add refused: %v", err)
 	}
 }

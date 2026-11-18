@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/cenvero/fleet/internal/core"
 	"github.com/cenvero/fleet/internal/webui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -93,7 +94,14 @@ var webDestructivePaths = map[string]bool{
 }
 
 // webStdinCommands read their main input from stdin when no flag supplies it.
-var webStdinCommands = map[string]bool{"secret set": true, "automation set": true}
+var webStdinCommands = map[string]bool{"secret set": true, "automation set": true,
+	// The SSH login password travels on stdin (--login-password-stdin).
+	"server add": true, "server remove": true}
+
+// webArgOnlyByStdin are flags whose value the browser must send on stdin
+// instead (the run's arguments are a child process's command line, which
+// every user on the machine can read).
+var webArgOnlyByStdin = map[string]string{"login-password": "login-password-stdin"}
 
 // webConsoleCatalog walks the command tree and describes every runnable,
 // visible command for the browser.
@@ -133,6 +141,7 @@ func webCommandSpec(c *cobra.Command, path []string) webui.CommandSpec {
 		Args:        parseUseArgs(c.Use, path),
 		Flags:       []webui.CommandFlag{},
 		Destructive: webDestructiveLeaves[path[len(path)-1]] || webDestructivePaths[key],
+		Mutating:    webCommandMutates(key),
 		Stdin:       webStdinCommands[key],
 		Unavailable: webUnavailable[key],
 	}
@@ -310,6 +319,14 @@ func webConsoleLauncher(root *cobra.Command, configDir, tokenID string, catalog 
 			if a == "--"+webTerminalOnlyFlag || strings.HasPrefix(a, "--"+webTerminalOnlyFlag+"=") {
 				return nil, fmt.Errorf("--%s cannot be used from the web UI: it is for a person at the server's console, in a terminal", webTerminalOnlyFlag)
 			}
+			for flag, viaStdin := range webArgOnlyByStdin {
+				if a == "--"+flag || strings.HasPrefix(a, "--"+flag+"=") {
+					return nil, fmt.Errorf("--%s cannot be passed from the web UI, where it would show in the process list; send it with --%s", flag, viaStdin)
+				}
+			}
+		}
+		if requested == "server add" && webAddsReverseServer(args) {
+			return nil, errors.New("a reverse-mode server is added in a terminal (`fleet server add <name> --mode reverse`): it prints a one-time join secret, which the web UI does not keep in its run history")
 		}
 		argv := append(append([]string(nil), path...), args...)
 		target, _, err := root.Find(argv)
@@ -399,4 +416,31 @@ func webTerminalEnv(parent []string, tokenID, configDir string) []string {
 		env = append(env, "FLEET_TOKEN="+tokenID)
 	}
 	return append(env, "FLEET_CONFIG_DIR="+configDir, "TERM=xterm-256color", "COLORTERM=truecolor")
+}
+
+// webCommandMutates is the RBAC classification of a command path with no
+// arguments; an unclassified command counts as mutating.
+func webCommandMutates(key string) bool {
+	mutating, known := core.ClassifyCommandMutation(key, nil)
+	return mutating || !known
+}
+
+// webAddsReverseServer reports whether server add arguments ask for a
+// reverse-mode (or per-node) server, whose add prints a join secret.
+func webAddsReverseServer(args []string) bool {
+	for i, a := range args {
+		v := ""
+		switch {
+		case strings.HasPrefix(a, "--mode="):
+			v = strings.TrimPrefix(a, "--mode=")
+		case a == "--mode" && i+1 < len(args):
+			v = args[i+1]
+		default:
+			continue
+		}
+		if m := strings.ToLower(strings.TrimSpace(v)); m != "direct" {
+			return true
+		}
+	}
+	return false
 }

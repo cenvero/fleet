@@ -36,6 +36,21 @@ Omit sections that have no entries for that release.
 
 ### Added
 
+- **Control is a set of screens, not a command list.**
+  - **Servers:** a list of your servers that loads straight away. Each server has its own
+    page (status, details, usage) with one-click actions: services, run a command, files,
+    terminal, live usage, health, firewall, open ports, tags, reconnect and remove.
+  - **Add server:** a step-by-step wizard. You enter the name and address, then how to
+    sign in (Fleet's key, a key file or a password), then review and add. Progress shows
+    as it runs. If the agent install fails, the wizard offers to remove the half-added
+    server and go back to the form.
+  - **Pages that only read data** (agent versions, health, jobs, logs…) load as soon as
+    they open and show tables; aligned text output becomes a table too.
+  - **Actions** have a button named for what they do and say how it went.
+
+  The command behind each page sits under "Show the command"; nothing else on the page
+  shows it. Data a page loads by itself stays out of Activity.
+
 - **The background helper.** One small process per controller now does the background work
   nobody should have to ask for:
   - it tracks running `fleet job`s, so they show as done (or lost) and `job-failed` is
@@ -113,6 +128,12 @@ Omit sections that have no entries for that release.
   masked in the run history, and stdin input is never kept.
 
 ### Security
+
+- **SSH login passwords never go on a command line.** `fleet server add` and
+  `fleet server remove --via-ssh` take `--login-password-stdin`. The web console sends the
+  password that way and refuses `--login-password`, since every user on the machine can
+  read a process's arguments. The web console also refuses a reverse-mode
+  `server add`, which prints a one-time join secret; add those in a terminal.
 
 - **The firewall lockout check parses rules instead of searching them for the port
   number.** Text matching was fooled both ways:
@@ -227,6 +248,9 @@ Omit sections that have no entries for that release.
   new random key while secrets sealed under it exist.
 
 ### Fixed
+
+- **The web console no longer flashes the file manager** while the Fleet tab (or any
+  other tab) loads or reloads.
 
 - **Background jobs:**
   - on macOS and Windows, a job whose server name was typed with different case was

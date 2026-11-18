@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1039,6 +1040,28 @@ func newFileManagerCommand(configDir *string) *cobra.Command {
 	return cmd
 }
 
+// loginPasswordFromStdin reads the SSH login password from the first line of
+// stdin when --login-password-stdin is set, so it never appears on a command
+// line, where every user on the machine could read it. It returns "" when
+// the flag is not set.
+func loginPasswordFromStdin(cmd *cobra.Command, fromFlag string) (string, error) {
+	if on, _ := cmd.Flags().GetBool("login-password-stdin"); !on {
+		return "", nil
+	}
+	if fromFlag != "" {
+		return "", errors.New("use --login-password or --login-password-stdin, not both")
+	}
+	line, err := bufio.NewReader(io.LimitReader(cmd.InOrStdin(), 4096)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read the login password from stdin: %w", err)
+	}
+	pw := strings.TrimRight(line, "\r\n")
+	if pw == "" {
+		return "", errors.New("--login-password-stdin: no password on standard input")
+	}
+	return pw, nil
+}
+
 // uiCommandAuthorizer returns an RBAC check bound to the --token / FLEET_TOKEN
 // the web UI was launched with, or nil for an unscoped invocation. A token
 // that can no longer be loaded denies everything (fail closed).
@@ -1174,6 +1197,19 @@ func newServerCommand(configDir *string) *cobra.Command {
 					return def
 				}
 				return v
+			}
+
+			if pw, err := loginPasswordFromStdin(cmd, loginPassword); err != nil {
+				return err
+			} else if pw != "" {
+				loginPassword = pw
+			}
+			// "~/.ssh/id_ed25519" from the web console's form, where no shell
+			// expands it.
+			if strings.HasPrefix(loginKey, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					loginKey = filepath.Join(home, loginKey[2:])
+				}
 			}
 
 			name := ""
@@ -1395,7 +1431,8 @@ func newServerCommand(configDir *string) *cobra.Command {
 	add.Flags().StringVar(&loginUser, "login-user", "", "login user for agent auto-install (e.g. root, ubuntu)")
 	add.Flags().IntVar(&loginPort, "login-port", 22, "SSH port for login")
 	add.Flags().StringVar(&loginKey, "login-key", "", "SSH private key for login")
-	add.Flags().StringVar(&loginPassword, "login-password", "", "SSH password for login (use key auth when possible)")
+	add.Flags().StringVar(&loginPassword, "login-password", "", "SSH password for login (use key auth when possible; other users can see command lines, so prefer --login-password-stdin)")
+	add.Flags().Bool("login-password-stdin", false, "read the SSH login password from the first line of standard input")
 	add.Flags().BoolVar(&useSudo, "sudo", false, "use sudo for agent install commands")
 	add.Flags().BoolVar(&noAgent, "no-agent", false, "skip agent auto-install")
 	add.Flags().BoolVar(&acceptNewHostKey, "accept-new-host-key", false, "re-pin a changed bootstrap SSH host key without prompting (after out-of-band verification)")
@@ -1490,6 +1527,11 @@ If the server is unreachable or credentials have changed, use one of:
 			loginKey, _ := cmd.Flags().GetString("login-key")
 			loginPassword, _ := cmd.Flags().GetString("login-password")
 			loginPort, _ := cmd.Flags().GetInt("login-port")
+			if pw, err := loginPasswordFromStdin(cmd, loginPassword); err != nil {
+				return err
+			} else if pw != "" {
+				loginPassword = pw
+			}
 
 			if viaSSH && loginUser == "" {
 				// Prompt for missing login user interactively
@@ -1546,7 +1588,8 @@ If the server is unreachable or credentials have changed, use one of:
 	removeCmd.Flags().Bool("via-ssh", false, "retry agent teardown via SSH with the credentials below")
 	removeCmd.Flags().String("login-user", "", "SSH login user for teardown (--via-ssh)")
 	removeCmd.Flags().String("login-key", "", "SSH private key path for teardown (--via-ssh)")
-	removeCmd.Flags().String("login-password", "", "SSH password for teardown (--via-ssh)")
+	removeCmd.Flags().String("login-password", "", "SSH password for teardown (--via-ssh; prefer --login-password-stdin)")
+	removeCmd.Flags().Bool("login-password-stdin", false, "read the SSH password for teardown from the first line of standard input")
 	removeCmd.Flags().Int("login-port", 0, "SSH port for teardown (--via-ssh, default 22)")
 	serverCmd.AddCommand(removeCmd)
 	reconnect := &cobra.Command{

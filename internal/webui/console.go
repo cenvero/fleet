@@ -71,6 +71,10 @@ type CommandSpec struct {
 	Flags   []CommandFlag `json:"flags"`
 	// Destructive commands get a confirmation step in the browser.
 	Destructive bool `json:"destructive,omitempty"`
+	// Mutating is the RBAC classification (core.ClassifyCommandMutation):
+	// a command that is not mutating only reads, so the browser may run it
+	// as soon as its page opens. An unclassified command counts as mutating.
+	Mutating bool `json:"mutating"`
 	// Stdin marks commands that read their input from stdin (secret values,
 	// automation scripts), so the form offers a text box for it.
 	Stdin bool `json:"stdin,omitempty"`
@@ -172,21 +176,22 @@ type runChunk struct {
 }
 
 type commandRun struct {
-	id        string
-	path      []string
-	display   []string
-	started   time.Time
-	ended     time.Time
-	state     string // running, ok, failed, cancelled
-	exitCode  int
-	errText   string
-	chunks    []runChunk
-	bytes     int
-	truncated bool
-	nextSeq   uint64
-	cancel    context.CancelFunc
-	cancelled bool
-	changed   chan struct{}
+	id         string
+	path       []string
+	display    []string
+	started    time.Time
+	ended      time.Time
+	state      string // running, ok, failed, cancelled
+	exitCode   int
+	errText    string
+	chunks     []runChunk
+	bytes      int
+	truncated  bool
+	nextSeq    uint64
+	cancel     context.CancelFunc
+	cancelled  bool
+	changed    chan struct{}
+	background bool
 }
 
 // runSummary is the JSON shape of a run (without its output).
@@ -202,6 +207,8 @@ type runSummary struct {
 	Truncated bool      `json:"truncated,omitempty"`
 	Bytes     int       `json:"bytes"`
 	LastSeq   uint64    `json:"last_seq"`
+	// Background runs fed a page; see runRequest.Background.
+	Background bool `json:"background,omitempty"`
 }
 
 type runHub struct {
@@ -217,6 +224,7 @@ func (r *commandRun) summaryLocked() runSummary {
 	return runSummary{
 		ID: r.id, Path: r.path, Command: r.display, State: r.state, ExitCode: r.exitCode, Error: r.errText,
 		Started: r.started, Ended: r.ended, Truncated: r.truncated, Bytes: r.bytes, LastSeq: r.nextSeq,
+		Background: r.background,
 	}
 }
 
@@ -254,8 +262,32 @@ func (h *runHub) running() int {
 	return n
 }
 
-// evictLocked drops the oldest finished runs beyond maxKeptRuns.
+// maxKeptBackgroundRuns is how many finished background runs stay; they only
+// fed a page, so they go before anything the operator ran.
+const maxKeptBackgroundRuns = 20
+
+// evictLocked drops the oldest finished background runs beyond
+// maxKeptBackgroundRuns, then the oldest finished runs beyond maxKeptRuns.
 func (h *runHub) evictLocked() {
+	background := 0
+	for _, id := range h.order {
+		if r := h.runs[id]; r.background && r.state != "running" {
+			background++
+		}
+	}
+	if background > maxKeptBackgroundRuns {
+		kept := h.order[:0]
+		for _, id := range h.order {
+			r := h.runs[id]
+			if background > maxKeptBackgroundRuns && r.background && r.state != "running" {
+				delete(h.runs, id)
+				background--
+				continue
+			}
+			kept = append(kept, id)
+		}
+		h.order = kept
+	}
 	finished := 0
 	for _, id := range h.order {
 		if h.runs[id].state != "running" {
@@ -454,6 +486,10 @@ type runRequest struct {
 	Path  []string `json:"path"`
 	Args  []string `json:"args"`
 	Stdin string   `json:"stdin"`
+	// Background marks a run a page started to show its data (a server
+	// list, a status): it stays out of the activity list and is the first
+	// dropped from the history.
+	Background bool `json:"background"`
 }
 
 func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
@@ -548,6 +584,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	run := &commandRun{
 		id: id, path: spec.Path, display: append(append([]string{"fleet"}, spec.Path...), displayArgs(spec, req.Args)...),
 		started: time.Now().UTC(), state: "running", cancel: cancel, changed: make(chan struct{}),
+		background: req.Background,
 	}
 	cmd, err := s.console.launch(ctx, append([]string(nil), spec.Path...), append([]string(nil), req.Args...))
 	if err != nil {

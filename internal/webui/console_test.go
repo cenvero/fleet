@@ -428,3 +428,34 @@ func TestConsoleDisabledByDefault(t *testing.T) {
 		t.Fatalf("status %d, want 404 without a console", res.StatusCode)
 	}
 }
+
+// Runs a page started to show its data are dropped from the history before
+// anything the operator ran, and beyond their own small allowance.
+func TestBackgroundRunsAreEvictedFirst(t *testing.T) {
+	h := newRunHub()
+	add := func(id string, background bool) {
+		h.runs[id] = &commandRun{id: id, state: "ok", background: background, changed: make(chan struct{})}
+		h.order = append(h.order, id)
+	}
+	for i := 0; i < 5; i++ {
+		add(fmt.Sprintf("user-%d", i), false)
+	}
+	for i := 0; i < maxKeptBackgroundRuns+7; i++ {
+		add(fmt.Sprintf("bg-%d", i), true)
+	}
+	h.evictLocked()
+	bg, user := 0, 0
+	for _, id := range h.order {
+		if h.runs[id].background {
+			bg++
+		} else {
+			user++
+		}
+	}
+	if bg != maxKeptBackgroundRuns || user != 5 {
+		t.Fatalf("after eviction: %d background, %d operator runs; want %d and 5", bg, user, maxKeptBackgroundRuns)
+	}
+	if _, ok := h.runs["bg-0"]; ok {
+		t.Fatal("the oldest background run was kept")
+	}
+}
