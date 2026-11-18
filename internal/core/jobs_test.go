@@ -13,8 +13,9 @@ import (
 func TestBuildJobLaunch_QuotesAndDetaches(t *testing.T) {
 	const nonce = "deadbeefcafef00d"
 	got := buildJobLaunch("echo hi; rm -rf /tmp", "/var/tmp/fleet-job-7.log", nonce)
-	// Detaching primitives must be present, and the marker must carry the nonce.
-	for _, want := range []string{"setsid sh -c ", "</dev/null", ">/dev/null 2>&1 &", jobExitMarker + nonce + ":$?"} {
+	// Detaching primitives must be present, and the marker must carry the nonce,
+	// start on a line of its own, and report the command's exit code.
+	for _, want := range []string{"setsid sh -c ", "</dev/null", ">/dev/null 2>&1 &", `\n` + jobExitMarker + nonce + `:%s\n`, `"$?"`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launch missing %q in: %s", want, got)
 		}
@@ -299,15 +300,15 @@ func TestJobStore_Wait(t *testing.T) {
 	dir := t.TempDir()
 	store := NewJobStore(dir)
 
-	tails := 0
+	probes := 0
 	var nonce string
 	exec := func(server, command string) (string, int, error) {
-		if strings.HasPrefix(command, "tail ") {
-			tails++
-			if tails >= 3 {
-				return "out\n" + jobExitMarker + nonce + ":0\n", 0, nil
+		if strings.Contains(command, jobProbeHeader) {
+			probes++
+			if probes >= 3 {
+				return jobProbeHeader + "unknown:log\nout\n\n" + jobExitMarker + nonce + ":0\n", 0, nil
 			}
-			return "out\n", 0, nil
+			return jobProbeHeader + "alive:log\nout\n", 0, nil
 		}
 		return "", 0, nil
 	}
@@ -336,8 +337,8 @@ func TestJobStore_WaitTimeout(t *testing.T) {
 	store := NewJobStore(dir)
 
 	exec := func(server, command string) (string, int, error) {
-		if strings.HasPrefix(command, "tail ") {
-			return "still going\n", 0, nil // never completes
+		if strings.Contains(command, jobProbeHeader) {
+			return jobProbeHeader + "alive:log\nstill going\n", 0, nil // never completes
 		}
 		return "", 0, nil
 	}

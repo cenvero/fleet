@@ -46,10 +46,16 @@ capture its output to a logfile, so the command keeps running even if the
 controller disconnects.
 
   fleet job run <server> <command>   start a job; prints its id
-  fleet job status <id>              show a job's state (running/done + exit)
+  fleet job status <id>              show a job's state (running/done/lost + exit)
   fleet job wait <id> [--timeout d]  block until the job finishes
   fleet job logs <id> [--follow]     print (or follow) the job's output
-  fleet jobs                         list all tracked jobs`,
+  fleet jobs                         list all tracked jobs
+
+Fleet's background helper keeps checking running jobs, so ` + "`fleet jobs`" + ` shows
+them as done without anyone asking. A job that can never report back — its
+server was removed, its log file is gone, or (on Linux and macOS servers) no
+process runs it any more because the server rebooted or the job was killed —
+is marked lost.`,
 	}
 
 	jobCmd.AddCommand(newJobRunCommand(configDir))
@@ -146,15 +152,20 @@ func newJobStatusCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			store := core.NewJobStore(*configDir)
-			rec, _, err := store.Tail(appExec(app), id)
+			rec, err := app.Jobs().Check(appExec(app), id)
 			if err != nil {
 				return err
 			}
 			if asJSON {
 				return writeJSON(cmd, rec)
 			}
-			return writeJobsTable(cmd, []core.JobRecord{rec})
+			if err := writeJobsTable(cmd, []core.JobRecord{rec}); err != nil {
+				return err
+			}
+			if rec.Status == core.JobLost {
+				fmt.Fprintf(cmd.OutOrStdout(), "\njob %d was lost: %s\n", rec.ID, rec.LostReason)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output the job record as JSON")
@@ -168,9 +179,10 @@ func newJobWaitCommand(configDir *string) *cobra.Command {
 		Use:   "wait <id>",
 		Short: "Block until a job finishes, then report its exit code",
 		Long: "Block until a background job finishes, then report its exit code.\n\n" +
-			"Exits 0 when the job succeeded and 1 when it exited non-zero (or could not be\n" +
-			"waited for), so `fleet job wait <id> && next-step` gates on the job. --json\n" +
-			"prints the final job record either way.",
+			"Exits 0 when the job succeeded and 1 when it exited non-zero, was lost (it can\n" +
+			"never report back; see `fleet job --help`) or could not be waited for, so\n" +
+			"`fleet job wait <id> && next-step` gates on the job. --json prints the final\n" +
+			"job record either way.",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -183,8 +195,7 @@ func newJobWaitCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			store := core.NewJobStore(*configDir)
-			rec, err := store.Wait(appExec(app), id, timeout, poll, nil)
+			rec, err := app.Jobs().Wait(appExec(app), id, timeout, poll, nil)
 			if err != nil {
 				return err
 			}
@@ -192,8 +203,11 @@ func newJobWaitCommand(configDir *string) *cobra.Command {
 				if err := writeJSON(cmd, rec); err != nil {
 					return err
 				}
-			} else {
+			} else if rec.Status == core.JobDone {
 				fmt.Fprintf(cmd.OutOrStdout(), "job %d done (exit %d)\n", rec.ID, rec.ExitCode)
+			}
+			if rec.Status == core.JobLost {
+				return fmt.Errorf("job %d on %s was lost: %s", rec.ID, rec.Server, rec.LostReason)
 			}
 			if rec.ExitCode != 0 {
 				return fmt.Errorf("job %d on %s failed with exit code %d", rec.ID, rec.Server, rec.ExitCode)
@@ -225,17 +239,23 @@ func newJobLogsCommand(configDir *string) *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			store := core.NewJobStore(*configDir)
+			store := app.Jobs()
 			exec := appExec(app)
+			out := cmd.OutOrStdout()
+			// endLine finishes output that doesn't end in a newline.
+			endLine := func(output string) {
+				if output != "" && !strings.HasSuffix(output, "\n") {
+					fmt.Fprintln(out)
+				}
+			}
 
 			if !follow {
 				_, output, err := store.Tail(exec, id)
 				if err != nil {
 					return err
 				}
-				if output != "" {
-					fmt.Fprintln(cmd.OutOrStdout(), output)
-				}
+				fmt.Fprint(out, output)
+				endLine(output)
 				return nil
 			}
 
@@ -249,12 +269,24 @@ func newJobLogsCommand(configDir *string) *cobra.Command {
 				}
 				// Print only the newly appended tail since the last poll.
 				if len(output) > printed {
-					fmt.Fprint(cmd.OutOrStdout(), output[printed:])
+					fmt.Fprint(out, output[printed:])
 					printed = len(output)
 				}
-				if rec.Status == core.JobDone {
-					fmt.Fprintln(cmd.OutOrStdout())
-					fmt.Fprintf(cmd.OutOrStdout(), "-- job %d done (exit %d) --\n", rec.ID, rec.ExitCode)
+				if rec.Status == core.JobRunning {
+					// Tail only spots a finish; the cheap probe also spots a job
+					// that can never finish, so following one doesn't hang.
+					if checked, cerr := store.Check(exec, id); cerr == nil {
+						rec = checked
+					}
+				}
+				switch rec.Status {
+				case core.JobDone:
+					endLine(output)
+					fmt.Fprintf(out, "-- job %d done (exit %d) --\n", rec.ID, rec.ExitCode)
+					return nil
+				case core.JobLost:
+					endLine(output)
+					fmt.Fprintf(out, "-- job %d lost: %s --\n", rec.ID, rec.LostReason)
 					return nil
 				}
 				select {

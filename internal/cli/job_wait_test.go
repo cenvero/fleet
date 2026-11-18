@@ -12,7 +12,9 @@ import (
 	"github.com/cenvero/fleet/internal/core"
 )
 
-// finishFakeJob makes the fake agent report job id as finished with code.
+// finishFakeJob makes the fake agent report job id as finished with code, in
+// the reply format of the job probe `job wait` sends (a header line, then the
+// end of the log).
 func finishFakeJob(t *testing.T, dir string, fake *fakeExecRPC, id, code int) {
 	t.Helper()
 	rec, err := core.NewJobStore(dir).Get(id)
@@ -20,7 +22,7 @@ func finishFakeJob(t *testing.T, dir string, fake *fakeExecRPC, id, code int) {
 		t.Fatal(err)
 	}
 	fake.mu.Lock()
-	fake.behave["srv"] = fakeExecBehavior{stdout: "output\nFLEETEXIT:" + rec.Nonce + ":" + strconv.Itoa(code) + "\n"}
+	fake.behave["srv"] = fakeExecBehavior{stdout: "FLEETPROBE:unknown:log\noutput\n\nFLEETEXIT:" + rec.Nonce + ":" + strconv.Itoa(code) + "\n"}
 	fake.mu.Unlock()
 }
 

@@ -25,6 +25,24 @@ const (
 	JobRunning JobStatus = "running"
 	// JobDone means the FLEETEXIT marker was observed; ExitCode is then valid.
 	JobDone JobStatus = "done"
+	// JobLost means the job can never report completion: its server was
+	// removed, its log file is gone, or no process on the server runs it any
+	// more (the server rebooted, or the job was killed) while its log has no
+	// marker. LostReason says which; ExitCode is not valid. See jobLostStrikes.
+	JobLost JobStatus = "lost"
+)
+
+// A running job is given up on (marked JobLost) once jobLostStrikes probes in a
+// row found it unable to finish — its log file missing, or (where the server
+// can tell, Linux) no process left that runs it — and it is at least
+// jobLostMinAge old, so a probe that races the launch can never lose a job.
+// A probe that cannot tell (no /proc, an unexpected reply) changes nothing,
+// and a transport error is not a strike: an unreachable server is retried,
+// never given up on. A job whose server record no longer exists is lost at
+// once.
+const (
+	jobLostStrikes = 3
+	jobLostMinAge  = time.Minute
 )
 
 // jobExitMarker is the fixed sentinel prefix the launched shell appends after
@@ -74,7 +92,13 @@ type JobRecord struct {
 	Status   JobStatus `json:"status"`
 	ExitCode int       `json:"exit_code"`
 	Started  time.Time `json:"started"`
+	// Finished is when the job was seen to finish (done) or given up on (lost).
 	Finished time.Time `json:"finished,omitempty"`
+	// LostReason says why a JobLost job was given up on.
+	LostReason string `json:"lost_reason,omitempty"`
+	// Strikes counts the probes in a row that found the job unable to finish;
+	// see jobLostStrikes. A probe that sees the job alive resets it.
+	Strikes int `json:"strikes,omitempty"`
 }
 
 // ExecFunc runs a command on a named server and returns its combined stdout.
@@ -89,6 +113,12 @@ type ExecFunc func(server, command string) (stdout string, exitCode int, err err
 type JobStore struct {
 	path string
 	mu   sync.Mutex
+
+	// ServerRemoved, when set, reports whether a job's server is known to be
+	// gone from the fleet (its record was removed). A probe that cannot reach
+	// such a server marks the job lost instead of retrying it forever.
+	// App.Jobs sets it.
+	ServerRemoved func(server string) bool
 }
 
 // jobsDocument is the on-disk JSON shape.
@@ -104,6 +134,29 @@ func NewJobStore(configDir string) *JobStore {
 		configDir = DefaultConfigDir("")
 	}
 	return &JobStore{path: JobsPath(configDir)}
+}
+
+// Jobs returns the job store for this App's config dir. Its probes treat a job
+// whose server has since been removed from the fleet as lost.
+func (a *App) Jobs() *JobStore {
+	s := NewJobStore(a.ConfigDir)
+	s.ServerRemoved = a.serverRemoved
+	return s
+}
+
+// serverRemoved reports whether name is no longer one of the fleet's servers.
+// It answers false when the server list cannot be read.
+func (a *App) serverRemoved(name string) bool {
+	servers, err := a.ListServers()
+	if err != nil {
+		return false
+	}
+	for _, s := range servers {
+		if s.Name == name {
+			return false
+		}
+	}
+	return true
 }
 
 // JobsPath returns the on-disk location of the jobs document for a config dir.
@@ -203,7 +256,7 @@ func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
 		removed = 0
 		pending = pending[:0]
 		for _, j := range doc.Jobs {
-			if j.Status == JobDone && !j.Finished.IsZero() && j.Finished.Before(cutoff) {
+			if (j.Status == JobDone || j.Status == JobLost) && !j.Finished.IsZero() && j.Finished.Before(cutoff) {
 				removed++
 				if exec != nil && j.Logfile != "" {
 					pending = append(pending, pendingDelete{server: j.Server, logfile: j.Logfile})
@@ -231,12 +284,21 @@ func (s *JobStore) Prune(cutoff time.Time, exec ExecFunc) (int, error) {
 // (the tail end, where the completion marker lives).
 const maxJobLogBytes = 4 << 20 // 4 MiB
 
+// jobProbeBytes is how much of the log's end Check reads. The marker line is
+// about 45 bytes, so this finds it without pulling the job's output across the
+// network on every poll.
+const jobProbeBytes = 512
+
+// jobLogDir is the remote directory job logs are written to. It is a variable
+// only so tests that run the in-process agent keep their logs in a temp dir.
+var jobLogDir = "/var/tmp"
+
 // JobLogfile returns the remote logfile path for a job. The per-job nonce is
 // included so the path is UNPREDICTABLE (another local user on the remote host
 // can't guess it from the sequential id), and buildJobLaunch creates it 0600
 // (umask 077) so it isn't world-readable.
 func JobLogfile(id int, nonce string) string {
-	return "/var/tmp/fleet-job-" + strconv.Itoa(id) + "-" + nonce + ".log"
+	return jobLogDir + "/fleet-job-" + strconv.Itoa(id) + "-" + nonce + ".log"
 }
 
 // buildJobLaunch builds the detached launcher command. The command is wrapped
@@ -247,8 +309,16 @@ func JobLogfile(id int, nonce string) string {
 // The user command is run via a nested `sh -c <quoted cmd>` rather than spliced
 // directly into the brace group, so that a trailing ';' (e.g. "sleep 60;") or
 // any other shell metacharacter cannot break the surrounding script. The
-// FLEETEXIT:<nonce>:<code> marker is then echoed as a separate statement using
-// the command's real exit code ($?), so completion is always recorded.
+// FLEETEXIT:<nonce>:<code> marker is then printed as a separate statement using
+// the command's real exit code ($?), so completion is always recorded. It is
+// printed after a newline of its own: the marker is only accepted at the start
+// of a line, and output that doesn't end in one (`printf done`) used to leave
+// it mid-line and the job "running" forever. stripExitMarker removes that
+// newline again.
+//
+// The wrapper shell stays alive for as long as the job runs, and its command
+// line carries the marker text; that is how a probe tells a running job from
+// one whose process is gone (see buildJobProbe).
 //
 // SECURITY: only this launcher knows the per-job nonce, so the user command's
 // own output cannot forge the completion marker. The nonce is a fixed-charset
@@ -258,13 +328,20 @@ func JobLogfile(id int, nonce string) string {
 // Every other interpolated value (the user command and the logfile path) is
 // single-quoted for safe embedding in the remote /bin/sh command.
 func buildJobLaunch(command, logfile, nonce string) string {
-	inner := "umask 077; { sh -c " + shellQuote(command) + "; echo " + jobExitMarker + nonce + ":$?; } > " + shellQuote(logfile) + " 2>&1"
+	inner := "umask 077; { sh -c " + shellQuote(command) + "; printf '\\n" + jobExitMarker + nonce + ":%s\\n' \"$?\"; } > " + shellQuote(logfile) + " 2>&1"
 	return "setsid sh -c " + shellQuote(inner) + " </dev/null >/dev/null 2>&1 &"
 }
 
 // Start records a new job and launches it on the server via exec. The returned
 // record is the persisted job (status running). The exec call is expected to
 // return promptly because the remote launcher detaches the work.
+//
+// The job is recorded before the launch and the jobs lock is NOT held across
+// it: the launch is a network round-trip, and holding a cross-process lock
+// through it let one slow or unreachable server stall every other fleet
+// process that touches jobs.json until the lock timed out. Recording first
+// also means a launched job is always tracked, even if this process dies
+// before the launch returns (it then finishes or is marked lost as usual).
 func (s *JobStore) Start(exec ExecFunc, server, command, name string) (JobRecord, error) {
 	if exec == nil {
 		return JobRecord{}, fmt.Errorf("exec function is required")
@@ -275,48 +352,60 @@ func (s *JobStore) Start(exec ExecFunc, server, command, name string) (JobRecord
 	if strings.TrimSpace(command) == "" {
 		return JobRecord{}, fmt.Errorf("command is required")
 	}
+	nonce, err := newJobNonce()
+	if err != nil {
+		return JobRecord{}, err
+	}
 
 	var rec JobRecord
-	err := s.withWriteLock(func() error {
+	err = s.withWriteLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		doc, err := s.read()
 		if err != nil {
 			return err
 		}
-		nonce, err := newJobNonce()
-		if err != nil {
-			return err
-		}
 		id := s.reserve(&doc)
-		logfile := JobLogfile(id, nonce)
 		rec = JobRecord{
 			ID:      id,
 			Name:    strings.TrimSpace(name),
 			Server:  server,
 			Command: command,
-			Logfile: logfile,
+			Logfile: JobLogfile(id, nonce),
 			Nonce:   nonce,
 			Status:  JobRunning,
 			Started: time.Now().UTC(),
 		}
-
-		if _, _, err := exec(server, buildJobLaunch(command, logfile, nonce)); err != nil {
-			// Do not persist a job we failed to launch; roll the counter back so
-			// the id is reused next time.
-			doc.Counter--
-			_ = s.write(doc)
-			return fmt.Errorf("launch job on %s: %w", server, err)
-		}
-
 		doc.Jobs = append(doc.Jobs, rec)
-		if err := s.write(doc); err != nil {
-			return err
-		}
-		return nil
+		return s.write(doc)
 	})
 	if err != nil {
 		return JobRecord{}, err
+	}
+
+	if _, _, err := exec(server, buildJobLaunch(command, rec.Logfile, nonce)); err != nil {
+		// Forget the job we failed to launch, and give its id back unless
+		// another job has taken the next one in the meantime.
+		_ = s.withWriteLock(func() error {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			doc, rerr := s.read()
+			if rerr != nil {
+				return rerr
+			}
+			kept := doc.Jobs[:0]
+			for _, j := range doc.Jobs {
+				if j.ID != rec.ID {
+					kept = append(kept, j)
+				}
+			}
+			doc.Jobs = kept
+			if doc.Counter == rec.ID {
+				doc.Counter--
+			}
+			return s.write(doc)
+		})
+		return JobRecord{}, fmt.Errorf("launch job on %s: %w", server, err)
 	}
 	return rec, nil
 }
@@ -408,22 +497,25 @@ func parseExit(logContent, nonce string) (int, bool) {
 	return code, true
 }
 
-// stripExitMarker removes the authentic FLEETEXIT:<nonce>:<code> trailer (and
-// any preceding newline) so log output shown to the user does not include the
-// sentinel. A spoofed/non-authentic "FLEETEXIT:..." line in the user's own
-// output is left untouched, since it is genuine job output.
+// stripExitMarker removes the authentic FLEETEXIT:<nonce>:<code> trailer, and
+// the newline the launcher writes in front of it, so log output shown to the
+// user does not include the sentinel. (Jobs launched by older releases have no
+// such newline; for those it is the output's own last newline that goes, which
+// is what was always shown.) A spoofed/non-authentic "FLEETEXIT:..." line in
+// the user's own output is left untouched, since it is genuine job output.
 func stripExitMarker(logContent, nonce string) string {
 	idx := markerLineIndex(logContent, nonce)
 	if idx < 0 {
 		return logContent
 	}
-	out := logContent[:idx]
-	return strings.TrimRight(out, "\n")
+	return strings.TrimSuffix(logContent[:idx], "\n")
 }
 
-// Tail reads the job's logfile from the server and returns its content with the
-// FLEETEXIT marker stripped. If the job has finished, the stored record is
-// updated (status done + exit code) and the refreshed record is returned.
+// Tail reads the job's logfile from the server (up to maxJobLogBytes of its
+// end) and returns its content with the FLEETEXIT marker stripped. If the job
+// has finished, the stored record is updated (status done + exit code) and the
+// refreshed record is returned. It is for showing output (`fleet job logs`);
+// Check is the cheap way to learn a job's state.
 func (s *JobStore) Tail(exec ExecFunc, id int) (rec JobRecord, output string, err error) {
 	if exec == nil {
 		return JobRecord{}, "", fmt.Errorf("exec function is required")
@@ -441,63 +533,236 @@ func (s *JobStore) Tail(exec ExecFunc, id int) (rec JobRecord, output string, er
 		return rec, "", fmt.Errorf("read job %d log: %w", id, execErr)
 	}
 	output = stripExitMarker(raw, rec.Nonce)
-	if rec.Status != JobDone {
+	if rec.Status == JobRunning {
 		if code, done := parseExit(raw, rec.Nonce); done {
-			rec.Status = JobDone
-			rec.ExitCode = code
-			rec.Finished = time.Now().UTC()
-			if uerr := s.update(rec); uerr != nil {
-				return rec, output, uerr
-			}
-			// On the transition to finished-with-a-nonzero-exit, fire the
-			// "job-failed" notification. Best-effort: it must never affect the
-			// returned record or fail the Tail.
-			if code != 0 {
-				s.fireJobFailed(rec)
-			}
+			rec, err = s.finish(id, code)
 		}
 	}
-	return rec, output, nil
+	return rec, output, err
 }
 
-// fireJobFailed sends a best-effort "job-failed" notification for a finished job
-// whose exit code was non-zero. The NotifyStore is loaded from the same config
-// dir as the job store (jobs.json's parent), so it requires no extra wiring. Any
-// failure — including a panic — is swallowed so it can never break Tail/Wait.
-func (s *JobStore) fireJobFailed(rec JobRecord) {
-	defer func() { _ = recover() }()
-	configDir := filepath.Dir(s.path)
-	msg := fmt.Sprintf("job %d on %s failed (exit %d): %s", rec.ID, rec.Server, rec.ExitCode, rec.Command)
-	_ = NewNotifyStore(configDir).Fire(NotifyEventJobFailed, msg)
+// jobProbeHeader starts the first line of a probe's reply; see buildJobProbe.
+const jobProbeHeader = "FLEETPROBE:"
+
+// buildJobProbe builds the command Check runs: one header line, then (if the
+// log exists) the last jobProbeBytes of the log:
+//
+//	FLEETPROBE:<alive|dead|unknown>:<log|nolog>
+//	<end of the log>
+//
+// alive/dead says whether any process on the server still carries the job's
+// marker text in its command line — the launcher's wrapper shell does for as
+// long as the job runs. Linux is asked through /proc/<pid>/cmdline; elsewhere
+// `ps -A -ww -o args=` is used. unknown means the server could not tell (no
+// /proc and no usable ps, or grep failed), and is never held against the job.
+// The pattern is written as "[F]LEETEXIT:…" so it matches the wrapper but not
+// this probe or grep itself, whose command lines hold the bracketed form.
+// Liveness is checked before the log is read: a wrapper is gone only after it
+// has written the marker (or was killed), so a job that ends between the two
+// steps is never mistaken for a lost one.
+//
+// The header is printed before any log content, so nothing the job writes can
+// forge it.
+func buildJobProbe(logfile, nonce string, tailBytes int) string {
+	q := shellQuote(logfile)
+	pattern := shellQuote("[" + jobExitMarker[:1] + "]" + jobExitMarker[1:] + nonce + ":")
+	return "s=unknown; " +
+		"if [ -r /proc/self/cmdline ]; then grep -qsa -e " + pattern + " /proc/[0-9]*/cmdline; case $? in 0) s=alive ;; 1) s=dead ;; esac; " +
+		"elif p=$(ps -A -ww -o args= 2>/dev/null) && [ -n \"$p\" ]; then printf '%s\\n' \"$p\" | grep -qs -e " + pattern + "; case $? in 0) s=alive ;; 1) s=dead ;; esac; fi; " +
+		"if [ -e " + q + " ]; then printf '" + jobProbeHeader + "%s:log\\n' \"$s\"; tail -c " + strconv.Itoa(tailBytes) + " " + q + " 2>/dev/null; " +
+		"else printf '" + jobProbeHeader + "%s:nolog\\n' \"$s\"; fi"
 }
 
-// update persists a single changed job record in place.
-func (s *JobStore) update(rec JobRecord) error {
-	return s.withWriteLock(func() error {
+// jobProbe is a parsed probe reply.
+type jobProbe struct {
+	liveness  string // "alive", "dead" or "unknown"
+	logExists bool
+	logTail   string
+}
+
+// parseJobProbe parses buildJobProbe's reply. Lines before the header (a
+// shell's startup chatter) are skipped; the first header line is the probe's
+// own, since the log content it may be followed by comes after it.
+func parseJobProbe(out string) (jobProbe, error) {
+	if !strings.HasPrefix(out, jobProbeHeader) {
+		i := strings.Index(out, "\n"+jobProbeHeader)
+		if i < 0 {
+			first, _, _ := strings.Cut(out, "\n")
+			if len(first) > 80 {
+				first = first[:80] + "…"
+			}
+			return jobProbe{}, fmt.Errorf("unexpected reply to the job probe: %q", first)
+		}
+		out = out[i+1:]
+	}
+	head, rest, _ := strings.Cut(out, "\n")
+	fields := strings.Split(strings.TrimSuffix(head, "\r"), ":")
+	if len(fields) != 3 || fields[0]+":" != jobProbeHeader {
+		if len(head) > 80 {
+			head = head[:80] + "…"
+		}
+		return jobProbe{}, fmt.Errorf("unexpected reply to the job probe: %q", head)
+	}
+	p := jobProbe{liveness: fields[1], logTail: rest}
+	switch fields[1] {
+	case "alive", "dead", "unknown":
+	default:
+		return jobProbe{}, fmt.Errorf("unexpected job probe liveness %q", fields[1])
+	}
+	switch fields[2] {
+	case "log":
+		p.logExists = true
+	case "nolog":
+	default:
+		return jobProbe{}, fmt.Errorf("unexpected job probe log state %q", fields[2])
+	}
+	return p, nil
+}
+
+// Check finds out whether a running job has finished, reading only the last
+// jobProbeBytes of its log, and records the outcome: done (with its exit
+// code), lost (see jobLostStrikes), or still running. A job that is already
+// done or lost is returned as stored, without contacting its server.
+//
+// A transport error is returned as is and changes nothing, unless the job's
+// server is known to have been removed (ServerRemoved), which loses the job.
+func (s *JobStore) Check(exec ExecFunc, id int) (JobRecord, error) {
+	if exec == nil {
+		return JobRecord{}, fmt.Errorf("exec function is required")
+	}
+	rec, err := s.Get(id)
+	if err != nil || rec.Status != JobRunning {
+		return rec, err
+	}
+	out, _, execErr := exec(rec.Server, buildJobProbe(rec.Logfile, rec.Nonce, jobProbeBytes))
+	if execErr != nil {
+		if s.ServerRemoved != nil && s.ServerRemoved(rec.Server) {
+			return s.lose(id, fmt.Sprintf("server %s was removed from the fleet", rec.Server))
+		}
+		return rec, fmt.Errorf("check job %d on %s: %w", id, rec.Server, execErr)
+	}
+	probe, err := parseJobProbe(out)
+	if err != nil {
+		return rec, fmt.Errorf("check job %d on %s: %w", id, rec.Server, err)
+	}
+	if code, done := parseExit(probe.logTail, rec.Nonce); done {
+		return s.finish(id, code)
+	}
+	switch {
+	case !probe.logExists:
+		return s.strike(id, "its log file "+rec.Logfile+" is gone")
+	case probe.liveness == "dead":
+		return s.strike(id, "no process on "+rec.Server+" runs it any more (the server rebooted, or the job was killed)")
+	case probe.liveness == "alive" && rec.Strikes > 0:
+		updated, _, err := s.transition(id, func(j *JobRecord) bool {
+			if j.Strikes == 0 {
+				return false
+			}
+			j.Strikes = 0
+			return true
+		})
+		return updated, err
+	}
+	return rec, nil
+}
+
+// finish records that a running job exited with code.
+func (s *JobStore) finish(id, code int) (JobRecord, error) {
+	rec, _, err := s.transition(id, func(j *JobRecord) bool {
+		j.Status = JobDone
+		j.ExitCode = code
+		j.Finished = time.Now().UTC()
+		j.Strikes = 0
+		return true
+	})
+	return rec, err
+}
+
+// lose gives up on a running job at once.
+func (s *JobStore) lose(id int, reason string) (JobRecord, error) {
+	rec, _, err := s.transition(id, func(j *JobRecord) bool {
+		j.Status = JobLost
+		j.LostReason = reason
+		j.Finished = time.Now().UTC()
+		return true
+	})
+	return rec, err
+}
+
+// strike counts one probe that found a running job unable to finish, and
+// gives up on it once the rule in jobLostStrikes is met.
+func (s *JobStore) strike(id int, reason string) (JobRecord, error) {
+	rec, _, err := s.transition(id, func(j *JobRecord) bool {
+		j.Strikes++
+		if j.Strikes >= jobLostStrikes && time.Since(j.Started) >= jobLostMinAge {
+			j.Status = JobLost
+			j.LostReason = reason
+			j.Finished = time.Now().UTC()
+		}
+		return true
+	})
+	return rec, err
+}
+
+// transition applies change to a job that is still running, as a
+// compare-and-set: under the store's write lock it re-reads the job and calls
+// change only if the job is still JobRunning, so when several pollers (the
+// background helper, `fleet job wait`, `fleet job logs`) see the same outcome,
+// exactly one of them records it. change reports whether it modified the
+// record. The returned record is the stored one afterwards; ended reports
+// whether this call moved the job out of JobRunning. Only that caller sends
+// the "job-failed" notification, so it goes out once.
+func (s *JobStore) transition(id int, change func(*JobRecord) bool) (rec JobRecord, ended bool, err error) {
+	err = s.withWriteLock(func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		doc, err := s.read()
 		if err != nil {
 			return err
 		}
-		found := false
 		for i := range doc.Jobs {
-			if doc.Jobs[i].ID == rec.ID {
-				doc.Jobs[i] = rec
-				found = true
-				break
+			if doc.Jobs[i].ID != id {
+				continue
 			}
+			if doc.Jobs[i].Status != JobRunning || !change(&doc.Jobs[i]) {
+				rec = doc.Jobs[i]
+				return nil
+			}
+			rec = doc.Jobs[i]
+			ended = rec.Status != JobRunning
+			return s.write(doc)
 		}
-		if !found {
-			return fmt.Errorf("job %d not found", rec.ID)
-		}
-		return s.write(doc)
+		return fmt.Errorf("job %d not found", id)
 	})
+	if err != nil {
+		return rec, false, err
+	}
+	// Notify outside the lock: it is a network call.
+	if ended && (rec.Status == JobLost || rec.ExitCode != 0) {
+		s.fireJobFailed(rec)
+	}
+	return rec, ended, nil
 }
 
-// Wait polls the job until it finishes (FLEETEXIT observed) or the timeout
-// elapses. A non-positive timeout waits indefinitely. poll controls the gap
-// between checks; sleep abstracts time.Sleep so tests can run without delay.
+// fireJobFailed sends a best-effort "job-failed" notification for a job that
+// finished with a non-zero exit code or was lost. The NotifyStore is loaded
+// from the same config dir as the job store (jobs.json's parent), so it
+// requires no extra wiring. Any failure — including a panic — is swallowed so
+// it can never break Tail/Check/Wait.
+func (s *JobStore) fireJobFailed(rec JobRecord) {
+	defer func() { _ = recover() }()
+	configDir := filepath.Dir(s.path)
+	msg := fmt.Sprintf("job %d on %s failed (exit %d): %s", rec.ID, rec.Server, rec.ExitCode, rec.Command)
+	if rec.Status == JobLost {
+		msg = fmt.Sprintf("job %d on %s was lost (%s): %s", rec.ID, rec.Server, rec.LostReason, rec.Command)
+	}
+	_ = NewNotifyStore(configDir).Fire(NotifyEventJobFailed, msg)
+}
+
+// Wait polls the job with Check until it is no longer running (done or lost)
+// or the timeout elapses. A non-positive timeout waits indefinitely. poll
+// controls the gap between checks; sleep abstracts time.Sleep so tests can run
+// without delay. The caller tells done from lost by the returned Status.
 func (s *JobStore) Wait(exec ExecFunc, id int, timeout, poll time.Duration, sleep func(time.Duration)) (JobRecord, error) {
 	if poll <= 0 {
 		poll = time.Second
@@ -510,11 +775,11 @@ func (s *JobStore) Wait(exec ExecFunc, id int, timeout, poll time.Duration, slee
 		deadline = time.Now().Add(timeout)
 	}
 	for {
-		rec, _, err := s.Tail(exec, id)
+		rec, err := s.Check(exec, id)
 		if err != nil {
 			return JobRecord{}, err
 		}
-		if rec.Status == JobDone {
+		if rec.Status != JobRunning {
 			return rec, nil
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
