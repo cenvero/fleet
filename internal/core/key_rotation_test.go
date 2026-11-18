@@ -198,9 +198,13 @@ func TestRotateKeysRollsBackOnRemovalFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fleetFingerprint(old) error = %v", err)
 	}
+	storeRotationSecret(t, configDir)
 	if _, err := app.RotateKeys(); err == nil {
 		t.Fatalf("expected RotateKeys() to fail on removal error")
 	}
+	// The failure came after the secrets were re-sealed under the new key, so
+	// the rollback must re-seal them for the restored key as well.
+	assertRotationSecretSurvives(t, configDir)
 
 	currentFingerprint, err := fleetFingerprint(configDir)
 	if err != nil {
@@ -227,6 +231,78 @@ func TestRotateKeysRollsBackOnRemovalFailure(t *testing.T) {
 			t.Fatalf("expected new key to be removed during rollback")
 		}
 	}
+}
+
+const rotationSecretName, rotationSecretValue = "db-password", "hunter2-rotation"
+
+// storeRotationSecret stores a secret sealed under the controller key that is
+// about to be rotated.
+func storeRotationSecret(t *testing.T, configDir string) {
+	t.Helper()
+	if err := NewSecretStore(configDir).Set(rotationSecretName, rotationSecretValue); err != nil {
+		t.Fatalf("SecretStore.Set() error = %v", err)
+	}
+}
+
+// assertRotationSecretSurvives checks the invariant a rotation must keep at
+// every exit, success or rollback: the secrets on disk decrypt with the key
+// files left on disk.
+func assertRotationSecretSurvives(t *testing.T, configDir string) {
+	t.Helper()
+	got, err := NewSecretStore(configDir).Get(rotationSecretName)
+	if err != nil {
+		t.Fatalf("secret unreadable with the key left on disk: %v", err)
+	}
+	if got != rotationSecretValue {
+		t.Fatalf("secret = %q, want %q", got, rotationSecretValue)
+	}
+}
+
+// resealSecretsForKeyOnDisk re-seals for the key on disk, leaves matching
+// secrets alone, and refuses to guess when the key matches neither.
+func TestResealSecretsForKeyOnDisk(t *testing.T) {
+	t.Parallel()
+	configDir := filepath.Join(t.TempDir(), "fleet")
+	if _, err := Initialize(InitOptions{
+		ConfigDir: configDir, Alias: "fleet", DefaultMode: transport.ModeDirect,
+		CryptoAlgorithm: "ed25519", UpdateChannel: "stable", UpdatePolicy: update.PolicyNotifyOnly,
+	}); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	storeRotationSecret(t, configDir)
+	onDisk, err := DeriveSecretKey(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := make([]byte, len(onDisk))
+	for i := range other {
+		other[i] = onDisk[i] ^ 0x5a
+	}
+
+	// Sealed under another key while the disk key is the previous one: re-seal back.
+	if err := NewSecretStore(configDir).Rekey(onDisk, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := resealSecretsForKeyOnDisk(configDir, onDisk, other); err != nil {
+		t.Fatalf("re-seal back: %v", err)
+	}
+	assertRotationSecretSurvives(t, configDir)
+
+	// Already sealed for the key on disk: nothing to do.
+	if err := resealSecretsForKeyOnDisk(configDir, other, onDisk); err != nil {
+		t.Fatalf("already matching: %v", err)
+	}
+	assertRotationSecretSurvives(t, configDir)
+
+	// The disk key matches neither: report it, change nothing.
+	third := make([]byte, len(onDisk))
+	for i := range third {
+		third[i] = onDisk[i] ^ 0xa5
+	}
+	if err := resealSecretsForKeyOnDisk(configDir, other, third); err == nil {
+		t.Fatal("expected an error when the key on disk matches neither key")
+	}
+	assertRotationSecretSurvives(t, configDir)
 }
 
 func TestRotateKeysUpdatesReverseAgentControllerKnownHosts(t *testing.T) {
@@ -435,9 +511,11 @@ func TestRotateKeysRollsBackOnReverseKnownHostsFailure(t *testing.T) {
 
 	waitForReverseSession(t, hub, "reverse-node")
 
+	storeRotationSecret(t, configDir)
 	if _, err := app.RotateKeys(); err == nil {
 		t.Fatalf("expected RotateKeys() to fail when reverse known_hosts cleanup fails")
 	}
+	assertRotationSecretSurvives(t, configDir)
 
 	currentFingerprint, err := fleetFingerprint(configDir)
 	if err != nil {

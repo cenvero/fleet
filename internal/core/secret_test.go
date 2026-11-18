@@ -636,6 +636,38 @@ func TestSecretKeySourcePinnedToDedicatedFile(t *testing.T) {
 	}
 }
 
+// A deleted dedicated key file must not be replaced by a fresh random key while
+// secrets sealed under it exist: that would orphan them silently. With nothing
+// sealed, re-creating it is harmless and still works.
+func TestSecretKeyMissingDedicatedFileFailsClosed(t *testing.T) {
+	dir := t.TempDir() // no controller key present
+	if err := NewSecretStore(dir).Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	keyPath := filepath.Join(dir, "keys", secretKeyFile)
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSecretStore(dir).Get("k"); err == nil || !strings.Contains(err.Error(), "restore it from a backup") {
+		t.Fatalf("Get with the dedicated key file gone = %v, want a fail-closed error", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("a new dedicated key file was created: %v", err)
+	}
+
+	// An unreadable secret can still be removed (no decryption needed). Once
+	// nothing is sealed, the key file is simply re-created on demand.
+	if err := NewSecretStore(dir).Remove("k"); err != nil {
+		t.Fatalf("Remove of an unreadable secret: %v", err)
+	}
+	if err := NewSecretStore(dir).Set("k2", "v2"); err != nil {
+		t.Fatalf("Set with no sealed secrets left: %v", err)
+	}
+	if got, err := NewSecretStore(dir).Get("k2"); err != nil || got != "v2" {
+		t.Fatalf("Get k2 = %q, %v", got, err)
+	}
+}
+
 // TestSecretKeyPinBlocksControllerToDedicatedFlip proves the exact silent-flip
 // the finding warns about is now blocked: with secrets pinned to the controller
 // key, even if a dedicated secret.key is ALSO present on disk, removing the

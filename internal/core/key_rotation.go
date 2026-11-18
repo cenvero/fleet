@@ -5,6 +5,8 @@ package core
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -117,6 +119,11 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		return stepErr
 	}
 
+	// rekeyed records that the stored secrets have been re-sealed under the
+	// new key's derived secret key, so a rollback must re-seal them back.
+	var rekeyed bool
+	var newSecretKey []byte
+
 	rollbackAfterPromote := func(stepErr error) error {
 		currentKeyPath := filepath.Join(a.ConfigDir, "keys", a.Config.Crypto.PrimaryKey)
 		for _, server := range cleanedDirect {
@@ -125,7 +132,27 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		for _, server := range cleanedReverse {
 			_ = a.updateControllerHostKeys(server, []string{oldKey}, nil)
 		}
-		_ = restoreActiveKeyFiles(rotationDir, filepath.Join(a.ConfigDir, "keys"))
+		restoreErr := restoreActiveKeyFiles(rotationDir, filepath.Join(a.ConfigDir, "keys"))
+		// Whatever happened above, the secrets on disk must decrypt with the
+		// controller key left on disk. Restoring the old key files without
+		// re-sealing the secrets would leave every secret sealed under a key
+		// that no longer exists anywhere.
+		if rekeyed {
+			if err := resealSecretsForKeyOnDisk(a.ConfigDir, oldSecretKey, newSecretKey); err != nil {
+				// Keep the new key files: the secrets may still be sealed under
+				// them, and tempDir is removed when this function returns.
+				kept := filepath.Join(rotationDir, "unfinished-new-key")
+				if mkErr := os.MkdirAll(kept, 0o700); mkErr == nil {
+					for _, name := range controllerKeyFileNames {
+						_, _ = copyControllerKeyFile(tempDir, kept, name)
+					}
+				}
+				return fmt.Errorf("%w; rolling back, could not re-seal the stored secrets for the restored controller key: %v (the new key files are kept in %s)", stepErr, err, kept)
+			}
+		}
+		if restoreErr != nil {
+			return fmt.Errorf("%w; rolling back, could not restore the previous controller key files from %s: %v", stepErr, rotationDir, restoreErr)
+		}
 		rollbackKeyPath := a.serverPrivateKeyPath(ServerRecord{})
 		for _, server := range stagedDirect {
 			_ = a.updateAuthorizedKeys(server, rollbackKeyPath, nil, []string{newKey})
@@ -169,7 +196,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	// new key — a crash before the rewrite leaves the (old-key-sealed) store intact
 	// and recoverable, since rollbackAfterPromote restores the old controller key
 	// files. Without this, every `fleet secret get` would fail after rotation.
-	newSecretKey, err := DeriveSecretKey(a.ConfigDir)
+	newSecretKey, err = DeriveSecretKey(a.ConfigDir)
 	if err != nil {
 		return KeyRotationResult{}, rollbackAfterPromote(fmt.Errorf("derive post-rotation secret key: %w", err))
 	}
@@ -177,6 +204,7 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 	if err := NewSecretStore(a.ConfigDir).Rekey(oldSecretKey, newSecretKey); err != nil {
 		return KeyRotationResult{}, rollbackAfterPromote(fmt.Errorf("re-encrypt secrets across key rotation: %w", err))
 	}
+	rekeyed = true
 
 	for _, server := range reverseTargets {
 		if err := a.verifyReverseReconnect(server); err != nil {
@@ -242,6 +270,29 @@ func (a *App) RotateKeys() (KeyRotationResult, error) {
 		ArchivedFiles:   archivedFiles,
 		VerificationKey: filepath.Join(a.ConfigDir, "keys", a.Config.Crypto.PrimaryKey+".pub"),
 	}, nil
+}
+
+// resealSecretsForKeyOnDisk makes the stored secrets decrypt with whichever
+// controller key a rotation rollback left on disk. sealedKey is the derived
+// secret key the secrets are sealed under now; previousKey is the one derived
+// from the key the rollback tried to restore. If the restore took, the
+// secrets are re-sealed back to previousKey; if it did not (the new key is
+// still on disk), they already match. Anything else is reported, never
+// guessed at.
+func resealSecretsForKeyOnDisk(configDir string, previousKey, sealedKey []byte) error {
+	onDisk, err := DeriveSecretKey(configDir)
+	if err != nil {
+		return fmt.Errorf("derive the secret key from the controller key on disk: %w", err)
+	}
+	defer wipe(onDisk)
+	switch {
+	case subtle.ConstantTimeCompare(onDisk, sealedKey) == 1:
+		return nil // the secrets already match the key on disk
+	case subtle.ConstantTimeCompare(onDisk, previousKey) == 1:
+		return NewSecretStore(configDir).Rekey(sealedKey, previousKey)
+	default:
+		return errors.New("the controller key on disk matches neither the previous nor the new key")
+	}
 }
 
 func unsupportedRotationServers(servers []ServerRecord) []string {

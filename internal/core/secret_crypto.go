@@ -11,6 +11,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -185,6 +186,14 @@ func deriveSecretKey(configDir string) ([]byte, error) {
 // source, since that would derive a different key and orphan existing secrets.
 func deriveFromPinnedSource(keysDir, pinned string) ([]byte, error) {
 	if pinned == dedicatedSourceID {
+		// A missing dedicated key file must not be silently regenerated while
+		// secrets sealed under it exist: a fresh random key would orphan every
+		// one of them. Re-creating it is safe only when nothing is sealed yet.
+		if _, statErr := os.Stat(filepath.Join(keysDir, secretKeyFile)); errors.Is(statErr, os.ErrNotExist) {
+			if sealed, err := hasSealedSecrets(filepath.Dir(keysDir)); err != nil || sealed {
+				return nil, fmt.Errorf("secret key source %q unavailable: %s is missing but secrets.json holds secrets sealed under it; restore it from a backup (fleet backup / fleet config restore) rather than letting a new key orphan them", pinned, filepath.Join(keysDir, secretKeyFile))
+			}
+		}
 		raw, err := loadOrCreateSecretKeyFile(keysDir)
 		if err != nil {
 			return nil, fmt.Errorf("secret key source %q unavailable; cannot decrypt: %w", pinned, err)
@@ -205,6 +214,28 @@ func deriveFromPinnedSource(keysDir, pinned string) ([]byte, error) {
 	key := hkdfKey(seed, []byte("controller-private-key"))
 	wipe(seed)
 	return key, nil
+}
+
+// hasSealedSecrets reports whether secrets.json holds any encrypted record.
+// An unreadable or unparsable store counts as holding some (fail closed).
+func hasSealedSecrets(configDir string) (bool, error) {
+	data, err := os.ReadFile(SecretsPath(configDir)) // #nosec G304 -- fixed filename beneath the controller config dir
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	var doc secretsDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return true, err
+	}
+	for _, rec := range doc.Secrets {
+		if rec.Enc != "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // wipe zeroes secret material once it is no longer needed.
