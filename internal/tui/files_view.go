@@ -2097,6 +2097,9 @@ func (m filesModel) renderEditor() string {
 		srcLabel = ed.source
 	}
 	modeTag := lipgloss.NewStyle().Foreground(fmDimC).Render("VIEW")
+	if ed.readOnly != "" {
+		modeTag = lipgloss.NewStyle().Foreground(fmWarnC).Bold(true).Render("READ-ONLY")
+	}
 	if ed.mode == editorEdit {
 		modeTag = lipgloss.NewStyle().Foreground(fmInk).Background(fmAccent).Bold(true).Padding(0, 1).Render("EDIT")
 	}
@@ -2139,8 +2142,16 @@ func (m filesModel) renderEditor() string {
 		statusSty = fmErrSty
 	case strings.HasPrefix(statusTxt, "saved"):
 		statusSty = fmDoneSty
+	case strings.HasPrefix(statusTxt, "read-only"):
+		statusSty = lipgloss.NewStyle().Foreground(fmWarnC)
 	}
-	footRight := statusSty.Render(fmFit(statusTxt, bw/2))
+	// Give the status whatever the hints leave over; messages that explain a
+	// refusal are long.
+	statusW := bw - lipgloss.Width(footLeft) - 1
+	if statusW < bw/2 {
+		statusW = bw / 2
+	}
+	footRight := statusSty.Render(fmFit(statusTxt, statusW))
 	fgap := bw - lipgloss.Width(footLeft) - lipgloss.Width(footRight)
 	if fgap < 1 {
 		fgap = 1
@@ -2166,7 +2177,7 @@ func (m filesModel) renderEditorViewer(bw, bh int) string {
 	ed := m.editor
 	lines := ed.viewLines
 	if lines == nil {
-		lines = highlightLines(ed.name, ed.area.Value())
+		lines = highlightLines(ed.name, ed.viewSrc)
 	}
 	total := len(lines)
 

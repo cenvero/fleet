@@ -43,9 +43,14 @@ type editorState struct {
 	name    string // base name (drives the lexer + the header)
 	mode    editorMode
 	area    textarea.Model
-	content string // last-saved content (for dirty detection)
+	codec   editorCodec // maps the file text onto area's text and back
+	content string      // last-saved file text (for dirty detection)
 	dirty   bool
 	saving  bool
+	loaded  bool // the file's content has arrived
+	// readOnly says why the file cannot be edited here ("" = editable): its
+	// content has no exact form in the textarea (see editorCodec).
+	readOnly string
 	// inPlace is set after a save failed because the file cannot be replaced
 	// (a bind-mounted file, a folder the agent may not write…): the next
 	// save writes into the file itself.
@@ -194,8 +199,7 @@ func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	ta := textarea.New()
-	ta.SetValue(msg.content)
+	ta, codec, why := newEditorArea(msg.content)
 	ta.ShowLineNumbers = true
 	ta.CharLimit = 0
 	ta.MaxHeight = 0 // unbounded; we size it explicitly each frame
@@ -207,6 +211,9 @@ func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 	ta.SetHeight(h)
 
 	m.editor.area = ta
+	m.editor.codec = codec
+	m.editor.readOnly = why
+	m.editor.loaded = true
 	m.editor.content = msg.content
 	m.editor.viewLines = msg.lines
 	m.editor.viewSrc = msg.content
@@ -218,8 +225,15 @@ func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 	m.editor.viewScrl = 0
 	m.editor.status = ""
 	m.status = "editing " + msg.name
+	if why != "" {
+		m.editor.status = readOnlyStatus(why, msg.source)
+		m.status = "viewing " + msg.name + " (read-only: " + why + ")"
+	}
 	return m, nil
 }
+
+// text returns the editor's current content as file text.
+func (ed *editorState) text() string { return ed.codec.decode(ed.area.Value()) }
 
 // styleEditorTextarea tints the textarea to match the file-manager palette.
 func styleEditorTextarea(ta *textarea.Model) {
@@ -264,7 +278,7 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// from discarding edits silently.
 			ed.area.Blur()
 			ed.mode = editorView
-			if v := ed.area.Value(); v != ed.viewSrc {
+			if v := ed.text(); v != ed.viewSrc {
 				ed.viewLines = highlightLines(ed.name, v)
 				ed.viewSrc = v
 			}
@@ -301,7 +315,7 @@ func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Edit mode: forward to the textarea.
 	var cmd tea.Cmd
 	ed.area, cmd = ed.area.Update(msg)
-	ed.dirty = ed.area.Value() != ed.content
+	ed.dirty = ed.text() != ed.content
 	return m, cmd
 }
 
@@ -313,7 +327,7 @@ func (m *filesModel) clampEditorScroll() {
 	}
 	total := len(ed.viewLines)
 	if total == 0 {
-		total = strings.Count(ed.area.Value(), "\n") + 1
+		total = strings.Count(ed.viewSrc, "\n") + 1
 	}
 	maxTop := total - m.editorBodyHeight()
 	if maxTop < 0 {
@@ -332,6 +346,13 @@ func (m *filesModel) clampEditorScroll() {
 func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
 	ed := m.editor
 	if ed.mode == editorView {
+		if !ed.loaded {
+			return m, nil
+		}
+		if ed.readOnly != "" {
+			ed.status = readOnlyStatus(ed.readOnly, ed.source)
+			return m, nil
+		}
 		ed.mode = editorEdit
 		ed.status = ""
 		w, h := m.editorAreaSize()
@@ -341,7 +362,7 @@ func (m filesModel) toggleEditorMode() (tea.Model, tea.Cmd) {
 	}
 	ed.mode = editorView
 	ed.area.Blur()
-	if v := ed.area.Value(); v != ed.viewSrc {
+	if v := ed.text(); v != ed.viewSrc {
 		ed.viewLines = highlightLines(ed.name, v)
 		ed.viewSrc = v
 	}
@@ -361,10 +382,14 @@ func (m filesModel) closeEditor() (tea.Model, tea.Cmd) {
 // remote upload) off the UI thread, then refreshes the owning pane.
 func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
 	ed := m.editor
-	if ed.saving {
+	if ed.saving || !ed.loaded {
 		return m, nil
 	}
-	content := ed.area.Value()
+	if ed.readOnly != "" {
+		ed.status = readOnlyStatus(ed.readOnly, ed.source)
+		return m, nil
+	}
+	content := ed.text()
 	ed.saving = true
 	ed.status = "saving…"
 	app := m.app
@@ -450,7 +475,7 @@ func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
 	// What was saved is the new base; text typed while the save ran is
 	// still unsaved.
 	ed.content = msg.content
-	ed.dirty = ed.area.Value() != msg.content
+	ed.dirty = ed.text() != msg.content
 	ed.status = "saved ✓"
 	m.status = "saved " + ed.name
 	return m, m.reload(ed.side)
