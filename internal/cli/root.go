@@ -128,18 +128,12 @@ func NewRootCommand() *cobra.Command {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Run 'fleet init' first to set up the controller.\n")
 			os.Exit(1)
 		}
-		// Check for pending config migrations and show a one-line hint.
+		// Notices (an update is available, a config migration is pending, a
+		// background task failed) are no longer printed before every command,
+		// where they got in the way of `fleet ssh`, `fleet exec` and scripts
+		// parsing their output. `fleet errors` lists them; bare `fleet` and
+		// `fleet status` say how many there are (see core.CollectNotices).
 		if cfg, err := core.LoadConfigShared(core.ConfigPath(configDir)); err == nil {
-			if hint := core.AdjustInitHint(cfg); hint != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "\n⚠  %s\n\n", hint)
-			}
-			// Update notice (any install method): shows the latest version on the
-			// configured channel + the correct upgrade command (brew vs
-			// `fleet update apply`), in yellow on a terminal. Backed by the same
-			// 10-minute cache the daemon's update checker keeps warm.
-			if notice := core.UpdateNotice(configDir, cfg.ManifestURL, cfg.Updates.Channel, cfg.Updates.Policy, term.IsTerminal(int(os.Stderr.Fd()))); notice != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "\n%s\n\n", notice)
-			}
 			// Stamp last-seen version so 'fleet recover' can detect mismatches.
 			core.StampLastSeenVersion(core.ConfigPath(configDir), cfg)
 		}
@@ -173,7 +167,11 @@ func NewRootCommand() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "To report an issue: fleet report")
 				return nil
 			}
-			return cmd.Help()
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			printNoticeSummary(cmd, configDir)
+			return nil
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if err := preRun(cmd, args); err != nil {
@@ -196,6 +194,7 @@ func NewRootCommand() *cobra.Command {
 
 	root.AddCommand(newInitCommand(&configDir))
 	root.AddCommand(newStatusCommand(&configDir))
+	root.AddCommand(newErrorsCommand(&configDir))
 	root.AddCommand(newLifecycleCommand("start", &configDir))
 	root.AddCommand(newLifecycleCommand("stop", &configDir))
 	root.AddCommand(newLifecycleCommand("daemon", &configDir))
@@ -831,7 +830,11 @@ func newStatusCommand(configDir *string) *cobra.Command {
 			}
 			daemon := core.DaemonStatus(app.ConfigDir, app.Config.Runtime.ControlAddress)
 			status.Daemon = &daemon
-			return writeJSON(cmd, status)
+			if err := writeJSON(cmd, status); err != nil {
+				return err
+			}
+			printNoticeSummary(cmd, app.ConfigDir) // stderr, terminal only: stdout stays JSON
+			return nil
 		},
 	}
 }

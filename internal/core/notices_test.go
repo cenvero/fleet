@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Cenvero / Shubhdeep Singh
+
+package core
+
+import (
+	"testing"
+
+	"github.com/cenvero/fleet/internal/transport"
+	"github.com/cenvero/fleet/internal/update"
+)
+
+func noticeIDs(notices []Notice) map[string]Notice {
+	out := map[string]Notice{}
+	for _, n := range notices {
+		out[n.ID] = n
+	}
+	return out
+}
+
+// Notices are derived from the controller's own state: a fresh controller has
+// none, each cause produces one with the command that fixes it, and fixing
+// the cause makes it go away.
+func TestCollectNoticesFollowsTheControllerState(t *testing.T) {
+	app := newImportTestApp(t)
+	dir := app.ConfigDir
+	// Keep the update check offline: no notice comes from the network here.
+	cfg := app.Config
+	cfg.Updates.Policy = update.PolicyDisabled
+	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := CollectNotices(dir); len(got) != 0 {
+		t.Fatalf("fresh controller has notices: %+v", got)
+	}
+
+	cfg.Crypto.PassphraseProtected = true
+	cfg.InitVersion = CurrentInitVersion - 1
+	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAgentSyncState(dir, AgentSyncState{LastFailed: 1, LastFailedNames: []string{"web-01\x1b[31m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AddServer(ServerRecord{Name: "edge-01", Address: "unknown", Mode: transport.ModeReverse}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := noticeIDs(CollectNotices(dir))
+	for id, fix := range map[string]string{
+		"passphrase-keys":   "fleet key rotate",
+		"adjust-init":       "fleet adjust-init",
+		"agent-sync-failed": "fleet sync-agent auto status",
+		"daemon-needed":     "fleet start",
+	} {
+		n, ok := got[id]
+		if !ok {
+			t.Fatalf("missing notice %q (have %v)", id, got)
+		}
+		if n.Fix != fix {
+			t.Fatalf("notice %q fix = %q, want %q", id, n.Fix, fix)
+		}
+	}
+	// Server names come from records an agent influenced: control characters
+	// must not reach the terminal.
+	if d := got["agent-sync-failed"].Detail; containsControl(d) {
+		t.Fatalf("notice detail carries control characters: %q", d)
+	}
+
+	// Fixing the causes clears them.
+	cfg.Crypto.PassphraseProtected = false
+	cfg.InitVersion = CurrentInitVersion
+	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAgentSyncState(dir, AgentSyncState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RemoveServerWithOptions("edge-01", RemoveOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if left := CollectNotices(dir); len(left) != 0 {
+		t.Fatalf("notices left after fixing every cause: %+v", left)
+	}
+}
+
+func containsControl(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}

@@ -138,3 +138,37 @@ func TestLogsFiltersWithoutSearch(t *testing.T) {
 		}
 	}
 }
+
+// Notices (here a pending config migration) are no longer printed before
+// ordinary commands; `fleet errors` lists them with the command that fixes them.
+func TestNoticesOnlyInFleetErrors(t *testing.T) {
+	configDir := newServerCommandTestConfig(t)
+	cfg, err := core.LoadConfig(core.ConfigPath(configDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.InitVersion = core.CurrentInitVersion - 1
+	cfg.Updates.Policy = "disabled" // keep the update check offline
+	if err := core.SaveConfig(core.ConfigPath(configDir), cfg); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runFleetIn(t, configDir, "server", "list")
+	if err != nil {
+		t.Fatalf("server list: %v", err)
+	}
+	if strings.Contains(out, "adjust-init") {
+		t.Fatalf("an ordinary command printed a notice:\n%s", out)
+	}
+	out, err = runFleetIn(t, configDir, "errors")
+	if err != nil || !strings.Contains(out, "Fix: fleet adjust-init") {
+		t.Fatalf("fleet errors = %v\n%s", err, out)
+	}
+	out, err = runFleetIn(t, configDir, "errors", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices []core.Notice
+	if err := json.Unmarshal([]byte(out), &notices); err != nil || len(notices) == 0 || notices[0].ID != "adjust-init" {
+		t.Fatalf("fleet errors --json = %v %+v\n%s", err, notices, out)
+	}
+}

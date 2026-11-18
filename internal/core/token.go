@@ -326,7 +326,7 @@ func IsReadCommand(topCommand string) bool {
 var commandMutationClassifications = map[string]bool{
 	"fleet": false,
 
-	"init": true, "status": false, "start": true, "stop": true, "daemon": true,
+	"init": true, "status": false, "errors": false, "start": true, "stop": true, "daemon": true,
 	"dashboard": true, "files": true, "filemanager": true, "filemanager ui": true,
 
 	"server add": true, "server list": false, "server show": false, "server metrics": false,

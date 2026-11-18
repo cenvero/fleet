@@ -136,11 +136,10 @@ func Open(configDir string) (*App, error) {
 		sessions:       newSessionPool(),
 	}
 	// Passphrase-protected keys are recorded in config but the runtime connector
-	// does not yet pass the passphrase through. Warn early so the operator knows
-	// that connections will fail rather than discovering it at connect time.
-	if cfg.Crypto.PassphraseProtected {
-		fmt.Fprintf(os.Stderr, "warning: passphrase-protected keys are not yet supported at runtime; connections will fail until this is wired\n")
-	}
+	// does not yet pass the passphrase through. That is reported by `fleet
+	// errors` (see CollectNotices) and by the connection failure itself ("requires
+	// a passphrase"), not printed on every Open, which put it in front of the
+	// output of every command, `fleet ssh` and `fleet exec` included.
 	return app, nil
 }
 
