@@ -258,3 +258,48 @@ func TestHelperStatusCommand(t *testing.T) {
 		t.Fatalf("status --json = %+v", state)
 	}
 }
+
+// `fleet __helper` runs in-process here: it gets through its own pre-run
+// without trying to start another helper, holds the lock, and returns nil when
+// it exits by design (its config dir going away).
+func TestHelperRunCommandRunsAndExitsCleanly(t *testing.T) {
+	configDir := newServerCommandTestConfig(t)
+	launches := fakeHelperLaunches(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := runFleetIn(t, configDir, core.HelperCommand)
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for !core.HelperRunning(configDir) {
+		select {
+		case err := <-done:
+			t.Fatalf("__helper returned before taking its lock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("__helper never took its lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if *launches != 0 {
+		t.Fatalf("__helper's pre-run launched %d helper(s)", *launches)
+	}
+	if st, err := core.ReadHelperStatus(configDir); err != nil || st.PID != os.Getpid() || len(st.Tasks) != 3 {
+		t.Fatalf("status of the running helper = %+v, %v", st, err)
+	}
+	if err := os.Remove(core.ConfigPath(configDir)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("__helper = %v, want nil after its config went away", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("__helper kept running without a config")
+	}
+	if core.HelperRunning(configDir) {
+		t.Fatal("lock still held")
+	}
+}

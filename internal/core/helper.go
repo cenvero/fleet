@@ -688,9 +688,12 @@ type helperRunner struct {
 	wg        sync.WaitGroup
 	changed   chan struct{} // a task finished
 	persistMu sync.Mutex    // keeps snapshots reaching the file in order
+	logMu     sync.Mutex    // tasks log from their own goroutines
 }
 
 func (r *helperRunner) logf(format string, args ...any) {
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
 	fmt.Fprintf(r.log, "%s helper: "+format+"\n", append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
 }
 

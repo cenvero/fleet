@@ -677,9 +677,10 @@ logfile on the server (not world-readable).
 
 The [background helper](#background-helper) keeps checking running jobs, so `fleet jobs` shows a
 finished job as `done` and a failed one fires the `job-failed` notification (once) without anyone
-running `job status`. Checking reads only the last 512 bytes of the log; `fleet job logs` reads
-the output itself. A job that can never report back is marked **`lost`**, with the reason in
-`fleet job status`:
+running `job status`. A check brings back only the last 512 bytes of the log (once the job's
+process is gone, the server searches the rest of the log for the exit marker, so output a job's
+leftover child writes afterwards doesn't hide it); `fleet job logs` reads the output itself. A
+job that can never report back is marked **`lost`**, with the reason in `fleet job status`:
 
 - its server was removed from the fleet;
 - its log file is gone (deleted, or swept), seen on 3 checks in a row;

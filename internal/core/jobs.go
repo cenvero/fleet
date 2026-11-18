@@ -545,9 +545,9 @@ func (s *JobStore) Tail(exec ExecFunc, id int) (rec JobRecord, output string, er
 const jobProbeHeader = "FLEETPROBE:"
 
 // buildJobProbe builds the command Check runs: one header line, then (if the
-// log exists) the last jobProbeBytes of the log:
+// log exists) the last tailBytes of the log:
 //
-//	FLEETPROBE:<alive|dead|unknown>:<log|nolog>
+//	FLEETPROBE:<alive|dead|unknown>:<log|nolog>:<exit code, or empty>
 //	<end of the log>
 //
 // alive/dead says whether any process on the server still carries the job's
@@ -561,22 +561,37 @@ const jobProbeHeader = "FLEETPROBE:"
 // has written the marker (or was killed), so a job that ends between the two
 // steps is never mistaken for a lost one.
 //
+// The exit code field covers a marker that is no longer in the tail: a job
+// that leaves a child writing to its log (`./server &`) gets its marker
+// followed by more output. When the wrapper is not known to be alive, the
+// probe searches the log on the server for the line-anchored marker — all of
+// it when the wrapper is gone (once, then the job is done), the last
+// maxJobLogBytes when the server can't tell, as Tail always did — and sends
+// back only the code.
+//
 // The header is printed before any log content, so nothing the job writes can
 // forge it.
 func buildJobProbe(logfile, nonce string, tailBytes int) string {
 	q := shellQuote(logfile)
-	pattern := shellQuote("[" + jobExitMarker[:1] + "]" + jobExitMarker[1:] + nonce + ":")
+	marker := "[" + jobExitMarker[:1] + "]" + jobExitMarker[1:] + nonce + ":"
+	pattern := shellQuote(marker)
+	anchored := shellQuote("^" + marker + "[0-9][0-9]*$")
 	return "s=unknown; " +
 		"if [ -r /proc/self/cmdline ]; then grep -qsa -e " + pattern + " /proc/[0-9]*/cmdline; case $? in 0) s=alive ;; 1) s=dead ;; esac; " +
 		"elif p=$(ps -A -ww -o args= 2>/dev/null) && [ -n \"$p\" ]; then printf '%s\\n' \"$p\" | grep -qs -e " + pattern + "; case $? in 0) s=alive ;; 1) s=dead ;; esac; fi; " +
-		"if [ -e " + q + " ]; then printf '" + jobProbeHeader + "%s:log\\n' \"$s\"; tail -c " + strconv.Itoa(tailBytes) + " " + q + " 2>/dev/null; " +
-		"else printf '" + jobProbeHeader + "%s:nolog\\n' \"$s\"; fi"
+		"if [ -e " + q + " ]; then c=; " +
+		"case $s in dead) c=$(grep -a -e " + anchored + " " + q + " 2>/dev/null | tail -n 1) ;; " +
+		"unknown) c=$(tail -c " + strconv.Itoa(maxJobLogBytes) + " " + q + " 2>/dev/null | grep -a -e " + anchored + " | tail -n 1) ;; esac; " +
+		"printf '" + jobProbeHeader + "%s:log:%s\\n' \"$s\" \"${c##*:}\"; tail -c " + strconv.Itoa(tailBytes) + " " + q + " 2>/dev/null; " +
+		"else printf '" + jobProbeHeader + "%s:nolog:\\n' \"$s\"; fi"
 }
 
 // jobProbe is a parsed probe reply.
 type jobProbe struct {
 	liveness  string // "alive", "dead" or "unknown"
 	logExists bool
+	exitCode  int // valid when exited
+	exited    bool
 	logTail   string
 }
 
@@ -597,7 +612,7 @@ func parseJobProbe(out string) (jobProbe, error) {
 	}
 	head, rest, _ := strings.Cut(out, "\n")
 	fields := strings.Split(strings.TrimSuffix(head, "\r"), ":")
-	if len(fields) != 3 || fields[0]+":" != jobProbeHeader {
+	if (len(fields) != 3 && len(fields) != 4) || fields[0]+":" != jobProbeHeader {
 		if len(head) > 80 {
 			head = head[:80] + "…"
 		}
@@ -615,6 +630,13 @@ func parseJobProbe(out string) (jobProbe, error) {
 	case "nolog":
 	default:
 		return jobProbe{}, fmt.Errorf("unexpected job probe log state %q", fields[2])
+	}
+	if len(fields) == 4 && fields[3] != "" {
+		code, err := strconv.Atoi(fields[3])
+		if err != nil || code < 0 {
+			return jobProbe{}, fmt.Errorf("unexpected job probe exit code %q", fields[3])
+		}
+		p.exitCode, p.exited = code, true
 	}
 	return p, nil
 }
@@ -647,6 +669,9 @@ func (s *JobStore) Check(exec ExecFunc, id int) (JobRecord, error) {
 	}
 	if code, done := parseExit(probe.logTail, rec.Nonce); done {
 		return s.finish(id, code)
+	}
+	if probe.exited {
+		return s.finish(id, probe.exitCode)
 	}
 	switch {
 	case !probe.logExists:

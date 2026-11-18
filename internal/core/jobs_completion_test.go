@@ -147,10 +147,13 @@ func TestJobFailureNotifiesOnceWithTwoPollers(t *testing.T) {
 	}
 }
 
-var tailBytesPattern = regexp.MustCompile(`tail -c ([0-9]+)`)
+// tailBytesPattern finds `tail -c N <file>` reads in a command, and whether
+// the bytes are piped into grep on the server (only a matching line comes
+// back) rather than sent back.
+var tailBytesPattern = regexp.MustCompile(`tail -c ([0-9]+) ('[^']*'|\S+)( 2>/dev/null)?( \| grep)?`)
 
-// Waiting for a job must not read the whole (up to 4 MiB) log on every poll:
-// completion only needs the last few hundred bytes.
+// Waiting for a job must not pull the whole (up to 4 MiB) log across the
+// network on every poll: completion only needs the last few hundred bytes.
 func TestJobWaitPollsWithoutReadingTheWholeLog(t *testing.T) {
 	store := NewJobStore(t.TempDir())
 	launch := func(string, string) (string, int, error) { return "", 0, nil }
@@ -161,6 +164,9 @@ func TestJobWaitPollsWithoutReadingTheWholeLog(t *testing.T) {
 	polls, maxRead := 0, 0
 	exec := func(_, command string) (string, int, error) {
 		for _, m := range tailBytesPattern.FindAllStringSubmatch(command, -1) {
+			if m[4] != "" {
+				continue // searched on the server; only the marker line returns
+			}
 			if n, _ := strconv.Atoi(m[1]); n > maxRead {
 				maxRead = n
 			}
@@ -454,5 +460,88 @@ func TestJobPruneRemovesOldLostJobs(t *testing.T) {
 	removed, err := store.Prune(time.Now().Add(time.Minute), nil)
 	if err != nil || removed != 1 {
 		t.Fatalf("Prune removed %d (%v), want the lost job", removed, err)
+	}
+}
+
+// A job that leaves a child writing to its log gets more output after its
+// marker than the probe's window holds. Once the wrapper is gone the probe
+// finds the marker in the whole log, so the job is done, not lost.
+func TestJobProbeFindsAMarkerFollowedByMoreOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the job launcher is a POSIX shell script")
+	}
+	shimSetsid(t)
+	const nonce = "33333333333333333333333333333333"
+	logfile := filepath.Join(t.TempDir(), "job.log")
+	job := "(sleep 0.3; printf '%2000s' tail-end) & exit 5"
+	if out, err := exec.Command("/bin/sh", "-c", buildJobLaunch(job, logfile, nonce)).CombinedOutput(); err != nil { // #nosec G204 -- test runs the launcher it builds
+		t.Fatalf("launch: %v: %s", err, out)
+	}
+	waitForFileContaining(t, logfile, "tail-end")
+
+	p := runJobProbe(t, logfile, nonce)
+	if _, inTail := parseExit(p.logTail, nonce); inTail {
+		t.Fatal("test setup: the marker is still inside the probe window")
+	}
+	if p.liveness == "unknown" {
+		t.Logf("this system cannot report liveness; the last %d bytes are searched", maxJobLogBytes)
+	}
+	if !p.exited || p.exitCode != 5 {
+		t.Fatalf("probe = %+v, want the exit code found beyond the window", p)
+	}
+
+	// And through Check: the job is done with that code.
+	store := NewJobStore(t.TempDir())
+	if err := store.write(jobsDocument{Counter: 1, Jobs: []JobRecord{{
+		ID: 1, Server: "local", Command: job, Logfile: logfile, Nonce: nonce,
+		Status: JobRunning, Started: time.Now().Add(-time.Hour).UTC(),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	local := func(_, command string) (string, int, error) {
+		out, err := exec.Command("/bin/sh", "-c", command).Output() // #nosec G204 -- test runs the probe it builds
+		return string(out), 0, err
+	}
+	rec, err := store.Check(local, 1)
+	if err != nil || rec.Status != JobDone || rec.ExitCode != 5 {
+		t.Fatalf("Check = %+v, %v", rec, err)
+	}
+}
+
+func TestParseJobProbeExitCode(t *testing.T) {
+	p, err := parseJobProbe("FLEETPROBE:dead:log:7\nout")
+	if err != nil || !p.exited || p.exitCode != 7 || p.logTail != "out" {
+		t.Fatalf("probe = %+v, %v", p, err)
+	}
+	if p, err := parseJobProbe("FLEETPROBE:alive:log:\nout"); err != nil || p.exited {
+		t.Fatalf("empty code: %+v, %v", p, err)
+	}
+	for _, bad := range []string{"FLEETPROBE:dead:log:x\n", "FLEETPROBE:dead:log:-1\n", "FLEETPROBE:dead:log:1:2\n"} {
+		if _, err := parseJobProbe(bad); err == nil {
+			t.Errorf("parseJobProbe(%q) accepted", bad)
+		}
+	}
+}
+
+// Whatever the log holds, a probe's reply is the header and at most
+// jobProbeBytes of it, for every liveness outcome.
+func TestJobProbeReplyStaysSmall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the probe is a POSIX shell script")
+	}
+	logfile := filepath.Join(t.TempDir(), "big.log")
+	if err := os.WriteFile(logfile, []byte(strings.Repeat("0123456789abcdef\n", 128<<10)), 0o600); err != nil { // ~2 MiB
+		t.Fatal(err)
+	}
+	const nonce = "44444444444444444444444444444444"
+	out, err := exec.Command("/bin/sh", "-c", buildJobProbe(logfile, nonce, jobProbeBytes)).Output() // #nosec G204 -- test runs the probe it builds
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > jobProbeBytes+80 {
+		t.Fatalf("probe reply is %d bytes for a 2 MiB log", len(out))
+	}
+	if p, err := parseJobProbe(string(out)); err != nil || p.exited || len(p.logTail) != jobProbeBytes {
+		t.Fatalf("probe = %+v, %v", p, err)
 	}
 }

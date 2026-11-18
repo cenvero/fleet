@@ -250,21 +250,27 @@ func TestHelperSpreadsOverdueJobsAcrossRuns(t *testing.T) {
 	if err := rig.app.Jobs().write(jobsDocument{Counter: len(jobs), Jobs: jobs}); err != nil {
 		t.Fatal(err)
 	}
-	probedPerRun := func() int {
+	// strikes runs the task once and counts the jobs probed once, twice, ...
+	strikes := func() map[int]int {
 		if err := rig.tracker.run(context.Background(), rig.app); err != nil {
 			t.Fatal(err)
 		}
-		struck := 0
+		counts := map[int]int{}
 		all, _ := rig.app.Jobs().List()
 		for _, j := range all {
-			struck += j.Strikes
+			counts[j.Strikes]++
 		}
-		return struck
+		return counts
 	}
-	if got := probedPerRun(); got != jobProbesPerRound {
-		t.Fatalf("the first run probed %d overdue jobs, want %d", got, jobProbesPerRound)
+	if got := strikes(); got[1] != jobProbesPerRound || got[0] != len(jobs)-jobProbesPerRound {
+		t.Fatalf("after one run, jobs by probe count = %v, want %d probed once", got, jobProbesPerRound)
 	}
-	if got := probedPerRun(); got != 2*jobProbesPerRound {
-		t.Fatalf("after two runs %d probes, want %d", got, 2*jobProbesPerRound)
+	// The first eight are due again by now, but the rest have waited longer:
+	// every job gets a first probe before any gets a second.
+	if got := strikes(); got[1] != 2*jobProbesPerRound || got[2] != 0 {
+		t.Fatalf("after two runs, jobs by probe count = %v, want %d probed once and none twice", got, 2*jobProbesPerRound)
+	}
+	if got := strikes(); got[0] != 0 {
+		t.Fatalf("after three runs, %d job(s) never probed", got[0])
 	}
 }

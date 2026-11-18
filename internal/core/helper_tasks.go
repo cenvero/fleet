@@ -114,10 +114,30 @@ func (t *jobTracker) run(ctx context.Context, app *App) error {
 	if err != nil {
 		return err
 	}
-	// Oldest first, so a backlog is worked through in order.
-	sort.Slice(jobs, func(i, k int) bool { return jobs[i].ID < jobs[k].ID })
-
 	now := wallNow()
+	// Most overdue first: with more due jobs than one run probes, the ones
+	// waiting longest go next, so every job gets its turn rather than the
+	// same few being re-probed.
+	t.mu.Lock()
+	deadline := map[int]time.Time{}
+	for _, j := range jobs {
+		if j.Status == JobRunning && t.dueLocked(j, now) {
+			deadline[j.ID] = t.jobs[j.ID].next
+		}
+	}
+	t.mu.Unlock()
+	sort.SliceStable(jobs, func(i, k int) bool {
+		di, iDue := deadline[jobs[i].ID]
+		dk, kDue := deadline[jobs[k].ID]
+		switch {
+		case iDue != kDue:
+			return iDue
+		case !di.Equal(dk):
+			return di.Before(dk)
+		}
+		return jobs[i].ID < jobs[k].ID
+	})
+
 	var reverseOK *bool
 	reverseReachable := func() bool {
 		if reverseOK == nil {
