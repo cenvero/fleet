@@ -319,3 +319,155 @@ func TestEditorEscAfterToggleNeedsSecondPress(t *testing.T) {
 		t.Fatal("Esc on an unmodified file should close at once")
 	}
 }
+
+// TestLocalEditSaveIsAtomicAndChecked covers the local save path: it replaces
+// the file atomically, keeps its mode, and refuses when the file on disk is no
+// longer the one that was opened.
+func TestLocalEditSaveIsAtomicAndChecked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("atomic replace keeps mode", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "run.sh")
+		if err := os.WriteFile(p, []byte("echo 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.Stat(p)
+		if err := saveFileFromEdit(nil, "", p, []byte("echo 2\n"), []byte("echo 1\n"), false); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		after, _ := os.Stat(p)
+		if got, _ := os.ReadFile(p); string(got) != "echo 2\n" {
+			t.Fatalf("content %q", got)
+		}
+		if after.Mode().Perm() != 0o750 {
+			t.Fatalf("mode %v, want 0750", after.Mode().Perm())
+		}
+		if os.SameFile(before, after) {
+			t.Fatal("file was rewritten in place, not replaced atomically")
+		}
+		left, _ := os.ReadDir(dir)
+		if len(left) != 1 {
+			t.Fatalf("temp debris left behind: %v", left)
+		}
+	})
+
+	t.Run("changed on disk", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "f.txt")
+		if err := os.WriteFile(p, []byte("theirs\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := saveFileFromEdit(nil, "", p, []byte("mine\n"), []byte("original\n"), false)
+		if err == nil || !strings.Contains(err.Error(), "changed") {
+			t.Fatalf("want a changed-on-disk refusal, got %v", err)
+		}
+		if got, _ := os.ReadFile(p); string(got) != "theirs\n" {
+			t.Fatalf("file overwritten: %q", got)
+		}
+	})
+
+	t.Run("deleted since opened", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "gone.txt")
+		if err := saveFileFromEdit(nil, "", p, []byte("mine\n"), []byte("original\n"), false); err == nil {
+			t.Fatal("saving a file that was deleted meanwhile should be refused")
+		}
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatal("save recreated a deleted file")
+		}
+	})
+
+	t.Run("swapped for a symlink", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "f.txt")
+		other := filepath.Join(dir, "other.txt")
+		if err := os.WriteFile(other, []byte("precious\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// f.txt was opened with "original\n" and has since become a link.
+		if err := os.Symlink(other, p); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if err := saveFileFromEdit(nil, "", p, []byte("mine\n"), []byte("original\n"), false); err == nil {
+			t.Fatal("save through a swapped-in symlink should be refused")
+		}
+		if got, _ := os.ReadFile(other); string(got) != "precious\n" {
+			t.Fatalf("symlink target overwritten: %q", got)
+		}
+	})
+
+	t.Run("symlinked file edits its target", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real.conf")
+		link := filepath.Join(dir, "link.conf")
+		if err := os.WriteFile(target, []byte("a=1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if err := saveFileFromEdit(nil, "", link, []byte("a=2\n"), []byte("a=1\n"), false); err != nil {
+			t.Fatalf("save through a symlink: %v", err)
+		}
+		if got, _ := os.ReadFile(target); string(got) != "a=2\n" {
+			t.Fatalf("target %q", got)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("the symlink was replaced instead of its target edited")
+		}
+	})
+
+	t.Run("symlinked directory", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		real := filepath.Join(base, "real")
+		if err := os.Mkdir(real, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		via := filepath.Join(base, "via")
+		if err := os.Symlink(real, via); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if err := os.WriteFile(filepath.Join(real, "f.txt"), []byte("v1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := saveFileFromEdit(nil, "", filepath.Join(via, "f.txt"), []byte("v2\n"), []byte("v1\n"), false); err != nil {
+			t.Fatalf("save in a symlinked folder: %v", err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(real, "f.txt")); string(got) != "v2\n" {
+			t.Fatalf("content %q", got)
+		}
+	})
+}
+
+// TestEditorReportsLocalConflict: a file changed by someone else after it was
+// opened is not overwritten; the footer says why and the edits stay unsaved.
+func TestEditorReportsLocalConflict(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := openInEditor(t, localPaneModel(dir, "f.txt"))
+	m, _ = sendKey(m, keyTab)
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if err := os.WriteFile(p, []byte("theirs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = saveAndDeliver(t, m)
+	if got, _ := os.ReadFile(p); string(got) != "theirs\n" {
+		t.Fatalf("the other change was overwritten: %q", got)
+	}
+	if !strings.Contains(m.editor.status, "changed on disk") || !m.editor.dirty {
+		t.Fatalf("want a conflict and unsaved edits, got status %q dirty=%v", m.editor.status, m.editor.dirty)
+	}
+}

@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/cenvero/fleet/internal/core"
@@ -421,17 +423,18 @@ func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
 	}
 }
 
-// saveFileFromEdit persists edited content. Local writes go straight to the file
-// (0o600). Remote writes use the agent's safe in-place edit: the file keeps its
-// owner, group, mode and extended attributes, is replaced atomically, and is
-// only replaced if it still has the content the editor opened (base) — a
-// change made on the server meanwhile is reported instead of overwritten.
-// Agents too old for that get the checksummed atomic upload instead.
+// saveFileFromEdit persists edited content. Local writes go through
+// saveLocalEdit. Remote writes use the agent's safe in-place edit: the file
+// keeps its owner, group, mode and extended attributes, is replaced
+// atomically, and is only replaced if it still has the content the editor
+// opened (base) — a change made on the server meanwhile is reported instead
+// of overwritten. Agents too old for that get the checksummed atomic upload
+// instead.
 //
 // inPlace writes the remote file in place instead (see core.EditRequest).
 func saveFileFromEdit(app *core.App, source, full string, content, base []byte, inPlace bool) error {
 	if source == "" {
-		return os.WriteFile(full, content, 0o600)
+		return saveLocalEdit(full, content, base)
 	}
 	_, err := app.EditRemoteFile(source, core.EditRequest{Path: full, Replace: true, Content: content, BaseSHA256: sha256Hex(base), InPlace: inPlace})
 	if err == nil {
@@ -460,6 +463,74 @@ func saveFileFromEdit(app *core.App, source, full string, content, base []byte, 
 		return err
 	}
 	return nil
+}
+
+// saveLocalEdit replaces the local file at full with content, atomically, and
+// only while it still holds base (what the editor opened).
+//
+// Like the agent's remote edit, symlinks in the path are resolved first: an
+// edit through a link changes the file it points to and leaves the link in
+// place. The resolved entry is then inspected without following links, its
+// bytes are hashed and compared with base, and content is written to a
+// sidecar in the same folder that is renamed over it with the file's mode.
+// A file that is missing, no longer regular, or has different bytes is left
+// alone and the save is refused.
+func saveLocalEdit(full string, content, base []byte) error {
+	const keep = "; your text is still here — copy what you need, then reopen the file"
+	target, err := filepath.EvalSymlinks(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("the file was removed since you opened it" + keep)
+	}
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	name := filepath.Base(target)
+	before, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("the file was removed since you opened it" + keep)
+	}
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() {
+		return errors.New("the file is no longer a regular file" + keep)
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	// Reading one byte past base is enough to tell a longer file apart.
+	current, readErr := io.ReadAll(io.LimitReader(f, int64(len(base))+1))
+	opened, statErr := f.Stat()
+	_ = f.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if statErr != nil {
+		return statErr
+	}
+	if !os.SameFile(before, opened) || sha256Hex(current) != sha256Hex(base) {
+		return errors.New("the file changed on disk since you opened it" + keep)
+	}
+
+	perm := before.Mode().Perm()
+	out, err := core.CreateAtomicLocalFile(target, perm)
+	if err != nil {
+		return err
+	}
+	defer out.Abort() // a no-op once committed
+	if _, err := out.File().Write(content); err != nil {
+		return err
+	}
+	if err := out.File().Chmod(perm); err != nil {
+		return err
+	}
+	return out.Commit()
 }
 
 func sha256Hex(b []byte) string {
