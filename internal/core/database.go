@@ -17,7 +17,10 @@ type DatabaseShiftResult struct {
 	ToBackend      store.Backend `json:"to_backend"`
 	StateEntries   int           `json:"state_entries"`
 	MetricsEntries int           `json:"metrics_entries"`
-	EventEntries   int           `json:"event_entries"`
+	// MetricSnapshots is how many history samples (the dashboard sparklines)
+	// were copied.
+	MetricSnapshots int `json:"metric_snapshots"`
+	EventEntries    int `json:"event_entries"`
 }
 
 func ShiftDatabase(configDir string, backend store.Backend, dsn string) (DatabaseShiftResult, error) {
@@ -88,6 +91,10 @@ func shiftDatabaseToTarget(configDir string, cfg Config, target store.DatabaseCo
 	if err != nil {
 		return DatabaseShiftResult{}, fmt.Errorf("migrate metrics workload: %w", err)
 	}
+	snapshots, err := migrateMetricSnapshots(cfg.Database, target)
+	if err != nil {
+		return DatabaseShiftResult{}, fmt.Errorf("migrate metric history: %w", err)
+	}
 	eventEntries, err := migrateEventWorkload(cfg.Database, target)
 	if err != nil {
 		return DatabaseShiftResult{}, fmt.Errorf("migrate events workload: %w", err)
@@ -105,16 +112,48 @@ func shiftDatabaseToTarget(configDir string, cfg Config, target store.DatabaseCo
 		Action:   "database.shift",
 		Target:   string(target.Backend),
 		Operator: cfg.Operator,
-		Details:  fmt.Sprintf("from=%s state=%d metrics=%d events=%d", previous, stateEntries, metricsEntries, eventEntries),
+		Details:  fmt.Sprintf("from=%s state=%d metrics=%d metric_snapshots=%d events=%d", previous, stateEntries, metricsEntries, snapshots, eventEntries),
 	})
 
 	return DatabaseShiftResult{
-		FromBackend:    previous,
-		ToBackend:      target.Backend,
-		StateEntries:   stateEntries,
-		MetricsEntries: metricsEntries,
-		EventEntries:   eventEntries,
+		FromBackend:     previous,
+		ToBackend:       target.Backend,
+		StateEntries:    stateEntries,
+		MetricsEntries:  metricsEntries,
+		MetricSnapshots: snapshots,
+		EventEntries:    eventEntries,
 	}, nil
+}
+
+// migrateMetricSnapshots copies the metric history (metric_snapshots, which
+// backs the dashboard sparklines) page by page. The target's history is
+// replaced, like the other workloads. The config only switches after every
+// workload has copied, so a failure here leaves the source in charge.
+func migrateMetricSnapshots(sourceCfg, targetCfg store.DatabaseConfig) (int, error) {
+	source, err := store.Open(sourceCfg, store.WorkloadMetrics)
+	if err != nil {
+		return 0, err
+	}
+	defer source.Close()
+
+	target, err := store.Open(targetCfg, store.WorkloadMetrics)
+	if err != nil {
+		return 0, err
+	}
+	defer target.Close()
+
+	if err := target.ClearMetricSnapshots(); err != nil {
+		return 0, err
+	}
+	copied := 0
+	err = source.ForEachMetricSnapshot(1000, func(page []store.MetricSnapshotEntry) error {
+		if err := target.InsertMetricSnapshots(page); err != nil {
+			return err
+		}
+		copied += len(page)
+		return nil
+	})
+	return copied, err
 }
 
 func migrateStateWorkload(sourceCfg, targetCfg store.DatabaseConfig, workload store.Workload) (int, error) {

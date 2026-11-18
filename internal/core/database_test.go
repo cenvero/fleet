@@ -49,6 +49,16 @@ func TestShiftDatabaseToAlternateSQLiteFiles(t *testing.T) {
 	if err := metricsStore.PutState("servers.total", "3"); err != nil {
 		t.Fatalf("PutState(metrics) error = %v", err)
 	}
+	// Metric history (the dashboard sparklines), more than one copy page.
+	const historyRows = 1205
+	history := make([]store.MetricSnapshotEntry, 0, historyRows)
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < historyRows; i++ {
+		history = append(history, store.MetricSnapshotEntry{Server: "web-01", Timestamp: base.Add(time.Duration(i) * time.Minute), Payload: `{"cpu":` + time.Duration(i).String() + `}`})
+	}
+	if _, err := metricsStore.AppendMetricSnapshots("web-01", history, ""); err != nil {
+		t.Fatalf("AppendMetricSnapshots() error = %v", err)
+	}
 	_ = metricsStore.Close()
 
 	eventsStore, err := store.Open(cfg.Database, store.WorkloadEvents)
@@ -102,5 +112,30 @@ func TestShiftDatabaseToAlternateSQLiteFiles(t *testing.T) {
 	}
 	if got != "2026-04-13T00:00:00Z" {
 		t.Fatalf("unexpected shifted state value %q", got)
+	}
+
+	// The whole metric history moved too, in order.
+	if result.MetricSnapshots != historyRows {
+		t.Fatalf("copied %d metric snapshots, want %d", result.MetricSnapshots, historyRows)
+	}
+	shiftedMetrics, err := store.Open(reloaded.Database, store.WorkloadMetrics)
+	if err != nil {
+		t.Fatalf("Open(shifted metrics) error = %v", err)
+	}
+	defer shiftedMetrics.Close()
+	var copied []store.MetricSnapshotEntry
+	if err := shiftedMetrics.ForEachMetricSnapshot(500, func(page []store.MetricSnapshotEntry) error {
+		copied = append(copied, page...)
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEachMetricSnapshot(shifted) error = %v", err)
+	}
+	if len(copied) != historyRows {
+		t.Fatalf("shifted history has %d rows, want %d", len(copied), historyRows)
+	}
+	for i, entry := range copied {
+		if entry.Server != history[i].Server || !entry.Timestamp.Equal(history[i].Timestamp) || entry.Payload != history[i].Payload {
+			t.Fatalf("history row %d = %+v, want %+v", i, entry, history[i])
+		}
 	}
 }
