@@ -220,3 +220,25 @@ func TestFirewallErrorsStripTerminalEscapes(t *testing.T) {
 		t.Fatalf("firstLine carries control characters: %q", line)
 	}
 }
+
+// With firewalld running, the agent port must be allowed in every active
+// zone: the controller's traffic may arrive through any of them.
+func TestFirewalldGuardChecksEveryActiveZone(t *testing.T) {
+	link := AgentLink{Server: "web-01", Port: testAgentPort}
+	zone := func(name, ports string) string {
+		return name + " (active)\n  target: default\n  interfaces: eth0\n  ports: " + ports + "\n  rich rules: \n"
+	}
+	dump := func(zones string) string {
+		return guardMarker + "firewalld-running\n" + zone("public", "2222/tcp") +
+			guardMarker + "permanent\n" + zone("public", "2222/tcp") +
+			guardMarker + "zones\n" + zones + guardMarker + "unit enabled\n"
+	}
+	ok := parseGuardState(FirewallBackendFirewalld, dump(zone("public", "2222/tcp")+zone("internal", "2222/tcp 80/tcp")), nil, testAgentPort)
+	if refusal := enableLockout(link, ok, ""); refusal != nil {
+		t.Fatalf("allowed in every zone, refused: %v", refusal)
+	}
+	missing := parseGuardState(FirewallBackendFirewalld, dump(zone("public", "2222/tcp")+zone("internal", "80/tcp")), nil, testAgentPort)
+	if refusal := enableLockout(link, missing, ""); refusal == nil {
+		t.Fatal("a zone without the agent port was not refused")
+	}
+}

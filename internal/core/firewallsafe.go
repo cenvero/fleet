@@ -219,6 +219,9 @@ const ufwDumpCommand = "ufw status verbose 2>&1; " +
 const firewalldDumpCommand = "if firewall-cmd --state >/dev/null 2>&1; then " +
 	"echo '" + guardMarker + "firewalld-running'; firewall-cmd --list-all 2>&1; " +
 	"echo '" + guardMarker + "permanent'; firewall-cmd --permanent --list-all 2>&1; " +
+	// Every active zone: the agent's traffic may arrive on an interface (or
+	// from a source) bound to a zone other than the default one.
+	"echo '" + guardMarker + "zones'; for z in $(firewall-cmd --get-active-zones 2>/dev/null | grep -v '^[[:space:]]'); do firewall-cmd --zone=\"$z\" --list-all 2>&1; done; " +
 	"else echo '" + guardMarker + "firewalld-stopped'; echo '" + guardMarker + "permanent'; firewall-offline-cmd --list-all 2>&1; fi; " +
 	"echo \"" + guardMarker + "unit $(systemctl is-enabled firewalld 2>&1)\""
 
@@ -1163,6 +1166,22 @@ func parseFirewalldGuard(st *firewallGuardState, dump string, port int) {
 		}
 		st.active = true
 		rt, perm := firewalldDecision(runtime, port), firewalldDecision(permanent, port)
+		if zones := firewalldZoneBlocks(sec["zones"]); len(zones) > 0 {
+			// The port must be allowed in every active zone, and blocked in
+			// none: fleet cannot tell which one the controller's traffic
+			// arrives through.
+			rt = agentPortDecision{allowed: true}
+			for _, z := range zones {
+				d := firewalldDecision(z, port)
+				rt.allowed = rt.allowed && d.allowed
+				if rt.blockedBy == "" {
+					rt.blockedBy = d.blockedBy
+				}
+				if rt.restricted == "" {
+					rt.restricted = d.restricted
+				}
+			}
+		}
 		d := agentPortDecision{allowed: rt.allowed && perm.allowed, blockedBy: rt.blockedBy, restricted: rt.restricted}
 		if d.blockedBy == "" {
 			d.blockedBy = perm.blockedBy

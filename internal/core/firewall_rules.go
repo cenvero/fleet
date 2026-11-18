@@ -610,3 +610,26 @@ func classifyFirewalldRich(rule string, port int) ruleEffect {
 	}
 	return effBlocks
 }
+
+// firewalldZoneBlocks splits the concatenated `firewall-cmd --zone=Z
+// --list-all` listings of the active zones: each starts with an unindented
+// "<zone> (active)" line.
+func firewalldZoneBlocks(text string) []string {
+	var zones []string
+	var cur strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			if cur.Len() > 0 {
+				zones = append(zones, cur.String())
+				cur.Reset()
+			}
+		}
+		if strings.TrimSpace(line) != "" {
+			cur.WriteString(line + "\n")
+		}
+	}
+	if cur.Len() > 0 {
+		zones = append(zones, cur.String())
+	}
+	return zones
+}
