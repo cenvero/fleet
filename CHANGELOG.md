@@ -127,8 +127,14 @@ Omit sections that have no entries for that release.
     - firewalld `source-ports`
 
   ufw (read from `ufw show added`), iptables, nftables and firewalld rules are now read
-  in evaluation order. Anything fleet cannot read counts as possibly blocking. With
-  firewalld, the port must be allowed in every active zone.
+  in evaluation order. Anything fleet cannot read counts as possibly blocking.
+
+  Allowing the agent port only for the controller works and is confirmed: from its IP or
+  network, or on its interface (a VPN such as Tailscale). The check lists the server's
+  connections to the agent port, which shows where fleet's own connection comes from.
+  Blocklist rules for other hosts no longer cause a refusal. With firewalld, the zone
+  that takes the controller's connection decides, or every active zone when fleet cannot
+  tell.
 - **`--force-i-have-console` is refused under any `--token`/`FLEET_TOKEN`**, with an
   audit entry. The web console's Control view no longer offers or accepts it.
 - **Web console:**

@@ -10,9 +10,9 @@ import (
 
 const testAgentPort = 2222
 
-func decide(t *testing.T, classify func(string, int) ruleEffect, rules ...string) agentPortDecision {
+func decide(t *testing.T, classify func(string, int) ruleMatch, rules ...string) agentPortDecision {
 	t.Helper()
-	return decideAgentPort(rules, testAgentPort, true, classify)
+	return decideAgentPort(rules, testAgentPort, true, classify, agentPeers{})
 }
 
 // The agent port counts as allowed only when a rule accepts it from anywhere,
@@ -156,7 +156,7 @@ func TestFirewalldZoneDecidesTheAgentPort(t *testing.T) {
 		zone("  ports: 2000-3000/tcp\n"),
 		zone("  ports: 443/tcp 2222/tcp 53/udp\n"),
 	} {
-		if d := firewalldDecision(z, testAgentPort); !d.allowed {
+		if d := firewalldDecision(z, testAgentPort, agentPeers{}); !d.allowed {
 			t.Errorf("not allowed (blocked by %q): %s", d.blockedBy, z)
 		}
 	}
@@ -166,13 +166,13 @@ func TestFirewalldZoneDecidesTheAgentPort(t *testing.T) {
 		zone("  ports: 2222/tcp\n") + "\trule family=\"ipv4\" source address=\"10.0.0.0/8\" reject\n",
 		zone("  ports: 2222/tcp\n") + "\trule family=\"ipv4\" port port=\"2000-3000\" protocol=\"tcp\" drop\n",
 	} {
-		if d := firewalldDecision(z, testAgentPort); d.allowed {
+		if d := firewalldDecision(z, testAgentPort, agentPeers{}); d.allowed {
 			t.Errorf("allowed, want refused: %s", z)
 		}
 	}
 	// source-ports alone must not count (only the ports: line does).
 	z := strings.Replace(zone(""), "  source-ports: \n", "  source-ports: 2222/tcp\n", 1)
-	if d := firewalldDecision(z, testAgentPort); d.allowed {
+	if d := firewalldDecision(z, testAgentPort, agentPeers{}); d.allowed {
 		t.Error("source-ports 2222/tcp counted as allowing the agent port")
 	}
 }
@@ -240,5 +240,127 @@ func TestFirewalldGuardChecksEveryActiveZone(t *testing.T) {
 	missing := parseGuardState(FirewallBackendFirewalld, dump(zone("public", "2222/tcp")+zone("internal", "80/tcp")), nil, testAgentPort)
 	if refusal := enableLockout(link, missing, ""); refusal == nil {
 		t.Fatal("a zone without the agent port was not refused")
+	}
+}
+
+// What the server lists while fleet is connected from 203.0.113.7 (seen
+// after NAT) to its public address on eth0, and from 100.64.0.9 over
+// Tailscale.
+const (
+	ssFromController = "Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n" +
+		"0      0      10.0.0.5:2222      203.0.113.7:51514\n" +
+		"0      0      10.0.0.5:22        198.51.100.1:40000\n" // another service: not the agent port
+	ssFromTailscale = "0 0 100.64.0.5:2222 100.64.0.9:60111\n"
+	ipAddrs         = "1: lo    inet 127.0.0.1/8 scope host lo\n" +
+		"2: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0\n" +
+		"3: tailscale0    inet 100.64.0.5/32 scope global tailscale0\n"
+)
+
+func peersFrom(t *testing.T, ss string) agentPeers {
+	t.Helper()
+	p := parseAgentPeers(ss, ipAddrs, testAgentPort)
+	if !p.known {
+		t.Fatalf("no connections to the agent port read from %q", ss)
+	}
+	return p
+}
+
+func TestAgentPeersAreReadFromSSAndNetstat(t *testing.T) {
+	p := peersFrom(t, ssFromController)
+	if len(p.conns) != 1 || p.conns[0].remote.String() != "203.0.113.7" || p.conns[0].iface != "eth0" {
+		t.Fatalf("ss: %+v", p.conns)
+	}
+	netstat := "tcp        0      0 10.0.0.5:2222           203.0.113.7:51514       ESTABLISHED\n" +
+		"tcp6       0      0 ::ffff:10.0.0.5:2222    ::ffff:203.0.113.7:51515 ESTABLISHED\n"
+	p = peersFrom(t, netstat)
+	if len(p.conns) != 2 || p.conns[1].remote.String() != "203.0.113.7" {
+		t.Fatalf("netstat: %+v", p.conns)
+	}
+	v6 := "0 0 [2001:db8::5]:2222 [2001:db8:1::7]:51514\n"
+	if p := parseAgentPeers(v6, "", testAgentPort); !p.known || p.conns[0].remote.String() != "2001:db8:1::7" {
+		t.Fatalf("ipv6: %+v", p)
+	}
+	if p := parseAgentPeers("", ipAddrs, testAgentPort); p.known {
+		t.Fatal("no listing counted as known")
+	}
+}
+
+// Allowing the agent port only from the controller's address, its network,
+// or only on the interface its connection uses, is confirmed — once the
+// server shows fleet's connection coming from there.
+func TestRestrictedAllowsAreConfirmedAgainstTheController(t *testing.T) {
+	ctrl := peersFrom(t, ssFromController)
+	ts := peersFrom(t, ssFromTailscale)
+	cases := []struct {
+		name     string
+		classify func(string, int) ruleMatch
+		rules    []string
+		peers    agentPeers
+		allowed  bool
+	}{
+		{"ufw from the controller's IP", classifyUFWRule, []string{"ufw allow from 203.0.113.7 to any port 2222 proto tcp"}, ctrl, true},
+		{"ufw from the controller's network", classifyUFWRule, []string{"ufw allow from 203.0.113.0/24 to any port 2222"}, ctrl, true},
+		{"ufw from another host", classifyUFWRule, []string{"ufw allow from 198.51.100.9 to any port 2222"}, ctrl, false},
+		{"ufw to the address it reaches", classifyUFWRule, []string{"ufw allow from any to 10.0.0.5 port 2222"}, ctrl, true},
+		{"ufw on its interface", classifyUFWRule, []string{"ufw allow in on tailscale0 to any port 2222"}, ts, true},
+		{"ufw on another interface", classifyUFWRule, []string{"ufw allow in on tailscale0 to any port 2222"}, ctrl, false},
+		{"ufw all ports from the controller", classifyUFWRule, []string{"ufw allow from 203.0.113.7"}, ctrl, true},
+		// A blocklist entry that is not the controller does not stand in the way.
+		{"ufw deny of another host first", classifyUFWRule, []string{"ufw deny from 192.0.2.66", "ufw allow 2222/tcp"}, ctrl, true},
+		{"ufw deny of the controller first", classifyUFWRule, []string{"ufw deny from 203.0.113.0/24", "ufw allow 2222/tcp"}, ctrl, false},
+		{"iptables -s the controller", classifyIptablesRule, []string{"-A INPUT -s 203.0.113.7/32 -p tcp -m tcp --dport 2222 -j ACCEPT"}, ctrl, true},
+		{"iptables -s another host", classifyIptablesRule, []string{"-A INPUT -s 198.51.100.9/32 -p tcp --dport 2222 -j ACCEPT"}, ctrl, false},
+		{"iptables -i its interface", classifyIptablesRule, []string{"-A INPUT -i tailscale0 -p tcp --dport 2222 -j ACCEPT"}, ts, true},
+		{"nft saddr set with the controller", classifyNftRule, []string{"ip saddr { 192.0.2.1, 203.0.113.0/24 } tcp dport 2222 accept"}, ctrl, true},
+		{"nft iifname its interface", classifyNftRule, []string{`iifname "tailscale0" tcp dport 2222 accept`}, ts, true},
+		// Without the connection listing, a restricted allow still cannot be confirmed.
+		{"no listing", classifyUFWRule, []string{"ufw allow from 203.0.113.7 to any port 2222"}, agentPeers{}, false},
+	}
+	for _, tc := range cases {
+		d := decideAgentPort(tc.rules, testAgentPort, true, tc.classify, tc.peers)
+		if d.allowed != tc.allowed {
+			t.Errorf("%s: allowed = %v (blocked by %q, restricted %q), want %v", tc.name, d.allowed, d.blockedBy, d.restricted, tc.allowed)
+		}
+	}
+	// Two connections, one from outside the allowed network: fleet cannot
+	// tell which is its own, so it refuses.
+	both := peersFrom(t, ssFromController+"0 0 10.0.0.5:2222 198.51.100.9:50000\n")
+	if d := decideAgentPort([]string{"ufw allow from 203.0.113.0/24 to any port 2222"}, testAgentPort, true, classifyUFWRule, both); d.allowed {
+		t.Error("allowed although one connection comes from outside the allowed network")
+	}
+}
+
+// The whole check, from a ufw dump with the connection listing, and the
+// refusal naming where the server sees fleet coming from.
+func TestUFWGuardWithTheControllersAddress(t *testing.T) {
+	link := AgentLink{Server: "web-01", Port: testAgentPort}
+	dump := func(added string) string {
+		return "Status: inactive\n" + guardMarker + "added\n" + ufwAddedHeader + added +
+			guardMarker + "peers\n" + ssFromController + guardMarker + "addrs\n" + ipAddrs
+	}
+	st := parseGuardState(FirewallBackendUFW, dump("ufw allow from 203.0.113.7 to any port 2222\n"), nil, testAgentPort)
+	if refusal := enableLockout(link, st, ""); refusal != nil {
+		t.Fatalf("allowed only from the controller's own IP, refused: %v", refusal)
+	}
+	st = parseGuardState(FirewallBackendUFW, dump("ufw allow from 198.51.100.9 to any port 2222\n"), nil, testAgentPort)
+	refusal := enableLockout(link, st, "")
+	if refusal == nil || !strings.Contains(refusal.Error(), "203.0.113.7") {
+		t.Fatalf("refusal does not say where fleet connects from: %v", refusal)
+	}
+}
+
+// firewalld: the zone that claims the controller's address decides, so a
+// trusted zone for the admin network admits it even when the default zone
+// does not list the port.
+func TestFirewalldZoneForTheController(t *testing.T) {
+	link := AgentLink{Server: "web-01", Port: testAgentPort}
+	public := "public (active)\n  target: default\n  interfaces: eth0\n  ports: 443/tcp\n  rich rules: \n"
+	trusted := "trusted (active)\n  target: ACCEPT\n  sources: 203.0.113.0/24\n  ports: \n  rich rules: \n"
+	dump := guardMarker + "firewalld-running\n" + public + guardMarker + "permanent\n" +
+		"public\n  target: default\n  ports: 2222/tcp\n" + guardMarker + "zones\n" + public + trusted +
+		guardMarker + "unit enabled\n" + guardMarker + "peers\n" + ssFromController + guardMarker + "addrs\n" + ipAddrs
+	st := parseGuardState(FirewallBackendFirewalld, dump, nil, testAgentPort)
+	if refusal := enableLockout(link, st, ""); refusal != nil {
+		t.Fatalf("the controller's own trusted zone accepts it, refused: %v", refusal)
 	}
 }

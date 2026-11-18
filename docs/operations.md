@@ -385,15 +385,25 @@ fleet firewall enable web-01
 - **Direct mode:** the agent's port (the server record's `port`) must be allowed for inbound TCP from
   anywhere, ahead of any rule that may block it. fleet parses the rules in the order the firewall
   applies them: ufw's from `ufw show added` (active or not), iptables' `INPUT` chain, the nftables
-  chain fleet manages, and firewalld's zones (every active zone when it runs).
+  chain fleet manages, and firewalld's zones (the zone that takes the controller's connection, by
+  its source or interface, or every active zone when fleet cannot tell).
   - **Counts as blocking:**
     - a deny, reject or limit on the port, or on a range or list including it;
     - a block of all traffic from an address or on an interface;
     - a jump to another chain;
     - a service name fleet does not resolve;
     - any line it cannot read.
-  - **Not enough:** an allow only from some sources, only on one interface, only outbound or for
-    forwarding. The refusal names that rule.
+  - **Allowing it only for your controller is fine, and safer:** `ufw allow from 203.0.113.7 to any port
+    2222`, an allow for the controller's network, or one only on the interface its connection arrives
+    on (`ufw allow in on tailscale0 to any port 2222`). While the check runs, fleet is connected to the
+    agent port, so it lists the server's connections to it (`ss`, or `netstat`) and `ip addr`. That
+    shows where the server sees fleet coming from (after any NAT) and on which interface. A restricted
+    allow is confirmed when every connection to the agent port matches it. A block that matches none
+    of them, such as a blocklist entry for some other host, does not stand in the way.
+  - **Not enough:** an allow for some traffic that does not include the controller's connection, one
+    fleet cannot check (it could not list the connections, or the rule uses a named set or a rate
+    limit), or one only outbound or for forwarding. The refusal names that rule and the address the
+    server sees fleet connecting from.
   - `port close` on the agent port is refused.
   - `firewall add` refuses deny, reject or limit rules on the agent port, and any rule it can't read.
   - Some agent versions accept rules that block by address without naming a port; the current agent

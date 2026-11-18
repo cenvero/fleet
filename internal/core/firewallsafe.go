@@ -195,7 +195,8 @@ func (e *FirewallEngine) Status() (FirewallStatusReport, error) {
 	if err != nil {
 		return report, err
 	}
-	report.Raw = strings.TrimSpace(dump)
+	rules, _, _ := strings.Cut(dump, guardMarker+"peers")
+	report.Raw = strings.TrimSpace(rules)
 	report.Active = backendActive(backend, dump)
 	report.DefaultDrop = backendDefaultDrop(backend, dump)
 	st := parseGuardState(backend, dump, nil, e.AgentPort)
@@ -241,7 +242,9 @@ func (e *FirewallEngine) dumpRuleset(backend FirewallBackend) (string, error) {
 	default:
 		return "", nil
 	}
-	out, _, err := e.Exec(cmd)
+	// Also list the controller's connections to the agent port, so rules
+	// restricted to its address, network or interface can be checked.
+	out, _, err := e.Exec(cmd + "; " + agentPeersCommand)
 	return out, err
 }
 
@@ -810,6 +813,9 @@ type firewallGuardState struct {
 	// sources or interfaces, which does not confirm the controller is among
 	// them (kept to explain the refusal).
 	agentRestricted string
+	// peers are the connections to the agent port the server listed, the
+	// controller's among them (see parseAgentPeers).
+	peers agentPeers
 	// Reverse-mode facts.
 	keepsEstablished triState
 	outgoingBlocked  triState
@@ -855,9 +861,14 @@ func enableLockout(link AgentLink, st firewallGuardState, fix string) *AgentLock
 	if !st.agentAllowed {
 		reason := fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is not allowed by the rules that would be in force, "+
 			"so enabling would lock fleet out", link.Port)
-		if st.agentRestricted != "" {
-			reason = fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is only allowed from some sources or interfaces (%q), "+
-				"and fleet cannot confirm the controller is among them", link.Port, st.agentRestricted)
+		switch {
+		case st.agentRestricted != "" && st.peers.known:
+			reason = fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is only allowed for some traffic (%q), and the server sees fleet's "+
+				"connection coming from %s, which that rule does not take in. Allow the port for that address (or its network or interface) first",
+				link.Port, st.agentRestricted, st.peers.remotes())
+		case st.agentRestricted != "":
+			reason = fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is only allowed for some traffic (%q), and fleet could not list "+
+				"the server's connections (with `ss` or `netstat`) to confirm the controller's is among it", link.Port, st.agentRestricted)
 		}
 		return lockout(change, reason, fix)
 	}
@@ -1068,6 +1079,12 @@ func parseGuardState(backend FirewallBackend, dump string, readErr error, port i
 		st.readErr = readErr.Error()
 		return st
 	}
+	// The backend's own dump comes first; the connection listing after it.
+	if rules, peersPart, ok := strings.Cut(dump, guardMarker+"peers"); ok {
+		sec := guardSections(guardMarker + "peers" + peersPart)
+		st.peers = parseAgentPeers(sec["peers"], sec["addrs"], port)
+		dump = rules
+	}
 	switch backend {
 	case FirewallBackendUFW:
 		parseUFWGuard(&st, dump, port)
@@ -1101,7 +1118,7 @@ func parseUFWGuard(st *firewallGuardState, dump string, port int) {
 		st.readErr = "`ufw show added` did not list the rules: " + firstLine(added)
 		return
 	}
-	st.applyAgentPortDecision(decideAgentPort(strings.Split(added, "\n"), port, true, classifyUFWRule))
+	st.applyAgentPortDecision(decideAgentPort(strings.Split(added, "\n"), port, true, classifyUFWRule, st.peers))
 
 	// Stock ufw accepts established/related traffic in /etc/ufw/before.rules,
 	// ahead of every user rule.
@@ -1165,14 +1182,21 @@ func parseFirewalldGuard(st *firewallGuardState, dump string, port int) {
 			return
 		}
 		st.active = true
-		rt, perm := firewalldDecision(runtime, port), firewalldDecision(permanent, port)
-		if zones := firewalldZoneBlocks(sec["zones"]); len(zones) > 0 {
-			// The port must be allowed in every active zone, and blocked in
-			// none: fleet cannot tell which one the controller's traffic
-			// arrives through.
+		rt, perm := firewalldDecision(runtime, port, st.peers), firewalldDecision(permanent, port, st.peers)
+		if blocks := firewalldZoneBlocks(sec["zones"]); len(blocks) > 0 {
+			// The port must be allowed, and blocked by nothing, in the zone
+			// that carries the controller's connections: the one whose
+			// sources include its address, else the one bound to its
+			// interface, else the default zone. When fleet cannot tell,
+			// every active zone must allow it.
+			var zones []firewalldZoneInfo
+			for _, b := range blocks {
+				zones = append(zones, parseFirewalldZone(b))
+			}
+			defaultZone, _, _ := strings.Cut(strings.TrimSpace(runtime), " ")
 			rt = agentPortDecision{allowed: true}
-			for _, z := range zones {
-				d := firewalldDecision(z, port)
+			for _, z := range zonesForPeers(zones, defaultZone, st.peers) {
+				d := firewalldDecision(z.listing, port, st.peers)
 				rt.allowed = rt.allowed && d.allowed
 				if rt.blockedBy == "" {
 					rt.blockedBy = d.blockedBy
@@ -1194,7 +1218,7 @@ func parseFirewalldGuard(st *firewallGuardState, dump string, port int) {
 		if !zone("permanent", permanent) {
 			return
 		}
-		st.applyAgentPortDecision(firewalldDecision(permanent, port))
+		st.applyAgentPortDecision(firewalldDecision(permanent, port, st.peers))
 	default:
 		st.readErr = "fleet could not tell whether firewalld is running: " + firstLine(dump)
 		return
@@ -1232,7 +1256,7 @@ func parseNftGuard(st *firewallGuardState, dump string, port int) {
 		if strings.Contains(strings.ToLower(chain), "policy drop;") {
 			st.nftPolicy = "drop"
 		}
-		st.applyAgentPortDecision(decideAgentPort(strings.Split(chain, "\n"), port, true, classifyNftRule))
+		st.applyAgentPortDecision(decideAgentPort(strings.Split(chain, "\n"), port, true, classifyNftRule, st.peers))
 	}
 	st.active = st.nftPolicy == "drop"
 	// enableCommand accepts established/related and loopback before the drop.
@@ -1278,7 +1302,7 @@ func parseIptablesGuard(st *firewallGuardState, dump string, port int) {
 		return
 	}
 	st.active = st.iptPolicy != "ACCEPT"
-	st.applyAgentPortDecision(decideAgentPort(input, port, true, classifyIptablesRule))
+	st.applyAgentPortDecision(decideAgentPort(input, port, true, classifyIptablesRule, st.peers))
 	// enableCommand accepts established/related and loopback before the drop.
 	st.keepsEstablished = triYes
 	st.outgoingBlocked = triNo
