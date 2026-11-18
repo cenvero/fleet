@@ -26,13 +26,11 @@ const defaultExecTimeout = 600 * time.Second
 
 // maxExecOutputBytes caps how much stdout (and, separately, stderr) is buffered
 // in memory for one command. A command that streams gigabytes to stdout must not
-// be able to exhaust the agent's memory; output past the cap is dropped and a
-// marker is appended so the caller knows truncation happened.
+// be able to exhaust the agent's memory; output past the cap is dropped and
+// truncationMarker is appended so the caller knows truncation happened. The
+// reply carrying both streams has the same 16 MiB limit, so execResponse may
+// trim them further.
 const maxExecOutputBytes = 16 << 20 // 16 MiB
-
-// truncationMarker is appended to a capped stream so the controller can tell the
-// output was cut rather than ending naturally.
-const truncationMarker = "\n[output truncated: exceeded 16 MiB limit]"
 
 // maxConcurrentExecs bounds how many shell.exec commands may run at once across
 // the whole agent. Each in-flight exec buffers up to maxExecOutputBytes for

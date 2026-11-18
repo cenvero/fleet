@@ -450,12 +450,9 @@ func serveDirectTCPIP(newChannel ssh.NewChannel, accepted func()) {
 func (s Server) serveRPC(channel ssh.Channel) {
 	channelCtx, cancelChannel := context.WithCancel(context.Background())
 	var workers sync.WaitGroup
-	var encodeMu sync.Mutex
-	encode := func(env proto.Envelope) error {
-		encodeMu.Lock()
-		defer encodeMu.Unlock()
-		return proto.Encode(channel, env)
-	}
+	// Every reply goes through one encoder, which serialises writes and answers
+	// with an error envelope when a reply cannot be sent (see replyEncoder).
+	encode := (&replyEncoder{channel: channel}).encode
 	var activeMu sync.Mutex
 	active := make(map[string]context.CancelFunc)
 	defer func() {
@@ -853,13 +850,7 @@ func (s Server) serveRPC(channel ssh.Channel) {
 					_ = encode(errorEnvelope(request, err))
 					return
 				}
-				_ = encode(proto.Envelope{
-					Type:            proto.EnvelopeTypeResponse,
-					ProtocolVersion: proto.CurrentProtocolVersion,
-					RequestID:       request.RequestID,
-					Action:          request.Action,
-					Payload:         result,
-				})
+				_ = encode(execResponse(request, result))
 			}(request, payload, execCtx, cancelExec)
 		case proto.ActionRequestCancel:
 			payload, err := proto.DecodePayload[proto.CancelRequestPayload](request.Payload)

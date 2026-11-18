@@ -45,7 +45,7 @@ func (b *windowsCappedBuffer) Write(p []byte) (int, error) {
 func (b *windowsCappedBuffer) String() string {
 	out := b.Buffer.String()
 	if b.truncated {
-		out += "\n[output truncated: exceeded 16 MiB limit]"
+		out += truncationMarker
 	}
 	return out
 }
