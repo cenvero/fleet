@@ -34,7 +34,7 @@ Omit sections that have no entries for that release.
 
 ## [Unreleased]
 
-## [v2.7.0] — 2026-11-18 (stable)
+## [v2.7.0] — 2026-11-19 (stable)
 
 ### Added
 
