@@ -51,6 +51,9 @@ type editorState struct {
 	// readOnly says why the file cannot be edited here ("" = editable): its
 	// content has no exact form in the textarea (see editorCodec).
 	readOnly string
+	// discardArmed is set by an Esc that warned about unsaved edits; the
+	// next key, if it is Esc, discards them.
+	discardArmed bool
 	// inPlace is set after a save failed because the file cannot be replaced
 	// (a bind-mounted file, a folder the agent may not write…): the next
 	// save writes into the file itself.
@@ -63,6 +66,9 @@ type editorState struct {
 	viewLines []string
 	viewSrc   string
 }
+
+// discardWarning is the footer message of the first Esc over unsaved edits.
+const discardWarning = "unsaved changes — Ctrl+S to save, Esc again to discard"
 
 // editorLoadedMsg carries the result of loading a file into the editor.
 type editorLoadedMsg struct {
@@ -270,22 +276,34 @@ func (m filesModel) editorBodyHeight() int {
 // handleEditorKey routes keys while the editor overlay is open.
 func (m filesModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	ed := m.editor
-	switch msg.String() {
+	key := msg.String()
+	if key != "esc" && ed.discardArmed {
+		// Only two Esc presses in a row discard; anything between disarms.
+		ed.discardArmed = false
+		if ed.status == discardWarning {
+			ed.status = ""
+		}
+	}
+	switch key {
 	case "esc":
-		if ed.dirty && ed.mode == editorEdit {
-			// First Esc out of a dirty edit returns to the viewer (a soft cancel);
-			// a second Esc from the viewer closes. Keeps an accidental keystroke
-			// from discarding edits silently.
+		if !ed.dirty || ed.discardArmed {
+			return m.closeEditor()
+		}
+		// Unsaved edits: the first Esc only warns, from either mode (leaving
+		// edit mode for the viewer), and arms the discard. A second Esc in a
+		// row closes without saving.
+		if ed.mode == editorEdit {
 			ed.area.Blur()
 			ed.mode = editorView
 			if v := ed.text(); v != ed.viewSrc {
 				ed.viewLines = highlightLines(ed.name, v)
 				ed.viewSrc = v
 			}
-			ed.status = "unsaved changes — Ctrl+S to save, Esc again to discard"
-			return m, nil
+			m.clampEditorScroll()
 		}
-		return m.closeEditor()
+		ed.discardArmed = true
+		ed.status = discardWarning
+		return m, nil
 	case "ctrl+s":
 		return m.saveEditor()
 	case "ctrl+e", "tab":

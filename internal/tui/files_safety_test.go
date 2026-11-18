@@ -17,6 +17,7 @@ import (
 var (
 	keyTab   = tea.KeyMsg{Type: tea.KeyTab}
 	keyDown  = tea.KeyMsg{Type: tea.KeyDown}
+	keyEsc   = tea.KeyMsg{Type: tea.KeyEsc}
 	keyCtrlS = tea.KeyMsg{Type: tea.KeyCtrlS}
 )
 
@@ -262,5 +263,59 @@ func TestEditorUnrepresentableOpensReadOnly(t *testing.T) {
 				t.Fatalf("read-only file was rewritten: %q", got)
 			}
 		})
+	}
+}
+
+// TestEditorEscAfterToggleNeedsSecondPress: with unsaved edits, leaving edit
+// mode with Tab and pressing Esc once must not discard them.
+func TestEditorEscAfterToggleNeedsSecondPress(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := openInEditor(t, localPaneModel(dir, "f.txt"))
+	m, _ = sendKey(m, keyTab)
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if !m.editor.dirty {
+		t.Fatal("typing should mark the file dirty")
+	}
+	m, _ = sendKey(m, keyTab) // back to the viewer
+	m, _ = sendKey(m, keyEsc)
+	if m.editor == nil || m.overlay != overlayEditor {
+		t.Fatal("one Esc from the viewer discarded unsaved edits")
+	}
+	if !strings.Contains(m.editor.status, "Esc again") {
+		t.Fatalf("first Esc should warn, got %q", m.editor.status)
+	}
+	// Any other key disarms: Esc then has to be pressed twice again.
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = sendKey(m, keyEsc)
+	if m.editor == nil {
+		t.Fatal("Esc after another key should warn again, not discard")
+	}
+	m, _ = sendKey(m, keyEsc)
+	if m.editor != nil || m.overlay == overlayEditor {
+		t.Fatal("second consecutive Esc should close the editor")
+	}
+
+	// Edit mode keeps its two-press behaviour.
+	m = openInEditor(t, localPaneModel(dir, "f.txt"))
+	m, _ = sendKey(m, keyTab)
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m, _ = sendKey(m, keyEsc)
+	if m.editor == nil || m.editor.mode != editorView {
+		t.Fatal("first Esc in edit mode should return to the viewer")
+	}
+	m, _ = sendKey(m, keyEsc)
+	if m.editor != nil {
+		t.Fatal("second Esc should discard and close")
+	}
+
+	// A clean file still closes on one Esc.
+	m = openInEditor(t, localPaneModel(dir, "f.txt"))
+	m, _ = sendKey(m, keyEsc)
+	if m.editor != nil {
+		t.Fatal("Esc on an unmodified file should close at once")
 	}
 }
