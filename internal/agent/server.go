@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -102,6 +103,9 @@ type Server struct {
 	MetricsQueue             MetricsQueue
 	Updater                  Updater
 	FileManager              FileManager
+
+	// shellExec runs a shell.exec request; nil means runShellExec. Tests set it.
+	shellExec func(context.Context, proto.ExecPayload) (proto.ExecResult, error)
 }
 
 func (s Server) Serve(ctx context.Context, listener net.Listener) error {
@@ -845,7 +849,12 @@ func (s Server) serveRPC(channel ssh.Channel) {
 					activeMu.Unlock()
 					cancelExec()
 				}()
-				result, err := runShellExec(execCtx, payload)
+				// This goroutine runs outside the channel's own panic guard, and the
+				// controller is waiting on its reply.
+				defer guardPanicThen("shell.exec", func() {
+					_ = encode(errorEnvelope(request, errShellExecPanic))
+				})
+				result, err := s.runExec(execCtx, payload)
 				if err != nil {
 					_ = encode(errorEnvelope(request, err))
 					return
@@ -910,11 +919,22 @@ func (s Server) serveRPC(channel ssh.Channel) {
 	}
 }
 
+// errShellExecPanic is the reply to a shell.exec whose handler panicked. The
+// details are in the agent's log.
+var errShellExecPanic = errors.New("the agent hit an internal error running this command; see the agent log")
+
 func requestDeadlineContext(parent context.Context, request proto.Envelope) (context.Context, context.CancelFunc) {
 	if request.DeadlineUnixMilli <= 0 {
 		return context.WithCancel(parent)
 	}
 	return context.WithDeadline(parent, time.UnixMilli(request.DeadlineUnixMilli))
+}
+
+func (s Server) runExec(ctx context.Context, payload proto.ExecPayload) (proto.ExecResult, error) {
+	if s.shellExec != nil {
+		return s.shellExec(ctx, payload)
+	}
+	return runShellExec(ctx, payload)
 }
 
 func (s Server) serviceManager() ServiceManager {

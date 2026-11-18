@@ -401,8 +401,13 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server, 
 	}
 	done := make(chan error, 1)
 	go func() {
+		// A handler panic must end only this session; the reconnect loop then
+		// replaces it. done is still signalled, or this function would wait
+		// forever and leave the agent running but disconnected.
+		var err error
+		defer func() { done <- err }()
+		defer guardPanicThen("reverse rpc channel", func() { err = errReverseRPCPanic })
 		server.serveRPC(channel)
-		done <- nil
 	}()
 
 	select {
@@ -414,6 +419,10 @@ func runReverseSession(ctx context.Context, opts ReverseOptions, server Server, 
 		return true, err
 	}
 }
+
+// errReverseRPCPanic ends a reverse session whose RPC handler panicked. The
+// panic itself is in the agent's log.
+var errReverseRPCPanic = errors.New("rpc handler panicked; see the agent log")
 
 // verifiedControllerHostKeyCallback preserves strict reconnects to an existing
 // pin, but refuses to create a first pin unless the presented controller key
@@ -492,6 +501,7 @@ func serveReverseInboundChannels(inbound <-chan ssh.NewChannel, server Server) {
 		go ssh.DiscardRequests(requests)
 		go func() {
 			defer func() { <-slots }()
+			defer guardPanic("reverse inbound rpc channel")
 			server.serveRPC(channel)
 		}()
 	}

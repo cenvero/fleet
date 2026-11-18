@@ -27,3 +27,18 @@ func guardPanic(what string) {
 		fmt.Fprintf(os.Stderr, "fleet-agent: recovered panic in %s: %v\n%s\n", what, r, debug.Stack())
 	}
 }
+
+// guardPanicThen is guardPanic for a goroutine that owes someone an answer.
+// After containing a panic it calls answer, to reply to the controller that is
+// waiting or to report the failure to the caller, so the panic does not turn
+// into silence. A second panic raised by answer is contained too.
+//
+// Like guardPanic it must be deferred directly: recover only stops a panic when
+// called by the deferred function itself.
+func guardPanicThen(what string, answer func()) {
+	if r := recover(); r != nil {
+		fmt.Fprintf(os.Stderr, "fleet-agent: recovered panic in %s: %v\n%s\n", what, r, debug.Stack())
+		defer guardPanic(what + " (answering after a panic)")
+		answer()
+	}
+}
