@@ -722,8 +722,15 @@ func (u *upload) put(target string) (proto.FileFinalizeResult, error) {
 	size := u.info.Size()
 	buf, release := getChunkBuf(size)
 	defer release()
-	if _, err := u.lf.ReadAt(buf, 0); err != nil && err != io.EOF {
+	n, err := u.lf.ReadAt(buf, 0)
+	if err != nil && err != io.EOF {
 		return proto.FileFinalizeResult{}, fmt.Errorf("read local file: %w", err)
+	}
+	// A short read means the file shrank after it was stat'ed. The tail of buf
+	// would then be whatever an earlier transfer left in the pooled buffer, and
+	// the checksum (taken over buf) would vouch for it, so refuse instead.
+	if int64(n) != size {
+		return proto.FileFinalizeResult{}, fmt.Errorf("local file %s changed while uploading (read %d of %d bytes); try again", u.lf.Name(), n, size)
 	}
 	sum := sha256Hex(buf)
 	env := proto.Envelope{Action: proto.ActionFilePut, Payload: &proto.FilePutPayload{

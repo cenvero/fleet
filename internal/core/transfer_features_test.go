@@ -551,3 +551,39 @@ func TestChannelBudget(t *testing.T) {
 		t.Fatalf("tryAcquire after release = %d, want 3", got)
 	}
 }
+
+// shrunkInfo reports a size larger than the file now has, as a FileInfo taken
+// just before the file was truncated would.
+type shrunkInfo struct {
+	os.FileInfo
+	size int64
+}
+
+func (s shrunkInfo) Size() int64 { return s.size }
+
+// A file that shrinks between the stat and the read must not be uploaded with
+// a tail of stale pooled-buffer bytes (vouched for by a checksum taken over
+// the same buffer): the single-chunk upload refuses before sending anything.
+func TestSingleChunkUploadRefusesAShrunkFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "shrinking.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), 100<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Above the pooled-buffer threshold, where the stale bytes would come from.
+	u := &upload{lf: f, info: shrunkInfo{FileInfo: info, size: 200 << 10}}
+	// No connection is set: reaching the send would panic, so this also proves
+	// nothing was sent.
+	if _, err := u.put("/remote/shrinking.bin"); err == nil || !strings.Contains(err.Error(), "changed while uploading") {
+		t.Fatalf("put of a shrunk file = %v, want a changed-while-uploading error", err)
+	}
+}
