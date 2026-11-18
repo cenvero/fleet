@@ -417,12 +417,16 @@ func TestDaemonRemovesItsControlTokenOnShutdown(t *testing.T) {
 // connect: whatever listens on the control address sees nothing.
 func TestDirectRelaySkipsLegacyTokenEntirely(t *testing.T) {
 	f := newRelayFleet(t)
-	address := f.cli.Config.Runtime.ControlAddress
 	f.stopCtl()
 	if err := os.WriteFile(f.cli.controlTokenPath(), []byte("0123456789abcdef"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	imp := startImpostor(t, address, impostorForgedChallenge)
+	// The impostor takes a fresh port and becomes the control address:
+	// binding the port the daemon just let go of races other processes on a
+	// busy machine.
+	imp := startImpostor(t, "127.0.0.1:0", impostorForgedChallenge)
+	address := imp.ln.Addr().String()
+	f.cli.Config.Runtime.ControlAddress = address
 	directRelayUnreachable.Delete(address)
 	result, err := f.cli.ExecCommandContext(context.Background(), "web", "printf direct")
 	if err != nil || result.Stdout != "direct" {

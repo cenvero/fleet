@@ -407,8 +407,21 @@ func TestHelperExitsWhenTheConfigDirGoes(t *testing.T) {
 		if err := os.Remove(ConfigPath(configDir)); err != nil {
 			t.Fatal(err)
 		}
-	} else if err := os.RemoveAll(configDir); err != nil { // self-uninstall
-		t.Fatal(err)
+	} else {
+		// Like self-uninstall. The helper may be writing its status into
+		// data/ at that moment, so RemoveAll can find a directory refilled
+		// under it: retry until the helper notices and stops writing.
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			err := os.RemoveAll(configDir)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal(err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 	select {
 	case err := <-done:
