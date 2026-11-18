@@ -511,10 +511,14 @@ func renderConsolePanel(w io.Writer, configDir string, p consolePanel) {
 		fmt.Fprintln(w, "  and open shells with your authority. Keep the link private.")
 	}
 	fmt.Fprintln(w)
+	// The numbers mean the same in both panels: 1 open, 2 a link, 3 keep
+	// it in the background, 4 stop. A key pressed out of habit never stops a
+	// console you meant to keep.
 	if p.attached {
 		fmt.Fprintln(w, "  1  Open in your browser")
-		fmt.Fprintln(w, "  2  Stop the background console")
-		fmt.Fprintln(w, "  3  Leave it running and exit")
+		fmt.Fprintln(w, "  2  Show a one-time link (works once, within 30 seconds)")
+		fmt.Fprintln(w, "  3  Leave it running in the background and exit")
+		fmt.Fprintln(w, "  4  Stop the background console")
 	} else {
 		fmt.Fprintln(w, "  1  Open in your browser")
 		fmt.Fprintln(w, "  2  Show the access link")
@@ -528,11 +532,7 @@ func renderConsolePanel(w io.Writer, configDir string, p consolePanel) {
 	if p.status != "" {
 		fmt.Fprintf(w, "\n%s\n", p.status)
 	}
-	if p.attached {
-		fmt.Fprint(w, "\nChoose [1-3]: ")
-	} else {
-		fmt.Fprint(w, "\nChoose [1-4]: ")
-	}
+	fmt.Fprint(w, "\nChoose [1-4]: ")
 }
 
 // attachConsole is `fleet console` (or `fleet file ui`) while a console runs
@@ -575,7 +575,16 @@ func attachConsole(cmd *cobra.Command, configDir string, st core.ConsoleState, o
 		switch strings.ToLower(strings.TrimSpace(l)) {
 		case "1", "o", "open":
 			status = openedStatus(openBackgroundConsole(cmd, configDir, st, o.view, false))
-		case "2", "s", "stop":
+		case "2", "l", "link":
+			if link, err := backgroundConsoleLink(configDir, st, o.view); err != nil {
+				status = fmt.Sprintf("Could not get a link: %v", err)
+			} else {
+				status = "One-time link (works once, within 30 seconds; it carries access, so keep it private):\n  " + link
+			}
+		case "3", "b", "background", "q", "quit", "exit":
+			fmt.Fprintln(out, "The console keeps running in the background.")
+			return nil
+		case "4", "s", "stop":
 			res, err := stopBackgroundConsole(configDir)
 			if err != nil {
 				return err
@@ -584,15 +593,25 @@ func attachConsole(cmd *cobra.Command, configDir string, st core.ConsoleState, o
 				fmt.Fprintf(out, "Stopped the background console (pid %d).\n", res.PID)
 			}
 			return nil
-		case "3", "q", "quit", "exit":
-			fmt.Fprintln(out, "The console keeps running in the background.")
-			return nil
 		case "":
 			status = ""
 		default:
-			status = "Choose 1, 2 or 3, then Enter."
+			status = "Choose 1, 2, 3 or 4, then Enter."
 		}
 	}
+}
+
+// backgroundConsoleLink returns a one-time link to the background console.
+func backgroundConsoleLink(configDir string, st core.ConsoleState, view string) (string, error) {
+	key, err := core.ReadConsoleLaunchKey(configDir)
+	if err != nil {
+		return "", err
+	}
+	code, err := requestLaunchCode(st.Address, key)
+	if err != nil {
+		return "", err
+	}
+	return webui.LaunchURL(st.Address, code, view), nil
 }
 
 // openBackgroundConsole asks the background console for a one-time launch
