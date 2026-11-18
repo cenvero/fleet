@@ -969,9 +969,24 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	errCh := make(chan error, 2)
 	go func() { errCh <- hub.Serve(ctx, reverseListener) }()
 	go func() { errCh <- hub.ServeControl(ctx, controlListener) }()
-	go a.runMetricsPoller(ctx)
-	go a.runUpdateChecker(ctx)
-	go a.runJobLogPruner(ctx)
+	// The background loops get their own context and are waited for on the
+	// way out (deferred after the auto-sync stop, so they stop first). They
+	// used to be left running: a metrics poll in flight when the daemon
+	// stopped could still raise an alert, writing into the config dir after
+	// RunDaemon, and the App's Close, had returned.
+	bgCtx, stopBackground := context.WithCancel(ctx)
+	var background sync.WaitGroup
+	for _, loop := range []func(context.Context){a.runMetricsPoller, a.runUpdateChecker, a.runJobLogPruner} {
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			loop(bgCtx)
+		}()
+	}
+	defer func() {
+		stopBackground()
+		waitWithin(&background, daemonBackgroundGrace)
+	}()
 	notifyDaemonReady(ctx) // listeners are bound: see WithDaemonReady
 
 	select {
@@ -981,6 +996,23 @@ func (a *App) RunDaemon(ctx context.Context) error {
 	case err := <-errCh:
 		hub.Close()
 		return err
+	}
+}
+
+// daemonBackgroundGrace bounds how long a stopping daemon waits for its
+// background loops to finish their current work (a metrics poll, a prune), so
+// a server that stopped answering mid-poll cannot hang the shutdown.
+const daemonBackgroundGrace = 15 * time.Second
+
+// waitWithin waits for wg, or gives up after d.
+func waitWithin(wg *sync.WaitGroup, d time.Duration) {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
 	}
 }
 
