@@ -197,6 +197,19 @@ on the server while it was open. Editing needs an agent with `file.edit` support
 update older agents with `fleet agent update <server>` (until then the interactive
 editors fall back to the atomic upload, which does not keep the file's owner).
 
+The terminal file manager's editor never changes bytes you did not edit. Tabs show as
+`⇥` and are saved as tabs, and a file whose line breaks are all CRLF keeps them. A file it
+cannot hold exactly — control characters, a lone CR, mixed line endings, invalid UTF-8, or
+more than 10,000 lines — opens read-only with the reason; edit those with `fleet file edit`
+or `$EDITOR`. Unsaved edits need a second `Esc` to discard. Local saves (the *Local* pane)
+are atomic, keep owner, group, mode and set-id bits, and refuse a file that changed since
+it was opened, has other hard links, or that you may not write; saving unchanged text
+writes nothing.
+
+In both file managers, *New file*, rename, move and duplicate never overwrite an existing
+file of that name — hidden files included, even when they are not shown — and a web upload
+named like an existing folder is refused rather than landing inside it.
+
 ## Defaults (global and per-server)
 
 Each transfer resolves its settings from per-server overrides, then global

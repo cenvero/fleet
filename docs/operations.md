@@ -149,6 +149,11 @@ fleet exec web-01 "./deploy.sh" --idempotency-key v3-2026-06-11   # cached resul
 whichever side notices the deadline first); `--retry`/`--backoff` retry transport failures;
 `--dry-run` previews; `--propagate-exit` returns the remote exit code; and
 `--idempotency-key KEY` returns the cached result for `KEY` instead of re-running.
+A command that starts something in the background (`./server &`) returns about 2 seconds
+after its shell exits; the background process keeps running, but output it writes after
+that is not collected, so redirect it (`nohup ./server >/var/log/server.log 2>&1 &`) or use
+`fleet job run` to keep and follow it. Output too large for one reply (over 16 MiB) is
+trimmed and ends with `[output truncated: exceeded 16 MiB limit]`.
 The safety flags (`--secret`, `--guard`, `--confirm`, `--require-approval`) are covered under
 [Operating safely and unattended](#operating-safely-and-unattended).
 
@@ -442,6 +447,9 @@ fleet guard web-01 "ufw default deny incoming && ufw reload" \
 fleet confirm <id>               # keep the change (cancels the revert)
 fleet revert  <id>               # undo it now
 ```
+
+The command policy (`fleet cmd-policy`) applies to the `--revert-cmd` as well as to the risky
+command: the revert runs on the server too, so a denied command cannot be passed as the undo.
 
 `fleet exec ... --guard` is a lighter check: it refuses commands that could lock the controller
 out of the server (downgrade to a warning with `--guard-warn`).

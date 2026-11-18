@@ -189,6 +189,21 @@ git push origin v0.1.0
 
 Then verify the live release before announcing it.
 
+### Which channel a tag publishes to
+
+`scripts/release-channel.sh` is the one rule the release workflow uses, checked before
+anything is built or published:
+
+| Tag | Channel |
+|---|---|
+| `v2.6.2` | stable |
+| `v3.0.0-beta.2`, `v3.0.0-beta2`, `v3.0.0-rc.1`, `v3.0.0-rc1` | beta |
+| `v3.0.0-alpha.1`, `v3.0.0-alpha1` | alpha |
+
+Any other pre-release suffix (`v3.0.0-preview.1`, `v3.0.0-rc` with no number) stops the
+release, so a tag GitHub marks as a pre-release can never land in the stable manifest that
+installers and `fleet update` read by default. WinGet jobs run only for stable tags.
+
 ## Rollback Guidance
 
 If a release is broken but not security-critical:
