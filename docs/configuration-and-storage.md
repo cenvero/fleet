@@ -33,14 +33,19 @@ Typical layout (shown for `~/.cenvero-fleet`):
 ├── logs/
 │   ├── _aggregated/
 │   ├── _audit.log
-│   └── _audit.log.lock    ← cross-process lock so concurrent fleet processes never fork the audit hash chain
+│   ├── _audit.log.lock    ← cross-process lock so concurrent fleet processes never fork the audit hash chain
+│   └── helper.log         ← the background helper's output (rotated to helper.log.1 at 5 MiB)
 ├── alerts/
 ├── data/
 │   ├── state.db
 │   ├── metrics.db
 │   ├── events.db
 │   ├── update-available.json ← cached update check (a failed check is also recorded, so an offline controller retries at most every 10 minutes)
-│   └── control.token      ← per-run secret for the daemon's mutually authenticated control socket (removed when the daemon stops)
+│   ├── control.token      ← per-run secret for the daemon's mutually authenticated control socket (removed when the daemon stops)
+│   ├── helper.lock        ← held by the background helper while it runs, so there is only ever one
+│   ├── helper.pid         ← the running helper's pid (informational; the lock is what counts)
+│   ├── helper-status.json ← what the helper is doing: each task's last and next run and last error, and start failures (format documented on HelperStatus in internal/core/helper.go)
+│   └── helper-status.lock ← serializes writers of helper-status.json
 ├── approvals.json         ← staged `exec --require-approval` commands and their outcomes
 ├── approvals-extra.json   ← copy of the exec options/outcomes, so older fleet binaries rewriting approvals.json cannot drop them
 ├── tui/

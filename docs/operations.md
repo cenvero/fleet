@@ -6,7 +6,9 @@ This guide covers the main day-to-day operator workflows in Cenvero Fleet.
 
 The controller daemon accepts reverse-mode agents, serves the loopback control socket that
 one-shot CLI commands use to reach them (and to reuse warm direct-mode connections), polls
-metrics and keeps the update check warm. Run it in the background or in the foreground:
+metrics and keeps the update check warm. It is optional: the [background helper](#background-helper),
+which starts by itself, does the rest of the background work. Run the daemon in the background or
+in the foreground:
 
 ```bash
 fleet start     # launch it detached; waits until it is listening, then prints its pid
@@ -62,6 +64,65 @@ fleet errors                # what needs attention, and the command that fixes e
   scripts); bare `fleet` lists them after the help and `fleet status` prints a count on
   stderr. They are worked out from the controller's state each time, so each disappears once
   fixed. Scoped tokens cannot run `fleet errors`, because the list names servers fleet-wide.
+
+## Background helper
+
+Besides the optional daemon, Fleet runs one small **background helper** per config dir. It does
+the work that should happen without anyone asking:
+
+| Task | What it does | How often |
+|---|---|---|
+| `jobs` | Checks running [background jobs](#scheduled-jobs-and-background-jobs), so `fleet jobs` shows them done (or lost) and `job-failed` notifications fire without anyone polling. | Each job about 10s after it starts, then less often, up to once a minute; an unreachable server is retried with backoff, up to every 5 minutes. |
+| `agent-sync` | The hourly [automatic agent sync](releases-and-updates.md#automatic-agent-sync). | Checks every 5 minutes whether the hourly run is due. |
+| `job-log-prune` | Removes job records and remote job logs older than `job-log-retention`. | Daily. |
+
+**It starts itself and there is nothing to turn on or off.** Every `fleet` command checks whether
+the helper is running (one lock probe; it costs nothing measurable) and starts it when it isn't.
+The helper runs until it is killed, and exits by itself when the `fleet` binary is replaced (an
+upgrade) or the config dir is removed, so the next command starts a fresh one from the new
+binary. `fleet self-uninstall`, `fleet update apply`/`rollback`, `fleet recover` and `fleet config
+restore` stop it before they run. Starting it never prints anything; if it cannot start, the
+reason is recorded for `fleet helper status`.
+
+```bash
+fleet helper status          # running? pid, uptime, and each task's last run, next run and last error
+fleet helper status --json   # the same as JSON
+fleet helper restart         # restart it (for example after changing its environment)
+```
+
+- **Each task follows its own setting**, not a switch on the helper: `fleet sync-agent auto off`
+  (or `updates.agent_auto_sync = false`) stops the agent sync, and `job-log-retention 0` stops the
+  pruning. `FLEET_AGENT_AUTOSYNC=off` in the environment the helper is started from (your shell
+  profile, say) also keeps it from syncing agents; run `fleet helper restart` for a change to
+  reach a helper that is already running.
+- **While the daemon runs**, the helper leaves the agent sync and the job-log pruning to it (the
+  daemon runs both itself) and keeps tracking jobs. Jobs on reverse-mode servers are only checked
+  while a daemon is running, since that is the only way to reach them; without one they wait.
+- **Scoped tokens.** A command run with `--token` / `FLEET_TOKEN` never starts the helper: a scoped
+  credential must not start fleet-wide work, even indirectly. A job started under a token is still
+  recorded, and is tracked as soon as any command without a token (or the daemon) runs and the
+  helper is up. `fleet helper restart` refuses to run under a token, and scoped tokens cannot run
+  `fleet helper` at all.
+- **Files.** It runs as `fleet --config-dir <dir> __helper` in its own session (on Windows, with no
+  console), with your token removed from its environment. It holds `data/helper.lock` while it runs
+  (so there is never more than one) and records its pid in `data/helper.pid`. Its output goes to
+  `logs/helper.log` (rotated to `helper.log.1` at 5 MiB), the agent sync's to
+  `logs/agent-sync.log`, and its state to `data/helper-status.json`.
+- **Problems** go to `data/helper-status.json`, not to your terminal: each task's last error and
+  when it happened, plus any failure to start the helper. `fleet helper status` shows them; the
+  file's format is documented on `HelperStatus` in `internal/core/helper.go` for tools that want
+  to read it.
+
+### Adding a task (developers)
+
+A task is a `HelperTask` in `helperRegistry` (`internal/core/helper.go`): a name, an interval, an
+optional cheap `Pending` check, and a `func(ctx context.Context, app *App) error`. The helper opens
+a fresh `App` for every run (so config changes are picked up and the databases are not held open),
+applies the task's timeout, recovers a panic, never runs a task twice at once, and records the
+outcome in the status file. A task should check its own on/off setting on every run and return
+`nil` with a `helperSay` note when it is off, return an error only for something an operator
+should see, say what it did with `helperSay`, honour `ctx`, and leave work the daemon does to the
+daemon (`daemonLockHeld`). The package comment in `helper.go` has the details.
 
 ## Servers
 
@@ -614,10 +675,26 @@ The optional `--name` label is shown in the `NAME` column of `fleet jobs` so a l
 job is easy to recognize. Captured output goes to a `0600`, per-job unpredictably-named
 logfile on the server (not world-readable).
 
+The [background helper](#background-helper) keeps checking running jobs, so `fleet jobs` shows a
+finished job as `done` and a failed one fires the `job-failed` notification (once) without anyone
+running `job status`. Checking reads only the last 512 bytes of the log; `fleet job logs` reads
+the output itself. A job that can never report back is marked **`lost`**, with the reason in
+`fleet job status`:
+
+- its server was removed from the fleet;
+- its log file is gone (deleted, or swept), seen on 3 checks in a row;
+- no process on the server runs it any more although its log has no exit marker — the server
+  rebooted, or the job was killed — seen on 3 checks in a row. Linux servers are asked through
+  `/proc`, others through `ps`; a server that can't tell is never held against the job.
+
+A job is not given up on within a minute of starting, and an unreachable server is retried, never
+counted against its jobs. `fleet job wait` ends on a lost job with exit status 1, `fleet job logs
+--follow` stops, a lost job fires `job-failed`, and lost jobs are pruned like finished ones.
+
 **Job-log retention.** Detached-job logs are auto-deleted once they pass the configured
-retention window (default `7d`) — a background pruner on the controller removes the finished
-job records and their remote `/var/tmp/fleet-job-*.log` files on each server, plus an mtime
-sweep that cleans up orphans. Change it any time:
+retention window (default `7d`) — the background helper (daily) or, while it runs, the daemon
+(hourly) removes the finished and lost job records and their remote `/var/tmp/fleet-job-*.log`
+files on each server, plus an mtime sweep that cleans up orphans. Change it any time:
 
 ```bash
 fleet config set job-log-retention 30d         # keep job logs 30 days (7d/30d/12h… or 0=never)
