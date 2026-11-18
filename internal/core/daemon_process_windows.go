@@ -76,8 +76,12 @@ func processLooksLikeFleet(pid int, _ ...string) (bool, string) {
 		return true, ""
 	}
 	image := windows.UTF16ToString(buf[:n])
-	if base := strings.ToLower(filepath.Base(image)); !strings.Contains(base, "fleet") {
-		return false, fmt.Sprintf("it runs %s, not fleet", image)
+	if base := strings.ToLower(filepath.Base(image)); strings.Contains(base, "fleet") {
+		return true, ""
 	}
-	return true, ""
+	// A renamed binary: accept it when it is this very executable.
+	if self, err := os.Executable(); err == nil && strings.EqualFold(filepath.Clean(self), filepath.Clean(image)) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("it runs %s, not fleet", image)
 }
