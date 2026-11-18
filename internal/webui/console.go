@@ -154,11 +154,16 @@ const errConsoleOff = "the Control view is off; start the web UI with `fleet fil
 // reservedRunFlags may not come from the browser: the launcher pins them.
 var reservedRunFlags = []string{"--config-dir", "--token"}
 
-// sensitiveFlagNames have values that are masked in the run history.
-var sensitiveFlagNames = map[string]bool{
+// sensitiveFlagNames have values that are masked in the run history and shown
+// as password fields. It is the one list: the CLI's catalog asks
+// IsSensitiveFlag rather than keeping its own copy.
+var sensitiveFlagNames = map[string]bool{ // #nosec G101 -- flag names, not credentials
 	"value": true, "password": true, "login-password": true, "dsn": true, "db-dsn": true,
 	"secret-value": true, "passphrase": true,
 }
+
+// IsSensitiveFlag reports whether a flag's value must never be echoed in the UI.
+func IsSensitiveFlag(name string) bool { return sensitiveFlagNames[name] }
 
 type runChunk struct {
 	Seq    uint64 `json:"seq"`

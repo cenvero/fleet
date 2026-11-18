@@ -86,11 +86,6 @@ var webDestructivePaths = map[string]bool{
 // webStdinCommands read their main input from stdin when no flag supplies it.
 var webStdinCommands = map[string]bool{"secret set": true, "automation set": true}
 
-// webSensitiveFlags are flags whose values must not be echoed in the UI.
-var webSensitiveFlags = map[string]bool{
-	"value": true, "login-password": true, "password": true, "dsn": true, "db-dsn": true,
-}
-
 // webConsoleCatalog walks the command tree and describes every runnable,
 // visible command for the browser.
 func webConsoleCatalog(root *cobra.Command) []webui.CommandSpec {
@@ -146,7 +141,7 @@ func webCommandSpec(c *cobra.Command, path []string) webui.CommandSpec {
 		}
 		spec.Flags = append(spec.Flags, webui.CommandFlag{
 			Name: f.Name, Shorthand: f.Shorthand, Type: f.Value.Type(), Default: def, Usage: f.Usage,
-			Required: required, Sensitive: webSensitiveFlags[f.Name],
+			Required: required, Sensitive: webui.IsSensitiveFlag(f.Name),
 		})
 	})
 	return spec
@@ -346,7 +341,7 @@ func webChildEnv(parent []string, tokenID, configDir string) []string {
 	if tokenID != "" {
 		env = append(env, "FLEET_TOKEN="+tokenID)
 	}
-	return append(env, "FLEET_CONFIG_DIR="+configDir, "NO_COLOR=1", "CLICOLOR=0", "TERM=dumb", "PAGER=cat", "FLEET_WEBUI_CHILD=1")
+	return append(env, "FLEET_CONFIG_DIR="+configDir, "NO_COLOR=1", "CLICOLOR=0", "TERM=dumb", "PAGER=cat")
 }
 
 // webTerminalLauncher starts a browser terminal session as `<this binary>
@@ -389,5 +384,5 @@ func webTerminalEnv(parent []string, tokenID, configDir string) []string {
 	if tokenID != "" {
 		env = append(env, "FLEET_TOKEN="+tokenID)
 	}
-	return append(env, "FLEET_CONFIG_DIR="+configDir, "TERM=xterm-256color", "COLORTERM=truecolor", "FLEET_WEBUI_CHILD=1")
+	return append(env, "FLEET_CONFIG_DIR="+configDir, "TERM=xterm-256color", "COLORTERM=truecolor")
 }
