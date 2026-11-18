@@ -39,6 +39,7 @@ const (
 // filesModel and is reset each time the editor opens.
 type editorState struct {
 	active  bool
+	gen     uint64 // this session's number (filesModel.editorGen)
 	side    int    // the pane the file belongs to (for refresh + source)
 	source  string // "" = local, else server name
 	path    string // absolute path of the file being edited
@@ -74,6 +75,7 @@ const discardWarning = "unsaved changes — Ctrl+S to save, Esc again to discard
 
 // editorLoadedMsg carries the result of loading a file into the editor.
 type editorLoadedMsg struct {
+	gen     uint64 // the editor session that asked for it
 	side    int
 	source  string
 	path    string
@@ -84,8 +86,13 @@ type editorLoadedMsg struct {
 }
 
 // editorSavedMsg carries the result of an asynchronous save and the content
-// that was saved (the base the next save is checked against).
+// that was saved (the base the next save is checked against). gen names the
+// editor session that saved; side and name let a result that outlived its
+// session still be reported.
 type editorSavedMsg struct {
+	gen     uint64
+	side    int
+	name    string
 	err     error
 	content string
 }
@@ -106,18 +113,19 @@ func (m filesModel) openEditor(side int) (tea.Model, tea.Cmd) {
 	}
 	full := joinPath(pane.cwd, it.name, pane.pathStyle)
 	m.overlay = overlayEditor
+	m.editorGen++
 	m.editor = &editorState{
-		active: true, side: side, source: pane.source,
+		active: true, gen: m.editorGen, side: side, source: pane.source,
 		path: full, name: it.name, mode: editorView,
 		status: "loading…",
 	}
 	m.status = "opening " + it.name + "…"
-	return m, m.editorLoadCmd(side, pane.source, full, it.name)
+	return m, m.editorLoadCmd(m.editorGen, side, pane.source, full, it.name)
 }
 
 // editorLoadCmd reads the file content (local or remote) into memory, enforcing
 // the size cap and rejecting binary content (detected via NUL bytes).
-func (m filesModel) editorLoadCmd(side int, source, full, name string) tea.Cmd {
+func (m filesModel) editorLoadCmd(gen uint64, side int, source, full, name string) tea.Cmd {
 	app := m.app
 	return func() tea.Msg {
 		data, err := loadFileForEdit(app, source, full)
@@ -125,7 +133,7 @@ func (m filesModel) editorLoadCmd(side int, source, full, name string) tea.Cmd {
 		if err == nil {
 			lines = highlightLines(name, data)
 		}
-		return editorLoadedMsg{side: side, source: source, path: full, name: name, content: data, lines: lines, err: err}
+		return editorLoadedMsg{gen: gen, side: side, source: source, path: full, name: name, content: data, lines: lines, err: err}
 	}
 }
 
@@ -197,7 +205,7 @@ func isBinary(data []byte) bool {
 // the editor into the read-only highlighted view.
 func (m filesModel) onEditorLoaded(msg editorLoadedMsg) (tea.Model, tea.Cmd) {
 	// Ignore a stale load if the editor was closed or retargeted meanwhile.
-	if m.editor == nil || !m.editor.active || m.editor.path != msg.path {
+	if m.editor == nil || !m.editor.active || m.editor.gen != msg.gen || m.editor.path != msg.path {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -417,9 +425,10 @@ func (m filesModel) saveEditor() (tea.Model, tea.Cmd) {
 	path := ed.path
 	base := ed.content
 	inPlace := ed.inPlace
+	gen, side, name := ed.gen, ed.side, ed.name
 	return m, func() tea.Msg {
 		err := saveFileFromEdit(app, source, path, []byte(content), []byte(base), inPlace)
-		return editorSavedMsg{err: err, content: content}
+		return editorSavedMsg{gen: gen, side: side, name: name, err: err, content: content}
 	}
 }
 
@@ -542,12 +551,16 @@ func sha256Hex(b []byte) string {
 // owning pane so the new size/mtime show immediately.
 func (m filesModel) onEditorSaved(msg editorSavedMsg) (tea.Model, tea.Cmd) {
 	ed := m.editor
-	if ed == nil || !ed.active {
-		// The editor was closed while the save was in flight.
+	if ed == nil || !ed.active || ed.gen != msg.gen {
+		// The editor session that saved was closed while the save was in
+		// flight (another file, or this one again, may be open now). Report
+		// the outcome without touching the current session.
 		if msg.err != nil {
-			m.setStatus(levelError, "save failed: "+msg.err.Error())
+			m.setStatus(levelError, "save of "+msg.name+" failed: "+msg.err.Error())
+			return m, nil
 		}
-		return m, nil
+		m.setStatus(levelOK, "saved "+msg.name)
+		return m, m.reload(msg.side)
 	}
 	ed.saving = false
 	if msg.err != nil && core.EditErrorCode(msg.err) == "cannot_replace" && !ed.inPlace {

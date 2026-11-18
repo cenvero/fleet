@@ -405,6 +405,9 @@ type filesModel struct {
 	// editor overlay (a pointer: textarea.Model is ~12 KB, and Bubble Tea
 	// boxes the whole model into an interface on every message)
 	editor *editorState
+	// editorGen numbers editor sessions, so a load or save result that
+	// arrives after its session closed is not applied to a later one.
+	editorGen uint64
 
 	// filter input
 	filterSide int

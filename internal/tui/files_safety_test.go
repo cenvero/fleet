@@ -471,3 +471,83 @@ func TestEditorReportsLocalConflict(t *testing.T) {
 		t.Fatalf("want a conflict and unsaved edits, got status %q dirty=%v", m.editor.status, m.editor.dirty)
 	}
 }
+
+// TestEditorLateSaveIgnoredAfterReopen: a save result that arrives after the
+// editor was closed and another file (or the same file again) was opened must
+// not touch the new session.
+func TestEditorLateSaveIgnoredAfterReopen(t *testing.T) {
+	t.Parallel()
+
+	t.Run("other file", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("A\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("B\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := openInEditor(t, localPaneModel(dir, "a.txt", "b.txt"))
+		m, _ = sendKey(m, keyTab)
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+		m, saveA := sendKey(m, keyCtrlS)
+		if saveA == nil {
+			t.Fatal("no save command")
+		}
+		m, _ = sendKey(m, keyEsc)
+		m, _ = sendKey(m, keyEsc)
+		if m.editor != nil {
+			t.Fatal("editor should be closed")
+		}
+		m.left.index = 2 // b.txt
+		m = openInEditor(t, m)
+		mm, _ := m.Update(saveA())
+		m = mm.(filesModel)
+		if m.editor == nil || m.editor.name != "b.txt" {
+			t.Fatal("b.txt should still be open")
+		}
+		if m.editor.content != "B\n" {
+			t.Fatalf("late save of a.txt replaced b.txt's base with %q", m.editor.content)
+		}
+		if strings.Contains(m.editor.status, "saved") {
+			t.Fatalf("b.txt shows a.txt's save result: %q", m.editor.status)
+		}
+		if !strings.Contains(m.status, "saved a.txt") {
+			t.Fatalf("the late result should still be reported, status %q", m.status)
+		}
+	})
+
+	t.Run("same file reopened", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "a.txt")
+		if err := os.WriteFile(p, []byte("A\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := openInEditor(t, localPaneModel(dir, "a.txt"))
+		m, _ = sendKey(m, keyTab)
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+		m, saveOld := sendKey(m, keyCtrlS)
+		if saveOld == nil {
+			t.Fatal("no save command")
+		}
+		m, _ = sendKey(m, keyEsc)
+		m, _ = sendKey(m, keyEsc)
+		// Reopen a.txt; the load sees the content from before the old save.
+		m = openInEditor(t, m)
+		// The old session's save now lands on disk and its result arrives.
+		mm, _ := m.Update(saveOld())
+		m = mm.(filesModel)
+		if m.editor.content != "A\n" {
+			t.Fatalf("late save from the closed session moved the new session's base to %q", m.editor.content)
+		}
+		// Saving the reopened (stale) text must now be refused, not silently
+		// overwrite what the earlier session wrote.
+		m, _ = sendKey(m, keyTab)
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+		m, _ = saveAndDeliver(t, m)
+		if got, _ := os.ReadFile(p); string(got) != "A\nx" {
+			t.Fatalf("the earlier session's save was overwritten: %q", got)
+		}
+	})
+}
