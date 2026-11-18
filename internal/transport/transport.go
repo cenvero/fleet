@@ -175,6 +175,34 @@ type callContextError struct {
 func (e *callContextError) Error() string { return e.err.Error() }
 func (e *callContextError) Unwrap() error { return e.err }
 
+// requestNotSentError marks a failure that happened before the request reached
+// the agent, so the request certainly did not run and may be sent again.
+type requestNotSentError struct{ err error }
+
+func (e *requestNotSentError) Error() string        { return e.err.Error() }
+func (e *requestNotSentError) Unwrap() error        { return e.err }
+func (e *requestNotSentError) RequestNotSent() bool { return true }
+
+// NotSent marks err as a failure that happened before any request was sent
+// (a dial or handshake error, for example), for callers that report such
+// failures on Call's behalf.
+func NotSent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &requestNotSentError{err: err}
+}
+
+// RequestNotSent reports whether err is from a call whose request never
+// reached the agent, so sending it again cannot make it run twice. Any other
+// failure after the request was written (a dropped connection while waiting
+// for the reply) may mean the agent already ran it. Errors from other layers
+// can opt in by implementing RequestNotSent() bool.
+func RequestNotSent(err error) bool {
+	var ns interface{ RequestNotSent() bool }
+	return errors.As(err, &ns) && ns.RequestNotSent()
+}
+
 // SessionUsableAfterError reports that Call consumed the cancelled request's
 // terminal response, so the RPC channel can safely be returned to its pool.
 func SessionUsableAfterError(err error) bool {

@@ -3341,14 +3341,17 @@ Examples:
 				}
 				return r, false, e
 			}
-			// run retries only transport-class failures (agentErr set, not a timeout,
-			// and the command never reached execution), never a command that ran.
+			// run retries only transport-class failures where the command never
+			// reached execution (transport.RequestNotSent: the dial failed, the
+			// reverse agent was not connected, the request was never written),
+			// never a command that ran or might have: a connection that dropped
+			// while waiting for the reply may mean it ran.
 			run := func(server, command string) (res proto.ExecResult, timedOut bool, dur time.Duration, agentErr error) {
 				for attempt := 0; ; attempt++ {
 					start := time.Now()
 					res, timedOut, agentErr = runOnce(server, command)
 					dur = time.Since(start)
-					if agentErr == nil || timedOut || attempt >= retries {
+					if agentErr == nil || timedOut || attempt >= retries || !transport.RequestNotSent(agentErr) {
 						return
 					}
 					select {

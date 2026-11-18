@@ -596,7 +596,7 @@ func (h *ReverseHub) CallContext(ctx context.Context, server string, env proto.E
 	current := h.sessions[server]
 	h.mu.RUnlock()
 	if current == nil || current.session == nil {
-		return proto.Envelope{}, fmt.Errorf("reverse session for %q is not connected", server)
+		return proto.Envelope{}, transport.NotSent(fmt.Errorf("reverse session for %q is not connected", server))
 	}
 	// Borrow a channel so concurrent callers do not queue behind one another.
 	// Against an agent without CapabilityReverseMultiplex this returns the

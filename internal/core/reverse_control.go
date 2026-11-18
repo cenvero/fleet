@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/pkg/proto"
 )
 
@@ -487,7 +488,13 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 		})
 		releaseCall()
 		if err != nil {
-			resp.Error = &proto.Error{Code: "reverse_call_failed", Message: err.Error()}
+			code := "reverse_call_failed"
+			if transport.RequestNotSent(err) {
+				// Tell the caller the request never reached the agent (it is
+				// not connected), so it may safely retry.
+				code = controlCodeNotSent
+			}
+			resp.Error = &proto.Error{Code: code, Message: err.Error()}
 			break
 		}
 		respAttachment = resp.setResponseFramed(out, framedResponse)
@@ -716,6 +723,11 @@ type controlNotSentError struct{ err error }
 func (e *controlNotSentError) Error() string { return e.err.Error() }
 func (e *controlNotSentError) Unwrap() error { return e.err }
 
+// RequestNotSent lets transport.RequestNotSent recognise it, so retry logic
+// treats a request that never left this process like one that never reached
+// an agent.
+func (e *controlNotSentError) RequestNotSent() bool { return true }
+
 // controlResponseError is an error the daemon reported. Its text is the
 // "<code>: <message>" form callers have always seen.
 type controlResponseError struct {
@@ -724,6 +736,18 @@ type controlResponseError struct {
 }
 
 func (e *controlResponseError) Error() string { return e.Code + ": " + e.Message }
+
+// controlCodeNotSent is the daemon's answer when a call never reached the
+// agent (its reverse session is not connected).
+const controlCodeNotSent = "reverse_not_sent"
+
+// RequestNotSent reports the daemon's own "never reached the agent" answers:
+// a call for a reverse agent that is not connected, or one the daemon turned
+// away as busy before running it. Older daemons answer reverse_call_failed,
+// which stays "may have run".
+func (e *controlResponseError) RequestNotSent() bool {
+	return e.Code == controlCodeNotSent || e.Code == "control_busy"
+}
 
 // controlSession is a connection on which the daemon has proved itself and
 // which is ready for one request.

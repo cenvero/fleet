@@ -166,17 +166,17 @@ func (c Connector) DialContext(ctx context.Context, target ServerTarget) (*Sessi
 
 func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope, error) {
 	if s == nil || s.Channel == nil {
-		return proto.Envelope{}, fmt.Errorf("transport session is not open")
+		return proto.Envelope{}, NotSent(fmt.Errorf("transport session is not open"))
 	}
 	s.callMu.Lock()
 	defer s.callMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return proto.Envelope{}, err
+		return proto.Envelope{}, NotSent(err)
 	}
 	if env.RequestID == "" {
 		requestID, err := newRequestID()
 		if err != nil {
-			return proto.Envelope{}, err
+			return proto.Envelope{}, NotSent(err)
 		}
 		env.RequestID = requestID
 	}
@@ -189,11 +189,13 @@ func (s *Session) Call(ctx context.Context, env proto.Envelope) (proto.Envelope,
 
 	canCancel := s.SupportsCapability(proto.CapabilityRequestCancel)
 	if strings.EqualFold(env.Action, "shell.exec") && ctx.Done() != nil && !hasDeadline && !canCancel {
-		return proto.Envelope{}, fmt.Errorf("agent does not advertise %s; refusing deadline-free cancellable execution until it is upgraded", proto.CapabilityRequestCancel)
+		return proto.Envelope{}, NotSent(fmt.Errorf("agent does not advertise %s; refusing deadline-free cancellable execution until it is upgraded", proto.CapabilityRequestCancel))
 	}
 
+	// A failed write leaves at most a partial frame, which the agent can never
+	// decode into a request, so it counts as not sent.
 	if err := s.encode(env); err != nil {
-		return proto.Envelope{}, fmt.Errorf("encode rpc request: %w", err)
+		return proto.Envelope{}, NotSent(fmt.Errorf("encode rpc request: %w", err))
 	}
 
 	decode := func() (proto.Envelope, error) {

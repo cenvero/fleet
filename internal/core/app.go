@@ -1441,11 +1441,19 @@ func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, 
 			return resp, err
 		}
 		l.discard()
+		// The pooled connection failed. Sending the request again on a fresh
+		// one is safe only if it never reached the agent, or if running it
+		// twice changes nothing. Otherwise it may already have run (a dropped
+		// connection while waiting for the reply), and a second send could
+		// run a command, restart a service or change a firewall twice.
+		if !transport.RequestNotSent(err) && !safeToResend(env.Action) {
+			return proto.Envelope{}, fmt.Errorf("the connection to %s dropped after %s was sent, so it may have run; check before retrying: %w", server.Name, env.Action, err)
+		}
 	}
 
 	l, err := a.dialPooledContext(ctx, server)
 	if err != nil {
-		return proto.Envelope{}, err
+		return proto.Envelope{}, transport.NotSent(err)
 	}
 	resp, err := l.session().Call(ctx, env)
 	if err != nil && !transport.SessionUsableAfterError(err) {
@@ -1455,6 +1463,17 @@ func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, 
 	l.release()
 	return resp, err
 }
+
+// resendSafeActions only read state, so sending one again after a dropped
+// connection cannot change anything twice.
+var resendSafeActions = map[string]bool{
+	"hello": true, "inventory": true, "service.list": true, "metrics.collect": true,
+	"metrics.peek_queue": true, "log.read": true, "firewall.status": true, "port.list": true,
+	proto.ActionFileList: true, proto.ActionFileStat: true, proto.ActionFileRead: true,
+	proto.ActionFileProbe: true, proto.ActionFileTree: true,
+}
+
+func safeToResend(action string) bool { return resendSafeActions[strings.ToLower(action)] }
 
 // dialPooledContext establishes the pooled connection for a server, or borrows
 // one that another caller established while this one was waiting.
