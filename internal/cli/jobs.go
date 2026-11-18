@@ -115,6 +115,11 @@ func newJobRunCommand(configDir *string) *cobra.Command {
 			}
 			rec, err := app.Jobs().Start(appExec(app), args[0], command, name)
 			if err != nil {
+				if rec.ID != 0 {
+					// The launch may have run, so the job stays recorded
+					// for the helper to settle.
+					ensureHelper(cmd, *configDir, "")
+				}
 				return err
 			}
 			// The background helper tracks the job from here; make sure one is

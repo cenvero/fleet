@@ -1321,10 +1321,20 @@ func (a *App) execPayloadContext(ctx context.Context, server ServerRecord, paylo
 		return proto.ExecResult{}, err
 	}
 	if response.Error != nil {
-		return proto.ExecResult{}, fmt.Errorf("%s: %s", response.Error.Code, response.Error.Message)
+		return proto.ExecResult{}, &AgentRefusedError{Code: response.Error.Code, Message: response.Error.Message}
 	}
 	return proto.DecodePayload[proto.ExecResult](response.Payload)
 }
+
+// AgentRefusedError is an agent's error answer to a request: the agent
+// received it and declined (or failed before running anything that it
+// reports as a result), as opposed to a connection that failed.
+type AgentRefusedError struct {
+	Code    string
+	Message string
+}
+
+func (e *AgentRefusedError) Error() string { return e.Code + ": " + e.Message }
 
 func (a *App) ExecCommandAll(command string) []ExecServerResult {
 	servers, err := a.ListServers()

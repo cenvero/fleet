@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cenvero/fleet/internal/transport"
 )
 
 func TestBuildJobLaunch_QuotesAndDetaches(t *testing.T) {
@@ -223,7 +225,8 @@ func TestJobStore_StartLaunchFailureRollsBackCounter(t *testing.T) {
 	exec := func(server, command string) (string, int, error) {
 		if failOnce {
 			failOnce = false
-			return "", 0, fmt.Errorf("transport down")
+			// The dial failed: the launch certainly never reached the server.
+			return "", 0, transport.NotSent(fmt.Errorf("transport down"))
 		}
 		return "", 0, nil
 	}

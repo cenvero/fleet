@@ -6,6 +6,7 @@ package core
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cenvero/fleet/internal/transport"
 )
 
 // JobStatus is the lifecycle state of a background job.
@@ -384,8 +387,15 @@ func (s *JobStore) Start(exec ExecFunc, server, command, name string) (JobRecord
 	}
 
 	if _, _, err := exec(server, buildJobLaunch(command, rec.Logfile, nonce)); err != nil {
-		// Forget the job we failed to launch, and give its id back unless
-		// another job has taken the next one in the meantime.
+		// A launch that may have reached the server (the connection dropped
+		// after the request was sent) may be running: keep it, so the helper
+		// settles it as done or lost, rather than forget a job that runs.
+		var refused *AgentRefusedError
+		if !transport.RequestNotSent(err) && !errors.As(err, &refused) {
+			return rec, fmt.Errorf("launch job %d on %s may have run (%w); it stays tracked: check it with `fleet job status %d`", rec.ID, server, err, rec.ID)
+		}
+		// Forget the job we certainly failed to launch, and give its id back
+		// unless another job has taken the next one in the meantime.
 		_ = s.withWriteLock(func() error {
 			s.mu.Lock()
 			defer s.mu.Unlock()
