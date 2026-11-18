@@ -5,6 +5,7 @@ package core
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,9 @@ func TestJobStore_TailIgnoresSpoofedMarker(t *testing.T) {
 	exec := func(server, command string) (string, int, error) {
 		if strings.HasPrefix(command, "tail ") {
 			return logContent, 0, nil
+		}
+		if strings.Contains(command, jobProbeHeader) {
+			return fakeProbe(command, logContent), 0, nil
 		}
 		return "", 0, nil // launch
 	}
@@ -253,6 +257,9 @@ func TestJobStore_TailDetectsCompletion(t *testing.T) {
 		if strings.HasPrefix(command, "tail ") {
 			return logContent, 0, nil
 		}
+		if strings.Contains(command, jobProbeHeader) {
+			return fakeProbe(command, logContent), 0, nil
+		}
 		return "", 0, nil // launch
 	}
 
@@ -359,4 +366,21 @@ func TestJobStore_WaitTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+var probeNonce = regexp.MustCompile(`\[F\]LEETEXIT:([0-9a-f]+):`)
+
+// fakeProbe answers a job probe the way the server would for a job whose log
+// is logContent: once the authentic marker is there, the wrapper (which
+// writes it as its last act) has gone, so the job reads as dead with that
+// exit code; before that it is alive.
+func fakeProbe(command, logContent string) string {
+	m := probeNonce.FindStringSubmatch(command)
+	if m == nil {
+		return ""
+	}
+	if code, done := parseExit(logContent, m[1]); done {
+		return fmt.Sprintf("%sdead:log:%d\n%s", jobProbeHeader, code, logContent)
+	}
+	return jobProbeHeader + "alive:log:\n" + logContent
 }

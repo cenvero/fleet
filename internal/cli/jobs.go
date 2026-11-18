@@ -113,7 +113,12 @@ func newJobRunCommand(configDir *string) *cobra.Command {
 			if err := enforceCmdPolicy(*configDir, command, false); err != nil {
 				return err
 			}
-			rec, err := app.Jobs().Start(appExec(app), args[0], command, name)
+			// Record the server under its own name, not however it was typed.
+			server, err := app.GetServer(args[0])
+			if err != nil {
+				return err
+			}
+			rec, err := app.Jobs().Start(appExec(app), server.Name, command, name)
 			if err != nil {
 				if rec.ID != 0 {
 					// The launch may have run, so the job stays recorded

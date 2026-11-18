@@ -5,6 +5,8 @@ package core
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,7 +24,7 @@ func TestJobStartKeepsAJobWhoseLaunchMayHaveRun(t *testing.T) {
 	}{
 		{"dropped after send", errors.New("the connection to web dropped after shell.exec was sent, so it may have run"), true},
 		{"never sent", transport.NotSent(errors.New("dial tcp: connection refused")), false},
-		{"agent refused", &AgentRefusedError{Code: "capability_denied", Message: "shell.exec is disabled"}, false},
+		{"agent refused before running", &AgentRefusedError{Code: "capability_denied", Message: "shell.exec is disabled"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,5 +74,30 @@ func TestJobCheckIgnoresAProbeThatMayHaveRun(t *testing.T) {
 		if got.Status != JobRunning || got.Strikes != 0 {
 			t.Fatalf("probe %d: a dropped probe changed the job: %+v", i, got)
 		}
+	}
+}
+
+// A job's server counts as removed only when its record file is gone, never
+// because the name was written differently (a case-insensitive filesystem
+// opens "Web-01" as "web-01") or the list could not be read.
+func TestJobServerRemovedOnlyWhenTheRecordIsGone(t *testing.T) {
+	app := newImportTestApp(t)
+	if err := app.AddServer(ServerRecord{Name: "web-01", Address: "127.0.0.1", Port: 2222, Mode: transport.ModeDirect}); err != nil {
+		t.Fatal(err)
+	}
+	if app.serverRemoved("web-01") {
+		t.Fatal("an existing server counted as removed")
+	}
+	if _, err := os.Stat(filepath.Join(app.ConfigDir, "servers", "Web-01.toml")); err == nil && app.serverRemoved("Web-01") {
+		t.Fatal("on a case-insensitive filesystem the differently-cased name counted as removed")
+	}
+	if app.serverRemoved("../web-01") {
+		t.Fatal("an unsafe name counted as removed")
+	}
+	if err := app.RemoveServerWithOptions("web-01", RemoveOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !app.serverRemoved("web-01") {
+		t.Fatal("a removed server did not count as removed")
 	}
 }

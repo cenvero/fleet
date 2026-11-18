@@ -46,6 +46,9 @@ const (
 const (
 	jobLostStrikes = 3
 	jobLostMinAge  = time.Minute
+	// jobLaunchGrace: a job whose launch has not returned yet is not struck
+	// within this long, so a slow launch is not taken for a lost job.
+	jobLaunchGrace = 5 * time.Minute
 )
 
 // jobExitMarker is the fixed sentinel prefix the launched shell appends after
@@ -102,6 +105,13 @@ type JobRecord struct {
 	// Strikes counts the probes in a row that found the job unable to finish;
 	// see jobLostStrikes. A probe that sees the job alive resets it.
 	Strikes int `json:"strikes,omitempty"`
+	// PID is the job's wrapper process on the server, and Launched when the
+	// launch returned. Liveness is checked on that one process: the nonce is
+	// not secret on the server (it is in the log file's name), so a check
+	// that searched every process for it could be fooled into calling a
+	// dead job alive. Records from before this have neither.
+	PID      int       `json:"pid,omitempty"`
+	Launched time.Time `json:"launched,omitzero"`
 }
 
 // ExecFunc runs a command on a named server and returns its combined stdout.
@@ -147,19 +157,17 @@ func (a *App) Jobs() *JobStore {
 	return s
 }
 
-// serverRemoved reports whether name is no longer one of the fleet's servers.
-// It answers false when the server list cannot be read.
+// serverRemoved reports whether name is no longer one of the fleet's servers:
+// only when its record file is certainly gone. Comparing names against the
+// server list was wrong on a case-insensitive filesystem (macOS, Windows),
+// where a job started for "Web-01" runs on the record "web-01", and any other
+// doubt (an unreadable directory) must not lose a running job either.
 func (a *App) serverRemoved(name string) bool {
-	servers, err := a.ListServers()
-	if err != nil {
+	if validateSafeName(name) != nil {
 		return false
 	}
-	for _, s := range servers {
-		if s.Name == name {
-			return false
-		}
-	}
-	return true
+	_, err := os.Stat(filepath.Join(a.ConfigDir, "servers", name+".toml"))
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // JobsPath returns the on-disk location of the jobs document for a config dir.
@@ -332,7 +340,24 @@ func JobLogfile(id int, nonce string) string {
 // single-quoted for safe embedding in the remote /bin/sh command.
 func buildJobLaunch(command, logfile, nonce string) string {
 	inner := "umask 077; { sh -c " + shellQuote(command) + "; printf '\\n" + jobExitMarker + nonce + ":%s\\n' \"$?\"; } > " + shellQuote(logfile) + " 2>&1"
-	return "setsid sh -c " + shellQuote(inner) + " </dev/null >/dev/null 2>&1 &"
+	// The background setsid is not a process group leader, so it does not
+	// fork: $! is the wrapper shell itself, reported for liveness checks.
+	return "setsid sh -c " + shellQuote(inner) + " </dev/null >/dev/null 2>&1 & printf '" + jobPIDPrefix + "%s\\n' \"$!\""
+}
+
+// jobPIDPrefix starts the line in which the launcher reports the wrapper's pid.
+const jobPIDPrefix = "fleet-job-pid:"
+
+// parseJobPID reads the wrapper pid the launcher reported, or 0.
+func parseJobPID(out string) int {
+	for _, line := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), jobPIDPrefix); ok {
+			if pid, err := strconv.Atoi(v); err == nil && pid > 1 {
+				return pid
+			}
+		}
+	}
+	return 0
 }
 
 // Start records a new job and launches it on the server via exec. The returned
@@ -386,38 +411,64 @@ func (s *JobStore) Start(exec ExecFunc, server, command, name string) (JobRecord
 		return JobRecord{}, err
 	}
 
-	if _, _, err := exec(server, buildJobLaunch(command, rec.Logfile, nonce)); err != nil {
-		// A launch that may have reached the server (the connection dropped
-		// after the request was sent) may be running: keep it, so the helper
-		// settles it as done or lost, rather than forget a job that runs.
-		var refused *AgentRefusedError
-		if !transport.RequestNotSent(err) && !errors.As(err, &refused) {
-			return rec, fmt.Errorf("launch job %d on %s may have run (%w); it stays tracked: check it with `fleet job status %d`", rec.ID, server, err, rec.ID)
+	launchOut, _, err := exec(server, buildJobLaunch(command, rec.Logfile, nonce))
+	if err == nil {
+		pid := parseJobPID(launchOut)
+		if updated, _, uerr := s.transition(rec.ID, func(j *JobRecord) bool {
+			j.PID, j.Launched = pid, time.Now().UTC()
+			return true
+		}); uerr == nil && updated.ID == rec.ID {
+			rec = updated
 		}
-		// Forget the job we certainly failed to launch, and give its id back
-		// unless another job has taken the next one in the meantime.
-		_ = s.withWriteLock(func() error {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			doc, rerr := s.read()
-			if rerr != nil {
-				return rerr
-			}
-			kept := doc.Jobs[:0]
-			for _, j := range doc.Jobs {
-				if j.ID != rec.ID {
-					kept = append(kept, j)
-				}
-			}
-			doc.Jobs = kept
-			if doc.Counter == rec.ID {
-				doc.Counter--
-			}
-			return s.write(doc)
-		})
-		return JobRecord{}, fmt.Errorf("launch job on %s: %w", server, err)
+		return rec, nil
 	}
-	return rec, nil
+	// A launch that may have reached the server (the connection dropped
+	// after the request was sent, or the agent failed after starting it)
+	// may be running: keep it, so the helper settles it as done or lost,
+	// rather than forget a job that runs.
+	if !launchCertainlyFailed(err) {
+		return rec, fmt.Errorf("launch job %d on %s may have run (%w); it stays tracked: check it with `fleet job status %d`", rec.ID, server, err, rec.ID)
+	}
+	// Forget the job we certainly failed to launch, and give its id back
+	// unless another job has taken the next one in the meantime.
+	_ = s.withWriteLock(func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		doc, rerr := s.read()
+		if rerr != nil {
+			return rerr
+		}
+		kept := doc.Jobs[:0]
+		for _, j := range doc.Jobs {
+			if j.ID != rec.ID {
+				kept = append(kept, j)
+			}
+		}
+		doc.Jobs = kept
+		if doc.Counter == rec.ID {
+			doc.Counter--
+		}
+		return s.write(doc)
+	})
+	return JobRecord{}, fmt.Errorf("launch job on %s: %w", server, err)
+}
+
+// preExecAgentCodes are agent answers to shell.exec that come before anything
+// runs: the request was refused as it stood. Others (internal_error among
+// them) can come after the command started.
+var preExecAgentCodes = map[string]bool{
+	"bad_payload": true, "unsupported_action": true, "unknown_action": true,
+	"capability_denied": true, "forbidden": true, "unauthorized": true, "policy_denied": true,
+}
+
+// launchCertainlyFailed reports whether a launch error means the job never
+// started: it was never sent, or the agent refused it before running it.
+func launchCertainlyFailed(err error) bool {
+	if transport.RequestNotSent(err) {
+		return true
+	}
+	var refused *AgentRefusedError
+	return errors.As(err, &refused) && preExecAgentCodes[refused.Code]
 }
 
 // Get returns a copy of the stored job record for an id.
@@ -543,9 +594,14 @@ func (s *JobStore) Tail(exec ExecFunc, id int) (rec JobRecord, output string, er
 		return rec, "", fmt.Errorf("read job %d log: %w", id, execErr)
 	}
 	output = stripExitMarker(raw, rec.Nonce)
+	// A marker in the log may have been printed by the job itself; whether
+	// the job has really finished is Check's to decide (it looks at the
+	// wrapper process too).
 	if rec.Status == JobRunning {
-		if code, done := parseExit(raw, rec.Nonce); done {
-			rec, err = s.finish(id, code)
+		if _, done := parseExit(raw, rec.Nonce); done {
+			if checked, cerr := s.Check(exec, id); cerr == nil {
+				rec = checked
+			}
 		}
 	}
 	return rec, output, err
@@ -581,14 +637,22 @@ const jobProbeHeader = "FLEETPROBE:"
 //
 // The header is printed before any log content, so nothing the job writes can
 // forge it.
-func buildJobProbe(logfile, nonce string, tailBytes int) string {
+func buildJobProbe(logfile, nonce string, tailBytes, pid int) string {
 	q := shellQuote(logfile)
 	marker := "[" + jobExitMarker[:1] + "]" + jobExitMarker[1:] + nonce + ":"
 	pattern := shellQuote(marker)
 	anchored := shellQuote("^" + marker + "[0-9][0-9]*$")
-	return "s=unknown; " +
-		"if [ -r /proc/self/cmdline ]; then grep -qsa -e " + pattern + " /proc/[0-9]*/cmdline; case $? in 0) s=alive ;; 1) s=dead ;; esac; " +
-		"elif p=$(ps -A -ww -o args= 2>/dev/null) && [ -n \"$p\" ]; then printf '%s\\n' \"$p\" | grep -qs -e " + pattern + "; case $? in 0) s=alive ;; 1) s=dead ;; esac; fi; " +
+	// Liveness: with the wrapper's pid, only that process counts (its
+	// command line carries the marker); without it (a job launched by an
+	// older release), any process whose command line carries it.
+	liveness := "if [ -r /proc/self/cmdline ]; then grep -qsa -e " + pattern + " /proc/[0-9]*/cmdline; case $? in 0) s=alive ;; 1) s=dead ;; esac; " +
+		"elif p=$(ps -A -ww -o args= 2>/dev/null) && [ -n \"$p\" ]; then printf '%s\\n' \"$p\" | grep -qs -e " + pattern + "; case $? in 0) s=alive ;; 1) s=dead ;; esac; fi; "
+	if pid > 1 {
+		ps := strconv.Itoa(pid)
+		liveness = "if [ -r /proc/self/cmdline ]; then if grep -qsa -e " + pattern + " /proc/" + ps + "/cmdline; then s=alive; else s=dead; fi; " +
+			"elif command -v ps >/dev/null 2>&1; then if ps -ww -o args= -p " + ps + " 2>/dev/null | grep -qs -e " + pattern + "; then s=alive; else s=dead; fi; fi; "
+	}
+	return "s=unknown; " + liveness +
 		"if [ -e " + q + " ]; then c=; " +
 		"case $s in dead) c=$(grep -a -e " + anchored + " " + q + " 2>/dev/null | tail -n 1) ;; " +
 		"unknown) c=$(tail -c " + strconv.Itoa(maxJobLogBytes) + " " + q + " 2>/dev/null | grep -a -e " + anchored + " | tail -n 1) ;; esac; " +
@@ -666,7 +730,7 @@ func (s *JobStore) Check(exec ExecFunc, id int) (JobRecord, error) {
 	if err != nil || rec.Status != JobRunning {
 		return rec, err
 	}
-	out, _, execErr := exec(rec.Server, buildJobProbe(rec.Logfile, rec.Nonce, jobProbeBytes))
+	out, _, execErr := exec(rec.Server, buildJobProbe(rec.Logfile, rec.Nonce, jobProbeBytes, rec.PID))
 	if execErr != nil {
 		if s.ServerRemoved != nil && s.ServerRemoved(rec.Server) {
 			return s.lose(id, fmt.Sprintf("server %s was removed from the fleet", rec.Server))
@@ -677,11 +741,18 @@ func (s *JobStore) Check(exec ExecFunc, id int) (JobRecord, error) {
 	if err != nil {
 		return rec, fmt.Errorf("check job %d on %s: %w", id, rec.Server, err)
 	}
-	if code, done := parseExit(probe.logTail, rec.Nonce); done {
-		return s.finish(id, code)
-	}
+	// The server found the last authentic marker in the whole log, once the
+	// wrapper was gone.
 	if probe.exited {
 		return s.finish(id, probe.exitCode)
+	}
+	// A marker in the recent output counts only once the wrapper has gone:
+	// it writes its marker as its last act, so one seen while it still runs
+	// was printed by the job itself (from output someone else influenced).
+	if probe.liveness != "alive" {
+		if code, done := parseExit(probe.logTail, rec.Nonce); done {
+			return s.finish(id, code)
+		}
 	}
 	switch {
 	case !probe.logExists:
@@ -728,6 +799,13 @@ func (s *JobStore) lose(id int, reason string) (JobRecord, error) {
 // gives up on it once the rule in jobLostStrikes is met.
 func (s *JobStore) strike(id int, reason string) (JobRecord, error) {
 	rec, _, err := s.transition(id, func(j *JobRecord) bool {
+		// Its launch may not have returned yet: the log and the wrapper may
+		// not exist so far, which says nothing about the job. (A job from an
+		// older release never records Launched; it is struck once the grace
+		// has passed, as before.)
+		if j.Launched.IsZero() && time.Since(j.Started) < jobLaunchGrace {
+			return false
+		}
 		j.Strikes++
 		if j.Strikes >= jobLostStrikes && time.Since(j.Started) >= jobLostMinAge {
 			j.Status = JobLost

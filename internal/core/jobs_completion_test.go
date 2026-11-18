@@ -114,12 +114,16 @@ func TestJobFailureNotifiesOnceWithTwoPollers(t *testing.T) {
 	release := make(chan struct{})
 	go func() { arrived.Wait(); close(release) }()
 	var reads atomic.Int32
-	exec := func(string, string) (string, int, error) {
+	exec := func(_, command string) (string, int, error) {
 		if reads.Add(1) <= 2 {
 			arrived.Done()
 			<-release
 		}
-		return "boom\n" + jobExitMarker + rec.Nonce + ":2\n", 0, nil
+		log := "boom\n" + jobExitMarker + rec.Nonce + ":2\n"
+		if strings.Contains(command, jobProbeHeader) {
+			return fakeProbe(command, log), 0, nil
+		}
+		return log, 0, nil
 	}
 
 	var wg sync.WaitGroup
@@ -177,7 +181,7 @@ func TestJobWaitPollsWithoutReadingTheWholeLog(t *testing.T) {
 			body += "\n" + jobExitMarker + rec.Nonce + ":0\n"
 		}
 		if strings.Contains(command, "FLEETPROBE") {
-			return "FLEETPROBE:alive:log\n" + body, 0, nil
+			return fakeProbe(command, body), 0, nil
 		}
 		return body, 0, nil
 	}
@@ -257,7 +261,7 @@ func TestJobStartDoesNotHoldTheJobsLockDuringLaunch(t *testing.T) {
 // runJobProbe runs buildJobProbe locally, as the agent's shell.exec would.
 func runJobProbe(t *testing.T, logfile, nonce string) jobProbe {
 	t.Helper()
-	out, err := exec.Command("/bin/sh", "-c", buildJobProbe(logfile, nonce, jobProbeBytes)).Output() // #nosec G204 -- test runs the probe it builds
+	out, err := exec.Command("/bin/sh", "-c", buildJobProbe(logfile, nonce, jobProbeBytes, 0)).Output() // #nosec G204 -- test runs the probe it builds
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -534,7 +538,7 @@ func TestJobProbeReplyStaysSmall(t *testing.T) {
 		t.Fatal(err)
 	}
 	const nonce = "44444444444444444444444444444444"
-	out, err := exec.Command("/bin/sh", "-c", buildJobProbe(logfile, nonce, jobProbeBytes)).Output() // #nosec G204 -- test runs the probe it builds
+	out, err := exec.Command("/bin/sh", "-c", buildJobProbe(logfile, nonce, jobProbeBytes, 0)).Output() // #nosec G204 -- test runs the probe it builds
 	if err != nil {
 		t.Fatal(err)
 	}
