@@ -486,6 +486,14 @@ func StartHelperProcess(configDir string) error {
 	if err != nil {
 		return fmt.Errorf("locate the fleet binary: %w", err)
 	}
+	env := daemonEnv(os.Environ())
+	if helperRunsFromCopy {
+		source := exe
+		if exe, err = helperExecutableCopy(configDir, source); err != nil {
+			return err
+		}
+		env = append(env, HelperSourceExeEnv+"="+source)
+	}
 	logFile, _, err := openRotatingLog(HelperLogPath(configDir), helperLogRotateBytes)
 	if err != nil {
 		return err
@@ -493,7 +501,7 @@ func StartHelperProcess(configDir string) error {
 	defer logFile.Close()                              // the child holds its own descriptor
 	cmd := exec.Command(exe, HelperArgs(configDir)...) // #nosec G204 -- this binary with fixed, credential-free arguments
 	cmd.Dir = configDir
-	cmd.Env = daemonEnv(os.Environ())
+	cmd.Env = env
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

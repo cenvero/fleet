@@ -40,10 +40,16 @@ type BackupResult struct {
 }
 
 // skipBackupPattern returns true for files that should never be included in a
-// backup — temp files, lock files, and SQLite journals/sidecars.
+// backup — temp files, lock files, SQLite journals/sidecars, the background
+// helper's copy of the fleet binary (Windows), and a running console's launch
+// key, which is only good while that console runs.
 func skipBackupPattern(name string) bool {
 	base := filepath.Base(name)
 	switch {
+	case strings.HasPrefix(base, helperCopyPrefix),
+		strings.HasPrefix(base, ".helper-copy-"),
+		base == consoleKeyFile:
+		return true
 	case strings.HasSuffix(base, ".new"),
 		strings.HasSuffix(base, ".tmp"),
 		strings.HasSuffix(base, ".lock"),

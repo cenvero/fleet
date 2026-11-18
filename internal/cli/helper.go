@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -105,7 +106,9 @@ func newHelperRunCommand(configDir *string) *cobra.Command {
 			if !helperSupported() {
 				return errors.New("the background helper does not run in a development build")
 			}
-			err := core.RunHelper(cmd.Context(), *configDir, core.HelperOptions{Log: cmd.ErrOrStderr()})
+			// A helper started from a copy of the binary (Windows) watches the
+			// installed one, so an upgrade still ends it.
+			err := core.RunHelper(cmd.Context(), *configDir, core.HelperOptions{Log: cmd.ErrOrStderr(), Executable: os.Getenv(core.HelperSourceExeEnv)})
 			switch {
 			case errors.Is(err, core.ErrHelperRunning):
 				return nil // another helper got there first
