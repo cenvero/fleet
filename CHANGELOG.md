@@ -96,6 +96,68 @@ Omit sections that have no entries for that release.
     count as well as size.
 - Built with Go 1.26.11, which fixes GO-2026-6859 (an HTTP/1 server crash from a
   `MaxBytesReader` header race in `net/http`, reachable through the web UI's server).
+- **`fleet guard --revert-cmd` is held to the command policy.** The revert command runs on
+  the server too, but only the risky command was checked, so a denied command could be passed
+  as the "undo".
+- **A missing dedicated `secret.key` fails closed** instead of being silently replaced by a
+  new random key while secrets sealed under it exist.
+
+### Fixed
+
+- **`fleet key rotate` no longer destroys stored secrets when it rolls back.** If verifying a
+  reverse agent or removing the old key failed after the secrets had been re-sealed, the
+  rollback restored the old key files but left every secret sealed under the new key, whose
+  files were gone. The rollback now re-seals them for whichever key it leaves on disk, keeps
+  the new key files if that fails, and reports failures instead of swallowing them.
+- **MySQL and MariaDB backends:** state lookups used the reserved word `key` unquoted
+  (`WHERE key = ?`, `ORDER BY key`), a syntax error there; it is now quoted for every dialect.
+- **`fleet database shift` moves the metric history** (the dashboard sparklines) as well as
+  state, latest metrics and events.
+- **The agent always answers `shell.exec` and every other request.** A reply over the 16 MiB
+  message limit (large output, or control bytes that JSON escaping expands) used to be dropped,
+  leaving the controller waiting; output is now trimmed to fit with the truncation marker, and
+  anything else that cannot be sent is answered with a `response_too_large` /
+  `response_encode_failed` error.
+- **`shell.exec` returns at its deadline** even when something it started keeps stdout open
+  (`server &`, a `setsid` child); `timed_out` is reported correctly. A plain `cmd &` now
+  returns about 2 s after the shell exits instead of holding the reply until the deadline.
+- **A handler panic no longer kills the agent** in reverse mode or in `shell.exec`; it is
+  logged and answered with an error.
+- **Firewall actions are matched without regard to case** in the agent.
+- **The daemon waits for its background loops** (metrics poller, update checker, job-log
+  pruner) when it stops, so nothing writes into the config dir after it has returned.
+- **Web file manager:**
+  - "New file" on a server, rename and same-pane move never overwrite an existing file
+    (hidden files included), and an upload named like an existing folder is refused instead
+    of landing inside it under a temporary name;
+  - rename and chmod *Undo* act on the folder where the change was made;
+  - the terminal retries WebGL after a lost GPU context instead of settling for a renderer
+    the page's CSP cannot colour;
+  - Ctrl-C lets in-flight requests finish.
+- **Terminal file manager (`fleet files`):**
+  - the editor no longer rewrites files on save: tabs and CRLF line endings round-trip
+    exactly, and a file it cannot hold exactly (control characters, a lone CR, invalid
+    UTF-8) opens read-only;
+  - a single Esc no longer discards unsaved edits;
+  - local saves are atomic, keep owner, group, mode and set-id bits, refuse a file that
+    changed since it was opened (or has other hard links, or may not be written), and write
+    nothing when the text is unchanged;
+  - a save that finishes after another file was opened no longer lands on it;
+  - new file, rename and duplicate check the real folder, so a hidden file that is not
+    shown is not overwritten.
+- **Uploads** refuse a file that shrank while being read, instead of sending stale bytes from
+  a reused buffer.
+- **`fleet autocomplete install`** (bash) no longer deletes the user's own rc lines on a
+  re-run.
+- **`fleet logs --server` / `--service`** filter the audit log on their own, not only together
+  with `--search`.
+- **Alerts are no longer recorded as notified** by a desktop notifier that is disabled; the
+  README and operations guide no longer advertise desktop notifications.
+- **Releases:** a pre-release tag such as `v3.0.0-rc1` can no longer be published to the
+  stable channel (any unrecognised pre-release suffix is refused before the build), and every
+  Pages deploy now publishes `/.well-known/security.txt`.
+- **Tests:** the suite passes on macOS (temp dirs under the `/var` symlink, LibreSSL without
+  BLAKE2b) and the timing-sensitive tests hold up on loaded CI runners.
 
 ### Changed
 
