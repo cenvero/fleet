@@ -251,7 +251,7 @@ Current alert coverage includes:
 
 - metric thresholds
 - metrics collection failures
-- desktop notifications for new critical alerts
+- Slack/webhook notifications through `fleet notify` (desktop pop-ups for critical alerts are paused until a dependency-free native implementation lands)
 - suppression windows and cooldown reminders
 
 ## Firewall and Ports

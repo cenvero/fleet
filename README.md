@@ -27,7 +27,7 @@ Today the repository includes:
 - Transactional, idempotent playbooks (`fleet run`) with check/apply/rollback, plus tag-based grouping (`fleet tag`) and scheduled jobs (`fleet cron`)
 - Fleet observability: `fleet health`, `fleet top`, `fleet svc`, `fleet journal`, `fleet drift`, `fleet inventory --json`, and event notifications (`fleet notify`)
 - Background jobs (`fleet job`/`jobs`), port tunneling (`fleet tunnel`), and health-gated rolling agent updates (`fleet agent update --canary`)
-- Metrics polling, alerting, suppression, acknowledgement, and desktop notifications
+- Metrics polling, alerting, suppression, acknowledgement, and Slack/webhook event notifications (desktop pop-ups are paused until a dependency-free native implementation lands)
 - Linux-first service management, firewall control, and remote bootstrap
 - Controller-owned cached service logs with size, count, and age-based retention
 - Managed database backends for SQLite, PostgreSQL, MySQL, and MariaDB

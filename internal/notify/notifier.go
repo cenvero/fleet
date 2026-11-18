@@ -38,19 +38,17 @@ type Notifier interface {
 	Notify(title, message string) error
 }
 
-type silentNotifier struct{}
-
-func (silentNotifier) Notify(string, string) error { return nil }
-
 // TODO(future): implement nativeNotifier using OS APIs directly
-// (no third-party deps) and wire it in NewDesktopNotifier below.
+// (no third-party deps) and return it from NewDesktopNotifier below.
 // macOS:   exec osascript -e 'display notification "msg" with title "title"'
 // Linux:   D-Bus call to org.freedesktop.Notifications via golang.org/x/sys
 // Windows: Windows Toast API via golang.org/x/sys/windows
 
-// NewDesktopNotifier returns a Notifier. Currently always returns a silent
-// no-op notifier — desktop notifications will be restored in a future version
-// with a native OS implementation that carries no third-party dependencies.
+// NewDesktopNotifier returns the desktop Notifier, or nil when desktop
+// notifications are unavailable, which is always the case until the native
+// implementation above lands. Callers treat nil as "no desktop notifications",
+// so an alert is never recorded as notified when no notification was shown
+// (a silent stand-in that reported success used to do exactly that).
 func NewDesktopNotifier(_ bool) Notifier {
-	return silentNotifier{}
+	return nil
 }
