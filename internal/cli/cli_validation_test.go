@@ -5,11 +5,14 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cenvero/fleet/internal/core"
+	"github.com/cenvero/fleet/internal/logs"
 )
 
 func runFleetIn(t *testing.T, configDir string, args ...string) (string, error) {
@@ -96,5 +99,42 @@ func TestClassifyDaemonNotRunningAsUnreachable(t *testing.T) {
 	err := errors.New("the fleet daemon is not running (reverse-mode servers are reached through it); start it with `fleet start`, or run `fleet daemon`: open control.token: no such file or directory")
 	if got := classifyAgentError(err); got != "unreachable" {
 		t.Fatalf("classifyAgentError = %q, want unreachable", got)
+	}
+}
+
+// `fleet logs --server` / `--service` filter the audit log on their own; they
+// used to apply only together with --search, so the whole log came back.
+func TestLogsFiltersWithoutSearch(t *testing.T) {
+	configDir := newServerCommandTestConfig(t)
+	audit := logs.NewAuditLog(filepath.Join(configDir, "logs", "_audit.log"))
+	for _, e := range []logs.AuditEntry{
+		{Action: "service.restart", Target: "web-01", Details: "service=nginx"},
+		{Action: "service.restart", Target: "db-01", Details: "service=postgres"},
+	} {
+		if err := audit.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct{ flag, value, want, unwanted string }{
+		{"--server", "web-01", "web-01", "db-01"},
+		{"--service", "nginx", "nginx", "postgres"},
+	} {
+		out, err := runFleetIn(t, configDir, "logs", c.flag, c.value)
+		if err != nil {
+			t.Fatalf("logs %s %s: %v", c.flag, c.value, err)
+		}
+		var entries []logs.AuditEntry
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &entries); err != nil {
+			t.Fatalf("logs %s %s output: %v\n%s", c.flag, c.value, err, out)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("logs %s %s returned nothing", c.flag, c.value)
+		}
+		for _, e := range entries {
+			payload, _ := json.Marshal(e)
+			if !strings.Contains(string(payload), c.want) || strings.Contains(string(payload), c.unwanted) {
+				t.Fatalf("logs %s %s returned an unmatched entry: %s", c.flag, c.value, payload)
+			}
+		}
 	}
 }

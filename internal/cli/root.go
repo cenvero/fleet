@@ -1911,7 +1911,9 @@ func newLogsCommand(configDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if search != "" {
+			// Each filter applies on its own (they used to work only together
+			// with --search, so `--server web-01` alone returned the whole log).
+			if search != "" || server != "" || service != "" {
 				filtered := entries[:0]
 				for _, entry := range entries {
 					payload, _ := json.Marshal(entry)
