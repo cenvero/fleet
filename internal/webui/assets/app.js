@@ -4920,7 +4920,6 @@ const CTL_QUICK = [
   { key: "svc status", icon: "list-checks", tint: "green", desc: "State and recent logs of a systemd unit." },
   { key: "inventory", icon: "layers", tint: "blue", desc: "Hostnames, IPs, OS, resources and services.", flags: { json: true }, now: true },
   { key: "update check", icon: "cloud-download", tint: "teal", desc: "See whether a newer release is available.", now: true },
-  { key: "backup", icon: "archive", tint: "gray", desc: "Configuration, keys and state as a tar.gz." },
   { key: "logs", icon: "scroll", tint: "gray", desc: "Everything the controller has done.", now: true },
 ];
 
@@ -5159,7 +5158,9 @@ function glanceTiles() {
 
 function renderHome() {
   const recent = ctl.runs.slice(0, 5);
-  const quick = CTL_QUICK.filter((q) => ctl.byKey.has(q.key));
+  // Terminal-only commands (credential and controller-state ones) never get a
+  // quick action, even if one is listed above.
+  const quick = CTL_QUICK.filter((q) => { const c = ctl.byKey.get(q.key); return c && !c.unavailable; });
   const pins = ctl.pins.filter((k) => ctl.byKey.has(k));
   if (!ov.data || Date.now() - ov.lastOk > 30000) loadOverview();
   $("#ctl-content").replaceChildren(h("div", { class: "page" },
@@ -6073,6 +6074,7 @@ const termUI = {
   order: [],
   active: "",
   supported: true,
+  disabled: "", // why the Terminal view is off (the UI was started without --terminal)
   attached: false,
   ro: null,
 };
@@ -6085,9 +6087,13 @@ const TERM_THEME = {
 };
 
 // xterm.js builds its colour and size rules as <style> elements. The page CSP
-// admits those only with this load's nonce, so tag every <style> this page
-// creates with it. Scripts stay 'self' only.
-(function installStyleNonce() {
+// admits those only with this load's nonce, so once the terminal is about to
+// load, tag every <style> the page creates with it. Scripts stay 'self' only,
+// and pages that never open a terminal never patch createElement at all.
+let styleNonceInstalled = false;
+function installStyleNonce() {
+  if (styleNonceInstalled) return;
+  styleNonceInstalled = true;
   const meta = document.querySelector('meta[name="fleet-style-nonce"]');
   const nonce = meta ? meta.getAttribute("content") : "";
   if (!nonce || nonce.startsWith("__")) return;
@@ -6097,7 +6103,7 @@ const TERM_THEME = {
     if (String(tag).toLowerCase() === "style") el.nonce = nonce;
     return el;
   };
-})();
+}
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -6111,6 +6117,7 @@ function loadScript(src) {
 
 function loadXterm() {
   if (termUI.loaded) return termUI.loaded;
+  installStyleNonce();
   termUI.loaded = (async () => {
     await new Promise((resolve, reject) => {
       const l = document.createElement("link");
@@ -6170,16 +6177,18 @@ function renderTerminalEmpty() {
   const others = state.servers.filter((s) => !terminalServers().includes(s));
   box.replaceChildren(h("div", { class: "term-empty-inner" },
     tile("terminal", "indigo", "xl"),
-    h("h1", { text: "Open a terminal" }),
-    h("p", { text: termUI.supported
-      ? "A shell on any server, right here in the browser. It's fleet ssh underneath: same access token, same audit log."
-      : "Browser terminals need a Linux or macOS controller. Use fleet ssh in a terminal instead." }),
-    termUI.supported ? h("div", { class: "term-picks" }, servers.map((s) => h("button", {
+    h("h1", { text: termUI.disabled ? "The Terminal is off" : "Open a terminal" }),
+    h("p", { text: termUI.disabled
+      ? termUI.disabled.charAt(0).toUpperCase() + termUI.disabled.slice(1) + "."
+      : termUI.supported
+        ? "A shell on any server, right here in the browser. It's fleet ssh underneath: same access token, same audit log."
+        : "Browser terminals need a Linux or macOS controller. Use fleet ssh in a terminal instead." }),
+    termUI.disabled ? null : termUI.supported ? h("div", { class: "term-picks" }, servers.map((s) => h("button", {
       type: "button", class: "term-pick" + (s.reachable ? "" : " offline"), title: s.reachable ? "Open a shell on " + s.name : s.name + " looked offline; try anyway",
       onclick: () => openTerminal(s.name),
     }, tile("server", s.reachable ? "blue" : "gray"), h("span", { class: "term-pick-text" }, h("b", { text: s.name }), h("span", { text: s.reachable ? (s.os || "online") : "offline" })), icon("chevron-right", "g-chev")))) : null,
-    termUI.supported && !servers.length ? h("p", { class: "muted", text: "No direct-mode servers yet." }) : null,
-    others.length ? h("p", { class: "term-note", text: plural(others.length, "reverse-mode server") + " can't open a terminal yet. Use Control → Run a command for those." }) : null));
+    !termUI.disabled && termUI.supported && !servers.length ? h("p", { class: "muted", text: "No direct-mode servers yet." }) : null,
+    !termUI.disabled && others.length ? h("p", { class: "term-note", text: plural(others.length, "reverse-mode server") + " can't open a terminal yet. Use Control → Run a command for those." }) : null));
 }
 
 async function showTerminalView() {
@@ -6190,10 +6199,16 @@ async function showTerminalView() {
     try {
       const d = await getJSON("/api/term");
       termUI.supported = d.supported !== false;
+      termUI.disabled = "";
       for (const s of d.sessions || []) {
         if (s.state === "running" && !termUI.sessions.has(s.id)) await attachTerminal(s, { replay: true });
       }
-    } catch { /* the view still works for new sessions */ }
+    } catch (err) {
+      // 404: this UI was started without --terminal; say how to turn it on.
+      // Anything else: the view still works for new sessions.
+      if (err && err.status === 404) termUI.disabled = err.message || "the Terminal view is off";
+      else termUI.attached = false;
+    }
     renderTerminalTabs();
   }
   const t = termUI.sessions.get(termUI.active);

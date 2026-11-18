@@ -53,7 +53,7 @@ func TestWebConsoleCatalogCoversTheCLI(t *testing.T) {
 	for _, spec := range catalog {
 		byPath[strings.Join(spec.Path, " ")] = spec
 	}
-	for _, want := range []string{"server add", "server list", "service restart", "exec", "alerts ack", "logs", "journal", "health", "update apply", "agent update", "secret set", "token create", "firewall status", "job run", "run", "cron add", "tag"} {
+	for _, want := range []string{"server add", "server list", "service restart", "exec", "alerts ack", "logs", "journal", "health", "update apply", "agent update", "secret list", "token list", "firewall status", "job run", "run", "cron add", "tag"} {
 		spec, ok := byPath[want]
 		if !ok {
 			t.Fatalf("catalog is missing %q", want)
@@ -62,7 +62,7 @@ func TestWebConsoleCatalogCoversTheCLI(t *testing.T) {
 			t.Fatalf("%q should be runnable from the UI: %s", want, spec.Unavailable)
 		}
 	}
-	for _, want := range []string{"dashboard", "ssh", "config edit", "file ui", "daemon", "self-uninstall"} {
+	for _, want := range []string{"dashboard", "ssh", "config edit", "file ui", "daemon", "self-uninstall", "secret set", "token create"} {
 		if spec, ok := byPath[want]; !ok || spec.Unavailable == "" {
 			t.Fatalf("%q must be listed as unavailable", want)
 		}
@@ -96,46 +96,148 @@ func TestWebConsoleLauncherPinsConfigDirAndToken(t *testing.T) {
 	catalog := webConsoleCatalog(root)
 	launch := webConsoleLauncher(root, t.TempDir(), "tok-123", catalog)
 
-	cmd, err := launch(context.Background(), []string{"server", "list", "--format", "json"})
+	cmd, err := launch(context.Background(), []string{"server", "list"}, []string{"--format", "json"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := cmd.Args[1:]
-	if args[len(args)-1] != "--config-dir="+cmd.Dir {
-		t.Fatalf("config dir not pinned: %v", args)
+	if args[0] != "--config-dir="+cmd.Dir || strings.Join(args[1:], " ") != "server list --format json" {
+		t.Fatalf("config dir not pinned first: %v", args)
 	}
 	env := strings.Join(cmd.Env, "\n")
 	if !strings.Contains(env, "FLEET_TOKEN=tok-123") || strings.Count(env, "FLEET_TOKEN=") != 1 {
 		t.Fatalf("token not pinned exactly once: %v", cmd.Env)
 	}
+	if !strings.Contains(env, "FLEET_CONFIG_DIR="+cmd.Dir) || strings.Count(env, "FLEET_CONFIG_DIR=") != 1 {
+		t.Fatalf("config dir not pinned in the env exactly once: %v", cmd.Env)
+	}
 	if !strings.Contains(env, "NO_COLOR=1") {
 		t.Fatal("colour not disabled")
 	}
 
-	// "--" keeps the operator's text positional, and the pinned flag before it.
-	cmd, err = launch(context.Background(), []string{"exec", "web-01", "--", "ls", "-la"})
+	// A trailing value-taking flag cannot swallow the pinned config dir: it is
+	// first, so "--format" just has no value (and the child reports that).
+	cmd, err = launch(context.Background(), []string{"server", "list"}, []string{"--format"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cmd.Args[1:], " "); !strings.HasPrefix(got, "exec web-01 --config-dir=") || !strings.HasSuffix(got, " -- ls -la") {
+	if got := cmd.Args[1:]; got[0] != "--config-dir="+cmd.Dir || got[len(got)-1] != "--format" {
+		t.Fatalf("args %v", got)
+	}
+
+	// "--" keeps the operator's text positional.
+	cmd, err = launch(context.Background(), []string{"exec"}, []string{"web-01", "--", "ls", "-la"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cmd.Args[1:], " "); !strings.HasPrefix(got, "--config-dir=") || !strings.HasSuffix(got, " exec web-01 -- ls -la") {
 		t.Fatalf("args %q", got)
 	}
 
-	// Arguments that make Cobra resolve a different, unavailable command are refused.
-	for _, args := range [][]string{{"filemanager", "ui"}, {"dashboard"}, {"config", "edit"}} {
-		if _, err := launch(context.Background(), args); err == nil {
-			t.Fatalf("%v should be refused", args)
+	// Unavailable commands are refused, and so are arguments that make Cobra
+	// resolve a command other than the one picked (a subcommand named in the
+	// arguments would otherwise run under the parent's name and confirmation).
+	for _, c := range []struct{ path, args []string }{
+		{[]string{"filemanager"}, []string{"ui"}},
+		{[]string{"dashboard"}, nil},
+		{[]string{"config", "edit"}, nil},
+		{[]string{"token", "create"}, []string{"--name", "x"}},
+		{[]string{"sync-agent"}, []string{"auto", "off"}},
+	} {
+		if _, err := launch(context.Background(), c.path, c.args); err == nil {
+			t.Fatalf("%v %v should be refused", c.path, c.args)
 		}
 	}
 
 	// Without a token the child is unscoped, even if this process has one in its env.
 	t.Setenv("FLEET_TOKEN", "parent-token")
 	launch = webConsoleLauncher(root, t.TempDir(), "", catalog)
-	cmd, err = launch(context.Background(), []string{"version"})
+	cmd, err = launch(context.Background(), []string{"version"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(cmd.Env, "\n"), "FLEET_TOKEN=") {
 		t.Fatal("an inherited FLEET_TOKEN leaked into an unscoped run")
+	}
+}
+
+// Commands that read or write the controller's keys, tokens or secrets, or
+// loosen its guardrails, stay terminal-only even with the Control view on.
+func TestWebConsoleCatalogKeepsCredentialCommandsOff(t *testing.T) {
+	byPath := map[string]webui.CommandSpec{}
+	for _, spec := range webConsoleCatalog(NewRootCommand()) {
+		byPath[strings.Join(spec.Path, " ")] = spec
+	}
+	for _, key := range []string{
+		"backup", "config backup", "config restore", "config import", "config export", "config show",
+		"database show", "database shift", "token create", "token revoke", "secret set", "secret rotate",
+		"secret rm", "key rotate", "server enroll-token", "automation set", "automation rm",
+		"cmd-policy set", "policy set", "approve", "adjust-init",
+	} {
+		spec, ok := byPath[key]
+		if !ok {
+			t.Fatalf("%q is missing from the catalog; the web UI's block list names a command that does not exist", key)
+		}
+		if spec.Unavailable == "" {
+			t.Fatalf("%q must be unavailable in the web UI", key)
+		}
+	}
+	// Reading names and fingerprints is fine.
+	for _, key := range []string{"token list", "secret list", "key fingerprint", "server list", "approvals"} {
+		if spec, ok := byPath[key]; ok && spec.Unavailable != "" {
+			t.Fatalf("%q should stay available: %s", key, spec.Unavailable)
+		}
+	}
+}
+
+// The Control and Terminal views are opt-in: `file ui` and `filemanager ui`
+// start without them unless asked.
+func TestWebUIControlAndTerminalAreOptIn(t *testing.T) {
+	root := NewRootCommand()
+	for _, path := range [][]string{{"file", "ui"}, {"filemanager", "ui"}} {
+		cmd, _, err := root.Find(path)
+		if err != nil || strings.Join(path, " ") != strings.TrimPrefix(cmd.CommandPath(), root.Name()+" ") {
+			t.Fatalf("find %v: %v (%s)", path, err, cmd.CommandPath())
+		}
+		for _, name := range []string{"control", "terminal"} {
+			f := cmd.Flags().Lookup(name)
+			if f == nil || f.Value.Type() != "bool" || f.DefValue != "false" {
+				t.Fatalf("%v --%s must be a bool flag that defaults to off: %+v", path, name, f)
+			}
+		}
+	}
+}
+
+// The terminal child is exactly `fleet --config-dir=<dir> ssh -- <server>`,
+// with this UI's token (or none) and config dir pinned in its environment.
+func TestWebTerminalLauncherPinsConfigDirAndToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLEET_TOKEN", "parent-token")
+	t.Setenv("FLEET_CONFIG_DIR", "/somewhere/else")
+	cmd, err := webTerminalLauncher(dir, "tok-9")(context.Background(), "web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cmd.Args[1:], " "); got != "--config-dir="+dir+" ssh -- web-01" {
+		t.Fatalf("args %q", got)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	if strings.Count(env, "FLEET_TOKEN=") != 1 || !strings.Contains(env, "FLEET_TOKEN=tok-9") {
+		t.Fatalf("token not pinned exactly once: %v", cmd.Env)
+	}
+	if strings.Count(env, "FLEET_CONFIG_DIR=") != 1 || !strings.Contains(env, "FLEET_CONFIG_DIR="+dir) {
+		t.Fatalf("config dir not pinned exactly once: %v", cmd.Env)
+	}
+	cmd, err = webTerminalLauncher(dir, "")(context.Background(), "web-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(cmd.Env, "\n"), "FLEET_TOKEN=") {
+		t.Fatal("an inherited FLEET_TOKEN leaked into an unscoped terminal")
+	}
+	for _, bad := range []string{"", "-x", "--config-dir=/tmp", "a\nb"} {
+		if _, err := webTerminalLauncher(dir, "")(context.Background(), bad); err == nil {
+			t.Fatalf("server name %q should be refused", bad)
+		}
 	}
 }

@@ -67,7 +67,8 @@ func TestConsoleHelperProcess(t *testing.T) {
 
 func helperLauncher(t *testing.T, seen *[][]string) CommandLauncher {
 	t.Helper()
-	return func(ctx context.Context, args []string) (*exec.Cmd, error) {
+	return func(ctx context.Context, path, rest []string) (*exec.Cmd, error) {
+		args := append(append([]string(nil), path...), rest...)
 		if seen != nil {
 			*seen = append(*seen, append([]string(nil), args...))
 		}
@@ -266,6 +267,9 @@ func TestConsoleRefusesBadRequests(t *testing.T) {
 		{"config-dir override", runRequest{Path: []string{"echo"}, Args: []string{"--config-dir=/tmp"}}, http.StatusBadRequest},
 		{"NUL byte", runRequest{Path: []string{"echo"}, Args: []string{"a\x00b"}}, http.StatusBadRequest},
 		{"launcher refusal", runRequest{Path: []string{"refuse"}}, http.StatusBadRequest},
+		// Only commands marked Stdin take input: anything else would let
+		// text sent with the run answer a prompt the browser never showed.
+		{"stdin for a command that does not read it", runRequest{Path: []string{"echo"}, Stdin: "yes\n"}, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		if status, out := postRun(t, s, base, c.req); status != c.want {

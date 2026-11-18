@@ -24,7 +24,7 @@ import (
 // webUnavailable lists commands the browser cannot drive, and why. They need
 // a terminal (full-screen UIs, an interactive shell, $EDITOR), or they would
 // set up, replace or remove the controller this UI is running from.
-var webUnavailable = map[string]string{
+var webUnavailable = map[string]string{ // #nosec G101 -- command names and refusal reasons, not credentials
 	"dashboard":      "it is a full-screen terminal UI. Run `fleet dashboard` in a terminal, or use the Fleet view here",
 	"files":          "it is a full-screen terminal UI. Use the Files view here",
 	"filemanager":    "it is a full-screen terminal UI. Use the Files view here",
@@ -36,7 +36,38 @@ var webUnavailable = map[string]string{
 	"init":           "it sets up the controller this UI is already running from. Run it in a terminal",
 	"recover":        "it re-attaches the controller this UI is running from. Run it in a terminal",
 	"self-uninstall": "it removes the controller this UI is running from. Run it in a terminal",
+
+	// The browser must never be able to read or plant the controller's keys,
+	// tokens or secrets (see internal/webui/protect.go), nor loosen the
+	// guardrails that hold unattended runs back. These commands do exactly
+	// that, so they stay terminal-only even with the Control view on.
+	"backup":              webCredentialReason,
+	"config backup":       webCredentialReason,
+	"config restore":      webCredentialReason,
+	"config import":       webCredentialReason,
+	"config export":       webCredentialReason,
+	"config show":         "it prints the database DSN, which can carry a password. Run it in a terminal",
+	"database show":       "it prints the database DSN, which can carry a password. Run it in a terminal",
+	"database shift":      webCredentialReason,
+	"token create":        webCredentialReason,
+	"token revoke":        webCredentialReason,
+	"secret set":          webCredentialReason,
+	"secret rotate":       webCredentialReason,
+	"secret rm":           webCredentialReason,
+	"key rotate":          webCredentialReason,
+	"server enroll-token": "it mints a join secret for a reverse-mode agent. Run it in a terminal",
+	"automation set":      "it stores a script that every new shell runs. Run it in a terminal",
+	"automation rm":       "it changes the scripts every new shell runs. Run it in a terminal",
+	"cmd-policy set":      webGuardrailReason,
+	"policy set":          webGuardrailReason,
+	"approve":             "approving a staged command is a decision for an operator at a terminal. Run `fleet approve` there",
+	"adjust-init":         "it asks questions on the terminal. Run it in a terminal",
 }
+
+const (
+	webCredentialReason = "it reads or writes the controller's keys, tokens or secrets, which a browser tab must never reach. Run it in a terminal" // #nosec G101 -- a refusal message, not a credential
+	webGuardrailReason  = "it changes the guardrails that hold commands back, so it stays with an operator at a terminal"
+)
 
 // webDestructiveLeaves are command names that change or remove things in a
 // way worth a confirmation click in the browser.
@@ -253,11 +284,12 @@ func splitUseTokens(use string) []string {
 	return out
 }
 
-// webConsoleLauncher starts each browser run as `<this binary> <args...>
-// --config-dir <dir>`, with the RBAC token this UI was launched with. Before
-// starting it, it checks that Cobra resolves the arguments to the requested
-// command, so a run can never route into a different command (for example an
-// unavailable subcommand).
+// webConsoleLauncher starts each browser run as `<this binary> --config-dir=<dir>
+// <path...> <args...>`, with the RBAC token this UI was launched with. Before
+// starting it, it checks that Cobra resolves the arguments to exactly the
+// command the operator picked, so a run can never route into a different
+// command: neither an unavailable one, nor a subcommand named in the arguments
+// (which would also be audited and confirmed as the wrong command).
 func webConsoleLauncher(root *cobra.Command, configDir, tokenID string, catalog []webui.CommandSpec) webui.CommandLauncher {
 	available := map[string]bool{}
 	for _, spec := range catalog {
@@ -265,14 +297,19 @@ func webConsoleLauncher(root *cobra.Command, configDir, tokenID string, catalog 
 			available[strings.Join(spec.Path, " ")] = true
 		}
 	}
-	return func(ctx context.Context, args []string) (*exec.Cmd, error) {
-		target, _, err := root.Find(args)
+	return func(ctx context.Context, path, args []string) (*exec.Cmd, error) {
+		requested := strings.Join(path, " ")
+		if !available[requested] {
+			return nil, fmt.Errorf("fleet %s cannot run from the web UI", requested)
+		}
+		argv := append(append([]string(nil), path...), args...)
+		target, _, err := root.Find(argv)
 		if err != nil {
 			return nil, err
 		}
 		resolved := strings.TrimSpace(strings.TrimPrefix(target.CommandPath(), root.Name()))
-		if !available[resolved] {
-			return nil, fmt.Errorf("fleet %s cannot run from the web UI", resolved)
+		if resolved != requested {
+			return nil, fmt.Errorf("these arguments would run `fleet %s`, not `fleet %s`; pick fleet %s from the list instead", resolved, requested, resolved)
 		}
 		exe, err := os.Executable()
 		if err != nil {
@@ -281,38 +318,23 @@ func webConsoleLauncher(root *cobra.Command, configDir, tokenID string, catalog 
 		if configDir == "" {
 			return nil, errors.New("the controller config dir is unknown")
 		}
-		// --config-dir goes before any "--" the operator typed, so it is
-		// always parsed as the flag.
-		full := webInsertFlag(args, "--config-dir", configDir)
+		// --config-dir goes first, before the command path. Placed after the
+		// operator's arguments, a trailing value-taking flag ("--format") would
+		// swallow it as its value and the child would fall back to another
+		// controller. FLEET_CONFIG_DIR pins the same directory as a backstop.
+		full := append([]string{"--config-dir=" + configDir}, argv...)
 		cmd := exec.CommandContext(ctx, exe, full...) // #nosec G204 -- this binary, args checked above
-		cmd.Env = webChildEnv(os.Environ(), tokenID)
+		cmd.Env = webChildEnv(os.Environ(), tokenID, configDir)
 		cmd.Dir = configDir
 		return cmd, nil
 	}
 }
 
-// webInsertFlag puts flag=value before the first "--" (or at the end).
-func webInsertFlag(args []string, flag, value string) []string {
-	out := make([]string, 0, len(args)+1)
-	inserted := false
-	for _, a := range args {
-		if a == "--" && !inserted {
-			out = append(out, flag+"="+value)
-			inserted = true
-		}
-		out = append(out, a)
-	}
-	if !inserted {
-		out = append(out, flag+"="+value)
-	}
-	return out
-}
-
 // webChildEnv is the parent's environment with the token pinned to the one
-// this UI was launched with (or removed), the config dir left to the flag,
+// this UI was launched with (or removed), the config dir pinned to this UI's,
 // and colour/pager output turned off for a non-terminal.
-func webChildEnv(parent []string, tokenID string) []string {
-	env := make([]string, 0, len(parent)+5)
+func webChildEnv(parent []string, tokenID, configDir string) []string {
+	env := make([]string, 0, len(parent)+6)
 	for _, kv := range parent {
 		name, _, _ := strings.Cut(kv, "=")
 		switch name {
@@ -324,11 +346,11 @@ func webChildEnv(parent []string, tokenID string) []string {
 	if tokenID != "" {
 		env = append(env, "FLEET_TOKEN="+tokenID)
 	}
-	return append(env, "NO_COLOR=1", "CLICOLOR=0", "TERM=dumb", "PAGER=cat", "FLEET_WEBUI_CHILD=1")
+	return append(env, "FLEET_CONFIG_DIR="+configDir, "NO_COLOR=1", "CLICOLOR=0", "TERM=dumb", "PAGER=cat", "FLEET_WEBUI_CHILD=1")
 }
 
-// webTerminalLauncher starts a browser terminal session as `<this binary> ssh
-// --config-dir <dir> -- <server>`, with the token this UI was launched with,
+// webTerminalLauncher starts a browser terminal session as `<this binary>
+// --config-dir=<dir> ssh -- <server>`, with the token this UI was launched with,
 // so the session is exactly `fleet ssh` (RBAC, the command-policy refusal,
 // host-key pinning and audit included). The web UI has already checked that
 // the server exists; "--" keeps the name from ever being read as a flag.
@@ -344,17 +366,18 @@ func webTerminalLauncher(configDir, tokenID string) webui.TerminalLauncher {
 		if err != nil {
 			return nil, fmt.Errorf("locate the fleet binary: %w", err)
 		}
-		cmd := exec.CommandContext(ctx, exe, "ssh", "--config-dir="+configDir, "--", server) // #nosec G204 -- this binary; server checked against the server list
-		cmd.Env = webTerminalEnv(os.Environ(), tokenID)
+		cmd := exec.CommandContext(ctx, exe, "--config-dir="+configDir, "ssh", "--", server) // #nosec G204 -- this binary; server checked against the server list
+		cmd.Env = webTerminalEnv(os.Environ(), tokenID, configDir)
 		cmd.Dir = configDir
 		return cmd, nil
 	}
 }
 
-// webTerminalEnv is the parent's environment with the token pinned (or
-// removed) and a colour-capable terminal type, as a real terminal would have.
-func webTerminalEnv(parent []string, tokenID string) []string {
-	env := make([]string, 0, len(parent)+4)
+// webTerminalEnv is the parent's environment with the token and config dir
+// pinned (the token removed when this UI has none) and a colour-capable
+// terminal type, as a real terminal would have.
+func webTerminalEnv(parent []string, tokenID, configDir string) []string {
+	env := make([]string, 0, len(parent)+5)
 	for _, kv := range parent {
 		name, _, _ := strings.Cut(kv, "=")
 		switch name {
@@ -366,5 +389,5 @@ func webTerminalEnv(parent []string, tokenID string) []string {
 	if tokenID != "" {
 		env = append(env, "FLEET_TOKEN="+tokenID)
 	}
-	return append(env, "TERM=xterm-256color", "COLORTERM=truecolor", "FLEET_WEBUI_CHILD=1")
+	return append(env, "FLEET_CONFIG_DIR="+configDir, "TERM=xterm-256color", "COLORTERM=truecolor", "FLEET_WEBUI_CHILD=1")
 }

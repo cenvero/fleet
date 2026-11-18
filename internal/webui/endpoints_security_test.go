@@ -144,6 +144,80 @@ func TestNewPostEndpointsEnforceCSRF(t *testing.T) {
 	}
 }
 
+// The page's style nonce is fresh on every load and matches its CSP, while
+// scripts stay 'self' only. Nothing here is platform-specific, so it runs on
+// every OS (the terminal tests that use the nonce do not run on Windows).
+func TestIndexCarriesFreshStyleNonce(t *testing.T) {
+	s, ts := newTestServer(t)
+	get := func() (string, string) {
+		res, err := http.Get(ts.URL + "/?t=" + s.Token())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Header.Get("Content-Security-Policy"), string(body)
+	}
+	csp1, html1 := get()
+	csp2, _ := get()
+	if csp1 == csp2 {
+		t.Fatal("the style nonce must change on every load")
+	}
+	nonce := csp1[strings.Index(csp1, "'nonce-")+7:]
+	nonce = nonce[:strings.Index(nonce, "'")]
+	if !strings.Contains(html1, `content="`+nonce+`"`) || strings.Contains(html1, styleNoncePlaceholder) {
+		t.Fatal("index.html does not carry the nonce from its CSP")
+	}
+	if !strings.Contains(csp1, "script-src 'self';") {
+		t.Fatalf("scripts must stay 'self' only: %s", csp1)
+	}
+}
+
+// /api/runs takes GET (history) and POST (start a run), so it is not in the
+// one-method newEndpoints table; this holds its POST to the same token, CSRF
+// and rebinding rules. A run is the most powerful request the UI accepts.
+func TestRunsEndpointSecurity(t *testing.T) {
+	t.Parallel()
+	s, ts := newTestServer(t)
+	u, _ := url.Parse(ts.URL)
+	otherPort := "http://127.0.0.1:1"
+	if u.Port() == "1" {
+		otherPort = "http://127.0.0.1:2"
+	}
+	post := func(token string, headers map[string]string) int {
+		return doReq(t, http.MethodPost, withQuery(ts.URL, "/api/runs", nil, token), headers).StatusCode
+	}
+	for name, tok := range map[string]string{"missing": "", "wrong": strings.Repeat("0", 64)} {
+		if code := post(tok, map[string]string{"Origin": ts.URL}); code != http.StatusUnauthorized {
+			t.Fatalf("POST /api/runs with %s token: status %d, want 401", name, code)
+		}
+	}
+	for name, headers := range map[string]map[string]string{
+		"no origin, no fetch metadata": {},
+		"cross-site fetch metadata":    {"Sec-Fetch-Site": "cross-site"},
+		"remote origin":                {"Origin": "https://evil.example"},
+		"other loopback port":          {"Origin": otherPort},
+		"null origin":                  {"Origin": "null"},
+		"rebinding host":               {"Host": "attacker.example:80", "Origin": ts.URL},
+	} {
+		if code := post(s.Token(), headers); code != http.StatusForbidden {
+			t.Fatalf("POST /api/runs (%s): status %d, want 403", name, code)
+		}
+	}
+	// Same origin gets past the gate (and then hears the console is off).
+	if code := post(s.Token(), map[string]string{"Origin": ts.URL}); code != http.StatusNotFound {
+		t.Fatalf("same-origin POST /api/runs: status %d, want 404 with the console off", code)
+	}
+	for _, m := range []string{http.MethodPut, http.MethodDelete} {
+		if code := doReq(t, m, withQuery(ts.URL, "/api/runs", nil, s.Token()), map[string]string{"Origin": ts.URL}).StatusCode; code == http.StatusOK {
+			t.Fatalf("%s /api/runs succeeded", m)
+		}
+	}
+}
+
 // The same-origin tightening applies to every mutating endpoint, not only the
 // new ones: a page on another local port cannot drive a mkdir.
 func TestMutationsRequireSameOrigin(t *testing.T) {

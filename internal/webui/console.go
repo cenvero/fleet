@@ -80,12 +80,13 @@ type CommandSpec struct {
 	Unavailable string `json:"unavailable,omitempty"`
 }
 
-// CommandLauncher builds the child process for one run. args is the full
-// argument vector after the binary name, starting with the command path. The
-// launcher must build the command with exec.CommandContext(ctx, …), so the
+// CommandLauncher builds the child process for one run: path is the catalog
+// command the operator picked and args the arguments after it, so the launcher
+// can refuse arguments that would make the CLI resolve a different command.
+// The launcher must build the command with exec.CommandContext(ctx, …), so the
 // Control view can cancel it, and may refuse an invocation by returning an
 // error.
-type CommandLauncher func(ctx context.Context, args []string) (*exec.Cmd, error)
+type CommandLauncher func(ctx context.Context, path, args []string) (*exec.Cmd, error)
 
 // SetConsole enables the Control view: catalog is the list of commands the
 // browser may pick from, launch starts one.
@@ -144,6 +145,11 @@ const (
 	// interrupt before it is killed.
 	runCancelGrace = 5 * time.Second
 )
+
+// errConsoleOff is the answer to every Control request while the view is off.
+// It is off unless the UI was started with --control, because it lets whoever
+// holds this UI's session token run fleet commands with the UI's authority.
+const errConsoleOff = "the Control view is off; start the web UI with `fleet file ui --control` to run commands from the browser"
 
 // reservedRunFlags may not come from the browser: the launcher pins them.
 var reservedRunFlags = []string{"--config-dir", "--token"}
@@ -447,7 +453,7 @@ type runRequest struct {
 
 func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	if s.console == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "the command console is not enabled in this UI"})
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": errConsoleOff})
 		return
 	}
 	writeJSON(w, map[string]any{"commands": s.console.catalog})
@@ -456,7 +462,7 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 // handleRuns lists runs (GET) or starts one (POST).
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	if s.console == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "the command console is not enabled in this UI"})
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": errConsoleOff})
 		return
 	}
 	switch r.Method {
@@ -507,7 +513,13 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	full := append(append([]string{}, spec.Path...), req.Args...)
+	// Only commands that read their input from stdin get any: everything else
+	// runs with stdin at EOF, so a prompt the browser cannot see fails closed
+	// instead of being answered by text sent along with the run.
+	if req.Stdin != "" && !spec.Stdin {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "fleet " + strings.Join(spec.Path, " ") + " does not read input from stdin"})
+		return
+	}
 
 	hub := s.console.runs
 	hub.mu.Lock()
@@ -532,7 +544,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 		id: id, path: spec.Path, display: append(append([]string{"fleet"}, spec.Path...), displayArgs(spec, req.Args)...),
 		started: time.Now().UTC(), state: "running", cancel: cancel, changed: make(chan struct{}),
 	}
-	cmd, err := s.console.launch(ctx, full)
+	cmd, err := s.console.launch(ctx, append([]string(nil), spec.Path...), append([]string(nil), req.Args...))
 	if err != nil {
 		hub.mu.Unlock()
 		cancel()
@@ -609,7 +621,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 	if s.console == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "the command console is not enabled in this UI"})
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": errConsoleOff})
 		return
 	}
 	run, ok := s.console.runs.get(r.URL.Query().Get("id"))
@@ -631,7 +643,7 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRunsClear(w http.ResponseWriter, r *http.Request) {
 	if s.console == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "the command console is not enabled in this UI"})
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": errConsoleOff})
 		return
 	}
 	writeJSON(w, map[string]int{"removed": s.console.runs.clearFinished()})
@@ -642,7 +654,7 @@ func (s *Server) handleRunsClear(w http.ResponseWriter, r *http.Request) {
 // The stream ends after the final status of a finished run.
 func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 	if s.console == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "the command console is not enabled in this UI"})
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": errConsoleOff})
 		return
 	}
 	run, ok := s.console.runs.get(r.URL.Query().Get("id"))

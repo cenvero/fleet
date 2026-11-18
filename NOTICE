@@ -17,4 +17,5 @@ The web UI's icons (internal/webui/assets/index.html) are from Lucide
 
 The web UI's terminal uses xterm.js and its fit and WebGL addons
 (internal/webui/assets/vendor), MIT License; see
-internal/webui/assets/vendor/LICENSE-xterm.
+internal/webui/assets/vendor/LICENSE-xterm, LICENSE-xterm-addon-fit and
+LICENSE-xterm-addon-webgl, and VERSIONS.md there for the exact versions and checksums.

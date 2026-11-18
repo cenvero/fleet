@@ -316,9 +316,14 @@ header) to change a pane's source.
 ## Web GUI
 
 ```bash
-fleet file ui            # prints http://127.0.0.1:9445/?t=<token>
+fleet file ui                        # prints http://127.0.0.1:9445/?t=<token>
 fleet file ui --addr 127.0.0.1:9000
+fleet file ui --control --terminal   # also run commands and open shells from the browser
 ```
+
+The *Control* and *Terminal* views are **off unless you start the UI with
+`--control` / `--terminal`**: with either on, whoever holds the session token can act
+on the whole fleet with this invocation's authority (see *Security* below).
 
 A premium browser file manager served by the controller. It binds **loopback
 only**, requires the per-process token on every request, rejects non-loopback
@@ -366,7 +371,7 @@ the transfers dock. The same secure transfer engine runs underneath.
   `server add` form, and each open alert has *Ack* and *Snooze 1h*. When the UI is
   started with `--token`, the overview is authorized like `fleet server list`,
   `fleet alerts` and `fleet tag`.
-- **Control** (the *Control* tab): every fleet command, from the browser, laid out like
+- **Control** (the *Control* tab, with `--control`): fleet commands, from the browser, laid out like
   System Settings. *Overview* opens with a one-line summary of the fleet ("All 4 servers
   are online.") and at-a-glance tiles. Star any command to pin it to the Overview and the
   sidebar. A sidebar lists *Overview*, *Activity*, your pinned commands and the categories (Servers,
@@ -382,7 +387,7 @@ the transfers dock. The same secure transfer engine runs underneath.
   state or text) keeps the newest 60 with 4 MiB of output each. Up to 8 commands
   run at once.
 
-- **Terminal** (the *Terminal* tab): interactive shells on direct-mode servers, in tabs,
+- **Terminal** (the *Terminal* tab, with `--terminal`): interactive shells on direct-mode servers, in tabs,
   drawn by xterm.js (vendored; WebGL when available). Open one from the tab, a server card
   or its menu, Control → *Open a shell*, or the palette. Full-screen programs (`top`,
   `vim`, `htop`) work, the window size follows the browser, a reload re-attaches to
@@ -390,7 +395,9 @@ the transfers dock. The same secure transfer engine runs underneath.
   terminal go to the shell, not to the UI's shortcuts. Each tab is `fleet ssh <server>`
   run by the controller under a pseudo-terminal, with the same token, so RBAC, the rule
   that refuses `ssh` while a command policy is configured, host-key pinning and the audit
-  log (`webui.terminal`) all apply. Up to 8 at once; needs a Linux or macOS controller.
+  log (`webui.terminal`) all apply. Up to 8 at once, each watched by up to 4 browser
+  tabs; a shell no tab has watched for 15 minutes (a closed tab) is ended. Needs a Linux
+  or macOS controller.
 
 ### How Control runs commands
 
@@ -403,17 +410,23 @@ every run, and a denied command shows the same `denied: …` message. The UI als
 and the child audits its own action).
 
 - The browser picks the command and its arguments only. It cannot set `--token`,
-  `--config-dir` or environment variables, and the arguments must resolve to the command
-  that was asked for.
+  `--config-dir` or environment variables (the config dir is pinned ahead of the
+  command, so no argument can override it), and the arguments must resolve to exactly
+  the command that was picked: a subcommand named in the arguments is refused.
 - Commands that need a terminal are listed but refused, with the reason: `dashboard`,
   `files` / `filemanager`, `file ui`, `config edit`, `daemon` (use `start` /
-  `stop`), `init`, `recover` and `self-uninstall`.
-- There is no terminal, so prompts fail closed. Tick `--yes` (or `--confirm` for
-  command-policy confirm patterns) to approve on purpose. Commands that change things
-  (remove, stop, restart, rotate, update apply, …) also ask in the browser first.
-- `secret set` and `automation set` take their input in a text box sent on stdin, which
-  is never stored or echoed. Values of password and secret flags are masked in the run
-  history.
+  `stop`), `init`, `recover`, `adjust-init` and `self-uninstall`.
+- Commands that read or write the controller's keys, tokens or secrets, or loosen its
+  guardrails, are listed as *Terminal only* and refused: `backup`,
+  `config backup|restore|import|export|show`, `database show|shift`,
+  `token create|revoke`, `secret set|rotate|rm`, `key rotate`, `server enroll-token`,
+  `automation set|rm`, `cmd-policy set`, `policy set` and `approve`. Reading names and
+  fingerprints (`token list`, `secret list`, `key fingerprint`) still works.
+- There is no terminal, so prompts fail closed: only commands that read their input from
+  stdin are given any. Tick `--yes` (or `--confirm` for command-policy confirm patterns)
+  to approve on purpose. Commands that change things (remove, stop, restart, update
+  apply, …) also ask in the browser first. Values of password and secret flags are masked
+  in the run history.
 - Closing the UI (`Ctrl-C`) interrupts any commands still running.
 
 Security: in addition to the loopback bind, per-process token and strict CSP, every
@@ -421,3 +434,6 @@ mutating request (including starting or cancelling a command) must be a same-ori
 `POST` (another localhost port is refused),
 extra isolation headers are sent, and the *Local* source refuses paths inside the
 controller's config directory (keys, tokens, databases), including through symlinks.
+With `--control` or `--terminal` on, the session token is the boundary: it can run
+fleet commands and open shells with the authority of the `fleet file ui` invocation, so
+start the UI with a scoped `--token` to bound it, and keep the printed URL private.

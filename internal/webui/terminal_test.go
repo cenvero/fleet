@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,8 +60,11 @@ func newTermServer(t *testing.T) (*Server, string, *[]string) {
 		}
 	}
 	var seen []string
+	var seenMu sync.Mutex // opens can run concurrently (see the session-limit test)
 	s.SetTerminal(func(ctx context.Context, server string) (*exec.Cmd, error) {
+		seenMu.Lock()
 		seen = append(seen, server)
+		seenMu.Unlock()
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTermHelperProcess$", "--", server)
 		cmd.Env = append(os.Environ(), "FLEET_TERM_HELPER=1")
 		return cmd, nil
@@ -258,33 +262,118 @@ func TestTerminalRefusesBadServers(t *testing.T) {
 	}
 }
 
-func TestIndexCarriesFreshStyleNonce(t *testing.T) {
-	s, ts := newTestServer(t)
-	get := func() (string, string) {
-		res, err := http.Get(ts.URL + "/?t=" + s.Token())
-		if err != nil {
-			t.Fatal(err)
+// listTerms returns the hub's sessions by id, as the browser sees them.
+func listTerms(t *testing.T, s *Server, base string) map[string]termSummary {
+	t.Helper()
+	res, err := http.Get(base + "/api/term?t=" + s.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var out struct {
+		Sessions []termSummary `json:"sessions"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]termSummary{}
+	for _, sum := range out.Sessions {
+		m[sum.ID] = sum
+	}
+	return m
+}
+
+// Opens that race each other must not together exceed maxTermSessions: the
+// slot is taken under the same lock that counts the running sessions.
+func TestTerminalSessionLimitHoldsUnderConcurrency(t *testing.T) {
+	s, base, _ := newTermServer(t)
+	const tries = maxTermSessions * 2
+	codes := make(chan int, tries)
+	start := make(chan struct{})
+	openURL := base + "/api/term/open?" + url.Values{"server": {"web"}, "t": {s.Token()}}.Encode()
+	for i := 0; i < tries; i++ {
+		go func() {
+			<-start
+			req, _ := http.NewRequest(http.MethodPost, openURL, nil)
+			req.Header.Set("Origin", base)
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				codes <- -1
+				return
+			}
+			res.Body.Close()
+			codes <- res.StatusCode
+		}()
+	}
+	close(start)
+	opened, refused := 0, 0
+	for i := 0; i < tries; i++ {
+		switch code := <-codes; code {
+		case http.StatusOK:
+			opened++
+		case http.StatusTooManyRequests:
+			refused++
+		default:
+			t.Fatalf("unexpected status %d", code)
 		}
-		defer res.Body.Close()
-		var b strings.Builder
-		sc := bufio.NewScanner(res.Body)
-		sc.Buffer(make([]byte, 1<<20), 1<<22)
-		for sc.Scan() {
-			b.WriteString(sc.Text())
+	}
+	if opened != maxTermSessions || refused != tries-maxTermSessions {
+		t.Fatalf("opened %d, refused %d; want %d and %d", opened, refused, maxTermSessions, tries-maxTermSessions)
+	}
+	s.terminal.mu.Lock()
+	reserved := s.terminal.reserved
+	s.terminal.mu.Unlock()
+	if reserved != 0 {
+		t.Fatalf("%d slots still reserved after every open returned", reserved)
+	}
+}
+
+// A session nobody watches (a closed tab) is ended after the idle timeout; a
+// watched one is left alone.
+func TestTerminalIdleSessionIsReaped(t *testing.T) {
+	s, base, _ := newTermServer(t)
+	// Long enough for the watched session's stream to attach first, even on a
+	// slow machine under the race detector.
+	s.terminal.idleTimeout = time.Second
+	s.terminal.reapEvery = 25 * time.Millisecond
+
+	idle := openTerm(t, s, base, "web")
+	watched := openTerm(t, s, base, "web")
+	tr := followTerm(t, s, base, watched)
+	tr.waitFor(t, "ready on web")
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		sum := listTerms(t, s, base)[idle]
+		if sum.State == "exited" {
+			if !strings.Contains(sum.Error, "no browser attached") {
+				t.Fatalf("reaped session error %q", sum.Error)
+			}
+			break
 		}
-		return res.Header.Get("Content-Security-Policy"), b.String()
+		if time.Now().After(deadline) {
+			t.Fatalf("idle session still %q after the timeout", sum.State)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	csp1, html1 := get()
-	csp2, _ := get()
-	if csp1 == csp2 {
-		t.Fatal("the style nonce must change on every load")
+	if got := listTerms(t, s, base)[watched].State; got != "running" {
+		t.Fatalf("a watched session was reaped: %q", got)
 	}
-	nonce := csp1[strings.Index(csp1, "'nonce-")+7:]
-	nonce = nonce[:strings.Index(nonce, "'")]
-	if !strings.Contains(html1, `content="`+nonce+`"`) || strings.Contains(html1, styleNoncePlaceholder) {
-		t.Fatal("index.html does not carry the nonce from its CSP")
+}
+
+// One session takes at most maxTermStreams output streams at once.
+func TestTerminalStreamLimit(t *testing.T) {
+	s, base, _ := newTermServer(t)
+	id := openTerm(t, s, base, "web")
+	for i := 0; i < maxTermStreams; i++ {
+		followTerm(t, s, base, id)
 	}
-	if !strings.Contains(csp1, "script-src 'self';") {
-		t.Fatalf("scripts must stay 'self' only: %s", csp1)
+	res, err := http.Get(base + "/api/term/stream?id=" + id + "&t=" + s.Token())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("stream %d: status %d, want 429", maxTermStreams+1, res.StatusCode)
 	}
 }

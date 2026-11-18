@@ -40,22 +40,22 @@ Omit sections that have no entries for that release.
   accent, the system font, larger titles, softer corners, frosted toolbar, menus and
   dialogs, switches for on/off options, sentence-case labels, and matching light and dark
   themes. Icons are now the Lucide set (bundled, no external requests) with a new app icon.
-  Tabs run Fleet → Control → Files and the UI opens on Fleet; `Alt+1`–`3` switch tabs.
+  Tabs run Fleet → Control → Files → Terminal and the UI opens on Fleet; `Alt+1`–`4` switch tabs.
   Control's Overview greets you with a one-line fleet status and at-a-glance tiles; commands
   can be pinned; Activity can be filtered; results can be downloaded or shown full screen.
   Fleet shows each server as a card with CPU, memory and disk ring gauges (or as a list).
-- **Web UI: Terminal.** A *Terminal* tab with interactive shells on direct-mode servers,
+- **Web UI: Terminal** (opt-in: `fleet file ui --terminal`). A *Terminal* tab with interactive shells on direct-mode servers,
   in tabs (xterm.js, vendored, WebGL-rendered). Open one from the tab, a server card or
   menu, Control or the palette; `top`/`vim` work, the size follows the window, a reload
   re-attaches, and an ended session can reconnect. Each tab is `fleet ssh` run by the
   controller under a pseudo-terminal with the UI's token, so RBAC, the command-policy
   refusal, host-key pinning and audit apply unchanged. The page CSP stays strict: scripts
   are `'self'` only, and `<style>` elements need a nonce that changes on every load.
-- **Web UI: Control view, so the whole fleet can be run from the browser.** `fleet file ui`
-  gains a *Control* tab that lists every fleet command, grouped by area, with a form built
+- **Web UI: Control view, so the whole fleet can be run from the browser** (opt-in:
+  `fleet file ui --control`). The web UI gains a *Control* tab that lists every fleet command, grouped by area, with a form built
   from the command's own arguments and flags. Runs stream live output (stdout and stderr),
   can be cancelled, keep a history, and show JSON output as a table. Quick actions cover
-  common work (add a server, run a command, fleet health, unit status, updates, backup).
+  common work (add a server, run a command, fleet health, unit status, inventory, updates, logs).
   The *Fleet* overview gains *Add server*, a per-server *Manage* menu (services, journal,
   run a command, live metrics, health checklist, firewall, ports, tags, reconnect, remove)
   and *Ack* / *Snooze 1h* buttons on open alerts. The command palette lists every command.
@@ -69,6 +69,40 @@ Omit sections that have no entries for that release.
   and fail closed unless the operator ticks `--yes` / `--confirm`. Commands that change
   things ask for confirmation in the browser first. Values of password and secret flags are
   masked in the run history, and stdin input is never kept.
+
+### Security
+
+- **The web UI's Control and Terminal views are off by default.** With either on, whoever
+  holds the UI's session token can act on the whole fleet with the authority of the
+  `fleet file ui` invocation, so the plain file manager no longer hands that out. Start the
+  UI with `--control` and/or `--terminal` to turn them on, and with a scoped `--token` to
+  bound what they can do. The UI says on startup which of them are on.
+- **Commands that reach the controller's keys, tokens or secrets stay terminal-only** in the
+  Control view: `backup`, `config backup|restore|import|export|show`, `database show|shift`,
+  `token create|revoke`, `secret set|rotate|rm`, `key rotate`, `server enroll-token`,
+  `automation set|rm`, `cmd-policy set`, `policy set`, `approve` and `adjust-init`.
+- **Control runs:**
+  - the controller's config dir is now pinned ahead of the command, plus `FLEET_CONFIG_DIR`, so a
+    trailing flag that takes a value can no longer swallow it and point the run at another
+    controller;
+  - arguments that would make the CLI run a different command (a subcommand named in
+    the arguments) are refused;
+  - stdin is accepted only by commands that read it.
+- **Terminal sessions:**
+  - the 8-session limit now holds when several open at once;
+  - a session nobody has watched for 15 minutes (a closed tab) is ended, so it no longer
+    keeps a shell open on the server;
+  - one session takes at most 4 output streams, and its scrollback is bounded by chunk
+    count as well as size.
+- Built with Go 1.26.11, which fixes GO-2026-6859 (an HTTP/1 server crash from a
+  `MaxBytesReader` header race in `net/http`, reachable through the web UI's server).
+
+### Changed
+
+- Dependencies: `golang.org/x/crypto` 0.58.0, `golang.org/x/sys` 0.50.0, `golang.org/x/term`
+  0.47.0, `golang.org/x/mod` 0.42.0, `golang.org/x/sync` 0.24.0, `golang.org/x/text` 0.43.0
+  and `github.com/spf13/pflag` 1.1.0; CI actions `github/codeql-action` 4.38.3,
+  `actions/upload-artifact` 7.0.2 and `actions/download-artifact` 8.0.2.
 
 ## [v2.6.1] — 2026-10-23 (stable)
 

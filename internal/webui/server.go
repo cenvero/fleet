@@ -308,7 +308,10 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 		// catches them all — including /api/upload, which enforces POST itself
 		// rather than going through postOnly. Without this a create/delete could
 		// stay invisible (or a deleted file keep showing) for the cache TTL.
-		if r.Method == http.MethodPost {
+		// Terminal keystrokes and Control runs are skipped: they change files,
+		// if at all, long after the POST returns, so flushing here would only
+		// empty the cache on every key typed.
+		if r.Method == http.MethodPost && !strings.HasPrefix(r.URL.Path, "/api/term/") && !strings.HasPrefix(r.URL.Path, "/api/runs") {
 			listCache.invalidate()
 		}
 	}

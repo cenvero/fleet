@@ -37,18 +37,36 @@ func (s *Server) SetTerminal(launch TerminalLauncher) {
 		s.terminal = nil
 		return
 	}
-	s.terminal = &termHub{launch: launch, sessions: map[string]*termSession{}}
+	s.terminal = &termHub{
+		launch: launch, sessions: map[string]*termSession{},
+		idleTimeout: termIdleTimeout, reapEvery: termReapInterval, stop: make(chan struct{}),
+	}
 }
+
+// errTerminalOff is the answer to every Terminal request while the view is
+// off. It is off unless the UI was started with --terminal, because it lets
+// whoever holds this UI's session token open shells on the fleet's servers.
+const errTerminalOff = "the Terminal view is off; start the web UI with `fleet file ui --terminal` to open shells from the browser"
 
 const (
 	maxTermSessions    = 8
 	maxTermScrollback  = 1 << 20 // bytes of output kept for reconnecting streams
+	maxTermChunks      = 20000   // and at most this many chunks of it
 	maxTermInputBytes  = 64 << 10
 	termDefaultCols    = 120
 	termDefaultRows    = 32
 	termMaxDimension   = 1000
 	maxKeptTermExited  = 20
 	termOutputChunkMax = 32 << 10
+	// maxTermStreams caps how many output streams may watch one session at
+	// once (a few tabs on the same shell), so a client cannot pile up streams.
+	maxTermStreams = 4
+	// termIdleTimeout is how long a session may run with no browser watching
+	// it (a closed tab, a crashed browser) before it is ended, so a forgotten
+	// tab does not leave a shell open on a server until the UI exits.
+	termIdleTimeout = 15 * time.Minute
+	// termReapInterval is how often idle sessions are looked for.
+	termReapInterval = 30 * time.Second
 )
 
 // termPTY is the controller-side end of a session's pseudo-terminal.
@@ -81,6 +99,11 @@ type termSession struct {
 	bytes   int
 	nextSeq uint64
 	changed chan struct{}
+
+	// watchers is how many output streams are attached right now; unwatched
+	// is when that last dropped to zero (or when the session started).
+	watchers  int
+	unwatched time.Time
 }
 
 type termHub struct {
@@ -89,6 +112,15 @@ type termHub struct {
 	sessions map[string]*termSession
 	order    []string
 	wg       sync.WaitGroup
+	// reserved counts sessions being started: a slot is taken under mu when
+	// the request is accepted, so concurrent opens cannot exceed the limit.
+	reserved int
+
+	idleTimeout time.Duration
+	reapEvery   time.Duration
+	reapOnce    sync.Once
+	stop        chan struct{}
+	stopOnce    sync.Once
 }
 
 type termSummary struct {
@@ -119,7 +151,7 @@ func (h *termHub) appendOutput(t *termSession, p []byte) {
 	t.nextSeq++
 	t.chunks = append(t.chunks, termChunk{seq: t.nextSeq, data: append([]byte(nil), p...)})
 	t.bytes += len(p)
-	for t.bytes > maxTermScrollback && len(t.chunks) > 1 {
+	for (t.bytes > maxTermScrollback || len(t.chunks) > maxTermChunks) && len(t.chunks) > 1 {
 		t.bytes -= len(t.chunks[0].data)
 		t.chunks[0] = termChunk{}
 		t.chunks = t.chunks[1:]
@@ -154,8 +186,44 @@ func (h *termHub) evictLocked() {
 	h.order = kept
 }
 
+// startReaper starts, once, the loop that ends sessions nobody has watched
+// for idleTimeout. It stops when the hub is closed.
+func (h *termHub) startReaper() {
+	h.reapOnce.Do(func() {
+		go func() {
+			tick := time.NewTicker(h.reapEvery)
+			defer tick.Stop()
+			for {
+				select {
+				case <-h.stop:
+					return
+				case now := <-tick.C:
+					h.reapIdle(now)
+				}
+			}
+		}()
+	})
+}
+
+// reapIdle ends running sessions that have had no output stream attached for
+// longer than idleTimeout.
+func (h *termHub) reapIdle(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, t := range h.sessions {
+		if t.state != "running" || t.watchers > 0 || t.cancel == nil {
+			continue
+		}
+		if now.Sub(t.unwatched) >= h.idleTimeout {
+			t.errText = fmt.Sprintf("closed after %s with no browser attached", h.idleTimeout)
+			t.cancel()
+		}
+	}
+}
+
 // closeAll ends every session (UI shutdown) and waits up to grace.
 func (h *termHub) closeAll(grace time.Duration) {
+	h.stopOnce.Do(func() { close(h.stop) })
 	h.mu.Lock()
 	for _, t := range h.sessions {
 		if t.state == "running" && t.cancel != nil {
@@ -213,7 +281,7 @@ func (s *Server) terminalDisabled(w http.ResponseWriter) bool {
 	if s.terminal != nil {
 		return false
 	}
-	writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "the terminal is not enabled in this UI"})
+	writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": errTerminalOff})
 	return true
 }
 
@@ -250,8 +318,11 @@ func (s *Server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 	rows := termDimension(r.URL.Query().Get("rows"), termDefaultRows)
 
 	h := s.terminal
+	// Take a slot under the lock that also counts the running sessions, so
+	// concurrent opens cannot together exceed maxTermSessions. The slot is
+	// given back on every failure below, and handed to the session on success.
 	h.mu.Lock()
-	running := 0
+	running := h.reserved
 	for _, t := range h.sessions {
 		if t.state == "running" {
 			running++
@@ -262,7 +333,16 @@ func (s *Server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": fmt.Sprintf("%d terminals are already open; close one first", maxTermSessions)})
 		return
 	}
+	h.reserved++
 	h.mu.Unlock()
+	reserved := true
+	defer func() {
+		if reserved {
+			h.mu.Lock()
+			h.reserved--
+			h.mu.Unlock()
+		}
+	}()
 
 	id, err := randomToken()
 	if err != nil {
@@ -294,17 +374,21 @@ func (s *Server) handleTermOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "could not start the terminal: " + err.Error()})
 		return
 	}
+	now := time.Now().UTC()
 	t := &termSession{
-		id: id, server: server, started: time.Now().UTC(), state: "running", cols: cols, rows: rows,
-		cmd: cmd, pty: pty, cancel: cancel, changed: make(chan struct{}),
+		id: id, server: server, started: now, state: "running", cols: cols, rows: rows,
+		cmd: cmd, pty: pty, cancel: cancel, changed: make(chan struct{}), unwatched: now,
 	}
 	h.mu.Lock()
+	h.reserved-- // the slot now belongs to the session
+	reserved = false
 	h.sessions[id] = t
 	h.order = append(h.order, id)
 	h.evictLocked()
 	h.wg.Add(1)
 	sum := t.summaryLocked()
 	h.mu.Unlock()
+	h.startReaper()
 	s.audit("webui.terminal", server, "session="+id)
 
 	go func() {
@@ -448,6 +532,24 @@ func (s *Server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 			after = n
 		}
 	}
+	// Count this stream as a watcher: a session nobody watches is ended by the
+	// idle reaper, and one session takes at most maxTermStreams streams.
+	h.mu.Lock()
+	if t.watchers >= maxTermStreams {
+		h.mu.Unlock()
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": fmt.Sprintf("this terminal already has %d viewers; close one first", maxTermStreams)})
+		return
+	}
+	t.watchers++
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		t.watchers--
+		if t.watchers == 0 {
+			t.unwatched = time.Now().UTC()
+		}
+		h.mu.Unlock()
+	}()
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
