@@ -359,7 +359,9 @@ func TestEnableSafeAbortsIfAgentAllowFails(t *testing.T) {
 }
 
 func TestStatusNormalizesUFW(t *testing.T) {
-	dump := "Status: active\nDefault: deny (incoming), allow (outgoing)\n\nTo                         Action      From\n--                         ------      ----\n2222/tcp                   ALLOW IN    Anywhere\n443/tcp                    ALLOW IN    Anywhere\n"
+	dump := "Status: active\nDefault: deny (incoming), allow (outgoing)\n\nTo                         Action      From\n--                         ------      ----\n2222/tcp                   ALLOW IN    Anywhere\n443/tcp                    ALLOW IN    Anywhere\n" +
+		// The dump also runs `ufw show added`, whose rules the check reads.
+		guardMarker + "added\n" + ufwAddedHeader + "ufw allow 2222/tcp\nufw allow 443/tcp\n"
 	fake := &fakeFirewall{respond: func(cmd string) (string, int, error) {
 		if strings.Contains(cmd, "command -v 'ufw'") {
 			return "yes", 0, nil
@@ -388,39 +390,6 @@ func TestStatusNormalizesUFW(t *testing.T) {
 	}
 	if !report.AgentPortAllowed {
 		t.Errorf("expected AgentPortAllowed=true for port 2222")
-	}
-}
-
-func TestRulesetAllowsPort(t *testing.T) {
-	cases := []struct {
-		dump string
-		port int
-		want bool
-	}{
-		{"-A INPUT -p tcp --dport 2222 -j ACCEPT", 2222, true},
-		{"tcp dport 2222 accept", 2222, true},
-		{"2222/tcp                   ALLOW IN", 2222, true},
-		{"ports: 2222 443", 2222, true},
-		{"-P INPUT DROP", 2222, false},
-		{"443/tcp ALLOW IN", 2222, false},
-		// A DENY/reject/drop rule that MENTIONS the port must NOT count as
-		// "allowed" — otherwise the fail-closed lockout guard is weakened.
-		{"-A INPUT -p tcp --dport 2222 -j DROP", 2222, false},
-		{"-A INPUT -p tcp --dport 2222 -j REJECT", 2222, false},
-		{"tcp dport 2222 drop", 2222, false},
-		{"2222/tcp                   DENY IN", 2222, false},
-		// The bare space-delimited column form must require an allow action: a
-		// number surrounded by spaces with no allow/accept verb is not a positive
-		// allow (e.g. a comment or a deny rule mentioning the port).
-		{"reject inbound on port 2222 by policy", 2222, false},
-		{"deny from any to any port 2222", 2222, false},
-		// ufw "v6" allow row in column form still matches in an allow context.
-		{"2222                       ALLOW IN    Anywhere", 2222, true},
-	}
-	for i, tc := range cases {
-		if got := rulesetAllowsPort(tc.dump, tc.port); got != tc.want {
-			t.Errorf("case %d rulesetAllowsPort(%q,%d) = %v, want %v", i, tc.dump, tc.port, got, tc.want)
-		}
 	}
 }
 

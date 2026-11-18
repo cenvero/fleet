@@ -512,30 +512,6 @@ func TestEnableSafeUnknownAgentPortIsUnskippable(t *testing.T) {
 	}
 }
 
-func TestRulesetAllowsPortGuardForms(t *testing.T) {
-	cases := []struct {
-		dump string
-		want bool
-	}{
-		// `ufw show added` forms (pending rules while ufw is inactive).
-		{"ufw allow 2222", true},
-		{"ufw allow 2222/tcp", true},
-		{"ufw allow from 10.0.0.5 to any port 2222", true},
-		{"ufw allow 22222", false},
-		// The agent speaks TCP: a UDP-only allow does not keep it reachable.
-		{"2222/udp                   ALLOW IN    Anywhere", false},
-		{"udp dport 2222 accept", false},
-		{"-A INPUT -p udp -m udp --dport 2222 -j ACCEPT", false},
-		{"  ports: 2222/udp 443/tcp", false},
-		{"  ports: 2222/tcp 53/udp", true},
-	}
-	for _, tc := range cases {
-		if got := rulesetAllowsPort(tc.dump, 2222); got != tc.want {
-			t.Errorf("rulesetAllowsPort(%q, 2222) = %v, want %v", tc.dump, got, tc.want)
-		}
-	}
-}
-
 // --force-i-have-console still injects the agent allow first, and that allow is
 // idempotent (checked with -C before inserting) so repeated runs don't stack
 // duplicate rules.

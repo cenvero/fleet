@@ -800,6 +800,10 @@ type firewallGuardState struct {
 	// are, or will be once enabled, in force. agentDenied is the offending rule.
 	agentAllowed bool
 	agentDenied  string
+	// agentRestricted is an allow that admits the agent port only from some
+	// sources or interfaces, which does not confirm the controller is among
+	// them (kept to explain the refusal).
+	agentRestricted string
 	// Reverse-mode facts.
 	keepsEstablished triState
 	outgoingBlocked  triState
@@ -838,13 +842,27 @@ func enableLockout(link AgentLink, st firewallGuardState, fix string) *AgentLock
 		return nil
 	}
 	if st.agentDenied != "" {
-		return lockout(change, fmt.Sprintf("a rule blocks port %d/tcp, which fleet uses to reach the agent (%q); remove that rule on the server first", link.Port, st.agentDenied), "")
+		return lockout(change, fmt.Sprintf("a rule that may block port %d/tcp, which fleet uses to reach the agent, comes before any rule that allows it (%q): "+
+			"it denies or rate-limits that port, a range or list including it, or all traffic from some address or interface, or fleet cannot read it. "+
+			"Remove or narrow that rule, or allow the agent port ahead of it, first", link.Port, st.agentDenied), "")
 	}
 	if !st.agentAllowed {
-		return lockout(change, fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is not allowed by the rules that would be in force, "+
-			"so enabling would lock fleet out", link.Port), fix)
+		reason := fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is not allowed by the rules that would be in force, "+
+			"so enabling would lock fleet out", link.Port)
+		if st.agentRestricted != "" {
+			reason = fmt.Sprintf("port %d/tcp, which fleet uses to reach the agent, is only allowed from some sources or interfaces (%q), "+
+				"and fleet cannot confirm the controller is among them", link.Port, st.agentRestricted)
+		}
+		return lockout(change, reason, fix)
 	}
 	return nil
+}
+
+// applyAgentPortDecision records d in st.
+func (st *firewallGuardState) applyAgentPortDecision(d agentPortDecision) {
+	st.agentAllowed = d.allowed && d.blockedBy == ""
+	st.agentDenied = d.blockedBy
+	st.agentRestricted = d.restricted
 }
 
 // portCloseLockout refuses closing the direct agent's own port. No preparatory
@@ -1068,20 +1086,14 @@ func parseUFWGuard(st *firewallGuardState, dump string, port int) {
 		return
 	}
 	st.active = strings.Contains(low, "status: active")
+	// `ufw show added` lists the user rules, in order, active or not, in
+	// ufw's own command syntax, which is what the check parses.
 	added, haveAdded := sec["added"]
-	haveAdded = haveAdded && strings.Contains(strings.ToLower(added), "added user rules")
-	rules := ""
-	if st.active {
-		rules = status
-	}
-	if haveAdded {
-		rules += "\n" + added
-	} else if !st.active {
-		st.readErr = "ufw is inactive and `ufw show added` did not list its pending rules: " + firstLine(added)
+	if !haveAdded || !strings.Contains(strings.ToLower(added), "added user rules") {
+		st.readErr = "`ufw show added` did not list the rules: " + firstLine(added)
 		return
 	}
-	st.agentAllowed = rulesetAllowsPort(rules, port)
-	st.agentDenied = rulesetDenyingLine(rules, port)
+	st.applyAgentPortDecision(decideAgentPort(strings.Split(added, "\n"), port, true, classifyUFWRule))
 
 	// Stock ufw accepts established/related traffic in /etc/ufw/before.rules,
 	// ahead of every user rule.
@@ -1145,14 +1157,20 @@ func parseFirewalldGuard(st *firewallGuardState, dump string, port int) {
 			return
 		}
 		st.active = true
-		st.agentAllowed = rulesetAllowsPort(runtime, port) && rulesetAllowsPort(permanent, port)
-		st.agentDenied = rulesetDenyingLine(runtime+"\n"+permanent, port)
+		rt, perm := firewalldDecision(runtime, port), firewalldDecision(permanent, port)
+		d := agentPortDecision{allowed: rt.allowed && perm.allowed, blockedBy: rt.blockedBy, restricted: rt.restricted}
+		if d.blockedBy == "" {
+			d.blockedBy = perm.blockedBy
+		}
+		if d.restricted == "" {
+			d.restricted = perm.restricted
+		}
+		st.applyAgentPortDecision(d)
 	case stopped:
 		if !zone("permanent", permanent) {
 			return
 		}
-		st.agentAllowed = rulesetAllowsPort(permanent, port)
-		st.agentDenied = rulesetDenyingLine(permanent, port)
+		st.applyAgentPortDecision(firewalldDecision(permanent, port))
 	default:
 		st.readErr = "fleet could not tell whether firewalld is running: " + firstLine(dump)
 		return
@@ -1190,8 +1208,7 @@ func parseNftGuard(st *firewallGuardState, dump string, port int) {
 		if strings.Contains(strings.ToLower(chain), "policy drop;") {
 			st.nftPolicy = "drop"
 		}
-		st.agentAllowed = rulesetAllowsPort(chain, port)
-		st.agentDenied = rulesetDenyingLine(chain, port)
+		st.applyAgentPortDecision(decideAgentPort(strings.Split(chain, "\n"), port, true, classifyNftRule))
 	}
 	st.active = st.nftPolicy == "drop"
 	// enableCommand accepts established/related and loopback before the drop.
@@ -1236,10 +1253,8 @@ func parseIptablesGuard(st *firewallGuardState, dump string, port int) {
 		st.readErr = "iptables did not list the INPUT chain: " + firstLine(dump)
 		return
 	}
-	rules := strings.Join(input, "\n")
 	st.active = st.iptPolicy != "ACCEPT"
-	st.agentAllowed = rulesetAllowsPort(rules, port)
-	st.agentDenied = rulesetDenyingLine(rules, port)
+	st.applyAgentPortDecision(decideAgentPort(input, port, true, classifyIptablesRule))
 	// enableCommand accepts established/related and loopback before the drop.
 	st.keepsEstablished = triYes
 	st.outgoingBlocked = triNo
@@ -1281,168 +1296,6 @@ func backendDefaultDrop(backend FirewallBackend, dump string) bool {
 		return false
 	}
 }
-
-// portPatterns are the backend forms a port appears in, as a prefix and
-// optional suffix around the exact port token. needsVerb pins a form that can
-// appear in any line (a bare number, a `port N` phrase) to a line whose action
-// verb gives it a meaning.
-var portPatterns = []struct {
-	prefix, suffix string
-	needsVerb      bool
-}{
-	{prefix: "dport ", suffix: " accept"},       // nft: "tcp dport 2222 accept"
-	{prefix: "--dport "},                        // iptables: "--dport 2222 -j ACCEPT"
-	{suffix: "/tcp"},                            // ufw / firewalld port form "2222/tcp"
-	{prefix: "port="},                           // firewalld: "port=2222"
-	{prefix: `port="`, suffix: `"`},             // firewalld rich rule: port port="2222"
-	{prefix: "ports: "},                         // firewalld: "ports: 2222 443" (the zone's allow-list)
-	{prefix: " ", suffix: " ", needsVerb: true}, // ufw column form "443  ALLOW ..."
-	{prefix: "allow ", needsVerb: true},         // `ufw show added`: "ufw allow 2222"
-	{prefix: "deny ", needsVerb: true},          // "ufw deny 2222"
-	{prefix: "reject ", needsVerb: true},        // "ufw reject 2222"
-	{prefix: "limit ", needsVerb: true},         // "ufw limit 2222"
-	{prefix: "port ", needsVerb: true},          // "to any port 2222"; nft "dport 2222 drop"
-}
-
-// udpPortToken matches a "<ports>/udp" token, which only concerns UDP.
-var udpPortToken = regexp.MustCompile(`[0-9][0-9:,]*/udp`)
-
-// tcpView drops from a lower-cased rule line what only concerns UDP: the agent
-// speaks TCP, so a UDP allow must not count as keeping it reachable (and a UDP
-// deny does not block it). It returns "" for a rule that matches only UDP.
-func tcpView(line string) string {
-	line = udpPortToken.ReplaceAllString(line, "")
-	if strings.Contains(line, "udp") && !strings.Contains(line, "tcp") {
-		return ""
-	}
-	return line
-}
-
-// lineMentionsPort reports whether a lower-cased line names port p in one of
-// the portPatterns. hasVerb says whether the line carries an action verb.
-func lineMentionsPort(line, p string, hasVerb bool) bool {
-	for _, pat := range portPatterns {
-		if pat.needsVerb && !hasVerb {
-			continue
-		}
-		if containsPortToken(line, pat.prefix, p, pat.suffix) {
-			return true
-		}
-	}
-	// ufw prints "443/tcp ALLOW" or "443 ALLOW IN"; catch the leading-token form.
-	if fields := strings.Fields(line); hasVerb && len(fields) > 0 {
-		if strings.SplitN(fields[0], "/", 2)[0] == p {
-			return true
-		}
-	}
-	return false
-}
-
-// rulesetAllowsPort reports whether the dumped ruleset appears to allow inbound
-// TCP traffic to `port`. It matches common backend forms but uses WORD-BOUNDARY
-// matching so that port N is never matched inside a longer number: a bare
-// substring scan would find "--dport 22" inside "--dport 2222 -j ACCEPT",
-// "22/tcp" inside "2222/tcp", and "ports: 22" inside "ports: 2222", producing a
-// FALSE positive that could let the lockout gate pass while the agent port is
-// actually blocked. This is SAFETY-CRITICAL: a wrong "allowed" here can lock
-// the controller out, so each port token must be bounded by a non-digit.
-//
-// A deny/reject/drop line never confirms "allowed", even if it mentions the
-// port, and neither does a UDP-only rule. The gate also checks
-// rulesetDenyingLine, since an allow does not help while a deny matches first.
-func rulesetAllowsPort(dump string, port int) bool {
-	if port < 1 {
-		return false
-	}
-	p := strconv.Itoa(port)
-	for _, line := range strings.Split(strings.ToLower(dump), "\n") {
-		line = tcpView(line)
-		if line == "" || lineDeniesTraffic(line) {
-			continue
-		}
-		if lineMentionsPort(line, p, lineAllowsTraffic(line)) {
-			return true
-		}
-	}
-	return false
-}
-
-// rulesetDenyingLine returns the first rule in dump that denies, rejects or
-// drops TCP traffic to port, or "" when none does. Any such rule fails the
-// gate: rule order differs between backends (firewalld evaluates denies
-// first), so a deny is never assumed to be shadowed by an allow.
-func rulesetDenyingLine(dump string, port int) string {
-	if port < 1 {
-		return ""
-	}
-	p := strconv.Itoa(port)
-	for _, raw := range strings.Split(dump, "\n") {
-		line := tcpView(strings.ToLower(raw))
-		if line == "" || !lineDeniesTraffic(line) {
-			continue
-		}
-		if lineMentionsPort(line, p, true) {
-			return strings.TrimSpace(raw)
-		}
-	}
-	return ""
-}
-
-// lineDeniesTraffic reports whether a (lower-cased) ruleset line is a
-// deny/reject/drop rule. Such a line must never be read as confirming a port is
-// allowed, even if it mentions the port — that would weaken the fail-closed
-// positive confirmation the gate relies on.
-func lineDeniesTraffic(line string) bool {
-	for _, verb := range []string{"deny", "reject", "drop"} {
-		if strings.Contains(line, verb) {
-			return true
-		}
-	}
-	return false
-}
-
-// lineAllowsTraffic reports whether a (lower-cased) ruleset line carries an
-// allow/accept action verb. Used to pin the ambiguous port forms (bare column
-// form, `port N` phrases) to an actual allow rule rather than any line that
-// happens to contain the port.
-func lineAllowsTraffic(line string) bool {
-	for _, verb := range []string{"allow", "accept"} {
-		if strings.Contains(line, verb) {
-			return true
-		}
-	}
-	return false
-}
-
-// containsPortToken reports whether s contains prefix+port+suffix where the port
-// is not part of a longer run of digits — i.e. the character immediately before
-// the port (if any) and immediately after it (if no suffix pins it) is a
-// non-digit. This is the word boundary that prevents matching 22 inside 2222.
-func containsPortToken(s, prefix, port, suffix string) bool {
-	needle := prefix + port + suffix
-	from := 0
-	for {
-		idx := strings.Index(s[from:], needle)
-		if idx < 0 {
-			return false
-		}
-		idx += from
-		// Position of the port digits within s.
-		portStart := idx + len(prefix)
-		portEnd := portStart + len(port)
-		leftOK := portStart == 0 || !isASCIIDigit(s[portStart-1])
-		// When a suffix is present it already pins the right side to a non-digit
-		// boundary (e.g. "/tcp"); otherwise the next char must be a non-digit.
-		rightOK := suffix != "" || portEnd >= len(s) || !isASCIIDigit(s[portEnd])
-		if leftOK && rightOK {
-			return true
-		}
-		from = idx + 1
-	}
-}
-
-// isASCIIDigit reports whether b is an ASCII decimal digit.
-func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // SortedBackends returns the supported backends in a stable order (for help/tests).
 func SortedBackends() []FirewallBackend {
