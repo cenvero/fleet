@@ -285,8 +285,16 @@ func TestHelperRunCommandRunsAndExitsCleanly(t *testing.T) {
 	if *launches != 0 {
 		t.Fatalf("__helper's pre-run launched %d helper(s)", *launches)
 	}
-	if st, err := core.ReadHelperStatus(configDir); err != nil || st.PID != os.Getpid() || len(st.Tasks) != 3 {
-		t.Fatalf("status of the running helper = %+v, %v", st, err)
+	// The helper writes its status just after taking the lock.
+	for {
+		st, err := core.ReadHelperStatus(configDir)
+		if err == nil && st.PID == os.Getpid() && len(st.Tasks) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status of the running helper = %+v, %v", st, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if err := os.Remove(core.ConfigPath(configDir)); err != nil {
 		t.Fatal(err)
