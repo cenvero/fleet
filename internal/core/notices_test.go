@@ -4,9 +4,12 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 
@@ -117,4 +120,50 @@ func containsControl(s string) bool {
 		}
 	}
 	return false
+}
+
+// Problems the background helper records reach `fleet errors`: a start that
+// failed (until one succeeds) and a task whose last run failed.
+func TestCollectNoticesReportsHelperProblems(t *testing.T) {
+	app := newImportTestApp(t)
+	dir := app.ConfigDir
+	cfg := app.Config
+	cfg.Updates.Policy = update.PolicyDisabled
+	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	status := HelperStatus{
+		Format: 1, StartedAt: now.Add(-time.Hour),
+		LastLaunchError: "exec format error\x1b[2J", LastLaunchErrorAt: now,
+		Tasks: map[string]HelperTaskStatus{
+			"jobs":       {Interval: "5s", LastResult: HelperResultError, LastError: "jobs.json is damaged"},
+			"agent-sync": {Interval: "5m", LastResult: HelperResultOK},
+		},
+	}
+	data, _ := json.Marshal(status)
+	if err := os.WriteFile(HelperStatusPath(dir), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := noticeIDs(CollectNotices(dir))
+	if n, ok := got["helper-not-running"]; !ok || n.Fix != "fleet helper restart" || containsControl(n.Detail) {
+		t.Fatalf("helper start failure: %+v (all: %v)", n, got)
+	}
+	if n, ok := got["helper-task-jobs"]; !ok || !strings.Contains(n.Detail, "damaged") {
+		t.Fatalf("failed task: %+v", n)
+	}
+	if _, ok := got["helper-task-agent-sync"]; ok {
+		t.Fatal("a task that last succeeded is reported")
+	}
+
+	// A later successful start clears the start failure.
+	status.StartedAt = now.Add(time.Minute)
+	status.Tasks = nil
+	data, _ = json.Marshal(status)
+	if err := os.WriteFile(HelperStatusPath(dir), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if left := CollectNotices(dir); len(left) != 0 {
+		t.Fatalf("notices after the helper started: %+v", left)
+	}
 }

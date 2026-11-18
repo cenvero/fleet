@@ -36,6 +36,20 @@ Omit sections that have no entries for that release.
 
 ### Added
 
+- **The background helper.** One small process per controller now does the background work
+  nobody should have to ask for:
+  - it tracks running `fleet job`s, so they show as done (or lost) and `job-failed` is
+    sent without anyone polling;
+  - it runs the hourly agent sync;
+  - it prunes old job logs.
+
+  Any `fleet` command starts it when it is not running. It needs no setup and has no off
+  switch; each task follows its own setting. It is separate from the optional daemon
+  (`fleet start`), and leaves the sync and pruning to the daemon while one runs. A command
+  run under `--token`/`FLEET_TOKEN` never starts it. See it with `fleet helper status`
+  and restart it with `fleet helper restart`. Its problems show in `fleet errors`, never
+  on your terminal.
+
 - **`fleet console` (alias `fleet web`): the web console.** It opens the localhost web UI
   with every view: Fleet, Files, Control and Terminal. Turn views off with
   `--control=false` / `--terminal=false`. On a terminal it shows a panel instead of a bare
@@ -166,6 +180,19 @@ Omit sections that have no entries for that release.
 
 ### Fixed
 
+- **Background jobs:**
+  - a job whose output does not end in a newline (`printf done`) now finishes;
+  - two pollers that see a job fail send `job-failed` once, not twice;
+  - `job wait` and `job status` probe a few hundred bytes instead of re-reading up to
+    4 MiB of log;
+  - a job whose server was removed, or whose process is gone without a result (a reboot,
+    a kill), ends as `lost` instead of `running` forever (`job wait` exits 1);
+  - a job that leaves a child writing to its log still finishes;
+  - `job run` no longer holds the jobs lock while it launches.
+- **`fleet stop`, `fleet console stop` and `fleet helper restart` wait until the process
+  has let go of its lock**, so on Windows a `fleet start` or a restart right after no
+  longer finds the old one apparently still running.
+
 - **A removed server no longer comes back.** A connect, metrics collection or agent update
   that was still running when the server was removed wrote its record back. These writes
   now only update a record that still exists.
@@ -230,6 +257,11 @@ Omit sections that have no entries for that release.
   BLAKE2b) and the timing-sensitive tests hold up on loaded CI runners.
 
 ### Changed
+
+- **Automatic agent sync runs in the background helper** instead of being launched by
+  whichever command noticed it was due, and no longer prints a notice on the terminal.
+  `FLEET_AGENT_AUTOSYNC=off` now applies to the environment the helper starts from (then
+  `fleet helper restart`).
 
 - **Ordinary commands no longer print notices.** `fleet ssh`, `fleet exec` and every other
   command used to print the update notice, the adjust-init hint and the passphrase-key

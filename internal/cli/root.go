@@ -3720,8 +3720,9 @@ restart or reverify the live Windows service automatically; restart it with
 Windows tooling, reconnect, and verify the live agent version. Servers already
 running the correct version are skipped.
 
-This also runs automatically every hour, in the background of any fleet command
-and in the daemon; see ` + "`fleet sync-agent auto`" + ` to check on it or turn it off.`,
+This also runs automatically every hour, in the background helper (see
+` + "`fleet helper status`" + `) or the daemon; see ` + "`fleet sync-agent auto`" + ` to check on it or
+turn it off.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			app, err := openApp(*configDir)
@@ -3730,8 +3731,9 @@ and in the daemon; see ` + "`fleet sync-agent auto`" + ` to check on it or turn 
 			}
 			defer app.Close()
 			if background {
-				// Started detached by maybeStartBackgroundAgentSync, with stdout
-				// and stderr going to the agent-sync log.
+				// The background helper now runs automatic syncs itself; this
+				// flag remains for anything that still starts one this way (a
+				// release before the helper), with output to the agent-sync log.
 				return app.RunBackgroundAgentSync(cmd.Context(), cmd.ErrOrStderr())
 			}
 			// Stream per-server progress to stderr as each server (synced

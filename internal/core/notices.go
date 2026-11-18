@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -109,6 +110,8 @@ func CollectNotices(configDir string) []Notice {
 		})
 	}
 
+	notices = append(notices, helperNotices(configDir)...)
+
 	if n := reverseServerCount(configDir, cfg); n > 0 && !DaemonStatus(configDir, cfg.Runtime.ControlAddress).Running {
 		notices = append(notices, Notice{
 			ID: "daemon-needed", Severity: NoticeInfo,
@@ -119,6 +122,43 @@ func CollectNotices(configDir string) []Notice {
 	}
 
 	return notices
+}
+
+// helperNotices reports the background helper's problems: a failed start
+// that no successful start has followed, and tasks whose last run failed.
+func helperNotices(configDir string) []Notice {
+	status, err := ReadHelperStatus(configDir)
+	if err != nil {
+		return nil
+	}
+	clean := func(s string) string { return safetext.Bound(safetext.Terminal(s, false), 300) }
+	var out []Notice
+	if status.LastLaunchError != "" && status.LastLaunchErrorAt.After(status.StartedAt) && !HelperRunning(configDir) {
+		out = append(out, Notice{
+			ID: "helper-not-running", Severity: NoticeError,
+			Title:  "The background helper could not start, so jobs are not tracked and agents are not synced",
+			Detail: clean(status.LastLaunchError) + ". Log: " + HelperLogPath(configDir),
+			Fix:    "fleet helper restart",
+		})
+	}
+	names := make([]string, 0, len(status.Tasks))
+	for name := range status.Tasks {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		task := status.Tasks[name]
+		if task.LastResult != HelperResultError {
+			continue
+		}
+		out = append(out, Notice{
+			ID: "helper-task-" + safetext.Bound(safetext.Terminal(name, false), 40), Severity: NoticeWarning,
+			Title:  fmt.Sprintf("The background %q task failed its last run", clean(name)),
+			Detail: clean(task.LastError),
+			Fix:    "fleet helper status",
+		})
+	}
+	return out
 }
 
 // keyNeedsPassphrase reports whether the private key at path is encrypted.
