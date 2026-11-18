@@ -69,6 +69,10 @@ var webUnavailable = map[string]string{ // #nosec G101 -- command names and refu
 	"adjust-init":         "it asks questions on the terminal. Run it in a terminal",
 }
 
+// webTerminalOnlyFlag is the agent-lockout override: never offered to, or
+// accepted from, the browser.
+const webTerminalOnlyFlag = "force-i-have-console"
+
 const (
 	webCredentialReason = "it reads or writes the controller's keys, tokens or secrets, which a browser tab must never reach. Run it in a terminal" // #nosec G101 -- a refusal message, not a credential
 	webGuardrailReason  = "it changes the guardrails that hold commands back, so it stays with an operator at a terminal"
@@ -133,7 +137,7 @@ func webCommandSpec(c *cobra.Command, path []string) webui.CommandSpec {
 		Unavailable: webUnavailable[key],
 	}
 	c.LocalFlags().VisitAll(func(f *pflag.Flag) {
-		if f.Hidden || f.Deprecated != "" || f.Name == "help" || f.Name == "token" || f.Name == "config-dir" {
+		if f.Hidden || f.Deprecated != "" || f.Name == "help" || f.Name == "token" || f.Name == "config-dir" || f.Name == webTerminalOnlyFlag {
 			return
 		}
 		required := false
@@ -301,6 +305,11 @@ func webConsoleLauncher(root *cobra.Command, configDir, tokenID string, catalog 
 		requested := strings.Join(path, " ")
 		if !available[requested] {
 			return nil, fmt.Errorf("fleet %s cannot run from the web UI", requested)
+		}
+		for _, a := range args {
+			if a == "--"+webTerminalOnlyFlag || strings.HasPrefix(a, "--"+webTerminalOnlyFlag+"=") {
+				return nil, fmt.Errorf("--%s cannot be used from the web UI: it is for a person at the server's console, in a terminal", webTerminalOnlyFlag)
+			}
 		}
 		argv := append(append([]string(nil), path...), args...)
 		target, _, err := root.Find(argv)

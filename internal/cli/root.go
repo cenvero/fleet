@@ -476,6 +476,16 @@ func enforceToken(cmd *cobra.Command, configDir, tokenFlag string) error {
 		}
 	}
 
+	// The agent-lockout override is for a person with console access to the
+	// server, never for a credential handed to a script or an AI agent:
+	// with it, a firewall change may cut fleet off from the server for good.
+	// Any token is refused it, scoped or not.
+	if f := cmd.Flags().Lookup("force-i-have-console"); f != nil && f.Changed && f.Value.String() == "true" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "denied: --force-i-have-console cannot be used with a token (--token / FLEET_TOKEN); it is for a person with console access to the server")
+		AuditDeniedHardExit(configDir, token.Name, fmt.Sprintf("%s --force-i-have-console denied for a token", commandSecurityPath(cmd)))
+		os.Exit(1)
+	}
+
 	args := commandPositionalArgs(cmd)
 	targetServer := bestEffortTargetServer(top, args)
 	// Classify the FULL runnable Cobra path (including nested leaves such as
