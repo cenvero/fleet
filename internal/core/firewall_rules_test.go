@@ -205,3 +205,18 @@ func TestUFWGuardRefusesTheReviewedHoles(t *testing.T) {
 		t.Error("allowed without `ufw show added`")
 	}
 }
+
+// A server's output in firewall errors cannot carry terminal escape
+// sequences to the operator's terminal.
+func TestFirewallErrorsStripTerminalEscapes(t *testing.T) {
+	eng := &FirewallEngine{Exec: func(string) (string, int, error) {
+		return "ufw: \x1b]0;owned\x07\x1b[2Jbad rule", 1, nil
+	}}
+	_, err := eng.run("ufw status")
+	if err == nil || strings.ContainsRune(err.Error(), 0x1b) || strings.ContainsRune(err.Error(), 0x07) {
+		t.Fatalf("error carries control characters: %q", err)
+	}
+	if line := firstLine("\x1b[31mStatus: weird\n"); strings.ContainsRune(line, 0x1b) {
+		t.Fatalf("firstLine carries control characters: %q", line)
+	}
+}

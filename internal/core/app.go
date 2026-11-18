@@ -819,7 +819,10 @@ func (a *App) ControlService(serverName, serviceName, action string) error {
 		return err
 	}
 	server.Services = upsertTrackedService(server.Services, serviceName, action, info)
-	if err := a.SaveServer(server); err != nil {
+	if err := a.updateExistingServer(server.Name, func(cur *ServerRecord) bool {
+		cur.Services = upsertTrackedService(cur.Services, serviceName, action, info)
+		return true
+	}); err != nil {
 		return err
 	}
 	return a.AuditLog.Append(logs.AuditEntry{
@@ -927,7 +930,10 @@ func (a *App) ListPorts(serverName string) ([]int, error) {
 	}
 	server.OpenPorts = append([]int(nil), ports...)
 	slices.Sort(server.OpenPorts)
-	if err := a.SaveServer(server); err != nil {
+	if err := a.updateExistingServer(server.Name, func(cur *ServerRecord) bool {
+		cur.OpenPorts = append([]int(nil), server.OpenPorts...)
+		return true
+	}); err != nil {
 		return nil, err
 	}
 	return server.OpenPorts, nil
@@ -973,7 +979,9 @@ func (a *App) SetPortGuarded(serverName string, port int, open bool, opts Firewa
 		return err
 	}
 	applyFirewallInfo(&server, info)
-	if err := a.SaveServer(server); err != nil {
+	// Write into the current record: the copy read before the call may be stale
+	// (or the server removed meanwhile, which must not bring it back).
+	if err := a.updateExistingServer(server.Name, func(cur *ServerRecord) bool { applyFirewallInfo(cur, info); return true }); err != nil {
 		return err
 	}
 	state := "close"
@@ -1011,7 +1019,9 @@ func (a *App) FirewallStatus(serverName string) (FirewallState, error) {
 		return FirewallState{}, err
 	}
 	applyFirewallInfo(&server, info)
-	if err := a.SaveServer(server); err != nil {
+	// Write into the current record: the copy read before the call may be stale
+	// (or the server removed meanwhile, which must not bring it back).
+	if err := a.updateExistingServer(server.Name, func(cur *ServerRecord) bool { applyFirewallInfo(cur, info); return true }); err != nil {
 		return FirewallState{}, err
 	}
 	return server.Firewall, nil
@@ -1061,7 +1071,9 @@ func (a *App) SetFirewallGuarded(serverName string, enabled bool, opts FirewallG
 		return err
 	}
 	applyFirewallInfo(&server, info)
-	if err := a.SaveServer(server); err != nil {
+	// Write into the current record: the copy read before the call may be stale
+	// (or the server removed meanwhile, which must not bring it back).
+	if err := a.updateExistingServer(server.Name, func(cur *ServerRecord) bool { applyFirewallInfo(cur, info); return true }); err != nil {
 		return err
 	}
 	return a.AuditLog.Append(logs.AuditEntry{
@@ -1128,7 +1140,9 @@ func (a *App) addFirewallRule(server ServerRecord, rule string) error {
 		return err
 	}
 	applyFirewallInfo(&server, info)
-	if err := a.SaveServer(server); err != nil {
+	// Write into the current record: the copy read before the call may be stale
+	// (or the server removed meanwhile, which must not bring it back).
+	if err := a.updateExistingServer(server.Name, func(cur *ServerRecord) bool { applyFirewallInfo(cur, info); return true }); err != nil {
 		return err
 	}
 	return a.AuditLog.Append(logs.AuditEntry{

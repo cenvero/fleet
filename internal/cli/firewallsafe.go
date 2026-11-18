@@ -180,6 +180,17 @@ func newFirewallSafeEnableCommand(configDir *string) *cobra.Command {
 			}
 			result, err := engine.EnableSafe(backend, forceConsole, undoAfter)
 			if err != nil {
+				// The enable step itself failed (or the connection dropped
+				// during it) after the timer was armed: say so, with how to
+				// cancel it, or the operator is left not knowing that the old
+				// firewall comes back in a minute.
+				if result.UndoScheduled {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Note: the self-revert timer is armed (%s): in %ds it restores %s's previous firewall state unless you cancel it.\n",
+						result.RevertMethod, result.UndoDelaySecs, args[0])
+					if result.CancelCmd != "" {
+						fmt.Fprintf(cmd.ErrOrStderr(), "  cancel: fleet exec %s '%s'\n", args[0], result.CancelCmd)
+					}
+				}
 				var refusal *core.AgentLockoutError
 				if errors.As(err, &refusal) {
 					if auditErr := app.AuditLockoutRefusal(refusal); auditErr != nil {

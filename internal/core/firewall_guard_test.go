@@ -376,3 +376,27 @@ func TestFirewallGuardReverseMode(t *testing.T) {
 		t.Fatalf("only the stock-ufw enable should have reached the agent; actions=%v", host.actions)
 	}
 }
+
+// A server removed while a firewall or port call is in flight stays removed:
+// the call's result is written into the current record, never by saving the
+// copy read before the call.
+func TestFirewallCallDoesNotBringBackARemovedServer(t *testing.T) {
+	manager := &fakeFirewallManager{status: proto.FirewallInfo{Enabled: false}}
+	app := directFirewallHarness(t, manager)
+	// Another fleet process removes it (its own App: this one's connection
+	// stays up, so the call completes).
+	other, err := Open(app.ConfigDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	manager.onSetPort = func(int, bool) {
+		if err := other.RemoveServerWithOptions("loopback", RemoveOptions{Force: true}); err != nil {
+			t.Errorf("remove during the call: %v", err)
+		}
+	}
+	_ = app.SetPort("loopback", 8080, true)
+	if _, err := os.Stat(filepath.Join(app.ConfigDir, "servers", "loopback.toml")); !os.IsNotExist(err) {
+		t.Fatalf("the removed server's record came back (%v)", err)
+	}
+}

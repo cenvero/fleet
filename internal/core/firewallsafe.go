@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/internal/transport"
 )
 
@@ -428,7 +429,9 @@ func (e *FirewallEngine) run(command string) (string, error) {
 		return out, err
 	}
 	if code != 0 {
-		msg := strings.TrimSpace(out)
+		// The server's own output: keep escape sequences out of the
+		// operator's terminal, and bound its size.
+		msg := safetext.Bound(safetext.Terminal(strings.TrimSpace(out), true), 2000)
 		if msg == "" {
 			msg = fmt.Sprintf("exit code %d", code)
 		}
@@ -1035,10 +1038,12 @@ func guardSections(dump string) map[string]string {
 	return out
 }
 
+// firstLine is the first non-empty line of a server's output, for an error
+// message: cleaned of terminal escape sequences and bounded.
 func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
-			return line
+			return safetext.Bound(safetext.Terminal(line, false), 300)
 		}
 	}
 	return "no output"
