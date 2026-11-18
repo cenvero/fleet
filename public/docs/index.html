@@ -796,7 +796,7 @@ fleet file defaults set web-01 <span class="f">--parallel</span> 2 <span class="
         </section>
 
         <section id="file-edit" class="prose">
-          <h2>Edit files in place <span class="tag tag-violet">New in v2.5.0</span></h2>
+          <h2>Edit files in place</h2>
           <p><code>fleet file edit</code> changes a file <strong>on the server</strong> without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.</p>
           <ul>
             <li><strong>Exact edits</strong> — <code>--old</code> must match the file exactly (whitespace, indentation and line breaks included) and exactly once unless you pass <code>--all</code>, so an edit never lands somewhere you did not intend. Add lines with <code>--insert-after N --text</code>, apply several edits all-or-nothing with <code>--edits</code>, or replace the whole file with <code>--content</code>.</li>
@@ -923,6 +923,11 @@ fleet console stop</pre></div>
             <li>It keeps its session token in memory only. Its data directory holds its address and a launch key that only lets <code>fleet console open</code> ask for a one-time code (both owner-only). It cannot be started or opened under <code>--token</code> / <code>FLEET_TOKEN</code>, because it acts with the controller's full authority.</li>
             <li><code>fleet console stop</code> asks it to stop, so it ends its runs and terminals, and signals only the background console's own process.</li>
           </ul>
+
+          <figure class="shot doc-shot">
+            <div class="shot-frame"><img src="/assets/img/web-console-add-server.webp" width="1600" height="900" loading="lazy" decoding="async" alt="The Add server wizard in the web console, on its Agent step: install the agent now, sign in over SSH as the deploy user on port 22 with Fleet's key, and use sudo."></div>
+            <figcaption>The <em>Add server</em> wizard in Control.</figcaption>
+          </figure>
 
           <h3>What the console shows</h3>
           <p>The tabs are <strong>Fleet</strong>, <strong>Control</strong>, <strong>Files</strong> and <strong>Terminal</strong>, in that order, and it opens on Fleet (<code>fleet file ui</code> opens on Files). <kbd>Alt</kbd>+<kbd>1</kbd> to <kbd>Alt</kbd>+<kbd>4</kbd> switch between them, and light and dark themes follow the system setting.</p>
@@ -1632,7 +1637,7 @@ fleet agent update <span class="f">--group</span> role=web <span class="f">--can
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet sync-agent
 fleet sync-agent <span class="f">--server</span> web-01 <span class="f">--server</span> web-02</pre></div>
           <p>Brings agents up to the controller's version, several servers at a time, with progress per server on stderr (<em>updated</em>, <em>up to date</em> or an error) and JSON on stdout. Servers already on the right version are skipped. Linux agents are restarted through systemd automatically; on Windows the new binary is delivered, but you restart the service and reconnect yourself.</p>
-          <h3 id="agent-auto-sync">Automatic agent sync <span class="tag tag-violet">New in v2.6.0</span></h3>
+          <h3 id="agent-auto-sync">Automatic agent sync</h3>
           <p>You don't have to remember <code>fleet sync-agent</code>: it runs on its own, on by default.</p>
           <ul>
             <li><strong>The <a href="#helper">background helper</a></strong> checks every 5 minutes whether the last agent sync started more than an hour ago, and if so runs one. No command waits for it or prints anything about it; the output goes to <code>logs/agent-sync.log</code> in the config directory, and <code>fleet helper status</code> and <code>fleet errors</code> show how it went. (Before v2.7.0, whichever command noticed the sync was due started it.)</li>

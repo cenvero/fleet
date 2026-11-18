@@ -532,6 +532,8 @@ ul.checks strong { color: var(--text); }
 .shot-frame img { width: 100%; }
 .shot figcaption { margin-top: 16px; text-align: center; color: var(--text-2); font-size: 0.95rem; }
 .shot figcaption strong { color: var(--text); }
+.release-shot, .doc-shot { margin: 18px 0 22px; }
+.release-shot figcaption, .doc-shot figcaption { margin-top: 10px; font-size: 0.875rem; }
 
 /* ───────────────────────── Split feature rows ───────────────────────── */
 .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: clamp(28px, 5vw, 64px); align-items: center; }

@@ -127,6 +127,10 @@
               <time datetime="2026-11-19">19 Nov 2026</time>
             </div>
             <p>A web console that runs the whole fleet from the browser, a background helper that tracks jobs and keeps agents in sync without anyone asking, a firewall check that refuses to lock Fleet out of its agents, and commands that are never sent twice when they may already have run.</p>
+            <figure class="shot release-shot">
+              <div class="shot-frame"><img src="/assets/img/web-console-servers.webp" width="1600" height="900" loading="lazy" decoding="async" alt="The Servers page of the web console's Control view: a table of five servers with status, address, mode, system, agent version and last seen, with Refresh and Add server buttons."></div>
+              <figcaption>Control → Servers in the v2.7.0 web console.</figcaption>
+            </figure>
             <h3>Highlights</h3>
             <ul>
               <li><strong>The web console:</strong> <code>fleet console</code> (alias <code>fleet web</code>) opens the localhost web UI with every view — Fleet, Control, Files and Terminal. On a terminal it shows a panel instead of a bare URL: open it in your browser, show the access link, keep it running in the background, or stop it. A background console (also <code>fleet console --background</code>) is reached with <code>fleet console open [--files] [--print]</code>, <code>fleet console status</code> and <code>fleet console stop</code>, and stops by itself after an hour unused and after 8 hours at most (30 minutes and an hour with Control or Terminal on). The browser is opened with a one-time code, never the session token. <code>fleet file ui</code> opens the same console on the file manager, with Control and Terminal opt-in. <a href="/docs/#web-console">Docs</a></li>

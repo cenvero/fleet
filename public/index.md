@@ -131,19 +131,23 @@ A self-describing CLI that Claude Code or Codex learns in one command — then o
 
 ## Terminal, browser or script — your call.
 
-The same engine drives a live terminal dashboard, a dual-pane terminal file manager, a localhost web UI and a CLI that prints JSON.
+The same engine drives a live terminal dashboard, a dual-pane terminal file manager, a localhost web console and a CLI that prints JSON.
 
 ![The fleet dashboard terminal UI showing four servers with status, transport mode, CPU, memory, disk, load, agent version and tags, and a detail panel for db-01.](https://fleet.cenvero.org/assets/img/dashboard-servers.webp)
 
-**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse. (New in v2.5.0)
+**`fleet dashboard`** — a live operations console: servers, services, logs, alerts and the audit trail, with keyboard and mouse.
 
 ![The dual-pane terminal file manager with a local project on the left, the web-01 server on the right and a preview of index.html.](https://fleet.cenvero.org/assets/img/file-manager.webp)
 
-**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop. (New in v2.5.0)
+**`fleet files`** — a dual-pane file manager for local ↔ server and server ↔ server work, with previews, a transfer queue and drag and drop.
 
-![The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags.](https://fleet.cenvero.org/assets/img/web-fleet.webp)
+![The Fleet tab of the Cenvero Fleet web console in dark mode: totals for servers, online, offline and open alerts, then a card per server with its status, address, system, CPU, memory and disk rings, tags and Files and Terminal buttons.](https://fleet.cenvero.org/assets/img/web-console-fleet.webp)
 
-**`fleet console`** — a localhost-only web console: the Fleet overview, Control screens for servers and their services, a drag-and-drop file manager and terminals. (New in v2.7.0)
+**`fleet console`** — a localhost-only web console: the Fleet overview, Control, a drag-and-drop file manager and terminals in the browser. (New in v2.7.0)
+
+![The Control view of the web console showing the page for server db-01: status, address, connection, system, agent version and last seen, CPU, memory and disk rings, tags, and a Manage grid with services, run a command, files, terminal, live usage, health checklist, firewall, open ports, tags and reconnect.](https://fleet.cenvero.org/assets/img/web-console-server.webp)
+
+**Control** — every server gets its own page with one-click actions, and a step-by-step wizard adds new ones. Each action runs the `fleet` CLI underneath, with the same tokens, policy and audit log. (New in v2.7.0)
 
 ## Reach every server — even the ones behind NAT.
 
@@ -224,7 +228,7 @@ The web UI binds to loopback with a per-run token, CSRF checks and a strict CSP;
 
 2. **Add a server**
 
-   Interactive by default; Fleet installs the agent over SSH.
+   Interactive by default; Fleet installs the agent over SSH. In the browser, `fleet console` has a step-by-step *Add server* wizard.
 
    ```sh
    fleet server add web-01 192.0.2.10 --login-user root

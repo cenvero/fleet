@@ -12,6 +12,10 @@ Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manag
 
 A web console that runs the whole fleet from the browser, a background helper that tracks jobs and keeps agents in sync without anyone asking, a firewall check that refuses to lock Fleet out of its agents, and commands that are never sent twice when they may already have run.
 
+![The Servers page of the web console's Control view: a table of five servers with status, address, mode, system, agent version and last seen, with Refresh and Add server buttons.](https://fleet.cenvero.org/assets/img/web-console-servers.webp)
+
+Control → Servers in the v2.7.0 web console.
+
 ### Highlights
 
 - **The web console:** `fleet console` (alias `fleet web`) opens the localhost web UI with every view — Fleet, Control, Files and Terminal. On a terminal it shows a panel instead of a bare URL: open it in your browser, show the access link, keep it running in the background, or stop it. A background console (also `fleet console --background`) is reached with `fleet console open [--files] [--print]`, `fleet console status` and `fleet console stop`, and stops by itself after an hour unused and after 8 hours at most (30 minutes and an hour with Control or Terminal on). The browser is opened with a one-time code, never the session token. `fleet file ui` opens the same console on the file manager, with Control and Terminal opt-in. [Docs](https://fleet.cenvero.org/docs/#web-console)

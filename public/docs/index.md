@@ -634,7 +634,7 @@ fleet-agent serve --listen 0.0.0.0:2222 --authorized-keys ~/fleet-controller.pub
 
 > `--file-root` bounds listing, reading, writing, creating, deleting and renaming. Archive, permission and checksum operations run through the agent's shell and are **not** confined by it — restrict the agent's user if you need a hard boundary.
 
-## Edit files in place (New in v2.5.0)
+## Edit files in place
 
 `fleet file edit` changes a file **on the server** without downloading and re-uploading it: the agent applies the edit and saves it the way a careful editor does. It is designed to be safe to hand to an AI agent such as Claude Code or Codex.
 
@@ -770,6 +770,10 @@ fleet console stop
 - Running `fleet console` or `fleet file ui` again reaches it instead of starting another; `fleet file ui` opens it on the file manager.
 - It keeps its session token in memory only. Its data directory holds its address and a launch key that only lets `fleet console open` ask for a one-time code (both owner-only). It cannot be started or opened under `--token` / `FLEET_TOKEN`, because it acts with the controller's full authority.
 - `fleet console stop` asks it to stop, so it ends its runs and terminals, and signals only the background console's own process.
+
+![The Add server wizard in the web console, on its Agent step: install the agent now, sign in over SSH as the deploy user on port 22 with Fleet's key, and use sudo.](https://fleet.cenvero.org/assets/img/web-console-add-server.webp)
+
+The *Add server* wizard in Control.
 
 ### What the console shows
 
@@ -1614,7 +1618,7 @@ fleet sync-agent --server web-01 --server web-02
 
 Brings agents up to the controller's version, several servers at a time, with progress per server on stderr (*updated*, *up to date* or an error) and JSON on stdout. Servers already on the right version are skipped. Linux agents are restarted through systemd automatically; on Windows the new binary is delivered, but you restart the service and reconnect yourself.
 
-### Automatic agent sync (New in v2.6.0)
+### Automatic agent sync
 
 You don't have to remember `fleet sync-agent`: it runs on its own, on by default.
 
