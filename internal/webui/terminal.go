@@ -46,7 +46,7 @@ func (s *Server) SetTerminal(launch TerminalLauncher) {
 // errTerminalOff is the answer to every Terminal request while the view is
 // off. It is off unless the UI was started with --terminal, because it lets
 // whoever holds this UI's session token open shells on the fleet's servers.
-const errTerminalOff = "the Terminal view is off; start the web UI with `fleet file ui --terminal` to open shells from the browser"
+const errTerminalOff = "the Terminal view is off in this console. To turn it on, run `fleet console stop`, then `fleet console`; if you move it to the background, answer y to keep Terminal on"
 
 const (
 	maxTermSessions    = 8

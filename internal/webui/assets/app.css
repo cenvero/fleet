@@ -1821,3 +1821,9 @@ body.result-expanded::after { content: ""; position: fixed; inset: 0; z-index: 7
   .kv, .kv.wide { grid-template-columns: 1fr; }
   .kv dd { border-top: 0; padding-top: 0; }
 }
+
+/* A console started without Control: no sidebar, just the page saying so. */
+.ctl.off { grid-template-columns: minmax(0, 1fr); }
+.ctl.off .ctl-side { display: none; }
+.empty-state.view-off { margin-top: 48px; }
+.empty-state.view-off .muted { max-width: 560px; margin: 8px auto 0; }

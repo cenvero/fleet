@@ -153,7 +153,7 @@ const (
 // errConsoleOff is the answer to every Control request while the view is off.
 // It is off unless the UI was started with --control, because it lets whoever
 // holds this UI's session token run fleet commands with the UI's authority.
-const errConsoleOff = "the Control view is off; start the web UI with `fleet file ui --control` to run commands from the browser"
+const errConsoleOff = "the Control view is off in this console. To turn it on, run `fleet console stop`, then `fleet console`; if you move it to the background, answer y to keep Control on"
 
 // reservedRunFlags may not come from the browser: the launcher pins them.
 var reservedRunFlags = []string{"--config-dir", "--token"}

@@ -3514,7 +3514,7 @@ function paletteCommands() {
       { label: "Paste", icon: "clipboard", hint: MOD + "+V", run: () => pasteInto(p) },
     );
     if (state.panes.length > 1) cmds.push({ label: "Close pane", icon: "x", run: () => removePane(p) });
-  for (const srv of terminalServers()) {
+  for (const srv of termUI.disabled ? [] : terminalServers()) {
     cmds.push({ label: "Open terminal on " + srv.name, icon: "terminal", run: () => openTerminal(srv.name) });
   }
   for (const c of ctl.commands) {
@@ -3811,20 +3811,26 @@ const ov = { data: null, loading: false, timer: 0, auto: true, sort: { key: "nam
 const OV_REFRESH_MS = 10000;
 const STATUS_RANK = { online: 0, pending: 1, "reconcile-required": 2, "install-failed": 3, offline: 4 };
 
-async function loadOverview() {
-  if (ov.loading) return;
+// loadOverview fetches the overview; a caller arriving while a fetch is in
+// flight shares it rather than returning before the data is there.
+function loadOverview() {
+  if (ov.pending) return ov.pending;
   ov.loading = true;
-  try {
-    ov.data = await getJSON("/api/overview");
-    ov.lastOk = Date.now();
-    ov.error = null;
-  } catch (e) {
-    ov.error = e;
-  }
-  ov.loading = false;
-  renderOverview();
-  renderAlertBadge();
-  refreshServerPages();
+  ov.pending = (async () => {
+    try {
+      ov.data = await getJSON("/api/overview");
+      ov.lastOk = Date.now();
+      ov.error = null;
+    } catch (e) {
+      ov.error = e;
+    }
+    ov.loading = false;
+    ov.pending = null;
+    renderOverview();
+    renderAlertBadge();
+    refreshServerPages();
+  })();
+  return ov.pending;
 }
 
 function scheduleOverview() {
@@ -4027,7 +4033,7 @@ function renderOverview() {
           al.code ? h("span", { text: al.code }) : null,
           h("span", { text: "since " + fmtRelative(al.created_at), title: fmtDateFull(al.created_at) }),
           al.occurrences > 1 ? h("span", { text: al.occurrences + "×" }) : null)),
-      h("div", { class: "alert-actions" },
+      ctl.off ? null : h("div", { class: "alert-actions" },
         h("button", { type: "button", class: "btn sm", title: "Acknowledge this alert", onclick: (e) => { e.currentTarget.disabled = true; alertAction(al, "ack"); } }, icon("check"), "Ack"),
         h("button", { type: "button", class: "btn sm ghost", title: "Silence notifications for an hour", onclick: (e) => { e.currentTarget.disabled = true; alertAction(al, "snooze"); } }, icon("clock"), "Snooze 1h")),
     )));
@@ -4109,9 +4115,10 @@ function serverCard(s, d) {
     h("footer", { class: "srv-card-foot" },
       h("span", { class: "srv-seen", title: fmtDateFull(s.last_seen), text: s.last_seen ? "Seen " + fmtRelative(s.last_seen) : "Never seen" }),
       h("button", { class: "btn sm", type: "button", disabled: !s.reachable, onclick: () => openServerInFiles(s.name), title: s.reachable ? "Browse files on " + s.name : s.name + " is not reachable" }, icon("folder"), "Files"),
-      s.mode === "direct"
+      s.mode === "direct" && !termUI.disabled
         ? h("button", { class: "btn sm", type: "button", onclick: () => openTerminal(s.name), title: "Open a terminal on " + s.name }, icon("terminal"), "Terminal")
-        : h("button", { class: "btn sm", type: "button", onclick: () => openCommand("exec", { args: [s.name] }), title: "Run a command on " + s.name }, icon("command"), "Run")));
+        : ctl.off ? null
+          : h("button", { class: "btn sm", type: "button", onclick: () => openCommand("exec", { args: [s.name] }), title: "Run a command on " + s.name }, icon("command"), "Run")));
 }
 
 function renderServerCards(rows, d) {
@@ -5090,10 +5097,15 @@ async function loadCommands() {
       ctl.commands = d.commands || [];
       ctl.byKey = new Map(ctl.commands.map((c) => [ctlKey(c.path), c]));
       ctl.disabled = "";
+      ctl.off = false;
     } catch (err) {
       ctl.disabled = err.message || String(err);
+      // 404: this console was started without Control. Buttons elsewhere
+      // that would run a command are hidden rather than left to fail.
+      ctl.off = !!(err && err.status === 404);
       ctl.loaded = null;
     }
+    applyViewAvailability();
     renderSidebar();
   })();
   return ctl.loaded;
@@ -5157,6 +5169,8 @@ function showControl(page) {
   renderSidebar();
   const content = $("#ctl-content");
   content.scrollTop = 0;
+  $(".ctl").classList.toggle("off", !!ctl.off);
+  if (ctl.off) { renderViewOff(content, "command", "Control is off", ctl.disabled); return; }
   switch (page.kind) {
     case "category": if (page.id === "servers") renderServersPage(); else renderCategory(page.id); break;
     case "server": renderServerPage(page.id); break;
@@ -6082,10 +6096,11 @@ async function rerunActive() {
 
 function serverMenuItems(name, reachable) {
   const go = (key, args = [name], flags, run) => () => openCommand(key, { args, flags, run });
-  const has = (k) => !ctl.byKey.size || ctl.byKey.has(k);
+  const has = (k) => !ctl.off && (!ctl.byKey.size || ctl.byKey.has(k));
   return [
     { title: name },
-    { label: "Open terminal", icon: "terminal", disabled: !terminalServers().some((x) => x.name === name), run: () => openTerminal(name) },
+    { label: "Browse files", icon: "folder", disabled: !reachable, run: () => openServerInFiles(name) },
+    !termUI.disabled && { label: "Open terminal", icon: "terminal", disabled: !terminalServers().some((x) => x.name === name), run: () => openTerminal(name) },
     "sep",
     has("service list") && { label: "Services", icon: "layers", run: go("service list", [name], null, true) },
     has("svc status") && { label: "Unit status…", icon: "list-checks", run: go("svc status") },
@@ -6102,7 +6117,7 @@ function serverMenuItems(name, reachable) {
     has("server reconnect") && { label: "Reconnect…", icon: "plug", run: go("server reconnect") },
     "sep",
     has("server remove") && { label: "Remove…", icon: "trash", danger: true, run: go("server remove") },
-  ];
+  ].filter(Boolean).filter((it, i, all) => it !== "sep" || (i + 1 < all.length && all[i + 1] !== "sep"));
 }
 
 async function alertAction(al, kind) {
@@ -6232,6 +6247,16 @@ async function runInline(spec, req, mode, slot, onDone) {
       const t = runText(run.id);
       if (t.trim()) { live.hidden = false; live.textContent = t.length > 6000 ? "…" + t.slice(-6000) : t; live.scrollTop = live.scrollHeight; }
     }, 400);
+  } else {
+    // A page that loads data stops loading it once you leave the page:
+    // nobody would see the result, and runs hidden from Activity must not
+    // pile up against the limit on concurrent commands. An action keeps
+    // running; it is in Activity.
+    timer = setInterval(() => {
+      if (slot.isConnected) return;
+      clearInterval(timer);
+      postJSON("/api/runs/cancel", { id: run.id }).catch(() => {});
+    }, 500);
   }
   const final = await waitRun(run.id);
   clearInterval(timer);
@@ -6347,7 +6372,7 @@ function renderServerPage(name) {
     has("service list") && act("layers", "Services", go("service list")),
     has("exec") && act("command", "Run a command", go("exec")),
     act("folder", "Files", () => openServerInFiles(name), { off: !s.reachable, why: name + " is not reachable" }),
-    act("terminal", "Terminal", () => openTerminal(name), { off: s.mode !== "direct", why: "Shells open on direct-mode servers" }),
+    !termUI.disabled && act("terminal", "Terminal", () => openTerminal(name), { off: s.mode !== "direct", why: "Shells open on direct-mode servers" }),
     has("server metrics") && act("chart", "Live usage", go("server metrics"), { off: !s.reachable, why: name + " is not reachable" }),
     has("doctor") && act("heart-pulse", "Health checklist", go("doctor")),
     has("fw status") && act("shield", "Firewall", go("fw status")),
@@ -6511,6 +6536,8 @@ function renderAddServer(prefill = {}) {
       if (w.sshPort !== "22") args.push("--login-port=" + w.sshPort);
       if (w.auth === "key") args.push("--login-key=" + w.keyPath);
       if (w.auth === "password") { args.push("--login-password-stdin"); stdin = w.password + "\n"; }
+      // The review step is the confirmation the terminal asks for.
+      args.push("--yes");
       if (w.sudo) args.push("--sudo");
     }
     return { args, stdin };
@@ -6546,6 +6573,9 @@ function renderAddServer(prefill = {}) {
     const req = request();
     w.password = ""; // sent once; not kept in the page
     const final = await runInline(spec, req, "action", slot);
+    // A fetch already in flight began before the add finished: wait it
+    // out, then load again so the list says whether the record remains.
+    await loadOverview();
     await loadOverview();
     done.hidden = false;
     const added = serverRows().some((s) => s.name === w.name);
@@ -6571,6 +6601,40 @@ function renderAddServer(prefill = {}) {
   };
 
   stepServer();
+}
+
+// probeTerminal asks once whether this console has the Terminal view, so the
+// Fleet tab can leave out Terminal buttons that could not work.
+async function probeTerminal() {
+  try { await getJSON("/api/term"); }
+  catch (err) {
+    if (err && err.status === 404) { termUI.disabled = err.message || "the Terminal view is off"; applyViewAvailability(); }
+  }
+}
+
+// applyViewAvailability hides what needs a view this console has off, and
+// redraws the Fleet tab, whose buttons depend on it.
+function applyViewAvailability() {
+  const add = $("#ov-add-server");
+  if (add) add.hidden = !!ctl.off;
+  if (ov.data && state.view === "overview") renderOverview();
+}
+
+// codeText turns `quoted` parts of a server message into code elements
+// (as text nodes, never parsed as HTML).
+function codeText(str) {
+  return str.split("`").map((part, i) => (i % 2 ? h("code", { text: part }) : document.createTextNode(part)));
+}
+
+// renderViewOff is the page of a view this console was started without.
+function renderViewOff(box, iconName, title, why) {
+  const text = why ? why.charAt(0).toUpperCase() + why.slice(1) + "." : "";
+  box.replaceChildren(h("div", { class: "page" },
+    h("div", { class: "empty-state view-off" },
+      tile(iconName, "gray", "xl"),
+      h("h3", { text: title }),
+      h("p", { text: "This console was started without it. The Fleet overview and Files work as usual." }),
+      text ? h("p", { class: "muted" }, codeText(text)) : null)));
 }
 
 // ---- setup
@@ -6599,8 +6663,10 @@ function setupControl() {
   });
   const add = $("#ov-add-server");
   if (add) add.addEventListener("click", () => openCommand("server add"));
-  // Learn the catalog early so menus and the palette can use it.
+  // Learn the catalog early so menus and the palette can use it, and
+  // whether Control and Terminal are on in this console at all.
   loadCommands();
+  probeTerminal();
   loadRuns().then(schedulePoll);
 }
 
@@ -6721,11 +6787,11 @@ function renderTerminalEmpty() {
   box.replaceChildren(h("div", { class: "term-empty-inner" },
     tile("terminal", "indigo", "xl"),
     h("h1", { text: termUI.disabled ? "The Terminal is off" : "Open a terminal" }),
-    h("p", { text: termUI.disabled
-      ? termUI.disabled.charAt(0).toUpperCase() + termUI.disabled.slice(1) + "."
+    h("p", {}, termUI.disabled
+      ? codeText(termUI.disabled.charAt(0).toUpperCase() + termUI.disabled.slice(1) + ".")
       : termUI.supported
         ? "A shell on any server, right here in the browser. It's fleet ssh underneath: same access token, same audit log."
-        : "Browser terminals need a Linux or macOS controller. Use fleet ssh in a terminal instead." }),
+        : "Browser terminals need a Linux or macOS controller. Use fleet ssh in a terminal instead."),
     termUI.disabled ? null : termUI.supported ? h("div", { class: "term-picks" }, servers.map((s) => h("button", {
       type: "button", class: "term-pick" + (s.reachable ? "" : " offline"), title: s.reachable ? "Open a shell on " + s.name : s.name + " looked offline; try anyway",
       onclick: () => openTerminal(s.name),
@@ -6749,7 +6815,7 @@ async function showTerminalView() {
     } catch (err) {
       // 404: this UI was started without --terminal; say how to turn it on.
       // Anything else: the view still works for new sessions.
-      if (err && err.status === 404) termUI.disabled = err.message || "the Terminal view is off";
+      if (err && err.status === 404) { termUI.disabled = err.message || "the Terminal view is off"; applyViewAvailability(); }
       else termUI.attached = false;
     }
     renderTerminalTabs();

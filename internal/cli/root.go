@@ -1051,8 +1051,8 @@ func loginPasswordFromStdin(cmd *cobra.Command, fromFlag string) (string, error)
 	if fromFlag != "" {
 		return "", errors.New("use --login-password or --login-password-stdin, not both")
 	}
-	line, err := bufio.NewReader(io.LimitReader(cmd.InOrStdin(), 4096)).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	line, err := readStdinLine(cmd.InOrStdin(), 4096)
+	if err != nil {
 		return "", fmt.Errorf("read the login password from stdin: %w", err)
 	}
 	pw := strings.TrimRight(line, "\r\n")
@@ -1060,6 +1060,29 @@ func loginPasswordFromStdin(cmd *cobra.Command, fromFlag string) (string, error)
 		return "", errors.New("--login-password-stdin: no password on standard input")
 	}
 	return pw, nil
+}
+
+// readStdinLine reads one line a byte at a time, so nothing after it is
+// consumed: the answers to later prompts can follow the password on stdin.
+func readStdinLine(r io.Reader, limit int) (string, error) {
+	var line []byte
+	var b [1]byte
+	for len(line) < limit {
+		n, err := r.Read(b[:])
+		if n == 1 {
+			if b[0] == '\n' {
+				return string(line), nil
+			}
+			line = append(line, b[0])
+		}
+		if errors.Is(err, io.EOF) {
+			return string(line), nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("line longer than %d bytes", limit)
 }
 
 // uiCommandAuthorizer returns an RBAC check bound to the --token / FLEET_TOKEN
@@ -1176,6 +1199,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 	var loginPassword string
 	var useSudo bool
 	var noAgent bool
+	var assumeYes bool
 	var acceptNewHostKey bool
 
 	add := &cobra.Command{
@@ -1360,13 +1384,19 @@ func newServerCommand(configDir *string) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "  • cenvero-fleet-agent.service  →  systemd unit (enabled on boot)")
 				fmt.Fprintln(cmd.OutOrStdout(), "  • authorized_keys entry for this controller's public key")
 				fmt.Fprintln(cmd.OutOrStdout())
-				fmt.Fprintln(cmd.OutOrStdout(), "To skip, press Ctrl+C now or re-run with --no-agent.")
-				fmt.Fprintf(cmd.OutOrStdout(), "Press Enter to continue: ")
-				if !scanner.Scan() {
-					if err := scanner.Err(); err != nil {
-						return fmt.Errorf("read install confirmation: %w", err)
+				if assumeYes {
+					// --yes: the caller already confirmed (the web console's
+					// review step, or a script).
+					fmt.Fprintln(cmd.OutOrStdout(), "Installing it (--yes).")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "To skip, press Ctrl+C now or re-run with --no-agent.")
+					fmt.Fprintf(cmd.OutOrStdout(), "Press Enter to continue: ")
+					if !scanner.Scan() {
+						if err := scanner.Err(); err != nil {
+							return fmt.Errorf("read install confirmation: %w", err)
+						}
+						return fmt.Errorf("agent install confirmation canceled; server was not added (pass --yes to install without asking)")
 					}
-					return fmt.Errorf("agent install confirmation canceled; server was not added")
 				}
 			}
 
@@ -1435,6 +1465,7 @@ func newServerCommand(configDir *string) *cobra.Command {
 	add.Flags().Bool("login-password-stdin", false, "read the SSH login password from the first line of standard input")
 	add.Flags().BoolVar(&useSudo, "sudo", false, "use sudo for agent install commands")
 	add.Flags().BoolVar(&noAgent, "no-agent", false, "skip agent auto-install")
+	add.Flags().BoolVarP(&assumeYes, "yes", "y", false, "install the agent without asking to confirm")
 	add.Flags().BoolVar(&acceptNewHostKey, "accept-new-host-key", false, "re-pin a changed bootstrap SSH host key without prompting (after out-of-band verification)")
 
 	serverCmd.AddCommand(add)

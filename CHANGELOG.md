@@ -51,7 +51,14 @@ Omit sections that have no entries for that release.
   - **Actions** have a button named for what they do and say how it went.
 
   The command behind each page sits under "Show the command"; nothing else on the page
-  shows it. Data a page loads by itself stays out of Activity.
+  shows it. Data a page loads by itself stays out of Activity, and stops loading when you
+  leave the page.
+
+  In a console started without Control or Terminal, the Fleet tab leaves out the buttons
+  that need them (Add server, Ack / Snooze, the per-server actions, Terminal), and the
+  Control and Terminal tabs say how to turn them on.
+- **`fleet server add --yes` (`-y`)** installs the agent without asking to confirm. The
+  web console's Add server wizard passes it, since its review step is the confirmation.
 
 - **The background helper.** One small process per controller now does the background work
   nobody should have to ask for:

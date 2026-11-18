@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -101,5 +102,25 @@ func TestReverseServerAddRefusedFromTheWebUI(t *testing.T) {
 	}
 	if _, err := launch(context.Background(), []string{"server", "add"}, []string{"web", "10.0.0.5", "--mode=direct", "--no-agent"}); err != nil {
 		t.Fatalf("direct add refused: %v", err)
+	}
+}
+
+// The login password is read without buffering past its line, so the answers
+// to later prompts can follow it on stdin.
+func TestLoginPasswordLineLeavesTheRestOfStdin(t *testing.T) {
+	r := strings.NewReader("s3cret\nyes\n")
+	pw, err := readStdinLine(r, 4096)
+	if err != nil || pw != "s3cret" {
+		t.Fatalf("readStdinLine = %q, %v", pw, err)
+	}
+	rest, _ := io.ReadAll(r)
+	if string(rest) != "yes\n" {
+		t.Fatalf("left on stdin: %q, want %q", rest, "yes\n")
+	}
+	if _, err := readStdinLine(strings.NewReader(strings.Repeat("x", 5000)), 4096); err == nil {
+		t.Fatal("an over-long line was accepted")
+	}
+	if pw, err := readStdinLine(strings.NewReader("last"), 4096); err != nil || pw != "last" {
+		t.Fatalf("a line without a newline = %q, %v", pw, err)
 	}
 }
