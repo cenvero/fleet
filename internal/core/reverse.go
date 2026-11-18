@@ -1001,8 +1001,11 @@ func (a *App) RunDaemon(ctx context.Context) error {
 
 // daemonBackgroundGrace bounds how long a stopping daemon waits for its
 // background loops to finish their current work (a metrics poll, a prune), so
-// a server that stopped answering mid-poll cannot hang the shutdown.
-const daemonBackgroundGrace = 15 * time.Second
+// a server that stopped answering mid-poll cannot hang the shutdown. It stays
+// well under DaemonStopTimeout, which `fleet stop` waits before reporting the
+// daemon as still running; the loops' RPCs and prunes honour cancellation, so
+// they normally end long before this.
+const daemonBackgroundGrace = 5 * time.Second
 
 // waitWithin waits for wg, or gives up after d.
 func waitWithin(wg *sync.WaitGroup, d time.Duration) {

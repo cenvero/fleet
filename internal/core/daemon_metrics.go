@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenvero/fleet/internal/logs"
@@ -52,7 +53,15 @@ func (a *App) metricsPollInterval() time.Duration {
 // Cycles never overlap: the next one starts only after the previous returned
 // (ticks that fire meanwhile are dropped by the ticker).
 func (a *App) runMetricsPoller(ctx context.Context) {
-	go a.runMetricsRetention(ctx)
+	// The retention loop is part of the poller: waiting for the poller (as a
+	// stopping daemon does) must also wait for a prune in progress.
+	var retention sync.WaitGroup
+	retention.Add(1)
+	go func() {
+		defer retention.Done()
+		a.runMetricsRetention(ctx)
+	}()
+	defer retention.Wait()
 
 	interval := a.metricsPollInterval()
 	if interval <= 0 {
