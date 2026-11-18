@@ -564,6 +564,10 @@ func TestCmdPolicyGatesNonExecCommands(t *testing.T) {
 	}{
 		{"job run", []string{"job", "run", "web-01", "rm -rf /"}},
 		{"guard", []string{"guard", "web-01", "--revert-after", "1m", "rm -rf /"}},
+		// The revert command runs on the server too (when the timer fires, or
+		// on `fleet revert`), so a denied command cannot hide in it.
+		{"guard --revert-cmd", []string{"guard", "web-01", "--revert-after", "1m", "--revert-cmd", "rm -rf /", "true"}},
+		{"guard --revert-cmd=", []string{"guard", "web-01", "--revert-after", "1m", "--revert-cmd=rm -rf /", "true"}},
 		{"cron add", []string{"cron", "add", "web-01", "--name", "j", "--schedule", "0 3 * * *", "--cmd", "rm -rf /"}},
 	}
 	for _, c := range cases {

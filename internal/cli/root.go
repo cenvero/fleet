@@ -3085,7 +3085,16 @@ func enforceCommandPolicyForLeaf(cmd *cobra.Command, configDir string) error {
 			return nil // arg-count errors are surfaced by cobra's own validator
 		}
 		command := strings.Join(args[1:], " ")
-		return enforceCmdPolicy(configDir, command, false)
+		if err := enforceCmdPolicy(configDir, command, false); err != nil {
+			return err
+		}
+		// The revert command runs on the server too — when the dead-man timer
+		// fires, or on `fleet revert` — so it is held to the same policy.
+		// Otherwise a denied command could simply be passed as the "undo".
+		if revert := strings.TrimSpace(flagValue(cmd, "revert-cmd")); revert != "" {
+			return enforceCmdPolicy(configDir, revert, false)
+		}
+		return nil
 	case top == "cron" && sub == "add":
 		// `cron add <server> --cmd <command>`: the command is the --cmd flag. cron
 		// add has no --confirm flag, so a confirm-required pattern blocks it.
