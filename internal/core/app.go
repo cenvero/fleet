@@ -1434,6 +1434,21 @@ func (a *App) callRPCContextRaw(ctx context.Context, server ServerRecord, env pr
 
 func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	if l, ok := a.sessions.acquireContext(ctx, server.Name); ok {
+		resendable := safeToResend(env.Action)
+		// A request that must not run twice cannot be re-sent if the pooled
+		// connection turns out to be dead, so check a connection that has
+		// been quiet (an idle NAT mapping, a laptop sleep) before using it.
+		// A failed probe sent nothing: discard the connection and dial.
+		if !resendable && l.quiet > pooledProbeAfter {
+			if err := l.session().Probe(ctx, pooledProbeTimeout); err != nil {
+				if ctx.Err() != nil {
+					l.release()
+					return proto.Envelope{}, transport.NotSent(ctx.Err())
+				}
+				l.discard()
+				return a.callDirectFreshContext(ctx, server, env)
+			}
+		}
 		resp, err := l.session().Call(ctx, env)
 		if err == nil || transport.SessionUsableAfterError(err) {
 			l.release()
@@ -1445,11 +1460,24 @@ func (a *App) callDirectPooledContext(ctx context.Context, server ServerRecord, 
 		// twice changes nothing. Otherwise it may already have run (a dropped
 		// connection while waiting for the reply), and a second send could
 		// run a command, restart a service or change a firewall twice.
-		if !transport.RequestNotSent(err) && !safeToResend(env.Action) {
+		if !transport.RequestNotSent(err) && !resendable {
 			return proto.Envelope{}, fmt.Errorf("the connection to %s dropped after %s was sent, so it may have run; check before retrying: %w", server.Name, env.Action, err)
 		}
 	}
+	return a.callDirectFreshContext(ctx, server, env)
+}
 
+// pooledProbeAfter is how long a pooled connection may sit unused before a
+// request that must not run twice probes it first; pooledProbeTimeout bounds
+// the probe. Variables so tests can shorten them.
+var (
+	pooledProbeAfter   = 10 * time.Second
+	pooledProbeTimeout = 5 * time.Second
+)
+
+// callDirectFreshContext sends env on a newly dialled (or just published)
+// pooled connection. A failure to connect means nothing was sent.
+func (a *App) callDirectFreshContext(ctx context.Context, server ServerRecord, env proto.Envelope) (proto.Envelope, error) {
 	l, err := a.dialPooledContext(ctx, server)
 	if err != nil {
 		return proto.Envelope{}, transport.NotSent(err)

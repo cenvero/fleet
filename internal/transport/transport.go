@@ -291,6 +291,33 @@ func (s *Session) OpenChannelSessionContext(ctx context.Context, timeout time.Du
 // StartKeepalive probes the connection this session owns (see the package
 // function StartKeepalive). Child sessions share their parent's connection and
 // have nothing of their own to probe, so for them this is a no-op.
+// Probe checks that the SSH connection under s still answers, with one
+// keepalive round trip bounded by timeout and ctx. It writes nothing to the
+// RPC channel, so when it fails no request has been sent and the caller can
+// safely dial again. A session with no SSH client (an in-memory test
+// session) has nothing to probe.
+func (s *Session) Probe(ctx context.Context, timeout time.Duration) error {
+	if s == nil || s.Client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		// The request is answered (true or false) by any live SSH peer; only
+		// a broken connection makes it fail. Closing the connection unblocks
+		// it when the probe gives up first.
+		_, _, err := s.Client.SendRequest(KeepaliveRequest, true, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("the connection did not answer a keepalive within %s: %w", timeout, ctx.Err())
+	}
+}
+
 func (s *Session) StartKeepalive(interval time.Duration, maxMissed int, onDead func()) (stop func()) {
 	if s == nil || s.Client == nil || s.childOfClient {
 		return func() {}

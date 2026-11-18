@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cenvero/fleet/internal/agent"
 	"github.com/cenvero/fleet/internal/testutil"
@@ -118,5 +119,98 @@ func TestPooledCallIsNotResentAfterItMayHaveRun(t *testing.T) {
 	}
 	if got := collects.Load(); got != 2 {
 		t.Fatalf("metrics.collect ran %d times, want 2 (the dropped one and the retry)", got)
+	}
+}
+
+// countingFirewall records how many times Enable ran.
+type countingFirewall struct{ enables *atomic.Int32 }
+
+func (f countingFirewall) Status(context.Context) (proto.FirewallInfo, error) {
+	return proto.FirewallInfo{}, nil
+}
+func (f countingFirewall) Enable(context.Context, bool) (proto.FirewallInfo, error) {
+	f.enables.Add(1)
+	return proto.FirewallInfo{Enabled: true}, nil
+}
+func (f countingFirewall) AddRule(context.Context, string) (proto.FirewallInfo, error) {
+	return proto.FirewallInfo{}, nil
+}
+func (f countingFirewall) ListOpenPorts(context.Context) ([]int, error) { return nil, nil }
+func (f countingFirewall) SetPort(context.Context, int, bool) (proto.FirewallInfo, error) {
+	return proto.FirewallInfo{}, nil
+}
+
+// blackholeConn stops delivering anything in either direction once on is
+// set, without closing: what a NAT that forgot the mapping, or a laptop that
+// slept, leaves behind. Writes still succeed locally.
+type blackholeConn struct {
+	net.Conn
+	on *atomic.Bool
+}
+
+func (c blackholeConn) Read(p []byte) (int, error) {
+	for {
+		n, err := c.Conn.Read(p)
+		if err != nil || !c.on.Load() {
+			return n, err
+		}
+	}
+}
+
+func (c blackholeConn) Write(p []byte) (int, error) {
+	if c.on.Load() {
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+// A pooled connection that died silently while unused would take a command
+// down with it as "may have run" — the request is written, no reply ever
+// comes. A quiet connection is probed first, so the command goes out on a
+// fresh connection instead, once.
+func TestQuietPooledConnectionIsProbedBeforeACommand(t *testing.T) {
+	oldAfter, oldTimeout := pooledProbeAfter, pooledProbeTimeout
+	pooledProbeAfter, pooledProbeTimeout = 0, 300*time.Millisecond
+	t.Cleanup(func() { pooledProbeAfter, pooledProbeTimeout = oldAfter, oldTimeout })
+
+	app := newImportTestApp(t)
+	var enables atomic.Int32
+	srv := agent.Server{
+		Mode:               transport.ModeDirect,
+		HostKeyPath:        filepath.Join(t.TempDir(), "agent_host_key"),
+		AuthorizedKeysPath: filepath.Join(app.ConfigDir, "keys", "id_ed25519.pub"),
+		FirewallManager:    countingFirewall{enables: &enables},
+	}
+	var mu sync.Mutex
+	var holes []*atomic.Bool
+	app.NetworkDialContext = func(_ context.Context, _, address string) (net.Conn, error) {
+		client, server := testutil.NewBufferedConnPair("127.0.0.1:50201", address)
+		on := &atomic.Bool{}
+		mu.Lock()
+		holes = append(holes, on)
+		mu.Unlock()
+		go func() { _ = srv.ServeConn(blackholeConn{Conn: server, on: on}) }()
+		return client, nil
+	}
+	t.Cleanup(app.DisconnectPooledSessions)
+	if err := app.AddServer(ServerRecord{Name: "web-01", Address: "127.0.0.1", Port: 2222, Mode: transport.ModeDirect, User: "cenvero-agent"}); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := app.GetServer("web-01")
+	if _, err := app.callRPC(record, proto.Envelope{Action: "firewall.status"}); err != nil {
+		t.Fatalf("warm the pool: %v", err)
+	}
+	mu.Lock()
+	holes[0].Store(true) // the pooled connection goes silent
+	mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := app.callRPCContext(ctx, record, proto.Envelope{Action: "firewall.enable"})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("firewall.enable over a silently dead pooled connection: %v %+v, want it sent on a fresh connection", err, resp.Error)
+	}
+	if got := enables.Load(); got != 1 {
+		t.Fatalf("firewall.enable ran %d times, want 1", got)
 	}
 }

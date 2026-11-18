@@ -527,7 +527,14 @@ func (h *ReverseHub) handleControl(conn net.Conn, releaseReadSlot func()) {
 				resp.Error = &proto.Error{Code: "direct_target_mismatch", Message: err.Error()}
 				break
 			}
-			resp.Error = &proto.Error{Code: "direct_call_failed", Message: err.Error()}
+			code := "direct_call_failed"
+			if transport.RequestNotSent(err) {
+				// The daemon could not reach the server (dial or handshake
+				// failed) or never wrote the request: safe for the caller to
+				// retry.
+				code = controlCodeDirectNotSent
+			}
+			resp.Error = &proto.Error{Code: code, Message: err.Error()}
 			break
 		}
 		respAttachment = resp.setResponseFramed(out, framedResponse)
@@ -740,6 +747,11 @@ func (e *controlResponseError) Error() string { return e.Code + ": " + e.Message
 // controlCodeNotSent is the daemon's answer when a call never reached the
 // agent (its reverse session is not connected).
 const controlCodeNotSent = "reverse_not_sent"
+
+// controlCodeDirectNotSent is its answer when a relayed direct call never
+// reached the server (the daemon could not connect, or never wrote it).
+// Older daemons answer direct_call_failed, which stays "may have run".
+const controlCodeDirectNotSent = "direct_not_sent"
 
 // RequestNotSent reports the daemon's own "never reached the agent" answers:
 // a call for a reverse agent that is not connected, or one the daemon turned

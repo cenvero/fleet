@@ -19,6 +19,12 @@ import (
 // cheaper than surfacing a stale-connection error to the operator.
 const sessionIdleTTL = 2 * time.Minute
 
+// wallNow is the current time without its monotonic reading, so durations
+// measured from it are wall-clock time. The monotonic clock stops while a
+// machine sleeps; a connection that sat through an hour of laptop sleep must
+// count as an hour quiet, not as the seconds it was awake.
+func wallNow() time.Time { return time.Now().Round(0) }
+
 // maxPooledChannelsPerServer bounds how many multiplexed fleet-rpc channels the
 // pool will keep open on one server's SSH connection. Concurrent callers beyond
 // this open a channel, use it, and close it rather than growing the cache without
@@ -124,6 +130,10 @@ type lease struct {
 	// redialled while the call was in flight, the channel belongs to a dead
 	// connection and must not be handed to the replacement's next caller.
 	entry *pooledServer
+	// quiet is how long the connection had been unused when this lease was
+	// taken (wall-clock time, so a laptop sleep counts). Callers that must
+	// not send a request twice probe a quiet connection first.
+	quiet time.Duration
 }
 
 func (l *lease) session() *transport.Session { return l.sess }
@@ -146,7 +156,7 @@ func (l *lease) release() {
 		_ = l.sess.Close()
 		return
 	}
-	entry.lastUsed = time.Now()
+	entry.lastUsed = wallNow()
 	if l.fromNew && len(entry.idle) >= maxPooledChannelsPerServer {
 		_ = l.sess.Close()
 		return
@@ -266,8 +276,9 @@ func (sp *sessionPool) acquireContext(ctx context.Context, serverName string) (*
 	if n := len(entry.idle); n > 0 {
 		sess := entry.idle[n-1]
 		entry.idle = entry.idle[:n-1]
+		quiet := time.Since(entry.lastUsed)
 		sp.mu.Unlock()
-		return &lease{pool: sp, name: serverName, sess: sess, entry: entry}, true
+		return &lease{pool: sp, name: serverName, sess: sess, entry: entry, quiet: quiet}, true
 	}
 	root := entry.root
 	sp.mu.Unlock()
@@ -318,10 +329,10 @@ func (sp *sessionPool) adopt(serverName string, sess *transport.Session) *lease 
 		// Someone else already established the pooled connection. Hand this one
 		// back to the caller as a one-shot; release() will close it because the
 		// entry it belongs to is not this one.
-		existing.lastUsed = time.Now()
+		existing.lastUsed = wallNow()
 		return &lease{pool: nil, name: serverName, sess: sess}
 	}
-	entry := &pooledServer{root: sess, lastUsed: time.Now(), established: time.Now()}
+	entry := &pooledServer{root: sess, lastUsed: wallNow(), established: time.Now()}
 	// Probe the connection while it is pooled. When the probe gives up it has
 	// already closed the connection; retiring the entry right away means the
 	// next caller redials instead of tripping over the corpse.

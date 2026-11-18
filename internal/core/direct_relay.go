@@ -151,15 +151,22 @@ func (a *App) tryDaemonDirectRelay(ctx context.Context, server ServerRecord, env
 		case "direct_target_mismatch", "control_busy", "unauthorized", "unsupported_action":
 			// The daemon refused before doing anything: dial it ourselves.
 			return proto.Envelope{}, false, nil
-		case "direct_call_failed":
-			// Surface the error exactly as a call made here would have.
+		case "direct_call_failed", controlCodeDirectNotSent:
+			// Surface the error exactly as a call made here would have,
+			// including whether the request may have reached the server.
+			var out error
 			switch respErr.Message {
 			case context.DeadlineExceeded.Error():
-				return proto.Envelope{}, true, context.DeadlineExceeded
+				out = context.DeadlineExceeded
 			case context.Canceled.Error():
-				return proto.Envelope{}, true, context.Canceled
+				out = context.Canceled
+			default:
+				out = errors.New(respErr.Message)
 			}
-			return proto.Envelope{}, true, errors.New(respErr.Message)
+			if respErr.Code == controlCodeDirectNotSent {
+				out = transport.NotSent(out)
+			}
+			return proto.Envelope{}, true, out
 		}
 	}
 	return proto.Envelope{}, true, err

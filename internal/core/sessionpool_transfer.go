@@ -6,7 +6,6 @@ package core
 import (
 	"context"
 	"sync"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -354,7 +353,7 @@ func (sp *sessionPool) touchConn(serverName string, client *ssh.Client) {
 	}
 	sp.mu.Lock()
 	if entry, ok := sp.entries[serverName]; ok && entry.root != nil && entry.root.Client == client {
-		entry.lastUsed = time.Now()
+		entry.lastUsed = wallNow()
 	}
 	sp.mu.Unlock()
 }
