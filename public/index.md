@@ -143,7 +143,7 @@ The same engine drives a live terminal dashboard, a dual-pane terminal file mana
 
 ![The Cenvero Fleet web UI Fleet overview listing servers with status, mode, operating system, CPU, memory and disk bars, last-seen times and tags.](https://fleet.cenvero.org/assets/img/web-fleet.webp)
 
-**`fleet file ui`** — a localhost-only web UI with a drag-and-drop file manager and a read-only Fleet overview. (New in v2.5.0)
+**`fleet console`** — a localhost-only web console: the Fleet overview, Control screens for servers and their services, a drag-and-drop file manager and terminals. (New in v2.7.0)
 
 ## Reach every server — even the ones behind NAT.
 

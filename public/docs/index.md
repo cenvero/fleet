@@ -10,7 +10,7 @@ Cenvero Fleet manages Linux, macOS and Windows servers from one controller that 
 
 **Controller — `fleet`**
 
-The CLI, the terminal dashboard, the terminal and web file managers, and the daemon. Most commands print JSON.
+The CLI, the terminal dashboard, the terminal file manager, the web console and the daemon. Most commands print JSON.
 
 [Set up the controller](https://fleet.cenvero.org/docs/#init)
 
@@ -59,7 +59,7 @@ Scoped tokens, named secrets, approvals, command policy and a dead-man's switch 
    fleet dashboard
    ```
 
-> These docs cover **v2.6.1**, the latest stable release. New in v2.6.1: `fleet server remove` tears agents down over their own authenticated connection, and `fleet server add` honours `runtime.default_agent_port`. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
+> These docs cover **v2.7.0**, the latest stable release. New in v2.7.0: the [web console](https://fleet.cenvero.org/docs/#web-console) (`fleet console`, also `fleet web`) with a background mode, [`fleet errors`](https://fleet.cenvero.org/docs/#errors) in place of notices before every command's output, the [background helper](https://fleet.cenvero.org/docs/#helper) that tracks jobs and runs the hourly agent sync, the [agent-lockout check](https://fleet.cenvero.org/docs/#agent-lockout) on every firewall change, and a command that may already have run is never sent twice. New in v2.6.1: `fleet server remove` tears agents down over their own authenticated connection, and `fleet server add` honours `runtime.default_agent_port`. New in v2.6.0: [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) (`fleet sync-agent auto`). New in v2.5.0: `fleet start` and `fleet stop` for a background daemon, `fleet version`, `fleet file view` and `fleet file edit`, and `fleet approve` running the approved command. Check what you have with `fleet --version`, and see [what's new](https://fleet.cenvero.org/whats-new.html).
 
 ### Conventions and global flags
 
@@ -228,9 +228,11 @@ Names must be unique. For reverse mode the address can be a placeholder such as 
 | `--login-user` | — | Login user for agent auto-install, e.g. `root` or `ubuntu` |
 | `--login-port` | `22` | SSH port used for the install login |
 | `--login-key` | — | Private key for the install login |
-| `--login-password` | — | Password for the install login (prefer keys) |
+| `--login-password-stdin` | off | Read the install login's password from the first line of standard input (prefer keys) |
+| `--login-password` | — | Password for the install login on the command line, where other users on the machine can see it; prefer `--login-password-stdin` |
 | `--sudo` | off | Run install steps with `sudo` when the login user is not root |
 | `--no-agent` | off | Register only; skip the agent install |
+| `--yes`, `-y` | off | Install the agent without asking to confirm |
 | `--accept-new-host-key` | off | Re-pin a changed SSH host key without prompting, after you have verified it |
 
 ### Inspect and manage servers
@@ -247,16 +249,16 @@ fleet server enroll-token edge-01
 
 ```text
 NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.1
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.1
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.1
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.7.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.7.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.7.0
 ```
 
 `reconnect` connects again and refreshes what the controller knows; add `--accept-new-host-key` after you have verified a changed host key. `enroll-token` mints a fresh one-time token for a reverse agent, for example after it lost its key.
 
 ### Remove a server
 
-Removing a server with a managed agent logs in with the stored credentials, stops and removes the systemd service, binary and state directory, and forgets the pinned host key.
+Removing a server with a managed agent tears it down on the server and forgets the pinned host key. The teardown goes through the agent's existing, authenticated connection, so it needs no login credentials; if the agent cannot be reached, Fleet falls back to SSH with the stored login credentials, and `--via-ssh` uses SSH with the credentials you give.
 
 ```sh
 fleet server remove web-01
@@ -485,7 +487,7 @@ A fan-out exits non-zero when any server failed — blocked by policy, unreachab
 ### Timeouts, retries and repeat runs
 
 ```sh
-# Abort after 5 minutes; retry only if the transport fails
+# Abort after 5 minutes; retry only failures that never reached the server
 fleet exec web-01 --timeout 5m --retry 2 --backoff 5s -- /opt/app/migrate.sh
 
 # A retried call with the same key returns the cached result instead of running again
@@ -498,7 +500,7 @@ fleet exec web-01 --on-fail "systemctl restart nginx" -- nginx -s reload
 fleet exec --group role=web --dry-run -- systemctl reload nginx
 ```
 
-`--retry` never re-runs a command that actually ran; it only covers connection failures. Idempotency results are cached on the controller for an hour per key, server and command.
+`--retry` retries only failures that certainly never reached the server, including when the command goes through the daemon. Fleet never sends a command twice when it may already have run: if the connection drops while the command runs, it is not sent again and fails with *may have run; check before retrying*. A pooled connection that has been quiet for 10 seconds is probed before a command goes out on it. Idempotency results are cached on the controller for an hour per key, server and command.
 
 ### All flags
 
@@ -509,8 +511,8 @@ fleet exec --group role=web --dry-run -- systemctl reload nginx
 | `--parallel` | `16` | Servers at once for `--all`/`--group` |
 | `--json` | off | Structured result |
 | `--timeout` | none | Abort after a duration and report `timed_out` |
-| `--retry` | `0` | Retry transport failures up to N times |
-| `--backoff` | `2s` | Delay between transport retries |
+| `--retry` | `0` | Retry up to N times, only after failures that never reached the server |
+| `--backoff` | `2s` | Delay between retries |
 | `--propagate-exit` | off | Exit with the remote command's exit code |
 | `--dry-run` | off | Print `would run: …` for each target and stop |
 | `--idempotency-key` | — | Return the cached result for this key instead of re-running |
@@ -691,9 +693,9 @@ An edit list looks like `[{"old":"a","new":"b"}, {"old":"x","new":"y","all":true
 
 > In-place editing needs agents with `file.edit` support. Update older agents with `fleet agent update <server>`; until then the interactive editors fall back to the atomic upload, which does not keep the file's owner.
 
-## File manager
+## File manager and web console
 
-Two interactive file managers sit on the same transfer engine: a dual-pane terminal UI and a localhost web UI. Both work local ↔ server and server ↔ server.
+Two interactive file managers sit on the same transfer engine: a dual-pane terminal UI and the Files view of the localhost web console. Both work local ↔ server and server ↔ server.
 
 ### Terminal: `fleet files`
 
@@ -729,22 +731,70 @@ fleet files web-01 db-01    # two servers side by side
 | `g` / `Ctrl+R` | Refresh pane / both panes |
 | `?` / `q` | Full key reference / quit |
 
-### Browser: `fleet file ui`
+### Browser: `fleet console` (New in v2.7.0)
 
 ```sh
-fleet file ui
+fleet console                # every view: Fleet, Control, Files and Terminal (alias: fleet web)
+fleet console --control=false --terminal=false
+fleet file ui                # the same console on the file manager, Control and Terminal off
+fleet file ui --control --terminal
 fleet file ui --addr 127.0.0.1:9000 --open no
 ```
 
-It prints a URL such as `http://127.0.0.1:9445/?t=…` with a per-run token and, on a terminal, offers to open your browser (`--open auto|yes|no`). `fleet filemanager ui` is the same command.
+`fleet console` (alias `fleet web`) starts the localhost web console with every view on: **Fleet**, **Control**, **Files** and **Terminal**. Turn views off with `--control=false` and `--terminal=false`. `fleet file ui` (or `fleet filemanager ui`) starts the same console on the file manager, where Control and Terminal stay off unless you add `--control` or `--terminal`. With either on, whoever holds the console's session token can act on the whole fleet with the authority of the command that started it, so start it with a scoped [`--token`](https://fleet.cenvero.org/docs/#tokens) to bound what they can do. `--addr` sets the loopback address and `--open auto|yes|no` whether to open a browser. `fleet start` is unrelated: it runs the [controller daemon](https://fleet.cenvero.org/docs/#daemon).
+
+On a terminal both show a panel instead of a bare URL, with four choices:
+
+1. open the console in your browser;
+2. show the access link (it carries the session token, so keep it private);
+3. keep it running in the background and return to the shell;
+4. stop it.
+
+When a console already runs in the background, the panel keeps the same numbers: 2 shows a one-time link, 3 leaves it running and 4 stops it.
+
+In a script or a pipe they print the link and serve until interrupted. The browser is opened with a **one-time code** (`/?c=…`, usable once, within 30 seconds), never the session token: a process's arguments can be read by every account on the machine. If a link is used a second time, the page says so and the session token is replaced; if you did not open it twice, run `fleet console stop`.
+
+### Keep the console in the background
+
+```sh
+fleet console --background       # start it in the background and return
+fleet console open               # open it in a new browser tab
+fleet console open --files       # ...on the file manager
+fleet console open --print       # print a one-time link instead
+fleet console status             # whether it runs, where, and until when
+fleet console stop
+```
+
+- Choice 3 in the panel hands the running console over, so tabs you already opened keep working; it asks whether to keep Control and Terminal on (default no). `fleet console --background` keeps them only with `--control` / `--terminal`.
+- It stops by itself after **an hour without use** and after **8 hours** at most — **30 minutes** and **1 hour** with Control or Terminal on. The page's own refreshes and streams do not count as use.
+- Running `fleet console` or `fleet file ui` again reaches it instead of starting another; `fleet file ui` opens it on the file manager.
+- It keeps its session token in memory only. Its data directory holds its address and a launch key that only lets `fleet console open` ask for a one-time code (both owner-only). It cannot be started or opened under `--token` / `FLEET_TOKEN`, because it acts with the controller's full authority.
+- `fleet console stop` asks it to stop, so it ends its runs and terminals, and signals only the background console's own process.
+
+### What the console shows
+
+The tabs are **Fleet**, **Control**, **Files** and **Terminal**, in that order, and it opens on Fleet (`fleet file ui` opens on Files). `Alt`+`1` to `Alt`+`4` switch between them, and light and dark themes follow the system setting.
+
+- **Fleet:** every server as a card with status, OS, ring gauges for CPU, memory and disk, tags and alerts, or as a sortable table, with filters and auto-refresh. *Browse* opens a server in a file pane. With Control on, *Manage* opens per-server actions (services, unit status, journal, run a command, live metrics, health checklist, firewall, open ports, tags, reconnect, remove), *Add server* opens the Add server wizard, and open alerts have *Ack* and *Snooze 1h*. Start the console with `--token` and the overview is checked against that token, like `fleet server list`.
+
+- **Control:** Fleet's tools as screens, laid out like System Settings, with an Overview (a one-line summary of the fleet, tiles, quick actions, recent activity), *Activity*, pinned pages and categories in the sidebar, and search by plain name or command name.
+
+  - **Servers** lists your servers straight away. Each has its own page with its details, usage and one-click actions: services, run a command, files, terminal, live usage, health checklist, firewall, open ports, tags, reconnect and remove.
+  - **Add server** is a wizard: the server, the agent and how to sign in (Fleet's key, a key file or a password), a review, then progress and the result. If the agent install fails, it offers to remove the half-added server and go back to the form. A reverse server prints a one-time join secret, so the wizard gives you the terminal command for it instead.
+  - A page that only reads (agent versions, health, jobs, logs…) loads its data as soon as it opens, as tables where it can. A page that changes something has a button named for what it does and shows how it went. The command behind a page is under *Show the command*.
+
+  Each run is the `fleet` binary itself, started with this controller's config directory and the `--token` the console was started with, if any, so tokens, command policy, redaction, confirmations and the audit log apply exactly as in a terminal. Runs can be stopped, *Activity* keeps the history of what you ran, and pages can be pinned. Commands that need a terminal, and those that reach the controller's keys, tokens or secrets, are listed but refused; an SSH password goes to the command on standard input, never on its command line. Prompts fail closed unless you tick `--yes` or `--confirm`, and commands that change things ask in the browser first.
+
+- **Terminal:** interactive shells on direct-mode servers, in tabs. Full-screen programs such as `top` and `vim` work, the size follows the window, a reload re-attaches and an ended session can reconnect. Each tab is `fleet ssh` run by the controller under the same `--token`, so tokens, host-key pinning and the audit log apply. Up to 8 at once; a shell no tab has watched for 15 minutes is ended. Needs a Linux or macOS controller.
+
+**Files** is the web file manager:
 
 - Two panes by default, up to six; each is Local or any server. Drag between panes to copy or move, drop files from your desktop to upload, and double-click a text file to edit it.
-- A per-pane toolbar and right-click menu cover new folder and file, rename, delete, copy, move, compress, extract, permissions, checksum, duplicate, upload and download, with list and icon views, filtering and sortable columns.
+- A per-pane toolbar and right-click menu cover new folder and file, rename, delete, copy, move, compress, extract, permissions, checksum, duplicate, upload and download, with list and icon views, filtering and sortable columns. New file, rename and a move within one pane never overwrite an existing file, hidden ones included.
 - Keyboard first: arrows and `Enter`, `Backspace` for up, `F6` to switch panes, `F2` to rename, `Ctrl`/`⌘`+`C`/`X` then `V` in the other pane, a command palette on `Ctrl`/`⌘`+`K`, and `?` for every shortcut.
 - Light and dark themes, a one-pane phone layout, previews of text and common images, streaming downloads that abort rather than deliver a corrupt file, and smooth scrolling through folders with tens of thousands of entries.
-- The **Fleet** tab is a read-only overview of every server — status, mode, OS, CPU, memory and disk, last seen, tags and open alerts — with filters and auto-refresh. *Browse* opens a server in a file pane. Start the UI with `--token` and the overview is checked against that token, like `fleet server list`.
 
-> **Locked down by default.** The web UI binds to loopback only, requires the per-run token on every request, accepts mutations only as same-origin `POST`s, sends a strict Content-Security-Policy and never renders previewed SVG or HTML. Its Local source refuses paths inside the controller's config directory.
+> **Locked down by default.** The web console binds to loopback only, requires its session token on every request (the browser gets it through a one-time code), accepts mutations only as same-origin `POST`s, sends a strict Content-Security-Policy and never renders previewed SVG or HTML. Its Local source refuses paths inside the controller's config directory.
 
 ## Live sync
 
@@ -837,7 +887,7 @@ fleet journal web-01 --unit nginx --follow --grep error
 
 ### Audit log
 
-Every state-changing action is appended to a hash-chained, tamper-evident log at `logs/_audit.log`: remote commands (`exec.run`, with exit codes), file changes, approvals, policy changes, and key, token and secret changes — names only, never secret values. `fleet logs` reads it; with `--server` and `--service` it reads a service log instead.
+Every state-changing action is appended to a hash-chained, tamper-evident log at `logs/_audit.log`: remote commands (`exec.run`, with exit codes), file changes, approvals, policy changes, and key, token and secret changes — names only, never secret values. `fleet logs` reads it, and `--server` or `--service` on its own filters it; with both `--server` and `--service` it reads a service log instead.
 
 ```sh
 fleet logs
@@ -944,7 +994,7 @@ fleet alerts suppress metrics-web-01-disk-warning --for 24h
 fleet alerts unsuppress metrics-web-01-disk-warning
 ```
 
-Severities are `info`, `warning` and `critical`. Suppression defaults to 6 hours. New critical alerts can raise a desktop notification (`runtime.desktop_notifications`), with reminders no more often than `runtime.alert_notify_cooldown` (6 hours). The dashboard's Alerts tab has the same actions.
+Severities are `info`, `warning` and `critical`. Suppression defaults to 6 hours. Desktop pop-ups for critical alerts are paused until a dependency-free native implementation lands. The dashboard's Alerts tab has the same actions.
 
 ## Notifications
 
@@ -963,7 +1013,7 @@ fleet notify rm 0
 |---|---|
 | `offline` | The daemon's metrics collection from a server starts failing |
 | `online` | Collection from that server recovers |
-| `job-failed` | A [background job](https://fleet.cenvero.org/docs/#jobs) finishes with a non-zero exit |
+| `job-failed` | A [background job](https://fleet.cenvero.org/docs/#jobs) finishes with a non-zero exit, or is lost |
 | `drift` | [`fleet drift`](https://fleet.cenvero.org/docs/#drift) finds a change |
 | `destructive` | A destructive command succeeds — for example `server remove`, `file rm`, firewall changes, secret changes, `sync`, `key rotate` or setting tags. The message names the command, server and operator, never other arguments. `exec`, `ssh` and `job run` do not fire it. |
 
@@ -1004,34 +1054,58 @@ Actions re-run the same `fleet` binary, so tokens, command policy, host-key pinn
 
 ## Firewall and ports (Linux)
 
-There are two ways to manage a server's firewall. `fleet fw` is agent-safe and works with nftables, iptables, firewalld or ufw. `fleet firewall` and `fleet port` drive ufw directly.
+There are two ways to manage a server's firewall. `fleet fw` works with nftables, iptables, firewalld or ufw. `fleet firewall` and `fleet port` drive ufw directly. Both refuse a change that would cut Fleet off from the agent.
 
-### Agent-safe: `fleet fw`
+### Agent-lockout check (New in v2.7.0)
+
+Every command that can block traffic first reads the server's rules and refuses if the change would lock Fleet out of the agent: `firewall enable`, `firewall add`, `port close`, the firewall settings in [`template apply`](https://fleet.cenvero.org/docs/#templates), and `fw enable --safe`. The refusal names the command to run first — `fleet port open web-01 2222` for ufw, `fleet fw allow web-01 2222/tcp` for `fw` — and both the refusal and any override are written to the audit log.
+
+```sh
+fleet firewall enable web-01
+# refusing to enable the firewall on web-01: port 2222/tcp, which fleet uses to reach the agent,
+# is not allowed by the rules that would be in force ... Run this first, then retry: fleet port open web-01 2222
+fleet port open web-01 2222
+fleet firewall enable web-01
+```
+
+- **Direct mode:** the agent's port must be allowed for inbound TCP ahead of any rule that may block it. Fleet parses the rules in the order the firewall applies them: ufw's from `ufw show added` (active or not), iptables' `INPUT` chain, the nftables chain Fleet manages, and firewalld's zones (the zone that takes the controller's connection, or every active zone when Fleet cannot tell). A deny, reject or limit on the port or on a range that includes it, a block of all traffic from an address or on an interface, a jump to another chain, a service name Fleet does not resolve and any line it cannot read all count as blocking.
+- **Allowing the port only for your controller is fine, and safer:** from its IP or network (`ufw allow from 203.0.113.7 to any port 2222`), or only on the interface its connection arrives on, such as a VPN (`ufw allow in on tailscale0 to any port 2222`). While the check runs, Fleet is connected to the agent port, so it lists the server's connections to that port and sees where the server sees Fleet coming from, after any NAT, and on which interface. A restricted allow is accepted when every such connection matches it, and a block that matches none of them, such as a blocklist entry for another host, does not stand in the way.
+- **Not enough:** an allow that does not include the controller's connection, one Fleet cannot check, or one only outbound or for forwarding. The refusal names that rule and the address the server sees Fleet connecting from.
+- **Reverse mode:** the agent dials out and listens on no port, so enabling must keep established/related traffic accepted and outgoing traffic allowed.
+- **Fail closed:** if Fleet cannot read the firewall's state, it refuses. A direct-mode server record without a valid agent port refuses tightening changes instead of assuming the default port.
+- **Override:** `--force-i-have-console` skips the refusal. It is only for a person with out-of-band console access to the server who accepts losing the agent, never for scripts or AI agents. It is refused under any `--token` / `FLEET_TOKEN`, and the web console's Control view neither offers nor accepts it.
+
+### Any backend: `fleet fw`
 
 ```sh
 fleet fw status web-01
+fleet fw allow web-01 2222/tcp      # direct mode: allow the agent port first
 fleet fw allow web-01 443/tcp
-fleet fw enable web-01 --safe --undo-after 120
+fleet fw enable web-01 --safe --undo-after 120   # human summary; add --json for JSON
 ```
 
-`fw` always adds an allow rule for the agent's own port before tightening anything, so the controller cannot lock itself out. `enable --safe` switches to default-drop only after checking the agent stays reachable, and schedules a self-reverting timer (default 60 seconds) that reopens the host if the change cuts the agent off. `--force-i-have-console` skips the lockout refusal — use it only with out-of-band console access.
+`fw enable --safe` runs the same check, so in direct mode it refuses until the agent port is allowed and names `fleet fw allow web-01 2222/tcp`; it does not open the port for you. With nftables and iptables it accepts established/related and loopback traffic before the drop policy. On firewalld, `fw allow` writes the permanent configuration and never reloads firewalld.
+
+- **Self-revert timer:** armed before the change (with `systemd-run`, or `setsid` where systemd isn't available). After `--undo-after` seconds (default 60) it restores the earlier state unless you cancel it. Nothing cancels it automatically: the summary prints the cancel command, such as `fleet exec web-01 'systemctl stop fleet-fw-safe-revert-….timer'`, and you run it once `fleet server reconnect web-01` succeeds. If the enable step fails after the timer was armed, it says so and prints the cancel command too.
+- **What the undo restores:** the policy and the rules that enable added; it never removes allow rules. It cannot restore changes someone else made in the meantime, ufw rules, firewalld zone changes or ip6tables, which Fleet doesn't touch. nftables and iptables changes aren't persisted, so a reboot also drops them.
 
 ### ufw: `fleet firewall` and `fleet port`
 
 ```sh
 fleet firewall status web-01
+fleet port open web-01 2222          # direct mode: the agent port, before enabling ufw
+fleet firewall enable web-01
 fleet firewall add web-01 "allow 443/tcp"
 fleet firewall add web-01 "allow from 203.0.113.0/24 to any port 22"
 fleet port list web-01
 fleet port open web-01 8443
 fleet port close web-01 8443
-fleet firewall enable web-01
 fleet firewall disable web-01
 ```
 
-Rules must match `allow|deny|limit|reject PORT[/tcp|/udp]` or `allow|deny|limit|reject from ADDRESS to any port PORT[/tcp|/udp]`; anything else, such as `reset` or `delete`, is refused.
+Rules must match `allow|deny|limit|reject PORT[/tcp|/udp]` or `allow|deny|limit|reject from ADDRESS to any port PORT[/tcp|/udp]`; anything else, such as `reset` or `delete`, is refused. `firewall add` also refuses deny, reject or limit rules on the agent port and any rule the check cannot read, and `port close` refuses to close the direct agent's port.
 
-> `fleet firewall enable` turns ufw on immediately. Allow the agent port (`2222` by default) first, or use `fleet fw enable --safe` or a [guarded change](https://fleet.cenvero.org/docs/#guard) instead.
+> `fleet firewall enable` turns ufw on immediately, with no revert timer. It reads the rules first and refuses unless the agent port is allowed (in reverse mode, unless established/related and outgoing traffic stay allowed). For a change that undoes itself, use `fleet fw enable --safe` or a [guarded change](https://fleet.cenvero.org/docs/#guard).
 
 ## Background jobs
 
@@ -1046,9 +1120,11 @@ fleet job wait 1 --timeout 30m && echo "import finished"
 ```
 
 - `job run` prints the job's ID (a number); `--name` is a label shown in `fleet jobs`. Add `--json` to `run`, `status`, `wait` or `jobs` for machine-readable records.
-- `job wait` exits 0 when the job succeeded and 1 when it failed, so you can chain the next step. `--timeout 0` (the default) waits forever.
-- Output is written to an owner-only, unpredictably named log in `/var/tmp` on the server. A failed job fires the `job-failed` [notification](https://fleet.cenvero.org/docs/#notify).
-- Finished jobs and their logs are pruned on the controller and the servers after the retention period (default 7 days): `fleet config set job-log-retention 30d`, or `0` to keep them.
+- `job wait` exits 0 when the job succeeded and 1 when it failed or was lost, so you can chain the next step. `--timeout 0` (the default) waits forever.
+- The [background helper](https://fleet.cenvero.org/docs/#helper) keeps checking running jobs, so `fleet jobs` shows a finished job as done, and a failed one fires the `job-failed` [notification](https://fleet.cenvero.org/docs/#notify) once, without anyone polling. Jobs on reverse-mode servers are checked while a daemon runs.
+- A job that can never report back ends as **`lost`** instead of running forever, with the reason in `fleet job status`: its server was removed from the fleet, or its process is gone without a result (the server rebooted, or the job was killed). A lost job also fires `job-failed`.
+- Output is written to an owner-only, unpredictably named log in `/var/tmp` on the server.
+- Finished and lost jobs and their logs are pruned on the controller and the servers after the retention period (default 7 days), daily by the background helper or hourly by the daemon while it runs: `fleet config set job-log-retention 30d`, or `0` to keep them.
 
 ## Scheduled jobs
 
@@ -1119,7 +1195,7 @@ fleet template list
 fleet template apply web-01 web.toml
 ```
 
-A `[firewall]` table may also set `enabled = true`, which turns ufw on *before* ports and rules are applied — make sure the agent port is already allowed.
+A `[firewall]` table may also set `enabled = true`. `template apply` opens the template's ports and adds its rules before it turns the firewall on, and changes services last, so a template that allows the agent port works on a fresh host. Its firewall settings go through the [agent-lockout check](https://fleet.cenvero.org/docs/#agent-lockout), and a refusal stops the template before any service is touched.
 
 ## Shell integration
 
@@ -1284,11 +1360,11 @@ fleet confirm web-01-1
 fleet revert web-01-1
 ```
 
-`--revert-after` is required. Always give a `--revert-cmd` that fully undoes the change.
+`--revert-after` is required. Always give a `--revert-cmd` that fully undoes the change. The [command policy](https://fleet.cenvero.org/docs/#approvals) applies to the `--revert-cmd` as well as to the risky command, since the revert runs on the server too.
 
 ### Lighter checks
 
-`fleet exec --guard` refuses commands that could lock the controller out of a server; `--guard-warn` turns that into a warning. For firewalls specifically, [`fleet fw enable --safe`](https://fleet.cenvero.org/docs/#firewall) keeps the agent port open and reverts itself.
+`fleet exec --guard` refuses commands that could lock the controller out of a server; `--guard-warn` turns that into a warning. For firewalls specifically, [`fleet fw enable --safe`](https://fleet.cenvero.org/docs/#firewall) refuses a change that would cut off the agent and arms a timer that reverts it unless you cancel it.
 
 ```sh
 fleet exec web-01 --guard -- "iptables -P INPUT DROP"
@@ -1314,7 +1390,7 @@ The result lists `rotated_servers` and `verified_servers`. A server in the first
 
 ## Controller daemon
 
-The daemon accepts [reverse-mode](https://fleet.cenvero.org/docs/#transport) agents, serves the local control socket that other `fleet` processes use to reach them, polls metrics and raises [alerts](https://fleet.cenvero.org/docs/#alerts), and checks for updates. Direct-mode servers work without it, but scheduled metrics polling — and with it alerts and the `offline` and `online` notifications — needs it.
+The daemon accepts [reverse-mode](https://fleet.cenvero.org/docs/#transport) agents, serves the local control socket that other `fleet` processes use to reach them, polls metrics and raises [alerts](https://fleet.cenvero.org/docs/#alerts), and checks for updates. Direct-mode servers work without it, but scheduled metrics polling — and with it alerts and the `offline` and `online` notifications — needs it. Tracking jobs, the hourly agent sync and job-log pruning don't: the [background helper](https://fleet.cenvero.org/docs/#helper), which starts by itself, does them.
 
 ```sh
 fleet start       # run it in the background
@@ -1338,6 +1414,47 @@ fleet daemon      # or run it in the foreground
 ### The control socket
 
 The control socket is mutually authenticated. The daemon writes a per-run secret to `data/control.token` (owner-only); on every connection it first proves it holds the secret with an HMAC-SHA256 challenge over fresh nonces, and only then does the caller send its request, authenticated the same way. Something else listening on the port while the daemon is down learns nothing. The token file is removed when the daemon stops. One-shot direct-mode commands also relay through the daemon's warm connections unless `FLEET_NO_DAEMON_RELAY=1` is set.
+
+## Background helper and notices (New in v2.7.0)
+
+Besides the optional [daemon](https://fleet.cenvero.org/docs/#daemon), Fleet runs one small background helper per config directory. It does the work that should happen without anyone asking:
+
+| Task | What it does | How often |
+|---|---|---|
+| `jobs` | Checks running [background jobs](https://fleet.cenvero.org/docs/#jobs), so `fleet jobs` shows them done (or lost) and `job-failed` is sent without anyone polling | About 10 seconds after a job starts, then less often, up to once a minute; an unreachable server is retried with backoff, up to every 5 minutes |
+| `agent-sync` | The hourly [automatic agent sync](https://fleet.cenvero.org/docs/#agent-auto-sync) | Checks every 5 minutes whether the hourly run is due |
+| `job-log-prune` | Removes job records and remote job logs older than `job-log-retention` | Daily |
+
+```sh
+fleet helper status          # running? pid, uptime, and each task's last run, next run and last error
+fleet helper status --json
+fleet helper restart         # for example after changing its environment
+```
+
+- **Nothing to set up or turn off.** Every `fleet` command checks whether the helper is running and starts it when it isn't, without printing anything. It exits by itself when the `fleet` binary is replaced (an upgrade) or the config directory is removed, so the next command starts a fresh one.
+- **Each task follows its own setting:** `fleet sync-agent auto off` stops the agent sync and `job-log-retention 0` stops the pruning. `FLEET_AGENT_AUTOSYNC=off` in the environment the helper starts from also keeps it from syncing agents; run `fleet helper restart` for a change to reach a helper that is already running.
+- **With the daemon:** while a daemon runs, the helper leaves the agent sync and the job-log pruning to it and keeps tracking jobs. Jobs on reverse-mode servers are only checked while a daemon runs, since that is the only way to reach them.
+- **Scoped tokens:** a command run with `--token` / `FLEET_TOKEN` never starts the helper, so a scoped credential cannot start fleet-wide work, even indirectly. `fleet helper restart` refuses to run under a token, and scoped tokens cannot run `fleet helper` at all.
+- **Problems** show in `fleet helper status` and `fleet errors`, never on your terminal. The helper's output goes to `logs/helper.log` and its state to `data/helper-status.json`.
+- On Windows it runs from a copy of `fleet.exe` in the data directory, so a WinGet upgrade or uninstall is not blocked by the running helper.
+
+### What needs attention: `fleet errors`
+
+```sh
+fleet errors             # also: fleet issues, fleet notices
+fleet errors --json
+```
+
+Commands such as `fleet ssh` and `fleet exec` no longer print notices before their own output. `fleet errors` lists what needs attention instead, with the command that fixes each item:
+
+- an available [update](https://fleet.cenvero.org/docs/#updates);
+- a pending [`fleet adjust-init`](https://fleet.cenvero.org/docs/#adjust-init);
+- a passphrase-protected controller key;
+- servers the last automatic agent sync could not update;
+- problems of the background helper;
+- reverse-mode servers waiting for a daemon that is not running.
+
+Bare `fleet` lists the same items after its help, and `fleet status` prints a one-line count on stderr when run on a terminal. Each item is worked out from the controller's state every time, so it goes away once its cause is fixed. A command's own errors are reported as before. Scoped tokens cannot run `fleet errors`, because the list names servers fleet-wide.
 
 ## Configuration
 
@@ -1365,7 +1482,6 @@ fleet config agent-port 2222
 | `runtime.session_reconnect_grace` | `10m` | How long a dropped shell stays alive on the server |
 | `runtime.job_log_retention` | `7d` | When finished job logs are pruned |
 | `runtime.alert_notify_cooldown` | `6h` | Minimum gap between reminders for the same alert |
-| `runtime.desktop_notifications` | `true` | Desktop notifications for new critical alerts |
 | `runtime.aggregated_log_max_size` / `_max_files` / `_max_age` | 5 MiB / 5 / 7 days | Bounds of the cached service logs |
 | `runtime.file_transfer.parallel_streams` | `8` | Global transfer parallelism (`fleet file defaults`) |
 
@@ -1398,11 +1514,12 @@ fleet config import fleet-state.json
 
 ## Config migrations
 
-When an upgrade adds or removes setup options, your `config.toml` may lack new settings or carry old ones. Fleet notices on every command and prints a hint:
+When an upgrade adds or removes setup options, your `config.toml` may lack new settings or carry old ones. [`fleet errors`](https://fleet.cenvero.org/docs/#errors) and bare `fleet` then list it (other commands no longer print a hint before their output):
 
 ```text
-⚠  Your fleet config (init_version=2) is behind this version (init_version=3).
-   Run 'fleet adjust-init' to review and apply configuration changes.
+⚠ The controller config needs updating
+  Config (init_version=2) is behind this binary (init_version=3). Run 'fleet adjust-init' to apply changes.
+  Fix: fleet adjust-init
 ```
 
 ```sh
@@ -1453,7 +1570,7 @@ fleet update channel beta
 - `update apply` updates the controller, then rolls the update out to managed agents and reports any that fail. `--server` (repeatable) limits the rollout.
 - `update rollback` restores the binary saved by the last `apply`.
 - Channels are `stable` and `beta`.
-- Fleet checks the channel at most every 10 minutes and caches the result; when a newer release exists, `fleet` commands print an *Update your fleet* notice on stderr with the right upgrade command for how you installed it.
+- Fleet checks the channel at most every 10 minutes and caches the result. When a newer release exists, [`fleet errors`](https://fleet.cenvero.org/docs/#errors) and bare `fleet` list it with the right upgrade command for how you installed it, and `fleet status` counts it on stderr. Other commands no longer print an update notice before their output.
 
 | Policy | What happens |
 |---|---|
@@ -1484,7 +1601,7 @@ fleet agent update --canary 1
 fleet agent update --group role=web --canary 2 --strict-health
 ```
 
-- `agent version` shows each agent's version in one form (`v2.6.1`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
+- `agent version` shows each agent's version in one form (`v2.7.0`), `dev` for development builds and `-` when unknown, and flags mismatches against the controller's version.
 - `agent update` updates a first batch of `--canary N` servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. `--canary 0` updates everything at once.
 - Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass `--strict-health`.
 
@@ -1501,17 +1618,17 @@ Brings agents up to the controller's version, several servers at a time, with pr
 
 You don't have to remember `fleet sync-agent`: it runs on its own, on by default.
 
-- **Any `fleet` command** whose last agent sync started more than an hour ago starts `fleet sync-agent` in the background. The command itself never waits; the output goes to `logs/agent-sync.log` in the config directory.
+- **The [background helper](https://fleet.cenvero.org/docs/#helper)** checks every 5 minutes whether the last agent sync started more than an hour ago, and if so runs one. No command waits for it or prints anything about it; the output goes to `logs/agent-sync.log` in the config directory, and `fleet helper status` and `fleet errors` show how it went. (Before v2.7.0, whichever command noticed the sync was due started it.)
 - **A running daemon** (`fleet start`) syncs hourly even when nobody runs a command, and updates an agent within seconds when it connects with an older version (at most once an hour per server).
 - Only agents known to be **older** than the controller are touched. An agent whose new binary needs a manual restart (Windows, macOS) is listed under *Awaiting restart* rather than sent again every hour, and reverse-mode agents wait for the daemon.
 - Background, daemon and manual runs never overlap; a manual `fleet sync-agent` waits for one in progress.
-- Commands run with a `--token` never start a sync, so a scoped token can't trigger a fleet-wide update.
+- Commands run with a `--token` never start the helper, so a scoped token can't trigger a fleet-wide update, even indirectly.
 
 ```sh
 fleet sync-agent auto          # status: last run, failures, next run, log
 fleet sync-agent auto off      # turn it off (or: fleet config set agent-auto-sync off)
 fleet sync-agent auto on
-FLEET_AGENT_AUTOSYNC=off fleet ...   # skip it for one shell
+FLEET_AGENT_AUTOSYNC=off       # in the environment the helper starts from, then: fleet helper restart
 ```
 
 ## Agentic Fleet
@@ -1549,7 +1666,7 @@ Both are generated from the installed binary, so they always match your version.
 
 ## Command reference
 
-All 62 top-level commands and their subcommands. Run `fleet ai <command>` for the full help of any of them, or `fleet context` for everything at once. `fleet help` and `fleet completion` are also available.
+All 65 top-level commands and their subcommands. Run `fleet ai <command>` for the full help of any of them, or `fleet context` for everything at once. `fleet help` and `fleet completion` are also available.
 
 | Command | Subcommands | What it does |
 |---|---|---|
@@ -1565,6 +1682,7 @@ All 62 top-level commands and their subcommands. Run `fleet ai <command>` for th
 | [`fleet cmd-policy`](https://fleet.cenvero.org/docs/#approvals) | `set` `show` | Manage the dangerous-command policy (deny / confirm patterns) |
 | [`fleet config`](https://fleet.cenvero.org/docs/#config) | `agent-port` `backup` `edit` `export` `import` `restore` `set` `show` `validate` | Show, validate, edit and change controller settings; back up, restore, export and import |
 | [`fleet confirm`](https://fleet.cenvero.org/docs/#guard) | — | Confirm a guarded change so its dead-man's-switch does not revert |
+| [`fleet console`](https://fleet.cenvero.org/docs/#web-console) | `open` `status` `stop` | Open the web console: fleet overview, files, commands and terminals in your browser (alias fleet web) |
 | [`fleet context`](https://fleet.cenvero.org/docs/#agentic) | — | Print the full agent-facing reference (commands, concepts, workflows) |
 | [`fleet cp`](https://fleet.cenvero.org/docs/#files) | — | Copy a file (or directory with -r) directly between two servers |
 | [`fleet cron`](https://fleet.cenvero.org/docs/#cron) | `add` `list` `rm` | Add, list and remove managed cron jobs on a server |
@@ -1573,14 +1691,16 @@ All 62 top-level commands and their subcommands. Run `fleet ai <command>` for th
 | [`fleet database`](https://fleet.cenvero.org/docs/#config) | `shift` `show` | Show the database backend or move to SQLite, PostgreSQL, MySQL or MariaDB |
 | [`fleet doctor`](https://fleet.cenvero.org/docs/#health) | — | Run a health checklist against a server (agent, ports, disk, swap, reboot, clock) |
 | [`fleet drift`](https://fleet.cenvero.org/docs/#drift) | `capture` | Capture a baseline of config files and report drift against it |
+| [`fleet errors`](https://fleet.cenvero.org/docs/#errors) | — | Show what needs attention (updates, migrations, failed background work) and how to fix it (also issues, notices) |
 | [`fleet exec`](https://fleet.cenvero.org/docs/#exec) | — | Run a shell command on one server or all servers |
 | [`fleet file`](https://fleet.cenvero.org/docs/#files) | `cat` `compress` `copy` `defaults` `defaults set` `defaults show` `diff` `download` `edit` `extract` `list` `mkdir` `move` `mv` `rm` `stat` `tail` `ui` `upload` | Browse, transfer, edit, compare and archive files on servers |
-| [`fleet filemanager`](https://fleet.cenvero.org/docs/#file-manager) | `ui` | Alias of fleet files (also fm); filemanager ui opens the web UI |
+| [`fleet filemanager`](https://fleet.cenvero.org/docs/#file-manager) | `ui` | Alias of fleet files (also fm); filemanager ui opens the web console on the file manager |
 | [`fleet files`](https://fleet.cenvero.org/docs/#file-manager) | — | Dual-pane terminal file manager (local and server panes) |
 | [`fleet firewall`](https://fleet.cenvero.org/docs/#firewall) | `add` `disable` `enable` `status` | Show, enable and disable ufw and add rules |
 | [`fleet fw`](https://fleet.cenvero.org/docs/#firewall) | `allow` `enable` `status` | Agent-safe firewall control that never locks out the agent |
 | [`fleet guard`](https://fleet.cenvero.org/docs/#guard) | — | Run a risky command with a dead-man's-switch that auto-reverts unless confirmed |
 | [`fleet health`](https://fleet.cenvero.org/docs/#health) | — | Per-server health checks across the fleet (offline, swap, disk, reboot, clock, load) |
+| [`fleet helper`](https://fleet.cenvero.org/docs/#helper) | `restart` `status` | Inspect the background helper (job tracking, agent auto-sync, job-log pruning) |
 | [`fleet init`](https://fleet.cenvero.org/docs/#init) | — | Run the first-time setup flow |
 | [`fleet inventory`](https://fleet.cenvero.org/docs/#health) | — | Machine-readable inventory of the fleet (hostname, IPs, OS, resources, ports, services, tags) |
 | [`fleet job`](https://fleet.cenvero.org/docs/#jobs) | `logs` `run` `status` `wait` | Run detached background jobs and check, wait for or follow them |
@@ -1669,5 +1789,7 @@ Databases open on first use, so commands that never need them stay fast. Other f
 | `data/idempotency.json` | [`fleet exec --idempotency-key`](https://fleet.cenvero.org/docs/#exec) |
 | `data/daemon.pid`, `data/daemon.lock`, `logs/daemon.log` | [The daemon](https://fleet.cenvero.org/docs/#daemon) |
 | `data/update-rollback.json` | [`fleet update apply`](https://fleet.cenvero.org/docs/#updates) |
+| `data/helper.pid`, `data/helper.lock`, `data/helper-status.json`, `logs/helper.log` | [The background helper](https://fleet.cenvero.org/docs/#helper) |
+| `data/console.json`, `data/console.key`, `data/console.lock`, `data/console.log` | [A background web console](https://fleet.cenvero.org/docs/#web-console) |
 
 On a managed Linux server the agent lives in `/opt/cenvero-fleet/` and runs as `cenvero-fleet-agent.service`.

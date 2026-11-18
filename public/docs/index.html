@@ -59,7 +59,7 @@
         "mainEntityOfPage": "https://fleet.cenvero.org/docs/",
         "inLanguage": "en",
         "image": "https://fleet.cenvero.org/assets/og/og-docs.png",
-        "dateModified": "2026-10-23",
+        "dateModified": "2026-11-19",
         "breadcrumb": { "@id": "https://fleet.cenvero.org/docs/#breadcrumb" },
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "author": { "@id": "https://fleet.cenvero.org/#org" },
@@ -195,7 +195,7 @@
           <ul>
             <li><a href="#files" data-keywords="file upload download copy move cp rm mkdir mv stat cat tail diff edit compress extract zip tar defaults chunk parallel resumable transfer">File commands</a></li>
             <li><a href="#file-edit" data-keywords="edit view in place replace insert old new sha256 expect conflict undo history atomic permissions owner mode acl selinux symlink ai agent claude codex">Edit files in place</a></li>
-            <li><a href="#file-manager" data-keywords="files filemanager fm tui web ui browser dual-pane drag drop fleet overview keyboard shortcuts">File manager</a></li>
+            <li><a href="#file-manager" data-keywords="files filemanager fm tui web ui browser console fleet web control terminal background one-time code dual-pane drag drop fleet overview keyboard shortcuts">File manager and web console</a></li>
             <li><a href="#sync" data-keywords="sync mirror live watch push pull writer replica no-delete deploy">Live sync</a></li>
           </ul>
         </div>
@@ -210,14 +210,14 @@
             <li><a href="#alerts" data-keywords="alerts alert ack acknowledge suppress unsuppress threshold severity critical warning">Alerts</a></li>
             <li><a href="#notify" data-keywords="notify notification slack webhook offline online job-failed destructive drift allow-internal">Notifications</a></li>
             <li><a href="#dashboard" data-keywords="dashboard tui terminal ui keys shortcuts overview servers ops">Dashboard</a></li>
-            <li><a href="#firewall" data-keywords="firewall fw ufw port ports open close allow lockout safe nftables iptables firewalld">Firewall and ports</a></li>
+            <li><a href="#firewall" data-keywords="firewall fw ufw port ports open close allow lockout agent-lockout refuse safe force-i-have-console nftables iptables firewalld">Firewall and ports</a></li>
           </ul>
         </div>
 
         <div class="docs-nav-group">
           <h2>Automation</h2>
           <ul>
-            <li><a href="#jobs" data-keywords="job jobs background detached run wait logs status long-running">Background jobs</a></li>
+            <li><a href="#jobs" data-keywords="job jobs background detached run wait logs status lost long-running">Background jobs</a></li>
             <li><a href="#cron" data-keywords="cron crontab schedule scheduled periodic">Scheduled jobs</a></li>
             <li><a href="#playbooks" data-keywords="run playbook yaml check apply rollback idempotent transactional deploy">Playbooks</a></li>
             <li><a href="#templates" data-keywords="template templates toml apply services firewall ports">Templates</a></li>
@@ -240,10 +240,11 @@
           <h2>Controller</h2>
           <ul>
             <li><a href="#daemon" data-keywords="daemon start stop status background pid control socket reverse listener relay">Controller daemon</a></li>
+            <li><a href="#helper" data-keywords="helper background jobs lost agent-sync prune errors issues notices attention status restart">Background helper and notices</a></li>
             <li><a href="#config" data-keywords="config configuration toml show validate edit set session-grace job-log-retention database postgres mysql mariadb sqlite export import FLEET_CONFIG_DIR">Configuration</a></li>
             <li><a href="#adjust-init" data-keywords="adjust-init migration migrations upgrade init_version">Config migrations</a></li>
             <li><a href="#backup" data-keywords="backup restore recover migrate reinstall archive">Backup and recovery</a></li>
-            <li><a href="#updates" data-keywords="update upgrade check apply rollback channel stable beta policy homebrew signature minisign">Updates</a></li>
+            <li><a href="#updates" data-keywords="update upgrade check apply rollback channel stable beta policy notice errors homebrew signature minisign">Updates</a></li>
             <li><a href="#agent-updates" data-keywords="agent version update canary strict-health sync-agent rollout auto-sync automatic hourly">Agent updates</a></li>
           </ul>
         </div>
@@ -288,7 +289,7 @@
             <article class="card">
               <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-square-terminal"/></svg></div>
               <p><strong>Controller — <code>fleet</code></strong></p>
-              <p>The CLI, the terminal dashboard, the terminal and web file managers, and the daemon. Most commands print JSON.</p>
+              <p>The CLI, the terminal dashboard, the terminal file manager, the web console and the daemon. Most commands print JSON.</p>
               <a class="card-link" href="#init">Set up the controller <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-arrow-right"/></svg></a>
             </article>
             <article class="card">
@@ -334,7 +335,7 @@ fleet dashboard</pre></div>
 
           <div class="callout info">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-info"/></svg>
-            <div><p>These docs cover <strong>v2.6.1</strong>, the latest stable release. New in v2.6.1: <code>fleet server remove</code> tears agents down over their own authenticated connection, and <code>fleet server add</code> honours <code>runtime.default_agent_port</code>. New in v2.6.0: <a href="#agent-auto-sync">automatic agent sync</a> (<code>fleet sync-agent auto</code>). New in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
+            <div><p>These docs cover <strong>v2.7.0</strong>, the latest stable release. New in v2.7.0: the <a href="#web-console">web console</a> (<code>fleet console</code>, also <code>fleet web</code>) with a background mode, <a href="#errors"><code>fleet errors</code></a> in place of notices before every command's output, the <a href="#helper">background helper</a> that tracks jobs and runs the hourly agent sync, the <a href="#agent-lockout">agent-lockout check</a> on every firewall change, and a command that may already have run is never sent twice. New in v2.6.1: <code>fleet server remove</code> tears agents down over their own authenticated connection, and <code>fleet server add</code> honours <code>runtime.default_agent_port</code>. New in v2.6.0: <a href="#agent-auto-sync">automatic agent sync</a> (<code>fleet sync-agent auto</code>). New in v2.5.0: <code>fleet start</code> and <code>fleet stop</code> for a background daemon, <code>fleet version</code>, <code>fleet file view</code> and <code>fleet file edit</code>, and <code>fleet approve</code> running the approved command. Check what you have with <code>fleet --version</code>, and see <a href="/whats-new.html">what's new</a>.</p></div>
           </div>
 
           <h3>Conventions and global flags</h3>
@@ -478,9 +479,11 @@ fleet server add edge-01 unknown <span class="f">--mode</span> reverse</pre></di
                 <tr><td><code>--login-user</code></td><td>—</td><td>Login user for agent auto-install, e.g. <code>root</code> or <code>ubuntu</code></td></tr>
                 <tr><td><code>--login-port</code></td><td><code>22</code></td><td>SSH port used for the install login</td></tr>
                 <tr><td><code>--login-key</code></td><td>—</td><td>Private key for the install login</td></tr>
-                <tr><td><code>--login-password</code></td><td>—</td><td>Password for the install login (prefer keys)</td></tr>
+                <tr><td><code>--login-password-stdin</code></td><td>off</td><td>Read the install login's password from the first line of standard input (prefer keys)</td></tr>
+                <tr><td><code>--login-password</code></td><td>—</td><td>Password for the install login on the command line, where other users on the machine can see it; prefer <code>--login-password-stdin</code></td></tr>
                 <tr><td><code>--sudo</code></td><td>off</td><td>Run install steps with <code>sudo</code> when the login user is not root</td></tr>
                 <tr><td><code>--no-agent</code></td><td>off</td><td>Register only; skip the agent install</td></tr>
+                <tr><td><code>--yes</code>, <code>-y</code></td><td>off</td><td>Install the agent without asking to confirm</td></tr>
                 <tr><td><code>--accept-new-host-key</code></td><td>off</td><td>Re-pin a changed SSH host key without prompting, after you have verified it</td></tr>
               </tbody>
             </table>
@@ -495,13 +498,13 @@ fleet server reconnect web-01
 fleet server mode edge-01 reverse
 fleet server enroll-token edge-01</pre></div>
           <div class="code"><pre>NAME    MODE     ADDRESS          STATUS  NODE    OS/ARCH      VERSION
-db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.6.1
-edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.6.1
-web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.6.1</pre></div>
+db-01   direct   192.0.2.30:2222  online  db-01   linux/amd64  v2.7.0
+edge-01 reverse  unknown:2222     online  edge-01 linux/arm64  v2.7.0
+web-01  direct   192.0.2.10:2222  online  web-01  linux/amd64  v2.7.0</pre></div>
           <p><code>reconnect</code> connects again and refreshes what the controller knows; add <code>--accept-new-host-key</code> after you have verified a changed host key. <code>enroll-token</code> mints a fresh one-time token for a reverse agent, for example after it lost its key.</p>
 
           <h3>Remove a server</h3>
-          <p>Removing a server with a managed agent logs in with the stored credentials, stops and removes the systemd service, binary and state directory, and forgets the pinned host key.</p>
+          <p>Removing a server with a managed agent tears it down on the server and forgets the pinned host key. The teardown goes through the agent's existing, authenticated connection, so it needs no login credentials; if the agent cannot be reached, Fleet falls back to SSH with the stored login credentials, and <code>--via-ssh</code> uses SSH with the credentials you give.</p>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet server remove web-01
 
 <span class="c"># The server is gone: delete the record without touching it</span>
@@ -674,7 +677,7 @@ fleet exec <span class="f">--all</span> <span class="f">--json</span> -- uptime 
           <p>A fan-out exits non-zero when any server failed — blocked by policy, unreachable, timed out or a non-zero remote exit. With <code>--propagate-exit</code> the first non-zero remote exit code, in target order, becomes the exit status. In <code>--json</code> mode only a policy block makes the exit status non-zero, and notes go to stderr so stdout stays valid JSON.</p>
 
           <h3>Timeouts, retries and repeat runs</h3>
-          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre><span class="c"># Abort after 5 minutes; retry only if the transport fails</span>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre><span class="c"># Abort after 5 minutes; retry only failures that never reached the server</span>
 fleet exec web-01 <span class="f">--timeout</span> 5m <span class="f">--retry</span> 2 <span class="f">--backoff</span> 5s -- /opt/app/migrate.sh
 
 <span class="c"># A retried call with the same key returns the cached result instead of running again</span>
@@ -685,7 +688,7 @@ fleet exec web-01 <span class="f">--on-fail</span> <span class="s">"systemctl re
 
 <span class="c"># Print what would run, and where, without running it</span>
 fleet exec <span class="f">--group</span> role=web <span class="f">--dry-run</span> -- systemctl reload nginx</pre></div>
-          <p><code>--retry</code> never re-runs a command that actually ran; it only covers connection failures. Idempotency results are cached on the controller for an hour per key, server and command.</p>
+          <p><code>--retry</code> retries only failures that certainly never reached the server, including when the command goes through the daemon. Fleet never sends a command twice when it may already have run: if the connection drops while the command runs, it is not sent again and fails with <em>may have run; check before retrying</em>. A pooled connection that has been quiet for 10 seconds is probed before a command goes out on it. Idempotency results are cached on the controller for an hour per key, server and command.</p>
 
           <h3>All flags</h3>
           <div class="table-wrap">
@@ -697,8 +700,8 @@ fleet exec <span class="f">--group</span> role=web <span class="f">--dry-run</sp
                 <tr><td><code>--parallel</code></td><td><code>16</code></td><td>Servers at once for <code>--all</code>/<code>--group</code></td></tr>
                 <tr><td><code>--json</code></td><td>off</td><td>Structured result</td></tr>
                 <tr><td><code>--timeout</code></td><td>none</td><td>Abort after a duration and report <code>timed_out</code></td></tr>
-                <tr><td><code>--retry</code></td><td><code>0</code></td><td>Retry transport failures up to N times</td></tr>
-                <tr><td><code>--backoff</code></td><td><code>2s</code></td><td>Delay between transport retries</td></tr>
+                <tr><td><code>--retry</code></td><td><code>0</code></td><td>Retry up to N times, only after failures that never reached the server</td></tr>
+                <tr><td><code>--backoff</code></td><td><code>2s</code></td><td>Delay between retries</td></tr>
                 <tr><td><code>--propagate-exit</code></td><td>off</td><td>Exit with the remote command's exit code</td></tr>
                 <tr><td><code>--dry-run</code></td><td>off</td><td>Print <code>would run: …</code> for each target and stop</td></tr>
                 <tr><td><code>--idempotency-key</code></td><td>—</td><td>Return the cached result for this key instead of re-running</td></tr>
@@ -853,8 +856,8 @@ fleet file edit web-01 /etc/nginx/nginx.conf <span class="f">--history</span></p
         </section>
 
         <section id="file-manager" class="prose">
-          <h2>File manager</h2>
-          <p>Two interactive file managers sit on the same transfer engine: a dual-pane terminal UI and a localhost web UI. Both work local ↔ server and server ↔ server.</p>
+          <h2>File manager and web console</h2>
+          <p>Two interactive file managers sit on the same transfer engine: a dual-pane terminal UI and the Files view of the localhost web console. Both work local ↔ server and server ↔ server.</p>
           <h3>Terminal: <code>fleet files</code></h3>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet files                 <span class="c"># Local on the left, the first server on the right</span>
 fleet files web-01          <span class="c"># Local and web-01</span>
@@ -889,20 +892,61 @@ fleet files web-01 db-01    <span class="c"># two servers side by side</span></p
             </table>
           </div>
 
-          <h3>Browser: <code>fleet file ui</code></h3>
-          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet file ui
+          <h3 id="web-console">Browser: <code>fleet console</code> <span class="tag tag-violet">New in v2.7.0</span></h3>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet console                <span class="c"># every view: Fleet, Control, Files and Terminal (alias: fleet web)</span>
+fleet console <span class="f">--control=false</span> <span class="f">--terminal=false</span>
+fleet file ui                <span class="c"># the same console on the file manager, Control and Terminal off</span>
+fleet file ui <span class="f">--control</span> <span class="f">--terminal</span>
 fleet file ui <span class="f">--addr</span> 127.0.0.1:9000 <span class="f">--open</span> no</pre></div>
-          <p>It prints a URL such as <code>http://127.0.0.1:9445/?t=…</code> with a per-run token and, on a terminal, offers to open your browser (<code>--open auto|yes|no</code>). <code>fleet filemanager ui</code> is the same command.</p>
+          <p><code>fleet console</code> (alias <code>fleet web</code>) starts the localhost web console with every view on: <strong>Fleet</strong>, <strong>Control</strong>, <strong>Files</strong> and <strong>Terminal</strong>. Turn views off with <code>--control=false</code> and <code>--terminal=false</code>. <code>fleet file ui</code> (or <code>fleet filemanager ui</code>) starts the same console on the file manager, where Control and Terminal stay off unless you add <code>--control</code> or <code>--terminal</code>. With either on, whoever holds the console's session token can act on the whole fleet with the authority of the command that started it, so start it with a scoped <a href="#tokens"><code>--token</code></a> to bound what they can do. <code>--addr</code> sets the loopback address and <code>--open auto|yes|no</code> whether to open a browser. <code>fleet start</code> is unrelated: it runs the <a href="#daemon">controller daemon</a>.</p>
+          <p>On a terminal both show a panel instead of a bare URL, with four choices:</p>
+          <ol>
+            <li>open the console in your browser;</li>
+            <li>show the access link (it carries the session token, so keep it private);</li>
+            <li>keep it running in the background and return to the shell;</li>
+            <li>stop it.</li>
+          </ol>
+          <p>When a console already runs in the background, the panel keeps the same numbers: 2 shows a one-time link, 3 leaves it running and 4 stops it.</p>
+          <p>In a script or a pipe they print the link and serve until interrupted. The browser is opened with a <strong>one-time code</strong> (<code>/?c=…</code>, usable once, within 30 seconds), never the session token: a process's arguments can be read by every account on the machine. If a link is used a second time, the page says so and the session token is replaced; if you did not open it twice, run <code>fleet console stop</code>.</p>
+
+          <h3>Keep the console in the background</h3>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet console <span class="f">--background</span>       <span class="c"># start it in the background and return</span>
+fleet console open               <span class="c"># open it in a new browser tab</span>
+fleet console open <span class="f">--files</span>       <span class="c"># ...on the file manager</span>
+fleet console open <span class="f">--print</span>       <span class="c"># print a one-time link instead</span>
+fleet console status             <span class="c"># whether it runs, where, and until when</span>
+fleet console stop</pre></div>
+          <ul>
+            <li>Choice 3 in the panel hands the running console over, so tabs you already opened keep working; it asks whether to keep Control and Terminal on (default no). <code>fleet console --background</code> keeps them only with <code>--control</code> / <code>--terminal</code>.</li>
+            <li>It stops by itself after <strong>an hour without use</strong> and after <strong>8 hours</strong> at most — <strong>30 minutes</strong> and <strong>1 hour</strong> with Control or Terminal on. The page's own refreshes and streams do not count as use.</li>
+            <li>Running <code>fleet console</code> or <code>fleet file ui</code> again reaches it instead of starting another; <code>fleet file ui</code> opens it on the file manager.</li>
+            <li>It keeps its session token in memory only. Its data directory holds its address and a launch key that only lets <code>fleet console open</code> ask for a one-time code (both owner-only). It cannot be started or opened under <code>--token</code> / <code>FLEET_TOKEN</code>, because it acts with the controller's full authority.</li>
+            <li><code>fleet console stop</code> asks it to stop, so it ends its runs and terminals, and signals only the background console's own process.</li>
+          </ul>
+
+          <h3>What the console shows</h3>
+          <p>The tabs are <strong>Fleet</strong>, <strong>Control</strong>, <strong>Files</strong> and <strong>Terminal</strong>, in that order, and it opens on Fleet (<code>fleet file ui</code> opens on Files). <kbd>Alt</kbd>+<kbd>1</kbd> to <kbd>Alt</kbd>+<kbd>4</kbd> switch between them, and light and dark themes follow the system setting.</p>
+          <ul>
+            <li><strong>Fleet:</strong> every server as a card with status, OS, ring gauges for CPU, memory and disk, tags and alerts, or as a sortable table, with filters and auto-refresh. <em>Browse</em> opens a server in a file pane. With Control on, <em>Manage</em> opens per-server actions (services, unit status, journal, run a command, live metrics, health checklist, firewall, open ports, tags, reconnect, remove), <em>Add server</em> opens the Add server wizard, and open alerts have <em>Ack</em> and <em>Snooze 1h</em>. Start the console with <code>--token</code> and the overview is checked against that token, like <code>fleet server list</code>.</li>
+            <li><strong>Control:</strong> Fleet's tools as screens, laid out like System Settings, with an Overview (a one-line summary of the fleet, tiles, quick actions, recent activity), <em>Activity</em>, pinned pages and categories in the sidebar, and search by plain name or command name.
+              <ul>
+                <li><strong>Servers</strong> lists your servers straight away. Each has its own page with its details, usage and one-click actions: services, run a command, files, terminal, live usage, health checklist, firewall, open ports, tags, reconnect and remove.</li>
+                <li><strong>Add server</strong> is a wizard: the server, the agent and how to sign in (Fleet's key, a key file or a password), a review, then progress and the result. If the agent install fails, it offers to remove the half-added server and go back to the form. A reverse server prints a one-time join secret, so the wizard gives you the terminal command for it instead.</li>
+                <li>A page that only reads (agent versions, health, jobs, logs…) loads its data as soon as it opens, as tables where it can. A page that changes something has a button named for what it does and shows how it went. The command behind a page is under <em>Show the command</em>.</li>
+              </ul>
+              Each run is the <code>fleet</code> binary itself, started with this controller's config directory and the <code>--token</code> the console was started with, if any, so tokens, command policy, redaction, confirmations and the audit log apply exactly as in a terminal. Runs can be stopped, <em>Activity</em> keeps the history of what you ran, and pages can be pinned. Commands that need a terminal, and those that reach the controller's keys, tokens or secrets, are listed but refused; an SSH password goes to the command on standard input, never on its command line. Prompts fail closed unless you tick <code>--yes</code> or <code>--confirm</code>, and commands that change things ask in the browser first.</li>
+            <li><strong>Terminal:</strong> interactive shells on direct-mode servers, in tabs. Full-screen programs such as <code>top</code> and <code>vim</code> work, the size follows the window, a reload re-attaches and an ended session can reconnect. Each tab is <code>fleet ssh</code> run by the controller under the same <code>--token</code>, so tokens, host-key pinning and the audit log apply. Up to 8 at once; a shell no tab has watched for 15 minutes is ended. Needs a Linux or macOS controller.</li>
+          </ul>
+          <p><strong>Files</strong> is the web file manager:</p>
           <ul>
             <li>Two panes by default, up to six; each is Local or any server. Drag between panes to copy or move, drop files from your desktop to upload, and double-click a text file to edit it.</li>
-            <li>A per-pane toolbar and right-click menu cover new folder and file, rename, delete, copy, move, compress, extract, permissions, checksum, duplicate, upload and download, with list and icon views, filtering and sortable columns.</li>
+            <li>A per-pane toolbar and right-click menu cover new folder and file, rename, delete, copy, move, compress, extract, permissions, checksum, duplicate, upload and download, with list and icon views, filtering and sortable columns. New file, rename and a move within one pane never overwrite an existing file, hidden ones included.</li>
             <li>Keyboard first: arrows and <kbd>Enter</kbd>, <kbd>Backspace</kbd> for up, <kbd>F6</kbd> to switch panes, <kbd>F2</kbd> to rename, <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>C</kbd>/<kbd>X</kbd> then <kbd>V</kbd> in the other pane, a command palette on <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd>, and <kbd>?</kbd> for every shortcut.</li>
             <li>Light and dark themes, a one-pane phone layout, previews of text and common images, streaming downloads that abort rather than deliver a corrupt file, and smooth scrolling through folders with tens of thousands of entries.</li>
-            <li>The <strong>Fleet</strong> tab is a read-only overview of every server — status, mode, OS, CPU, memory and disk, last seen, tags and open alerts — with filters and auto-refresh. <em>Browse</em> opens a server in a file pane. Start the UI with <code>--token</code> and the overview is checked against that token, like <code>fleet server list</code>.</li>
           </ul>
           <div class="callout">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-lock"/></svg>
-            <div><p><strong>Locked down by default.</strong> The web UI binds to loopback only, requires the per-run token on every request, accepts mutations only as same-origin <code>POST</code>s, sends a strict Content-Security-Policy and never renders previewed SVG or HTML. Its Local source refuses paths inside the controller's config directory.</p></div>
+            <div><p><strong>Locked down by default.</strong> The web console binds to loopback only, requires its session token on every request (the browser gets it through a one-time code), accepts mutations only as same-origin <code>POST</code>s, sends a strict Content-Security-Policy and never renders previewed SVG or HTML. Its Local source refuses paths inside the controller's config directory.</p></div>
           </div>
         </section>
 
@@ -980,7 +1024,7 @@ fleet journal web-01 <span class="f">--unit</span> nginx <span class="f">--follo
           <p><code>--unit</code> is required; <code>--lines</code> (<code>-n</code>) defaults to 200. <code>--grep</code> is a case-insensitive substring match, run on the server where journalctl supports it. <code>--follow</code> resumes from journalctl's cursor on each poll.</p>
 
           <h3>Audit log</h3>
-          <p>Every state-changing action is appended to a hash-chained, tamper-evident log at <code>logs/_audit.log</code>: remote commands (<code>exec.run</code>, with exit codes), file changes, approvals, policy changes, and key, token and secret changes — names only, never secret values. <code>fleet logs</code> reads it; with <code>--server</code> and <code>--service</code> it reads a service log instead.</p>
+          <p>Every state-changing action is appended to a hash-chained, tamper-evident log at <code>logs/_audit.log</code>: remote commands (<code>exec.run</code>, with exit codes), file changes, approvals, policy changes, and key, token and secret changes — names only, never secret values. <code>fleet logs</code> reads it, and <code>--server</code> or <code>--service</code> on its own filters it; with both <code>--server</code> and <code>--service</code> it reads a service log instead.</p>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet logs
 fleet logs <span class="f">--search</span> exec.run
 fleet logs <span class="f">--server</span> web-01 <span class="f">--service</span> nginx.service <span class="f">--follow</span>
@@ -1064,7 +1108,7 @@ fleet alerts <span class="f">--server</span> web-01 <span class="f">--severity</
 fleet alerts ack metrics-web-01-disk-warning
 fleet alerts suppress metrics-web-01-disk-warning <span class="f">--for</span> 24h
 fleet alerts unsuppress metrics-web-01-disk-warning</pre></div>
-          <p>Severities are <code>info</code>, <code>warning</code> and <code>critical</code>. Suppression defaults to 6 hours. New critical alerts can raise a desktop notification (<code>runtime.desktop_notifications</code>), with reminders no more often than <code>runtime.alert_notify_cooldown</code> (6 hours). The dashboard's Alerts tab has the same actions.</p>
+          <p>Severities are <code>info</code>, <code>warning</code> and <code>critical</code>. Suppression defaults to 6 hours. Desktop pop-ups for critical alerts are paused until a dependency-free native implementation lands. The dashboard's Alerts tab has the same actions.</p>
         </section>
 
         <section id="notify" class="prose">
@@ -1082,7 +1126,7 @@ fleet notify rm 0</pre></div>
               <tbody>
                 <tr><td><code>offline</code></td><td>The daemon's metrics collection from a server starts failing</td></tr>
                 <tr><td><code>online</code></td><td>Collection from that server recovers</td></tr>
-                <tr><td><code>job-failed</code></td><td>A <a href="#jobs">background job</a> finishes with a non-zero exit</td></tr>
+                <tr><td><code>job-failed</code></td><td>A <a href="#jobs">background job</a> finishes with a non-zero exit, or is lost</td></tr>
                 <tr><td><code>drift</code></td><td><a href="#drift"><code>fleet drift</code></a> finds a change</td></tr>
                 <tr><td><code>destructive</code></td><td>A destructive command succeeds — for example <code>server remove</code>, <code>file rm</code>, firewall changes, secret changes, <code>sync</code>, <code>key rotate</code> or setting tags. The message names the command, server and operator, never other arguments. <code>exec</code>, <code>ssh</code> and <code>job run</code> do not fire it.</td></tr>
               </tbody>
@@ -1131,27 +1175,49 @@ fleet notify rm 0</pre></div>
 
         <section id="firewall" class="prose">
           <h2>Firewall and ports <span class="tag tag-blue">Linux</span></h2>
-          <p>There are two ways to manage a server's firewall. <code>fleet fw</code> is agent-safe and works with nftables, iptables, firewalld or ufw. <code>fleet firewall</code> and <code>fleet port</code> drive ufw directly.</p>
+          <p>There are two ways to manage a server's firewall. <code>fleet fw</code> works with nftables, iptables, firewalld or ufw. <code>fleet firewall</code> and <code>fleet port</code> drive ufw directly. Both refuse a change that would cut Fleet off from the agent.</p>
 
-          <h3>Agent-safe: <code>fleet fw</code></h3>
+          <h3 id="agent-lockout">Agent-lockout check <span class="tag tag-violet">New in v2.7.0</span></h3>
+          <p>Every command that can block traffic first reads the server's rules and refuses if the change would lock Fleet out of the agent: <code>firewall enable</code>, <code>firewall add</code>, <code>port close</code>, the firewall settings in <a href="#templates"><code>template apply</code></a>, and <code>fw enable --safe</code>. The refusal names the command to run first — <code>fleet port open web-01 2222</code> for ufw, <code>fleet fw allow web-01 2222/tcp</code> for <code>fw</code> — and both the refusal and any override are written to the audit log.</p>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet firewall enable web-01
+<span class="c"># refusing to enable the firewall on web-01: port 2222/tcp, which fleet uses to reach the agent,</span>
+<span class="c"># is not allowed by the rules that would be in force ... Run this first, then retry: fleet port open web-01 2222</span>
+fleet port open web-01 2222
+fleet firewall enable web-01</pre></div>
+          <ul>
+            <li><strong>Direct mode:</strong> the agent's port must be allowed for inbound TCP ahead of any rule that may block it. Fleet parses the rules in the order the firewall applies them: ufw's from <code>ufw show added</code> (active or not), iptables' <code>INPUT</code> chain, the nftables chain Fleet manages, and firewalld's zones (the zone that takes the controller's connection, or every active zone when Fleet cannot tell). A deny, reject or limit on the port or on a range that includes it, a block of all traffic from an address or on an interface, a jump to another chain, a service name Fleet does not resolve and any line it cannot read all count as blocking.</li>
+            <li><strong>Allowing the port only for your controller is fine, and safer:</strong> from its IP or network (<code>ufw allow from 203.0.113.7 to any port 2222</code>), or only on the interface its connection arrives on, such as a VPN (<code>ufw allow in on tailscale0 to any port 2222</code>). While the check runs, Fleet is connected to the agent port, so it lists the server's connections to that port and sees where the server sees Fleet coming from, after any NAT, and on which interface. A restricted allow is accepted when every such connection matches it, and a block that matches none of them, such as a blocklist entry for another host, does not stand in the way.</li>
+            <li><strong>Not enough:</strong> an allow that does not include the controller's connection, one Fleet cannot check, or one only outbound or for forwarding. The refusal names that rule and the address the server sees Fleet connecting from.</li>
+            <li><strong>Reverse mode:</strong> the agent dials out and listens on no port, so enabling must keep established/related traffic accepted and outgoing traffic allowed.</li>
+            <li><strong>Fail closed:</strong> if Fleet cannot read the firewall's state, it refuses. A direct-mode server record without a valid agent port refuses tightening changes instead of assuming the default port.</li>
+            <li><strong>Override:</strong> <code>--force-i-have-console</code> skips the refusal. It is only for a person with out-of-band console access to the server who accepts losing the agent, never for scripts or AI agents. It is refused under any <code>--token</code> / <code>FLEET_TOKEN</code>, and the web console's Control view neither offers nor accepts it.</li>
+          </ul>
+
+          <h3>Any backend: <code>fleet fw</code></h3>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet fw status web-01
+fleet fw allow web-01 2222/tcp      <span class="c"># direct mode: allow the agent port first</span>
 fleet fw allow web-01 443/tcp
-fleet fw enable web-01 <span class="f">--safe</span> <span class="f">--undo-after</span> 120</pre></div>
-          <p><code>fw</code> always adds an allow rule for the agent's own port before tightening anything, so the controller cannot lock itself out. <code>enable --safe</code> switches to default-drop only after checking the agent stays reachable, and schedules a self-reverting timer (default 60 seconds) that reopens the host if the change cuts the agent off. <code>--force-i-have-console</code> skips the lockout refusal — use it only with out-of-band console access.</p>
+fleet fw enable web-01 <span class="f">--safe</span> <span class="f">--undo-after</span> 120   <span class="c"># human summary; add --json for JSON</span></pre></div>
+          <p><code>fw enable --safe</code> runs the same check, so in direct mode it refuses until the agent port is allowed and names <code>fleet fw allow web-01 2222/tcp</code>; it does not open the port for you. With nftables and iptables it accepts established/related and loopback traffic before the drop policy. On firewalld, <code>fw allow</code> writes the permanent configuration and never reloads firewalld.</p>
+          <ul>
+            <li><strong>Self-revert timer:</strong> armed before the change (with <code>systemd-run</code>, or <code>setsid</code> where systemd isn't available). After <code>--undo-after</code> seconds (default 60) it restores the earlier state unless you cancel it. Nothing cancels it automatically: the summary prints the cancel command, such as <code>fleet exec web-01 'systemctl stop fleet-fw-safe-revert-….timer'</code>, and you run it once <code>fleet server reconnect web-01</code> succeeds. If the enable step fails after the timer was armed, it says so and prints the cancel command too.</li>
+            <li><strong>What the undo restores:</strong> the policy and the rules that enable added; it never removes allow rules. It cannot restore changes someone else made in the meantime, ufw rules, firewalld zone changes or ip6tables, which Fleet doesn't touch. nftables and iptables changes aren't persisted, so a reboot also drops them.</li>
+          </ul>
 
           <h3>ufw: <code>fleet firewall</code> and <code>fleet port</code></h3>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet firewall status web-01
+fleet port open web-01 2222          <span class="c"># direct mode: the agent port, before enabling ufw</span>
+fleet firewall enable web-01
 fleet firewall add web-01 <span class="s">"allow 443/tcp"</span>
 fleet firewall add web-01 <span class="s">"allow from 203.0.113.0/24 to any port 22"</span>
 fleet port list web-01
 fleet port open web-01 8443
 fleet port close web-01 8443
-fleet firewall enable web-01
 fleet firewall disable web-01</pre></div>
-          <p>Rules must match <code>allow|deny|limit|reject PORT[/tcp|/udp]</code> or <code>allow|deny|limit|reject from ADDRESS to any port PORT[/tcp|/udp]</code>; anything else, such as <code>reset</code> or <code>delete</code>, is refused.</p>
+          <p>Rules must match <code>allow|deny|limit|reject PORT[/tcp|/udp]</code> or <code>allow|deny|limit|reject from ADDRESS to any port PORT[/tcp|/udp]</code>; anything else, such as <code>reset</code> or <code>delete</code>, is refused. <code>firewall add</code> also refuses deny, reject or limit rules on the agent port and any rule the check cannot read, and <code>port close</code> refuses to close the direct agent's port.</p>
           <div class="callout warn">
             <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-triangle-alert"/></svg>
-            <div><p><code>fleet firewall enable</code> turns ufw on immediately. Allow the agent port (<code>2222</code> by default) first, or use <code>fleet fw enable --safe</code> or a <a href="#guard">guarded change</a> instead.</p></div>
+            <div><p><code>fleet firewall enable</code> turns ufw on immediately, with no revert timer. It reads the rules first and refuses unless the agent port is allowed (in reverse mode, unless established/related and outgoing traffic stay allowed). For a change that undoes itself, use <code>fleet fw enable --safe</code> or a <a href="#guard">guarded change</a>.</p></div>
           </div>
         </section>
 
@@ -1165,9 +1231,11 @@ fleet job logs 1 <span class="f">--follow</span>
 fleet job wait 1 <span class="f">--timeout</span> 30m &amp;&amp; echo <span class="s">"import finished"</span></pre></div>
           <ul>
             <li><code>job run</code> prints the job's ID (a number); <code>--name</code> is a label shown in <code>fleet jobs</code>. Add <code>--json</code> to <code>run</code>, <code>status</code>, <code>wait</code> or <code>jobs</code> for machine-readable records.</li>
-            <li><code>job wait</code> exits 0 when the job succeeded and 1 when it failed, so you can chain the next step. <code>--timeout 0</code> (the default) waits forever.</li>
-            <li>Output is written to an owner-only, unpredictably named log in <code>/var/tmp</code> on the server. A failed job fires the <code>job-failed</code> <a href="#notify">notification</a>.</li>
-            <li>Finished jobs and their logs are pruned on the controller and the servers after the retention period (default 7 days): <code>fleet config set job-log-retention 30d</code>, or <code>0</code> to keep them.</li>
+            <li><code>job wait</code> exits 0 when the job succeeded and 1 when it failed or was lost, so you can chain the next step. <code>--timeout 0</code> (the default) waits forever.</li>
+            <li>The <a href="#helper">background helper</a> keeps checking running jobs, so <code>fleet jobs</code> shows a finished job as done, and a failed one fires the <code>job-failed</code> <a href="#notify">notification</a> once, without anyone polling. Jobs on reverse-mode servers are checked while a daemon runs.</li>
+            <li>A job that can never report back ends as <strong><code>lost</code></strong> instead of running forever, with the reason in <code>fleet job status</code>: its server was removed from the fleet, or its process is gone without a result (the server rebooted, or the job was killed). A lost job also fires <code>job-failed</code>.</li>
+            <li>Output is written to an owner-only, unpredictably named log in <code>/var/tmp</code> on the server.</li>
+            <li>Finished and lost jobs and their logs are pruned on the controller and the servers after the retention period (default 7 days), daily by the background helper or hourly by the daemon while it runs: <code>fleet config set job-log-retention 30d</code>, or <code>0</code> to keep them.</li>
           </ul>
         </section>
 
@@ -1224,7 +1292,7 @@ open_ports = [80, 443]
 rules = [<span class="s">"allow from 203.0.113.0/24 to any port 22"</span>]</pre></div>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet template list
 fleet template apply web-01 web.toml</pre></div>
-          <p>A <code>[firewall]</code> table may also set <code>enabled = true</code>, which turns ufw on <em>before</em> ports and rules are applied — make sure the agent port is already allowed.</p>
+          <p>A <code>[firewall]</code> table may also set <code>enabled = true</code>. <code>template apply</code> opens the template's ports and adds its rules before it turns the firewall on, and changes services last, so a template that allows the agent port works on a fresh host. Its firewall settings go through the <a href="#agent-lockout">agent-lockout check</a>, and a refusal stops the template before any service is touched.</p>
         </section>
 
         <section id="shell" class="prose">
@@ -1349,9 +1417,9 @@ fleet approvals reject 70ea09cc74284eae</pre></div>
 fleet confirm web-01-1
 <span class="c"># ...or undo it now</span>
 fleet revert web-01-1</pre></div>
-          <p><code>--revert-after</code> is required. Always give a <code>--revert-cmd</code> that fully undoes the change.</p>
+          <p><code>--revert-after</code> is required. Always give a <code>--revert-cmd</code> that fully undoes the change. The <a href="#approvals">command policy</a> applies to the <code>--revert-cmd</code> as well as to the risky command, since the revert runs on the server too.</p>
           <h3>Lighter checks</h3>
-          <p><code>fleet exec --guard</code> refuses commands that could lock the controller out of a server; <code>--guard-warn</code> turns that into a warning. For firewalls specifically, <a href="#firewall"><code>fleet fw enable --safe</code></a> keeps the agent port open and reverts itself.</p>
+          <p><code>fleet exec --guard</code> refuses commands that could lock the controller out of a server; <code>--guard-warn</code> turns that into a warning. For firewalls specifically, <a href="#firewall"><code>fleet fw enable --safe</code></a> refuses a change that would cut off the agent and arms a timer that reverts it unless you cancel it.</p>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet exec web-01 <span class="f">--guard</span> -- <span class="s">"iptables -P INPUT DROP"</span></pre></div>
         </section>
 
@@ -1372,7 +1440,7 @@ fleet key rotate</pre></div>
 
         <section id="daemon" class="prose">
           <h2>Controller daemon</h2>
-          <p>The daemon accepts <a href="#transport">reverse-mode</a> agents, serves the local control socket that other <code>fleet</code> processes use to reach them, polls metrics and raises <a href="#alerts">alerts</a>, and checks for updates. Direct-mode servers work without it, but scheduled metrics polling — and with it alerts and the <code>offline</code> and <code>online</code> notifications — needs it.</p>
+          <p>The daemon accepts <a href="#transport">reverse-mode</a> agents, serves the local control socket that other <code>fleet</code> processes use to reach them, polls metrics and raises <a href="#alerts">alerts</a>, and checks for updates. Direct-mode servers work without it, but scheduled metrics polling — and with it alerts and the <code>offline</code> and <code>online</code> notifications — needs it. Tracking jobs, the hourly agent sync and job-log pruning don't: the <a href="#helper">background helper</a>, which starts by itself, does them.</p>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet start       <span class="c"># run it in the background</span>
 fleet status      <span class="c"># "daemon": {"running": true, "pid": ...}</span>
 fleet stop        <span class="c"># stop it</span>
@@ -1400,6 +1468,46 @@ fleet daemon      <span class="c"># or run it in the foreground</span></pre></di
           <p>The control socket is mutually authenticated. The daemon writes a per-run secret to <code>data/control.token</code> (owner-only); on every connection it first proves it holds the secret with an HMAC-SHA256 challenge over fresh nonces, and only then does the caller send its request, authenticated the same way. Something else listening on the port while the daemon is down learns nothing. The token file is removed when the daemon stops. One-shot direct-mode commands also relay through the daemon's warm connections unless <code>FLEET_NO_DAEMON_RELAY=1</code> is set.</p>
         </section>
 
+        <section id="helper" class="prose">
+          <h2>Background helper and notices <span class="tag tag-violet">New in v2.7.0</span></h2>
+          <p>Besides the optional <a href="#daemon">daemon</a>, Fleet runs one small background helper per config directory. It does the work that should happen without anyone asking:</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">Task</th><th scope="col">What it does</th><th scope="col">How often</th></tr></thead>
+              <tbody>
+                <tr><td><code>jobs</code></td><td>Checks running <a href="#jobs">background jobs</a>, so <code>fleet jobs</code> shows them done (or lost) and <code>job-failed</code> is sent without anyone polling</td><td>About 10 seconds after a job starts, then less often, up to once a minute; an unreachable server is retried with backoff, up to every 5 minutes</td></tr>
+                <tr><td><code>agent-sync</code></td><td>The hourly <a href="#agent-auto-sync">automatic agent sync</a></td><td>Checks every 5 minutes whether the hourly run is due</td></tr>
+                <tr><td><code>job-log-prune</code></td><td>Removes job records and remote job logs older than <code>job-log-retention</code></td><td>Daily</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet helper status          <span class="c"># running? pid, uptime, and each task's last run, next run and last error</span>
+fleet helper status <span class="f">--json</span>
+fleet helper restart         <span class="c"># for example after changing its environment</span></pre></div>
+          <ul>
+            <li><strong>Nothing to set up or turn off.</strong> Every <code>fleet</code> command checks whether the helper is running and starts it when it isn't, without printing anything. It exits by itself when the <code>fleet</code> binary is replaced (an upgrade) or the config directory is removed, so the next command starts a fresh one.</li>
+            <li><strong>Each task follows its own setting:</strong> <code>fleet sync-agent auto off</code> stops the agent sync and <code>job-log-retention 0</code> stops the pruning. <code>FLEET_AGENT_AUTOSYNC=off</code> in the environment the helper starts from also keeps it from syncing agents; run <code>fleet helper restart</code> for a change to reach a helper that is already running.</li>
+            <li><strong>With the daemon:</strong> while a daemon runs, the helper leaves the agent sync and the job-log pruning to it and keeps tracking jobs. Jobs on reverse-mode servers are only checked while a daemon runs, since that is the only way to reach them.</li>
+            <li><strong>Scoped tokens:</strong> a command run with <code>--token</code> / <code>FLEET_TOKEN</code> never starts the helper, so a scoped credential cannot start fleet-wide work, even indirectly. <code>fleet helper restart</code> refuses to run under a token, and scoped tokens cannot run <code>fleet helper</code> at all.</li>
+            <li><strong>Problems</strong> show in <code>fleet helper status</code> and <code>fleet errors</code>, never on your terminal. The helper's output goes to <code>logs/helper.log</code> and its state to <code>data/helper-status.json</code>.</li>
+            <li>On Windows it runs from a copy of <code>fleet.exe</code> in the data directory, so a WinGet upgrade or uninstall is not blocked by the running helper.</li>
+          </ul>
+
+          <h3 id="errors">What needs attention: <code>fleet errors</code></h3>
+          <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet errors             <span class="c"># also: fleet issues, fleet notices</span>
+fleet errors <span class="f">--json</span></pre></div>
+          <p>Commands such as <code>fleet ssh</code> and <code>fleet exec</code> no longer print notices before their own output. <code>fleet errors</code> lists what needs attention instead, with the command that fixes each item:</p>
+          <ul>
+            <li>an available <a href="#updates">update</a>;</li>
+            <li>a pending <a href="#adjust-init"><code>fleet adjust-init</code></a>;</li>
+            <li>a passphrase-protected controller key;</li>
+            <li>servers the last automatic agent sync could not update;</li>
+            <li>problems of the background helper;</li>
+            <li>reverse-mode servers waiting for a daemon that is not running.</li>
+          </ul>
+          <p>Bare <code>fleet</code> lists the same items after its help, and <code>fleet status</code> prints a one-line count on stderr when run on a terminal. Each item is worked out from the controller's state every time, so it goes away once its cause is fixed. A command's own errors are reported as before. Scoped tokens cannot run <code>fleet errors</code>, because the list names servers fleet-wide.</p>
+        </section>
+
         <section id="config" class="prose">
           <h2>Configuration</h2>
           <p>Settings live in <code>config.toml</code> in the config directory. Inspect and change them with <code>fleet config</code>:</p>
@@ -1423,7 +1531,6 @@ fleet config agent-port 2222</pre></div>
                 <tr><td><code>runtime.session_reconnect_grace</code></td><td><code>10m</code></td><td>How long a dropped shell stays alive on the server</td></tr>
                 <tr><td><code>runtime.job_log_retention</code></td><td><code>7d</code></td><td>When finished job logs are pruned</td></tr>
                 <tr><td><code>runtime.alert_notify_cooldown</code></td><td><code>6h</code></td><td>Minimum gap between reminders for the same alert</td></tr>
-                <tr><td><code>runtime.desktop_notifications</code></td><td><code>true</code></td><td>Desktop notifications for new critical alerts</td></tr>
                 <tr><td><code>runtime.aggregated_log_max_size</code> / <code>_max_files</code> / <code>_max_age</code></td><td>5 MiB / 5 / 7 days</td><td>Bounds of the cached service logs</td></tr>
                 <tr><td><code>runtime.file_transfer.parallel_streams</code></td><td><code>8</code></td><td>Global transfer parallelism (<code>fleet file defaults</code>)</td></tr>
               </tbody>
@@ -1448,9 +1555,10 @@ fleet config import fleet-state.json</pre></div>
 
         <section id="adjust-init" class="prose">
           <h2>Config migrations</h2>
-          <p>When an upgrade adds or removes setup options, your <code>config.toml</code> may lack new settings or carry old ones. Fleet notices on every command and prints a hint:</p>
-          <div class="code"><pre>⚠  Your fleet config (init_version=2) is behind this version (init_version=3).
-   Run 'fleet adjust-init' to review and apply configuration changes.</pre></div>
+          <p>When an upgrade adds or removes setup options, your <code>config.toml</code> may lack new settings or carry old ones. <a href="#errors"><code>fleet errors</code></a> and bare <code>fleet</code> then list it (other commands no longer print a hint before their output):</p>
+          <div class="code"><pre>  ⚠ The controller config needs updating
+    Config (init_version=2) is behind this binary (init_version=3). Run 'fleet adjust-init' to apply changes.
+    Fix: fleet adjust-init</pre></div>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet adjust-init</pre></div>
           <p>Each pending change is shown as <code>[✕] removed</code> (with the reason; the entry is cleaned up) or <code>[+] added</code> (you choose a value). The config is saved and stamped with the current <code>init_version</code>. It is safe to run at any time.</p>
         </section>
@@ -1488,7 +1596,7 @@ fleet update channel beta</pre></div>
             <li><code>update apply</code> updates the controller, then rolls the update out to managed agents and reports any that fail. <code>--server</code> (repeatable) limits the rollout.</li>
             <li><code>update rollback</code> restores the binary saved by the last <code>apply</code>.</li>
             <li>Channels are <code>stable</code> and <code>beta</code>.</li>
-            <li>Fleet checks the channel at most every 10 minutes and caches the result; when a newer release exists, <code>fleet</code> commands print an <em>Update your fleet</em> notice on stderr with the right upgrade command for how you installed it.</li>
+            <li>Fleet checks the channel at most every 10 minutes and caches the result. When a newer release exists, <a href="#errors"><code>fleet errors</code></a> and bare <code>fleet</code> list it with the right upgrade command for how you installed it, and <code>fleet status</code> counts it on stderr. Other commands no longer print an update notice before their output.</li>
           </ul>
           <div class="table-wrap">
             <table>
@@ -1516,7 +1624,7 @@ fleet agent version web-01
 fleet agent update <span class="f">--canary</span> 1
 fleet agent update <span class="f">--group</span> role=web <span class="f">--canary</span> 2 <span class="f">--strict-health</span></pre></div>
           <ul>
-            <li><code>agent version</code> shows each agent's version in one form (<code>v2.6.1</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
+            <li><code>agent version</code> shows each agent's version in one form (<code>v2.7.0</code>), <code>dev</code> for development builds and <code>-</code> when unknown, and flags mismatches against the controller's version.</li>
             <li><code>agent update</code> updates a first batch of <code>--canary N</code> servers (default 1), waits up to 90 seconds for each to reconnect, answer and report the new version, and only then continues. If a canary fails, the rollout stops before touching the rest. <code>--canary 0</code> updates everything at once.</li>
             <li>Host problems on a canary (no swap, high load, full disk, pending reboot, clock skew) are reported but do not stop the rollout unless you pass <code>--strict-health</code>.</li>
           </ul>
@@ -1527,16 +1635,16 @@ fleet sync-agent <span class="f">--server</span> web-01 <span class="f">--server
           <h3 id="agent-auto-sync">Automatic agent sync <span class="tag tag-violet">New in v2.6.0</span></h3>
           <p>You don't have to remember <code>fleet sync-agent</code>: it runs on its own, on by default.</p>
           <ul>
-            <li><strong>Any <code>fleet</code> command</strong> whose last agent sync started more than an hour ago starts <code>fleet sync-agent</code> in the background. The command itself never waits; the output goes to <code>logs/agent-sync.log</code> in the config directory.</li>
+            <li><strong>The <a href="#helper">background helper</a></strong> checks every 5 minutes whether the last agent sync started more than an hour ago, and if so runs one. No command waits for it or prints anything about it; the output goes to <code>logs/agent-sync.log</code> in the config directory, and <code>fleet helper status</code> and <code>fleet errors</code> show how it went. (Before v2.7.0, whichever command noticed the sync was due started it.)</li>
             <li><strong>A running daemon</strong> (<code>fleet start</code>) syncs hourly even when nobody runs a command, and updates an agent within seconds when it connects with an older version (at most once an hour per server).</li>
             <li>Only agents known to be <strong>older</strong> than the controller are touched. An agent whose new binary needs a manual restart (Windows, macOS) is listed under <em>Awaiting restart</em> rather than sent again every hour, and reverse-mode agents wait for the daemon.</li>
             <li>Background, daemon and manual runs never overlap; a manual <code>fleet sync-agent</code> waits for one in progress.</li>
-            <li>Commands run with a <code>--token</code> never start a sync, so a scoped token can't trigger a fleet-wide update.</li>
+            <li>Commands run with a <code>--token</code> never start the helper, so a scoped token can't trigger a fleet-wide update, even indirectly.</li>
           </ul>
           <div class="code"><button class="copy-btn" type="button" data-copy><svg class="icon icon-copy" aria-hidden="true"><use href="/assets/icons.svg#i-copy"/></svg><svg class="icon icon-check" aria-hidden="true"><use href="/assets/icons.svg#i-check"/></svg><span class="copy-label">Copy</span></button><pre>fleet sync-agent auto          <span class="c"># status: last run, failures, next run, log</span>
 fleet sync-agent auto off      <span class="c"># turn it off (or: fleet config set agent-auto-sync off)</span>
 fleet sync-agent auto on
-FLEET_AGENT_AUTOSYNC=off fleet ...   <span class="c"># skip it for one shell</span></pre></div>
+FLEET_AGENT_AUTOSYNC=off       <span class="c"># in the environment the helper starts from, then: fleet helper restart</span></pre></div>
         </section>
 
         <section id="agentic" class="prose">
@@ -1565,7 +1673,7 @@ fleet ai sync <span class="f">--json</span></pre></div>
 
         <section id="commands" class="prose">
           <h2>Command reference</h2>
-          <p>All 62 top-level commands and their subcommands. Run <code>fleet ai &lt;command&gt;</code> for the full help of any of them, or <code>fleet context</code> for everything at once. <code>fleet help</code> and <code>fleet completion</code> are also available.</p>
+          <p>All 65 top-level commands and their subcommands. Run <code>fleet ai &lt;command&gt;</code> for the full help of any of them, or <code>fleet context</code> for everything at once. <code>fleet help</code> and <code>fleet completion</code> are also available.</p>
           <div class="table-wrap">
           <table>
             <thead><tr><th scope="col">Command</th><th scope="col">Subcommands</th><th scope="col">What it does</th></tr></thead>
@@ -1582,6 +1690,7 @@ fleet ai sync <span class="f">--json</span></pre></div>
               <tr><td><a href="#approvals"><code>fleet cmd-policy</code></a></td><td><code>set</code> <code>show</code></td><td>Manage the dangerous-command policy (deny / confirm patterns)</td></tr>
               <tr><td><a href="#config"><code>fleet config</code></a></td><td><code>agent-port</code> <code>backup</code> <code>edit</code> <code>export</code> <code>import</code> <code>restore</code> <code>set</code> <code>show</code> <code>validate</code></td><td>Show, validate, edit and change controller settings; back up, restore, export and import</td></tr>
               <tr><td><a href="#guard"><code>fleet confirm</code></a></td><td><span class="muted">—</span></td><td>Confirm a guarded change so its dead-man's-switch does not revert</td></tr>
+              <tr><td><a href="#web-console"><code>fleet console</code></a></td><td><code>open</code> <code>status</code> <code>stop</code></td><td>Open the web console: fleet overview, files, commands and terminals in your browser (alias fleet web)</td></tr>
               <tr><td><a href="#agentic"><code>fleet context</code></a></td><td><span class="muted">—</span></td><td>Print the full agent-facing reference (commands, concepts, workflows)</td></tr>
               <tr><td><a href="#files"><code>fleet cp</code></a></td><td><span class="muted">—</span></td><td>Copy a file (or directory with -r) directly between two servers</td></tr>
               <tr><td><a href="#cron"><code>fleet cron</code></a></td><td><code>add</code> <code>list</code> <code>rm</code></td><td>Add, list and remove managed cron jobs on a server</td></tr>
@@ -1590,14 +1699,16 @@ fleet ai sync <span class="f">--json</span></pre></div>
               <tr><td><a href="#config"><code>fleet database</code></a></td><td><code>shift</code> <code>show</code></td><td>Show the database backend or move to SQLite, PostgreSQL, MySQL or MariaDB</td></tr>
               <tr><td><a href="#health"><code>fleet doctor</code></a></td><td><span class="muted">—</span></td><td>Run a health checklist against a server (agent, ports, disk, swap, reboot, clock)</td></tr>
               <tr><td><a href="#drift"><code>fleet drift</code></a></td><td><code>capture</code></td><td>Capture a baseline of config files and report drift against it</td></tr>
+              <tr><td><a href="#errors"><code>fleet errors</code></a></td><td><span class="muted">—</span></td><td>Show what needs attention (updates, migrations, failed background work) and how to fix it (also issues, notices)</td></tr>
               <tr><td><a href="#exec"><code>fleet exec</code></a></td><td><span class="muted">—</span></td><td>Run a shell command on one server or all servers</td></tr>
               <tr><td><a href="#files"><code>fleet file</code></a></td><td><code>cat</code> <code>compress</code> <code>copy</code> <code>defaults</code> <code>defaults set</code> <code>defaults show</code> <code>diff</code> <code>download</code> <code>edit</code> <code>extract</code> <code>list</code> <code>mkdir</code> <code>move</code> <code>mv</code> <code>rm</code> <code>stat</code> <code>tail</code> <code>ui</code> <code>upload</code></td><td>Browse, transfer, edit, compare and archive files on servers</td></tr>
-              <tr><td><a href="#file-manager"><code>fleet filemanager</code></a></td><td><code>ui</code></td><td>Alias of fleet files (also fm); filemanager ui opens the web UI</td></tr>
+              <tr><td><a href="#file-manager"><code>fleet filemanager</code></a></td><td><code>ui</code></td><td>Alias of fleet files (also fm); filemanager ui opens the web console on the file manager</td></tr>
               <tr><td><a href="#file-manager"><code>fleet files</code></a></td><td><span class="muted">—</span></td><td>Dual-pane terminal file manager (local and server panes)</td></tr>
               <tr><td><a href="#firewall"><code>fleet firewall</code></a></td><td><code>add</code> <code>disable</code> <code>enable</code> <code>status</code></td><td>Show, enable and disable ufw and add rules</td></tr>
               <tr><td><a href="#firewall"><code>fleet fw</code></a></td><td><code>allow</code> <code>enable</code> <code>status</code></td><td>Agent-safe firewall control that never locks out the agent</td></tr>
               <tr><td><a href="#guard"><code>fleet guard</code></a></td><td><span class="muted">—</span></td><td>Run a risky command with a dead-man's-switch that auto-reverts unless confirmed</td></tr>
               <tr><td><a href="#health"><code>fleet health</code></a></td><td><span class="muted">—</span></td><td>Per-server health checks across the fleet (offline, swap, disk, reboot, clock, load)</td></tr>
+              <tr><td><a href="#helper"><code>fleet helper</code></a></td><td><code>restart</code> <code>status</code></td><td>Inspect the background helper (job tracking, agent auto-sync, job-log pruning)</td></tr>
               <tr><td><a href="#init"><code>fleet init</code></a></td><td><span class="muted">—</span></td><td>Run the first-time setup flow</td></tr>
               <tr><td><a href="#health"><code>fleet inventory</code></a></td><td><span class="muted">—</span></td><td>Machine-readable inventory of the fleet (hostname, IPs, OS, resources, ports, services, tags)</td></tr>
               <tr><td><a href="#jobs"><code>fleet job</code></a></td><td><code>logs</code> <code>run</code> <code>status</code> <code>wait</code></td><td>Run detached background jobs and check, wait for or follow them</td></tr>
@@ -1687,6 +1798,8 @@ fleet ai sync <span class="f">--json</span></pre></div>
                 <tr><td><code>data/idempotency.json</code></td><td><a href="#exec"><code>fleet exec --idempotency-key</code></a></td></tr>
                 <tr><td><code>data/daemon.pid</code>, <code>data/daemon.lock</code>, <code>logs/daemon.log</code></td><td><a href="#daemon">The daemon</a></td></tr>
                 <tr><td><code>data/update-rollback.json</code></td><td><a href="#updates"><code>fleet update apply</code></a></td></tr>
+                <tr><td><code>data/helper.pid</code>, <code>data/helper.lock</code>, <code>data/helper-status.json</code>, <code>logs/helper.log</code></td><td><a href="#helper">The background helper</a></td></tr>
+                <tr><td><code>data/console.json</code>, <code>data/console.key</code>, <code>data/console.lock</code>, <code>data/console.log</code></td><td><a href="#web-console">A background web console</a></td></tr>
               </tbody>
             </table>
           </div>

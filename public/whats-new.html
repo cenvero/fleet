@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>What's New in Cenvero Fleet — Release Notes and Changelog</title>
-  <meta name="description" content="Cenvero Fleet release notes from v2.0 to v2.6.1 — file managers, live sync, agentic AI, RBAC, secrets and security hardening — plus what's coming next.">
+  <meta name="description" content="Cenvero Fleet release notes from v2.0 to v2.7.0 — the web console, file managers, live sync, agentic AI, RBAC, secrets and security hardening — plus what's coming next.">
   <link rel="canonical" href="https://fleet.cenvero.org/whats-new.html">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
   <meta name="color-scheme" content="dark light">
@@ -55,12 +55,12 @@
         "@id": "https://fleet.cenvero.org/whats-new.html#webpage",
         "url": "https://fleet.cenvero.org/whats-new.html",
         "name": "What's New in Cenvero Fleet — Release Notes and Changelog",
-        "description": "Release notes for Cenvero Fleet v2.0 through v2.6.1.",
+        "description": "Release notes for Cenvero Fleet v2.0 through v2.7.0.",
         "isPartOf": { "@id": "https://fleet.cenvero.org/#website" },
         "about": { "@id": "https://fleet.cenvero.org/#software" },
         "breadcrumb": { "@id": "https://fleet.cenvero.org/whats-new.html#breadcrumb" },
         "primaryImageOfPage": "https://fleet.cenvero.org/assets/og/og-whats-new.png",
-        "dateModified": "2026-10-23",
+        "dateModified": "2026-11-19",
         "inLanguage": "en"
       }
     ]
@@ -107,7 +107,7 @@
     <div class="container">
       <nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/">Home</a></li><li aria-current="page">What's new</li></ol></nav>
       <h1 id="page-title">What's new in <span class="grad-text">Cenvero Fleet</span></h1>
-      <p class="hero-lead">Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.6.1, released on 23 October 2026. Every release is signed; upgrade with <code>fleet update apply</code>, <code>brew upgrade cenvero-fleet</code> or <code>winget upgrade --id Cenvero.Fleet</code>. The complete, line-by-line history lives in the changelog.</p>
+      <p class="hero-lead">Release notes for Cenvero Fleet, the open-source, self-hosted server fleet manager, newest first. The latest stable release is v2.7.0, released on 19 November 2026. Every release is signed; upgrade with <code>fleet update apply</code>, <code>brew upgrade cenvero-fleet</code> or <code>winget upgrade --id Cenvero.Fleet</code>. The complete, line-by-line history lives in the changelog.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href="https://github.com/cenvero/fleet/releases"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-download"/></svg> Latest release</a>
         <a class="btn btn-secondary" href="https://github.com/cenvero/fleet/blob/main/CHANGELOG.md"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#i-scroll-text"/></svg> Full changelog</a>
@@ -119,11 +119,72 @@
     <div class="container">
       <div class="timeline">
 
+        <article class="release" id="v2-7-0" aria-labelledby="v270-title">
+          <div class="release-card">
+            <div class="release-head">
+              <h2 id="v270-title">v2.7.0</h2>
+              <span class="tag tag-accent">Latest stable</span>
+              <time datetime="2026-11-19">19 Nov 2026</time>
+            </div>
+            <p>A web console that runs the whole fleet from the browser, a background helper that tracks jobs and keeps agents in sync without anyone asking, a firewall check that refuses to lock Fleet out of its agents, and commands that are never sent twice when they may already have run.</p>
+            <h3>Highlights</h3>
+            <ul>
+              <li><strong>The web console:</strong> <code>fleet console</code> (alias <code>fleet web</code>) opens the localhost web UI with every view — Fleet, Control, Files and Terminal. On a terminal it shows a panel instead of a bare URL: open it in your browser, show the access link, keep it running in the background, or stop it. A background console (also <code>fleet console --background</code>) is reached with <code>fleet console open [--files] [--print]</code>, <code>fleet console status</code> and <code>fleet console stop</code>, and stops by itself after an hour unused and after 8 hours at most (30 minutes and an hour with Control or Terminal on). The browser is opened with a one-time code, never the session token. <code>fleet file ui</code> opens the same console on the file manager, with Control and Terminal opt-in. <a href="/docs/#web-console">Docs</a></li>
+              <li><strong>Run the fleet from the browser:</strong> the Control view is a set of screens. <em>Servers</em> lists your servers straight away, each with its own page of details, usage and one-click actions; <em>Add server</em> is a step-by-step wizard; pages that only read load their data as tables as soon as they open, and actions have a button named for what they do. Each run is the <code>fleet</code> binary itself, so tokens, command policy, redaction, confirmations and the audit log apply exactly as in a terminal. The Terminal view opens <code>fleet ssh</code> shells on direct-mode servers in tabs, and with Control on, the Fleet overview gains <em>Add server</em> (the wizard), a per-server <em>Manage</em> menu and <em>Ack</em> / <em>Snooze 1h</em> on alerts.</li>
+              <li><strong><code>fleet errors</code>:</strong> commands no longer print notices before their own output. <code>fleet errors</code> (also <code>fleet issues</code> and <code>fleet notices</code>; <code>--json</code>) lists what needs attention — an available update, a pending <code>fleet adjust-init</code>, a passphrase-protected controller key, servers the last automatic agent sync could not update, reverse-mode servers waiting for a daemon that is not running — each with the command that fixes it. Bare <code>fleet</code> lists them too, and <code>fleet status</code> prints a count. <a href="/docs/#errors">Docs</a></li>
+              <li><strong>The background helper:</strong> one small process per controller tracks running <code>fleet job</code>s, so they show as done (or lost) and <code>job-failed</code> is sent without anyone polling; it also runs the hourly agent sync and prunes old job logs. Any <code>fleet</code> command starts it, and there is nothing to set up. See it with <code>fleet helper status</code> and restart it with <code>fleet helper restart</code>. <a href="/docs/#helper">Docs</a></li>
+              <li><strong>The firewall lockout check:</strong> every command that can block traffic reads the server's ufw, iptables, nftables or firewalld rules, in the order the firewall applies them, and refuses a change that would cut Fleet off from the agent, naming the command to run first. Allowing the agent port only from the controller's IP, network or VPN interface is accepted, because Fleet checks the server's own view of its connection. <code>--force-i-have-console</code> is for a person at the server's console only, and is refused under any token. <a href="/docs/#agent-lockout">Docs</a></li>
+              <li><strong>A command is never sent twice when it may already have run:</strong> when a pooled connection dropped while waiting for a reply, the controller used to send the request again on a fresh one, so a command, a service restart or a firewall change could run twice. Now only requests that never reached the server, or that only read, are sent again; anything else fails with <em>may have run; check before retrying</em>. <code>fleet exec --retry</code> retries only failures that certainly never reached the server.</li>
+            </ul>
+            <h3>Added</h3>
+            <ul>
+              <li><code>fleet console</code> and <code>fleet web</code>, with <code>open</code>, <code>status</code> and <code>stop</code>; <code>--control=false</code> and <code>--terminal=false</code> turn views off.</li>
+              <li>The Control view: pages grouped by area, a Servers list and a page per server, the Add server wizard, data pages that load on their own (JSON and aligned text as tables), live output for actions, cancel, run history, pinned pages and quick actions. The command behind a page is under <em>Show the command</em>. An SSH password typed into the wizard reaches <code>fleet server add</code> on standard input (the new <code>--login-password-stdin</code>), never its command line. Commands that change things ask for confirmation in the browser, prompts fail closed unless you tick <code>--yes</code> or <code>--confirm</code>, and each run is audited as <code>webui.command</code>.</li>
+              <li>The Terminal view: interactive shells on direct-mode servers, in tabs (xterm.js, vendored). <code>top</code> and <code>vim</code> work, the size follows the window and a reload re-attaches.</li>
+              <li><code>fleet errors</code> (<code>fleet issues</code>, <code>fleet notices</code>), <code>fleet helper status</code> and <code>fleet helper restart</code>.</li>
+              <li>The <code>lost</code> job status: a job whose server was removed, or whose process is gone without a result (a reboot, a kill), ends as <code>lost</code> instead of <code>running</code> forever, and <code>fleet job wait</code> exits 1. <a href="/docs/#jobs">Docs</a></li>
+            </ul>
+            <h3>Changed</h3>
+            <ul>
+              <li>Automatic agent sync runs in the background helper instead of being launched by whichever command noticed it was due, and no longer prints a notice. <code>FLEET_AGENT_AUTOSYNC=off</code> now applies to the environment the helper starts from (then run <code>fleet helper restart</code>).</li>
+              <li>The update notice, the <code>adjust-init</code> hint and the passphrase-key warning are no longer printed before other commands' output; <code>fleet errors</code> and bare <code>fleet</code> list them.</li>
+              <li><code>fleet fw enable --safe</code> no longer allows the agent port for you: it refuses and names <code>fleet fw allow &lt;server&gt; &lt;port&gt;/tcp</code>. Its JSON output now needs <code>--json</code>.</li>
+              <li><code>fleet firewall enable</code>, <code>fleet firewall add</code>, <code>fleet port close</code> and <code>fleet template apply</code> refuse changes that would lock Fleet out of the agent, and <code>template apply</code> opens the template's ports before enabling its firewall and changes services last.</li>
+              <li><code>fleet file ui</code> and <code>fleet filemanager ui</code> run the web console on the file manager and show its panel on a terminal; if a console already runs in the background, they open that one.</li>
+              <li>A redesigned web UI: one blue accent, the system font, frosted toolbar, menus and dialogs, matching light and dark themes, and bundled Lucide icons. The tabs run Fleet → Control → Files → Terminal, the UI opens on Fleet, and <kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>4</kbd> switch tabs. Fleet shows each server as a card with CPU, memory and disk ring gauges, or as a list.</li>
+              <li>Dependencies: the archived <code>gopkg.in/yaml.v3</code> is replaced by <code>go.yaml.in/yaml/v3</code>, gopsutil moves to v4, and the <code>golang.org/x</code> modules are updated.</li>
+            </ul>
+            <h3>Security</h3>
+            <ul>
+              <li>The browser is opened with a one-time code that works once, within 30 seconds, instead of a URL carrying the session token, which every account on the machine could read from the process list. A link used a second time replaces the session token, and the page says so.</li>
+              <li>A background console keeps its session token in memory only, is handed its listening socket when it moves to the background (Linux, macOS) so another account cannot take the port, and cannot be started or opened under <code>--token</code> / <code>FLEET_TOKEN</code>.</li>
+              <li>In the Control view, commands that reach the controller's keys, tokens or secrets stay terminal-only, the controller's config directory is pinned ahead of every command, and arguments that would run a different command are refused.</li>
+              <li><code>--force-i-have-console</code> is refused under any token, with an audit entry, and every lockout refusal and override is audit-logged.</li>
+              <li>Background jobs: a job's completion marker counts only once its wrapper process has exited, so a job, or whoever can influence its output, cannot forge <em>done, exit 0</em>.</li>
+              <li><code>fleet guard --revert-cmd</code> is held to the command policy, so a denied command can no longer be passed as the undo.</li>
+              <li>A missing dedicated <code>secret.key</code> fails closed instead of being replaced by a new random key, and <code>fleet config import</code> refuses unsafe server names such as <code>../x</code>.</li>
+              <li>Before signalling a pid from a pid or state file, <code>fleet stop</code> checks the process's command line or image on every OS, not only on Linux. Server text is cleaned of terminal escape sequences in firewall errors.</li>
+              <li>Built with Go 1.26.11, which fixes GO-2026-6859 (an HTTP/1 server crash in <code>net/http</code>, reachable through the web UI's server), and <code>golang.org/x/crypto</code> 0.59.0, which clears GO-2026-5932. <code>govulncheck</code> reports no vulnerabilities in any required module.</li>
+            </ul>
+            <h3>Fixed</h3>
+            <ul>
+              <li>Background jobs: a job whose output does not end in a newline, or that leaves a child writing to its log, now finishes; <code>job-failed</code> is sent once, not twice; <code>job wait</code> and <code>job status</code> read a few hundred bytes instead of up to 4 MiB of log.</li>
+              <li>A removed server no longer comes back: a connect, metrics collection, agent update or firewall, port or service call still running when it was removed no longer writes its record back.</li>
+              <li><code>fleet key rotate</code> no longer destroys stored secrets when it rolls back, and <code>fleet database shift</code> moves the metric history (the dashboard sparklines) too. MySQL and MariaDB state lookups no longer fail on the reserved word <code>key</code>.</li>
+              <li>The agent always answers: a reply over the 16 MiB message limit is trimmed or answered with an error instead of being dropped, <code>shell.exec</code> returns at its deadline even when something it started keeps stdout open, and a handler panic no longer kills the agent.</li>
+              <li>A pooled connection that sat through a laptop sleep is redialled instead of reused, and <code>fw enable --safe</code> says the revert timer is armed, and how to cancel it, when the enable step fails after arming it.</li>
+              <li><code>fleet stop</code> waits until the daemon has let go of its lock, so on Windows a <code>fleet start</code> right after no longer finds the old one apparently still running.</li>
+              <li>File managers: in the web UI, new file, rename and same-pane move never overwrite an existing file; in <code>fleet files</code>, the editor keeps tabs and CRLF line endings exactly, a single Esc no longer discards unsaved edits, and local saves are atomic and keep owner, group and mode.</li>
+              <li>Uploads refuse a file that shrank while being read, <code>fleet autocomplete install</code> (bash) no longer deletes your own rc lines on a re-run, and <code>fleet logs --server</code> / <code>--service</code> filter the audit log on their own.</li>
+              <li>Alerts are no longer recorded as notified by a desktop notifier that is disabled, and a pre-release tag can no longer be published to the stable channel.</li>
+            </ul>
+          </div>
+        </article>
+
         <article class="release" id="v2-6-1" aria-labelledby="v261-title">
           <div class="release-card">
             <div class="release-head">
               <h2 id="v261-title">v2.6.1</h2>
-              <span class="tag tag-accent">Latest stable</span>
               <time datetime="2026-10-23">23 Oct 2026</time>
             </div>
             <p>A patch release that lets <code>fleet server remove</code> tear an agent down over its own connection, makes <code>server add</code> honour your configured default agent port, and rebuilds on Go 1.26.10 for a round of standard-library security fixes.</p>
