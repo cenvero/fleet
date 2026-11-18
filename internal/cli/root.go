@@ -170,7 +170,18 @@ func NewRootCommand() *cobra.Command {
 			if err := cmd.Help(); err != nil {
 				return err
 			}
-			printNoticeSummary(cmd, configDir)
+			// Bare `fleet` is where an operator looks around, so it lists what
+			// needs attention in full. Under a token it gives only the count:
+			// the list names servers fleet-wide, which `fleet errors` (denied
+			// to scoped tokens) guards.
+			if resolveTokenID(cmd) != "" {
+				printNoticeSummary(cmd, configDir)
+				return nil
+			}
+			if notices := core.CollectNotices(configDir); len(notices) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout())
+				writeNotices(cmd.OutOrStdout(), notices)
+			}
 			return nil
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {

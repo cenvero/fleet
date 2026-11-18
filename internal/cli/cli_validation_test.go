@@ -163,6 +163,11 @@ func TestNoticesOnlyInFleetErrors(t *testing.T) {
 	if err != nil || !strings.Contains(out, "Fix: fleet adjust-init") {
 		t.Fatalf("fleet errors = %v\n%s", err, out)
 	}
+	// Bare `fleet` lists them too, after the help.
+	out, err = runFleetIn(t, configDir)
+	if err != nil || !strings.Contains(out, "Fix: fleet adjust-init") || !strings.Contains(out, "Usage:") {
+		t.Fatalf("bare fleet = %v\n%s", err, out)
+	}
 	out, err = runFleetIn(t, configDir, "errors", "--json")
 	if err != nil {
 		t.Fatal(err)

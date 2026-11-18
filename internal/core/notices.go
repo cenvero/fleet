@@ -4,6 +4,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/cenvero/fleet/internal/safetext"
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/version"
+	"golang.org/x/crypto/ssh"
 )
 
 // A Notice is something about the controller that needs the operator's
@@ -64,12 +66,12 @@ func CollectNotices(configDir string) []Notice {
 	}
 	var notices []Notice
 
-	if cfg.Crypto.PassphraseProtected {
+	if key := filepath.Join(configDir, "keys", cfg.Crypto.PrimaryKey); cfg.Crypto.PassphraseProtected && cfg.Crypto.PrimaryKey != "" && keyNeedsPassphrase(key) {
 		notices = append(notices, Notice{
 			ID: "passphrase-keys", Severity: NoticeError,
-			Title:  "The controller keys are passphrase-protected, which Fleet does not support yet",
-			Detail: "Connections to servers fail until the keys can be used without a passphrase.",
-			Fix:    "fleet key rotate",
+			Title:  "The controller key is passphrase-protected, which Fleet does not support yet",
+			Detail: "Connections to servers fail until the key can be used without a passphrase. Removing it asks for the current passphrase.",
+			Fix:    fmt.Sprintf("ssh-keygen -p -N '' -f %s", key),
 		})
 	}
 
@@ -117,6 +119,19 @@ func CollectNotices(configDir string) []Notice {
 	}
 
 	return notices
+}
+
+// keyNeedsPassphrase reports whether the private key at path is encrypted.
+// A key that is missing or unreadable is not reported here: connecting
+// reports that itself.
+func keyNeedsPassphrase(path string) bool {
+	data, err := os.ReadFile(path) // #nosec G304 -- the controller's own key, inside its config dir
+	if err != nil {
+		return false
+	}
+	_, err = ssh.ParseRawPrivateKey(data)
+	var missing *ssh.PassphraseMissingError
+	return errors.As(err, &missing)
 }
 
 // reverseServerCount counts servers that reach the controller in reverse

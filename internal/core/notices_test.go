@@ -4,7 +4,11 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	fleetcrypto "github.com/cenvero/fleet/internal/crypto"
 
 	"github.com/cenvero/fleet/internal/transport"
 	"github.com/cenvero/fleet/internal/update"
@@ -36,6 +40,22 @@ func TestCollectNoticesFollowsTheControllerState(t *testing.T) {
 
 	cfg.Crypto.PassphraseProtected = true
 	cfg.InitVersion = CurrentInitVersion - 1
+	keyPath := filepath.Join(dir, "keys", cfg.Crypto.PrimaryKey)
+	plainKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encDir := t.TempDir()
+	if err := fleetcrypto.GenerateKeySet(encDir, fleetcrypto.Algorithm(cfg.Crypto.Algorithm), []byte("secret")); err != nil {
+		t.Fatal(err)
+	}
+	encKey, err := os.ReadFile(filepath.Join(encDir, cfg.Crypto.PrimaryKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, encKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +68,7 @@ func TestCollectNoticesFollowsTheControllerState(t *testing.T) {
 
 	got := noticeIDs(CollectNotices(dir))
 	for id, fix := range map[string]string{
-		"passphrase-keys":   "fleet key rotate",
+		"passphrase-keys":   "ssh-keygen -p -N '' -f " + keyPath,
 		"adjust-init":       "fleet adjust-init",
 		"agent-sync-failed": "fleet sync-agent auto status",
 		"daemon-needed":     "fleet start",
@@ -67,8 +87,14 @@ func TestCollectNoticesFollowsTheControllerState(t *testing.T) {
 		t.Fatalf("notice detail carries control characters: %q", d)
 	}
 
-	// Fixing the causes clears them.
-	cfg.Crypto.PassphraseProtected = false
+	// Fixing the causes clears them. Removing the passphrase from the key is
+	// enough on its own, even though config.toml still records one.
+	if err := os.WriteFile(keyPath, plainKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n := noticeIDs(CollectNotices(dir)); n["passphrase-keys"].ID != "" {
+		t.Fatal("passphrase notice remains after the passphrase was removed from the key")
+	}
 	cfg.InitVersion = CurrentInitVersion
 	if err := SaveConfig(ConfigPath(dir), cfg); err != nil {
 		t.Fatal(err)
