@@ -48,7 +48,8 @@ Omit sections that have no entries for that release.
   (`fleet start`), and leaves the sync and pruning to the daemon while one runs. A command
   run under `--token`/`FLEET_TOKEN` never starts it. See it with `fleet helper status`
   and restart it with `fleet helper restart`. Its problems show in `fleet errors`, never
-  on your terminal.
+  on your terminal. On Windows it runs from a copy of `fleet.exe` in the data directory,
+  so a winget upgrade or uninstall is not blocked by the running helper.
 
 - **`fleet console` (alias `fleet web`): the web console.** It opens the localhost web UI
   with every view: Fleet, Files, Control and Terminal. Turn views off with
