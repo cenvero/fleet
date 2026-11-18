@@ -60,7 +60,7 @@ func addForceConsoleFlag(cmd *cobra.Command, target *bool) {
 }
 
 // newFirewallSafeEngine opens the app, loads the server, and returns a
-// FirewallEngine bound to the server's agent link and exec transport.
+// FirewallEngine bound to the server's agent and exec transport.
 func newFirewallSafeEngine(configDir, server string) (*core.App, *core.FirewallEngine, error) {
 	app, err := openApp(configDir)
 	if err != nil {
@@ -71,17 +71,13 @@ func newFirewallSafeEngine(configDir, server string) (*core.App, *core.FirewallE
 		_ = app.Close()
 		return nil, nil, err
 	}
-	// Guard the REAL agent port, from the record: guarding a guessed port could
-	// allow the wrong one and drop the actual agent connection.
-	link, err := core.ResolveAgentLink(record)
-	if err != nil {
-		_ = app.Close()
-		return nil, nil, fmt.Errorf("refusing an agent-safe firewall operation: %w", err)
-	}
+	// Guard the REAL agent port, from the record, never a guessed default: an
+	// allow for the wrong port would leave the actual agent connection to be
+	// dropped. A direct record without a valid port makes `enable` refuse.
 	engine := &core.FirewallEngine{
-		AgentPort: link.Port,
-		Server:    link.Server,
-		Mode:      link.Mode,
+		AgentPort: record.Port,
+		Server:    record.Name,
+		Mode:      record.Mode,
 		Exec:      app.FirewallExec(server),
 	}
 	return app, engine, nil
@@ -192,15 +188,8 @@ func newFirewallSafeEnableCommand(configDir *string) *cobra.Command {
 				}
 				return err
 			}
-			if err := app.AuditLog.Append(logs.AuditEntry{
-				Action:   "firewall.enable",
-				Target:   args[0],
-				Operator: app.Operator(),
-				Details: fmt.Sprintf("fw --safe backend=%s mode=%s undo_scheduled=%t revert=%s overrode=%d",
-					result.Backend, result.Mode, result.UndoScheduled, result.RevertID, len(result.Overrode)),
-			}); err != nil {
-				return err
-			}
+			// The firewall is on and the timer may be armed: print the result
+			// (with its cancel command) before anything else can fail.
 			for _, skipped := range result.Overrode {
 				fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: --force-i-have-console skipped a refusal: %s\n", skipped)
 			}
@@ -210,10 +199,19 @@ func newFirewallSafeEnableCommand(configDir *string) *cobra.Command {
 					result.UndoScheduleErr)
 			}
 			if asJSON {
-				return writeJSON(cmd, result)
+				if err := writeJSON(cmd, result); err != nil {
+					return err
+				}
+			} else {
+				writeEnableSafeSummary(cmd.OutOrStdout(), args[0], result)
 			}
-			writeEnableSafeSummary(cmd.OutOrStdout(), args[0], result)
-			return nil
+			return app.AuditLog.Append(logs.AuditEntry{
+				Action:   "firewall.enable",
+				Target:   args[0],
+				Operator: app.Operator(),
+				Details: fmt.Sprintf("fw --safe backend=%s mode=%s undo_scheduled=%t revert=%s overrode=%d",
+					result.Backend, result.Mode, result.UndoScheduled, result.RevertID, len(result.Overrode)),
+			})
 		},
 	}
 	cmd.Flags().BoolVar(&safe, "safe", false, "required acknowledgement that this is a guarded, agent-safe enable")

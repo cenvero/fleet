@@ -1087,6 +1087,11 @@ func (a *App) AddFirewallRuleGuarded(serverName, rule string, opts FirewallGuard
 	if err != nil {
 		return err
 	}
+	// An allow rule only opens traffic, so it needs no gate, not even a known
+	// agent port.
+	if impact, _ := classifyFirewallRule(rule, 0); impact == ruleOpens {
+		return a.addFirewallRule(server, rule)
+	}
 	if err := a.firewallGate(server, "firewall.rule.add", fmt.Sprintf("add firewall rule %q", rule), opts, func(link AgentLink) *AgentLockoutError {
 		impact, why := classifyFirewallRule(rule, link.Port)
 		var st *firewallGuardState
@@ -1098,7 +1103,12 @@ func (a *App) AddFirewallRuleGuarded(serverName, rule string, opts FirewallGuard
 	}); err != nil {
 		return err
 	}
+	return a.addFirewallRule(server, rule)
+}
 
+// addFirewallRule sends a rule the gate has already passed.
+func (a *App) addFirewallRule(server ServerRecord, rule string) error {
+	serverName := server.Name
 	response, err := a.callRPC(server, proto.Envelope{
 		Action: "firewall.add_rule",
 		Payload: proto.FirewallRulePayload{
@@ -1144,7 +1154,7 @@ type FirewallGuardOptions struct {
 func (a *App) firewallGate(server ServerRecord, op, change string, opts FirewallGuardOptions, decide func(AgentLink) *AgentLockoutError) error {
 	var refusal *AgentLockoutError
 	if link, err := ResolveAgentLink(server); err != nil {
-		refusal = &AgentLockoutError{Reason: err.Error()}
+		refusal = &AgentLockoutError{Reason: err.Error(), Unskippable: true}
 	} else {
 		refusal = decide(link)
 	}
@@ -1155,7 +1165,7 @@ func (a *App) firewallGate(server ServerRecord, op, change string, opts Firewall
 	if refusal.Change == "" {
 		refusal.Change = change
 	}
-	if !opts.ForceIHaveConsole {
+	if !opts.ForceIHaveConsole || refusal.Unskippable {
 		if err := a.AuditLockoutRefusal(refusal); err != nil {
 			return fmt.Errorf("%w (and the refusal could not be audit-logged: %v)", refusal, err)
 		}

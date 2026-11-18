@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -29,6 +30,9 @@ type fakeUFW struct{ dir string }
 
 func newFakeUFW(t *testing.T) *fakeUFW {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the in-process agent's shell.exec and the fake ufw need a Unix /bin/sh")
+	}
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" +
 		"case \"$1 $2\" in\n" +
@@ -194,6 +198,46 @@ func TestFirewallGuardDirectEntryPoints(t *testing.T) {
 		t.Fatalf("every refusal must be audit-logged; got %d entries: %+v", len(got), got)
 	} else if got[0].Target != "loopback" || got[0].Operator == "" || !strings.Contains(got[0].Details, "port.close") {
 		t.Errorf("refusal audit entry should name the server, operator and operation; got %+v", got[0])
+	}
+}
+
+// A direct record with no valid port: fleet cannot tell which port must stay
+// open, so tightening is refused even with the override (it could not allow the
+// agent port first), while an allow rule still goes through.
+func TestFirewallGuardUnknownAgentPort(t *testing.T) {
+	newFakeUFW(t)
+	manager := &fakeFirewallManager{status: proto.FirewallInfo{Enabled: false}}
+	app := directFirewallHarness(t, manager)
+	record, err := app.GetServer("loopback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Port = 0
+	if err := app.SaveServer(record); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.AddFirewallRule("loopback", "allow 80"); err != nil {
+		t.Fatalf("an allow rule needs no known agent port: %v", err)
+	}
+	force := FirewallGuardOptions{ForceIHaveConsole: true}
+	for name, err := range map[string]error{
+		"enable":    app.SetFirewallGuarded("loopback", true, force),
+		"close 443": app.SetPortGuarded("loopback", 443, false, force),
+		"deny 80":   app.AddFirewallRuleGuarded("loopback", "deny 80", force),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "no valid agent port") || !strings.Contains(err.Error(), "cannot skip") {
+			t.Errorf("%s: want an unskippable refusal naming the missing port; got %v", name, err)
+		}
+	}
+	if slices.Contains(manager.actions, "enable:true") || slices.Contains(manager.actions, "port:443:false") || slices.Contains(manager.actions, "rule:deny 80") {
+		t.Fatalf("a refused change reached the agent; actions=%v", manager.actions)
+	}
+	if got := auditEntries(t, app, "firewall.lockout.refused"); len(got) != 3 {
+		t.Fatalf("each refusal must be audit-logged; got %+v", got)
+	}
+	if got := auditEntries(t, app, "firewall.lockout.override"); len(got) != 0 {
+		t.Fatalf("nothing was overridden; got %+v", got)
 	}
 }
 

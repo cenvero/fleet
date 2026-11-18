@@ -1976,8 +1976,9 @@ func newFirewallCommand(configDir *string) *cobra.Command {
 		Use:   "add <server> <rule>",
 		Short: "Add a firewall rule to the tracked state",
 		Long: "Add a ufw rule. Rules that would deny, reject or rate-limit the port fleet reaches a\n" +
-			"direct-mode agent through, and rules fleet cannot read, are refused. A rule that blocks\n" +
-			"by address without a port is allowed only once the agent port is allowed ahead of it.",
+			"direct-mode agent through, and rules fleet cannot read, are refused. For agents that accept\n" +
+			"rules blocking by address without a port (the current agent does not), such a rule goes\n" +
+			"through only once the agent port is allowed ahead of it.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := openApp(*configDir)

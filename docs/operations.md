@@ -294,8 +294,8 @@ fleet firewall enable web-01
   lists no rules while ufw is off.
   - `port close` on the agent port is refused.
   - `firewall add` refuses deny, reject or limit rules on the agent port, and any rule it can't read.
-  - A rule that blocks by address with no port (`deny from 203.0.113.0/24`) goes through only once
-    the agent port is allowed ahead of it.
+  - Some agent versions accept rules that block by address without naming a port; the current agent
+    does not. Such a rule goes through only once the agent port is allowed ahead of it.
 - **Reverse mode:** the agent dials out and listens on no port. Enabling must keep established/related
   traffic accepted (ufw's stock `before.rules` does) and outgoing traffic allowed.
 - **Fail closed:** if fleet can't read the state, it refuses.

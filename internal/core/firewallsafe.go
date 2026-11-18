@@ -312,7 +312,13 @@ func (e *FirewallEngine) EnableSafe(backend FirewallBackend, forceIHaveConsole b
 	}
 	reverse := e.Mode == transport.ModeReverse
 	if !reverse && (e.AgentPort < 1 || e.AgentPort > 65535) {
-		return EnableSafeResult{}, fmt.Errorf("refusing to enable firewall: agent port %d is invalid; cannot guarantee the agent stays reachable", e.AgentPort)
+		refusal := lockout("enable the firewall", fmt.Sprintf("the agent port %d is invalid, so fleet cannot tell which port must stay open; "+
+			"set the server record's port to the port the agent listens on", e.AgentPort), "")
+		refusal.Server, refusal.Op, refusal.Unskippable = e.Server, "fw.enable", true
+		if refusal.Server == "" {
+			refusal.Server = "<server>"
+		}
+		return EnableSafeResult{}, refusal
 	}
 	if backend == FirewallBackendUnknown {
 		return EnableSafeResult{}, fmt.Errorf("no supported firewall backend detected; refusing to enable")
@@ -730,6 +736,10 @@ type AgentLockoutError struct {
 	Change string
 	Reason string
 	Fix    string
+	// Unskippable marks a refusal --force-i-have-console does not skip: fleet
+	// does not know which port the agent listens on, so it could not even
+	// allow that port first.
+	Unskippable bool
 }
 
 func (e *AgentLockoutError) Error() string {
@@ -737,6 +747,10 @@ func (e *AgentLockoutError) Error() string {
 	fmt.Fprintf(&b, "refusing to %s on %s: %s", e.Change, e.Server, e.Reason)
 	if e.Fix != "" {
 		fmt.Fprintf(&b, ". Run this first, then retry: %s", e.Fix)
+	}
+	if e.Unskippable {
+		b.WriteString(". --force-i-have-console cannot skip this check")
+		return b.String()
 	}
 	fmt.Fprintf(&b, ". Only a person with out-of-band console access to %s who accepts losing the agent may pass "+
 		"--force-i-have-console to skip this check; scripts and AI agents must not", e.Server)

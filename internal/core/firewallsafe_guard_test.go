@@ -4,8 +4,15 @@
 package core
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // guardHost is a programmable host for the firewall engine. It answers each
@@ -412,6 +419,96 @@ func TestScheduleSelfRevertChecksForSetsid(t *testing.T) {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("schedule command missing %q:\n%s", want, cmd)
 		}
+	}
+}
+
+// The schedule command run through a real /bin/sh, with fake systemd-run and
+// setsid on PATH: each path prints its marker, a failing systemd-run falls back
+// to setsid, and with neither tool the command fails instead of reporting a
+// timer that does not exist.
+func TestScheduleSelfRevertInARealShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a Unix /bin/sh")
+	}
+	cmd, id, err := scheduleSelfRevertCommand("true", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := func(dir, name string, exit int) string {
+		t.Helper()
+		argsFile := filepath.Join(dir, name+".args")
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %s\nexit %d\n", shellQuote(argsFile), exit)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil { // #nosec G306 -- test fake must be executable
+			t.Fatal(err)
+		}
+		return argsFile
+	}
+	run := func(dir string) (string, int) {
+		t.Helper()
+		c := exec.Command("/bin/sh", "-c", cmd) // #nosec G204 -- the command under test, run against fakes
+		c.Env = []string{"PATH=" + dir}
+		out, err := c.CombinedOutput()
+		code := 0
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatalf("run schedule command: %v", err)
+		}
+		return string(out), code
+	}
+	readArgs := func(path string) string {
+		t.Helper()
+		for i := 0; i < 100; i++ { // the setsid job runs in the background
+			if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+				return string(b)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("%s was never written", path)
+		return ""
+	}
+
+	dir := t.TempDir()
+	systemdArgs := fake(dir, "systemd-run", 0)
+	fake(dir, "setsid", 0)
+	if out, code := run(dir); code != 0 || revertMethodFrom(out) != RevertMethodSystemd {
+		t.Fatalf("systemd-run path: exit %d, output %q", code, out)
+	}
+	if got := readArgs(systemdArgs); got != "--on-active=30s\n--unit="+id+"\n/bin/sh\n-c\ntrue\n" {
+		t.Errorf("systemd-run got args %q", got)
+	}
+
+	dir = t.TempDir()
+	fake(dir, "systemd-run", 1) // present but failing: fall back to setsid
+	setsidArgs := fake(dir, "setsid", 0)
+	if out, code := run(dir); code != 0 || revertMethodFrom(out) != RevertMethodSetsid {
+		t.Fatalf("setsid fallback: exit %d, output %q", code, out)
+	}
+	if got := readArgs(setsidArgs); got != "sh\n-c\nsleep 30; true\n"+id+"\n" {
+		t.Errorf("setsid got args %q", got)
+	}
+	if cancel := cancelRevertCommand(RevertMethodSetsid, id); cancel != `pkill -f "[f]`+id[1:]+`"` {
+		t.Errorf("setsid cancel command = %q", cancel)
+	}
+
+	if out, code := run(t.TempDir()); code == 0 || revertMethodFrom(out) != "" {
+		t.Fatalf("with neither tool the command must fail and report nothing armed; exit %d, output %q", code, out)
+	}
+}
+
+// fleet does not know the direct agent's port: no override can make enable
+// safe (it could not even allow that port first), and the refusal is typed so
+// callers audit it.
+func TestEnableSafeUnknownAgentPortIsUnskippable(t *testing.T) {
+	host := &guardHost{}
+	_, err := (&FirewallEngine{AgentPort: 0, Server: "web-01", Exec: host.exec}).EnableSafe(FirewallBackendIptables, true, 60)
+	var refusal *AgentLockoutError
+	if !errors.As(err, &refusal) || !refusal.Unskippable || refusal.Op != "fw.enable" || refusal.Server != "web-01" {
+		t.Fatalf("want an unskippable fw.enable refusal; got %#v (%v)", refusal, err)
+	}
+	if len(host.calls) != 0 {
+		t.Fatalf("nothing may run; calls=%q", host.calls)
 	}
 }
 
