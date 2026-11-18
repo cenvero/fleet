@@ -679,16 +679,27 @@ func (s *Store) GetState(key string) (string, error) {
 	}
 	if s.workload == WorkloadState {
 		var row stateRow
-		if err := db.Where("key = ?", key).Take(&row).Error; err != nil {
+		if err := whereKey(db, key).Take(&row).Error; err != nil {
 			return "", err
 		}
 		return row.Value, nil
 	}
 	var row metricsRow
-	if err := db.Where("key = ?", key).Take(&row).Error; err != nil {
+	if err := whereKey(db, key).Take(&row).Error; err != nil {
 		return "", err
 	}
 	return row.Value, nil
+}
+
+// whereKey and orderByKey address the "key" column through a clause, so each
+// dialect quotes it. KEY is a reserved word in MySQL and MariaDB, where a raw
+// `WHERE key = ?` or `ORDER BY key` is a syntax error.
+func whereKey(db *gorm.DB, key string) *gorm.DB {
+	return db.Where(clause.Eq{Column: clause.Column{Name: "key"}, Value: key})
+}
+
+func orderByKey(db *gorm.DB) *gorm.DB {
+	return db.Order(clause.OrderByColumn{Column: clause.Column{Name: "key"}})
 }
 
 func (s *Store) AppendEvent(timestamp time.Time, category, payload string) error {
@@ -718,7 +729,7 @@ func (s *Store) ListStateEntries() ([]StateEntry, error) {
 	}
 	if s.workload == WorkloadState {
 		var rows []stateRow
-		if err := db.Order("key asc").Find(&rows).Error; err != nil {
+		if err := orderByKey(db).Find(&rows).Error; err != nil {
 			return nil, err
 		}
 		entries := make([]StateEntry, 0, len(rows))
@@ -728,7 +739,7 @@ func (s *Store) ListStateEntries() ([]StateEntry, error) {
 		return entries, nil
 	}
 	var rows []metricsRow
-	if err := db.Order("key asc").Find(&rows).Error; err != nil {
+	if err := orderByKey(db).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	entries := make([]StateEntry, 0, len(rows))
@@ -776,6 +787,78 @@ func (s *Store) ReplaceStateEntries(entries []StateEntry) error {
 		}
 		return tx.CreateInBatches(rows, 200).Error
 	})
+}
+
+// ForEachMetricSnapshot calls fn with the stored metric history in insertion
+// (id) order, at most pageSize rows at a time, so a long history is never
+// loaded into memory at once. It is the read side of a backend shift.
+func (s *Store) ForEachMetricSnapshot(pageSize int, fn func([]MetricSnapshotEntry) error) error {
+	if s.workload != WorkloadMetrics {
+		return fmt.Errorf("metric snapshots are unsupported for workload %q", s.workload)
+	}
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	if pageSize <= 0 {
+		pageSize = 1000
+	}
+	var last uint64
+	for {
+		var rows []metricsSnapshotRow
+		if err := db.Where(clause.Gt{Column: clause.Column{Name: "id"}, Value: last}).
+			Order(clause.OrderByColumn{Column: clause.Column{Name: "id"}}).
+			Limit(pageSize).Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		page := make([]MetricSnapshotEntry, 0, len(rows))
+		for _, row := range rows {
+			page = append(page, MetricSnapshotEntry{Server: row.Server, Timestamp: row.Timestamp.UTC(), Payload: row.Payload})
+		}
+		if err := fn(page); err != nil {
+			return err
+		}
+		last = rows[len(rows)-1].ID
+		if len(rows) < pageSize {
+			return nil
+		}
+	}
+}
+
+// ClearMetricSnapshots deletes the whole stored metric history. It is the
+// first step of copying a history in from another backend.
+func (s *Store) ClearMetricSnapshots() error {
+	if s.workload != WorkloadMetrics {
+		return fmt.Errorf("metric snapshots are unsupported for workload %q", s.workload)
+	}
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	return db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&metricsSnapshotRow{}).Error
+}
+
+// InsertMetricSnapshots appends history rows as given (no de-duplication),
+// for copying a history between backends.
+func (s *Store) InsertMetricSnapshots(entries []MetricSnapshotEntry) error {
+	if s.workload != WorkloadMetrics {
+		return fmt.Errorf("metric snapshots are unsupported for workload %q", s.workload)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	db, err := s.conn()
+	if err != nil {
+		return err
+	}
+	rows := make([]metricsSnapshotRow, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, metricsSnapshotRow{Server: entry.Server, Timestamp: entry.Timestamp.UTC(), Payload: entry.Payload})
+	}
+	return db.CreateInBatches(rows, 200).Error
 }
 
 func (s *Store) ListEvents() ([]EventEntry, error) {

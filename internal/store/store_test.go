@@ -6,9 +6,46 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
+
+// KEY is a reserved word in MySQL and MariaDB, so the state queries must have
+// each dialect quote the "key" column. This builds the real SQL for every
+// backend in dry-run mode (no database server needed) and checks the quoting.
+// It does not run against a live MySQL; it pins the SQL that would be sent.
+func TestStateQueriesQuoteTheKeyColumn(t *testing.T) {
+	t.Parallel()
+	dialects := map[string]struct {
+		dialector gorm.Dialector
+		quoted    string
+	}{
+		"sqlite":   {sqlite.Open(":memory:"), "`key`"},
+		"mysql":    {mysql.New(mysql.Config{DSN: "u:p@tcp(127.0.0.1:1)/fleet", SkipInitializeWithVersion: true}), "`key`"},
+		"postgres": {postgres.New(postgres.Config{DSN: "host=127.0.0.1 port=1 user=u dbname=fleet sslmode=disable"}), `"key"`},
+	}
+	for name, d := range dialects {
+		db, err := gorm.Open(d.dialector, &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+		if err != nil {
+			t.Fatalf("%s: open dry-run: %v", name, err)
+		}
+		where := whereKey(db.Model(&stateRow{}), "k").Take(&stateRow{}).Statement.SQL.String()
+		if !strings.Contains(where, "WHERE "+d.quoted+" = ") {
+			t.Fatalf("%s: key lookup is not quoted: %s", name, where)
+		}
+		var rows []metricsRow
+		order := orderByKey(db.Model(&metricsRow{})).Find(&rows).Statement.SQL.String()
+		if !strings.Contains(order, "ORDER BY "+d.quoted) {
+			t.Fatalf("%s: key ordering is not quoted: %s", name, order)
+		}
+	}
+}
 
 func TestDefaultDatabaseConfigUsesSeparateSQLiteFiles(t *testing.T) {
 	t.Parallel()
