@@ -66,6 +66,13 @@ type Server struct {
 	terminal *termHub
 	// baseCtx is the server's lifetime; command runs are cancelled with it.
 	baseCtx context.Context
+	// launch holds the one-time codes that open the UI without putting the
+	// session token on a browser's command line; launchKey lets another
+	// local process ask for one (see launch.go).
+	launch    launchCodes
+	launchKey string
+	// activity records when someone last used the UI (see IdleFor).
+	activity activity
 }
 
 // New builds a web UI server with a fresh random session token.
@@ -84,6 +91,21 @@ func New(app *core.App) (*Server, error) {
 // Token returns the per-process access token.
 func (s *Server) Token() string { return s.token }
 
+// SetToken replaces the session token with one handed over from the
+// process that served this UI before (so pages it opened keep working when
+// a console moves to the background). It must look like a token this
+// package generates: 64 hex characters.
+func (s *Server) SetToken(token string) error {
+	if len(token) != 64 {
+		return errors.New("session token has the wrong length")
+	}
+	if _, err := hex.DecodeString(token); err != nil {
+		return errors.New("session token is not hex")
+	}
+	s.token = token
+	return nil
+}
+
 // SetCommandAuthorizer installs an RBAC check for the read-only views the UI
 // offers beyond file management. fn receives the CLI command the view is
 // equivalent to ("server", "alerts", "tag") and returns an error to deny it.
@@ -98,17 +120,45 @@ func (s *Server) SetOperator(op string) { s.operator = strings.TrimSpace(op) }
 // onReady, when non-nil, is called with the full access URL right after the
 // server starts accepting connections — used to open a browser.
 func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer, onReady func(url string)) error {
+	listener, err := Listen(addr)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Cenvero Fleet web UI: %s\n", s.TokenURL(listener))
+	fmt.Fprintln(out, "Bound to loopback only. Keep the token private; press Ctrl-C to stop.")
+	var ready func()
+	if onReady != nil {
+		ready = func() { onReady(s.TokenURL(listener)) }
+	}
+	return s.Serve(ctx, listener, ready)
+}
+
+// Listen binds addr (loopback only; DefaultAddr when empty) for Serve.
+func Listen(addr string) (net.Listener, error) {
 	if addr == "" {
 		addr = DefaultAddr
 	}
 	if err := ensureLoopbackAddr(addr); err != nil {
-		return err
+		return nil, err
 	}
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
+	return net.Listen("tcp", addr)
+}
+
+// BaseURL is the root address of a UI served on l, without credentials.
+func BaseURL(l net.Listener) string { return fmt.Sprintf("http://%s/", l.Addr()) }
+
+// TokenURL is the address that opens the UI with the session token in it.
+// It is for showing to the operator; open a browser with a launch code
+// instead (see NewLaunchCode), so the token is not on its command line.
+func (s *Server) TokenURL(l net.Listener) string { return BaseURL(l) + "?t=" + s.token }
+
+// Serve serves the UI on listener until ctx is done, then lets requests in
+// flight finish and stops what the browser started (command runs,
+// terminals). onReady, when non-nil, runs once the server accepts
+// connections.
+func (s *Server) Serve(ctx context.Context, listener net.Listener, onReady func()) error {
 	s.baseCtx = ctx
+	s.activity.last.Store(time.Now().UnixNano())
 	srv := &http.Server{
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -124,18 +174,15 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string, out io.Writer,
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
-	url := fmt.Sprintf("http://%s/?t=%s", listener.Addr(), s.token)
-	fmt.Fprintf(out, "Cenvero Fleet web UI: %s\n", url)
-	fmt.Fprintln(out, "Bound to loopback only. Keep the token private; press Ctrl-C to stop.")
 	if onReady != nil {
 		// Fire once the accept loop is running so the browser doesn't race the
 		// listener and get connection-refused.
 		go func() {
 			time.Sleep(350 * time.Millisecond)
-			onReady(url)
+			onReady()
 		}()
 	}
-	err = srv.Serve(listener)
+	err := srv.Serve(listener)
 	if err == http.ErrServerClosed {
 		<-shutdownDone // let in-flight requests drain (bounded by the timeout above)
 	}
@@ -211,7 +258,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/term/input", s.guard(postOnly(s.handleTermInput)))
 	mux.HandleFunc("/api/term/resize", s.guard(postOnly(s.handleTermResize)))
 	mux.HandleFunc("/api/term/close", s.guard(postOnly(s.handleTermClose)))
-	return securityHeaders(gzipHandler(mux))
+	// Launch codes for `fleet console open`: authenticated by the launch key,
+	// not the session token (see launch.go).
+	mux.HandleFunc("/api/launch-code", s.handleLaunchCode)
+	return securityHeaders(s.trackActivity(gzipHandler(mux)))
 }
 
 // maxWebUploadBytes caps a single browser upload spooled to the controller's
@@ -258,6 +308,14 @@ func contentSecurityPolicy(styleNonce string) string {
 // styleNoncePlaceholder in index.html is replaced with a fresh nonce on every
 // page load.
 const styleNoncePlaceholder = "__FLEET_STYLE_NONCE__"
+
+// launchTokenPlaceholder and launchStatePlaceholder in index.html carry a
+// redeemed launch code's session token and the code's outcome ("ok", or
+// "used" for one that is unknown, expired or already used).
+const (
+	launchTokenPlaceholder = "__FLEET_LAUNCH_TOKEN__" // #nosec G101 -- a template placeholder, not a credential
+	launchStatePlaceholder = "__FLEET_LAUNCH_STATE__"
+)
 
 // postOnly rejects non-POST requests, used for state-changing endpoints so the
 // guard's POST-gated Origin/CSRF check actually covers them.
@@ -355,9 +413,24 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nonce := base64.RawURLEncoding.EncodeToString(raw[:])
+	// A launch code (see launch.go) puts the session token into this one
+	// page, so the browser never needed it on its command line. A code that
+	// is unknown, expired or already used is reported to the page, which
+	// says so instead of quietly reusing a stored token.
+	launchToken, launchState := "", ""
+	if code := r.URL.Query().Get("c"); code != "" {
+		if s.redeemLaunchCode(code) {
+			launchToken, launchState = s.token, "ok"
+		} else {
+			launchState = "used"
+		}
+	}
+	page := bytes.Replace(indexHTML, []byte(styleNoncePlaceholder), []byte(nonce), 1)
+	page = bytes.Replace(page, []byte(launchTokenPlaceholder), []byte(launchToken), 1)
+	page = bytes.Replace(page, []byte(launchStatePlaceholder), []byte(launchState), 1)
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy(nonce))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(bytes.Replace(indexHTML, []byte(styleNoncePlaceholder), []byte(nonce), 1))
+	_, _ = w.Write(page)
 }
 
 func (s *Server) staticAsset(name, contentType string) http.HandlerFunc {

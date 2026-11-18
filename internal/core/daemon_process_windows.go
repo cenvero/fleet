@@ -55,3 +55,8 @@ func terminateProcess(pid int) error {
 func processLooksLikeDaemon(int) (bool, string) {
 	return true, ""
 }
+
+// processLooksLikeFleet relies on the lock the process holds on Windows.
+func processLooksLikeFleet(int, ...string) (bool, string) {
+	return true, ""
+}

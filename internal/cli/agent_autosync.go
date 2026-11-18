@@ -29,7 +29,7 @@ var (
 // commands that create, replace or remove the controller's config or binary,
 // and shell completion, which runs on every Tab press.
 var agentAutoSyncSkip = map[string]bool{
-	"sync-agent": true, "daemon": true,
+	"sync-agent": true, "daemon": true, "console serve": true,
 	"init": true, "self-uninstall": true, "recover": true, "adjust-init": true, "backup": true,
 	"config restore": true, "config import": true,
 	"update": true, "completion": true, "__complete": true, "__completeNoDesc": true,

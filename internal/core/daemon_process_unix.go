@@ -42,6 +42,15 @@ func terminateProcess(pid int) error {
 // fleet binary running `daemon`. On Linux it reads /proc/<pid>/cmdline; other
 // systems rely on the daemon lock alone.
 func processLooksLikeDaemon(pid int) (bool, string) {
+	return processLooksLikeFleet(pid, "daemon")
+}
+
+// processLooksLikeFleet double-checks, where the OS lets us, that pid is a
+// fleet binary whose arguments include every one of words (`daemon`, or
+// `console serve`), so stopping one kind of fleet process can never signal
+// another. On Linux it reads /proc/<pid>/cmdline; other systems rely on the
+// lock the process holds.
+func processLooksLikeFleet(pid int, words ...string) (bool, string) {
 	if runtime.GOOS != "linux" {
 		return true, ""
 	}
@@ -53,8 +62,13 @@ func processLooksLikeDaemon(pid int) (bool, string) {
 		return true, "" // procfs hidden from us: the daemon lock is the guard
 	}
 	args := strings.Split(string(bytes.TrimRight(raw, "\x00")), "\x00")
-	if len(args) == 0 || !slices.Contains(args[1:], "daemon") {
-		return false, fmt.Sprintf("its command line (%q) is not a fleet daemon", strings.Join(args, " "))
+	if len(args) == 0 {
+		return false, "its command line is empty"
+	}
+	for _, w := range words {
+		if !slices.Contains(args[1:], w) {
+			return false, fmt.Sprintf("its command line (%q) is not a fleet %s", strings.Join(args, " "), strings.Join(words, " "))
+		}
 	}
 	if strings.Contains(strings.ToLower(filepath.Base(args[0])), "fleet") {
 		return true, ""

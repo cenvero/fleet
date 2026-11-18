@@ -33,7 +33,6 @@ import (
 	"github.com/cenvero/fleet/internal/tui"
 	"github.com/cenvero/fleet/internal/update"
 	"github.com/cenvero/fleet/internal/version"
-	"github.com/cenvero/fleet/internal/webui"
 	"github.com/cenvero/fleet/pkg/proto"
 	"github.com/spf13/cobra"
 )
@@ -206,6 +205,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newInitCommand(&configDir))
 	root.AddCommand(newStatusCommand(&configDir))
 	root.AddCommand(newErrorsCommand(&configDir))
+	root.AddCommand(newConsoleCommand(&configDir))
 	root.AddCommand(newLifecycleCommand("start", &configDir))
 	root.AddCommand(newLifecycleCommand("stop", &configDir))
 	root.AddCommand(newLifecycleCommand("daemon", &configDir))
@@ -1024,93 +1024,6 @@ func newFileManagerCommand(configDir *string) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newUICommand(configDir))
-	return cmd
-}
-
-func newUICommand(configDir *string) *cobra.Command {
-	var addr string
-	var open string
-	var withControl, withTerminal bool
-	cmd := &cobra.Command{
-		Use:   "ui",
-		Short: "Launch the localhost web UI (files, fleet overview; opt-in commands and terminal)",
-		Long: "Serve a browser-based file manager from the controller. It binds loopback only,\n" +
-			"requires a per-process token printed at startup, restricts mutations to POST\n" +
-			"with an Origin/CSRF check, and sets a strict CSP — there is no remote-reachable\n" +
-			"surface. Browse a server, drag files from your desktop onto the page to upload\n" +
-			"them (with live progress), and click to download. Prompts to open your browser\n" +
-			"when interactive; use --open=yes/no to skip the prompt.\n\n" +
-			"Two more views are off unless you ask for them, because they let whoever holds\n" +
-			"the session token act on the whole fleet with this invocation's authority:\n" +
-			"  --control   the Control view runs non-interactive fleet commands (servers,\n" +
-			"              services, logs, exec, alerts, updates…) as child processes under\n" +
-			"              the same token, policy and audit as the CLI. Commands that reach\n" +
-			"              the controller's keys, tokens or secrets stay terminal-only.\n" +
-			"  --terminal  the Terminal view opens `fleet ssh` shells on direct-mode servers.\n" +
-			"Launch the UI with a scoped --token to bound what those views can do.",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmd.SilenceUsage = true
-			app, err := openApp(*configDir)
-			if err != nil {
-				return err
-			}
-			defer app.Close()
-			srv, err := webui.New(app)
-			if err != nil {
-				return err
-			}
-			// The UI acts with the authority of this invocation. When it was
-			// launched under an RBAC token (already vetted for `file ui` by the
-			// pre-run gate), the extra read-only views it offers — the Fleet
-			// overview's server list, alerts and tags — are held to the same
-			// token, exactly as `server list` / `alerts` / `tag` would be.
-			if actingOperator != "" {
-				srv.SetOperator(actingOperator)
-			}
-			if authz := uiCommandAuthorizer(cmd, *configDir); authz != nil {
-				srv.SetCommandAuthorizer(authz)
-			}
-			// The Control and Terminal views are opt-in: with either on, the
-			// session token works like this invocation's own credential across
-			// the fleet, so the plain file manager does not hand that out.
-			//
-			// The Control view runs non-interactive fleet commands as children
-			// of this binary, pinned to this config dir and to the token this UI
-			// was launched with, so every run is checked by the same RBAC,
-			// cmd-policy and audit code as in a terminal.
-			if withControl {
-				catalog := webConsoleCatalog(cmd.Root())
-				srv.SetConsole(catalog, webConsoleLauncher(cmd.Root(), app.ConfigDir, resolveTokenID(cmd), catalog))
-				fmt.Fprintln(cmd.ErrOrStderr(), "Control view on: the session token can run fleet commands with this invocation's authority.")
-			}
-			// The Terminal view runs `fleet ssh` the same way, under a pty.
-			if withTerminal {
-				srv.SetTerminal(webTerminalLauncher(app.ConfigDir, resolveTokenID(cmd)))
-				fmt.Fprintln(cmd.ErrOrStderr(), "Terminal view on: the session token can open shells on direct-mode servers.")
-			}
-			// Decide whether to open the browser BEFORE installing the signal
-			// handler, so Ctrl-C during the prompt still quits normally.
-			shouldOpen := decideOpenBrowser(cmd, open)
-
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-			defer stop()
-
-			var onReady func(string)
-			if shouldOpen {
-				out := cmd.OutOrStdout()
-				onReady = func(url string) {
-					if err := openBrowser(url); err != nil {
-						fmt.Fprintf(out, "could not open a browser automatically (%v) — open the link above manually\n", err)
-					}
-				}
-			}
-			return srv.ListenAndServe(ctx, addr, cmd.OutOrStdout(), onReady)
-		},
-	}
-	cmd.Flags().StringVar(&addr, "addr", webui.DefaultAddr, "loopback bind address for the web UI")
-	cmd.Flags().StringVar(&open, "open", "auto", "open the web UI in a browser: auto (prompt when interactive), yes, or no")
-	cmd.Flags().BoolVar(&withControl, "control", false, "enable the Control view (run fleet commands from the browser)")
-	cmd.Flags().BoolVar(&withTerminal, "terminal", false, "enable the Terminal view (fleet ssh shells in the browser)")
 	return cmd
 }
 

@@ -12,19 +12,45 @@
 
 // ----------------------------------------------------------------- token / api
 
-// The per-process token arrives in the URL as ?t=<token>. Read it once at load,
-// preferring the URL but falling back to sessionStorage so a browser refresh
-// (which strips ?t= from the address bar, below) keeps working. Persist it so
-// every later request — and every reload of this tab — reuses the same value.
+// The per-process token reaches the page one of two ways. `fleet console` and
+// `fleet file ui` open the browser on ?c=<code>, a one-time launch code the
+// server swaps for the token inside this page (the fleet-launch-token meta),
+// so the token never sits on a browser command line. A link the operator
+// copied carries it directly as ?t=<token>. Either one wins over a token kept
+// from an earlier visit (the console may have restarted with a new one); a
+// refresh, which no longer has either in the address bar, falls back to
+// sessionStorage.
+function metaContent(name) {
+  const el = document.querySelector('meta[name="' + name + '"]');
+  const v = el ? el.getAttribute("content") || "" : "";
+  return v.startsWith("__FLEET_") ? "" : v;
+}
+const URL_PARAMS = new URLSearchParams(location.search);
+const LAUNCH_STATE = URL_PARAMS.has("c") ? metaContent("fleet-launch-state") || "used" : "";
 const TOKEN =
-  new URLSearchParams(location.search).get("t") ||
-  sessionStorage.getItem("fleet_token") ||
+  URL_PARAMS.get("t") ||
+  metaContent("fleet-launch-token") ||
+  (LAUNCH_STATE === "used" ? "" : sessionStorage.getItem("fleet_token")) ||
   "";
 if (TOKEN) sessionStorage.setItem("fleet_token", TOKEN);
 
-// Drop the token from the address bar so it doesn't linger in history.
-if (TOKEN && window.history && window.history.replaceState) {
+// Drop the token and the launch code from the address bar so neither lingers
+// in history.
+if ((URL_PARAMS.has("t") || URL_PARAMS.has("c")) && window.history && window.history.replaceState) {
   window.history.replaceState(null, "", location.pathname + (location.hash || ""));
+}
+
+// sessionEnded runs on the first request the server refuses for its token:
+// the console was stopped or restarted, so the stored token is useless.
+let sessionGone = false;
+function sessionEnded() {
+  if (sessionGone) return;
+  sessionGone = true;
+  try { sessionStorage.removeItem("fleet_token"); } catch { /* ignore */ }
+  showTakeover("This console session has ended", [
+    "The console this page belonged to was stopped or restarted, so its access token no longer works.",
+    "Run `fleet console` (or `fleet console open` if it runs in the background) to open it again.",
+  ]);
 }
 
 function api(pathname, params = {}) {
@@ -47,6 +73,7 @@ class ApiError extends Error {
 }
 
 async function errorFrom(res) {
+  if (res.status === 401 && TOKEN) sessionEnded();
   let text = "";
   try { text = await res.text(); } catch { /* ignore */ }
   let msg = text.trim();
@@ -95,7 +122,7 @@ function friendlyError(err, server) {
   if (/no such file|not found|does not exist|cannot find/i.test(msg)) return "It no longer exists — it may have been moved or deleted.";
   if (/not a directory/i.test(msg)) return "That is not a folder.";
   if (/connection refused|unreachable|no route|timed? ?out|i\/o timeout|EOF/i.test(msg)) return (server || "The server") + " is not reachable right now.";
-  if (/failed to fetch|networkerror/i.test(msg)) return "Lost the connection to the Fleet web UI. Is `fleet file ui` still running?";
+  if (/failed to fetch|networkerror/i.test(msg)) return "Lost the connection to the Fleet console. Is `fleet console` still running?";
   return msg;
 }
 
@@ -4765,9 +4792,16 @@ async function loadServers() {
 }
 
 function init() {
+  if (LAUNCH_STATE === "used") {
+    showTakeover("This link was already used or has expired", [
+      "Links that open the console work once, for 30 seconds. Run `fleet console open` (or start `fleet console` again) for a new one.",
+      "If you did not open this link twice, another account on this computer may have used it: run `fleet console stop`.",
+    ]);
+    return;
+  }
   if (!TOKEN) {
     showTakeover("Missing access token", [
-      "Open the exact URL printed by `fleet file ui` (or `fleet fm ui`) — it carries this session's one-time access token.",
+      "Open the console with `fleet console` (or `fleet file ui`), which opens your browser with this session's access, or use the link it shows.",
     ]);
     return;
   }
