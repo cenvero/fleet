@@ -3,6 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The script runs in a terminal, so git would send each diff through a pager
+# and wait there (with LESS=-R, until someone presses q). Print them instead.
+export GIT_PAGER=cat
 SOURCE_REPOSITORY="cenvero/fleet"
 UPSTREAM_REPOSITORY="microsoft/winget-pkgs"
 PACKAGE_IDENTIFIER="Cenvero.Fleet"
